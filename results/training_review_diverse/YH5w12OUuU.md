@@ -1,22 +1,18 @@
-Now I have thoroughly verified the paper content against all reviewer claims. Let me produce the consolidated review.
+Now I have thoroughly verified all claims against the paper. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper introduces TEMPO, a method for time series forecasting that integrates STL decomposition (trend, seasonal, residual) with a semi-soft prompting strategy to adapt a pre-trained GPT backbone for zero-shot forecasting. The core technical contributions are: (1) explicit decomposition of time series into three components fed separately into the GPT, (2) component-specific soft prompts, and (3) a decomposition alignment loss. Results are reported on standard benchmarks and a newly introduced multimodal TETS dataset.
-
----
+TEMPO proposes a generative pre-trained transformer for zero-shot time series forecasting that integrates STL decomposition (trend, seasonal, residual) with component-specific soft prompts and a GPT backbone. The key ideas are: (1) explicitly decomposing time series into trend, seasonal, and residual components before feeding them into the transformer, and (2) using a semi-soft prompt design with separate learnable prompt vectors for each component. Under a challenging "many-to-one" zero-shot setting, TEMPO achieves state-of-the-art performance across multiple benchmark datasets (e.g., ~6.5% and ~19.1% MAE improvement over PatchTST on Weather and ETTm1), and also demonstrates effectiveness on multimodal inputs.
 
 ## Strengths
 
-1. **Novel integration of decomposition with prompted LLMs for time series.** The paper's core architecture — decomposing time series into trend/seasonal/residual components, encoding each separately with component-specific soft prompts, and feeding them into a frozen GPT backbone with LoRA — is a well-motivated design. The additive prediction structure (trend + seasonal + residual) is a clean inductive bias that gives the model a principled way to handle different temporal patterns, and the semi-soft prompt strategy (starting from a natural-language template then learning continuous vectors) is a sensible compromise between interpretability and flexibility.
+1. **Novel and well-motivated framework design**: TEMPO's integration of STL decomposition with component-specific semi-soft prompts within a pre-trained GPT backbone is a clean and principled approach. The idea of treating trend, seasonal, and residual as distinct "semantic" channels — each with its own learnable prompt — and processing them jointly through a shared transformer is architecturally elegant and the ablation confirms that all components contribute positively on average.
 
-2. **Consistent zero-shot results across multiple datasets (if the comparison protocol is fair).** Table 1 reports that TEMPO achieves the best average MSE/MAE across all prediction horizons on benchmark datasets including Weather (≈6.5% MAE improvement over PatchTST) and ETTm1 (≈19.1% MAE improvement). Even accounting for the comparison-protocol concerns below, the pattern of results is consistent across datasets and horizons, suggesting genuine effectiveness.
+2. **Strong and consistent zero-shot performance**: Across 6 benchmark datasets and multiple prediction horizons, TEMPO achieves the best average MSE/MAE under the many-to-one zero-shot setting, outperforming both specialized time-series transformers (PatchTST, FEDformer, DLinear) and other LLM-based approaches (GPT2, T5, LLaMA). The reported gains (e.g., ~19.1% MAE improvement on ETTm1 over PatchTST) are substantial and consistently favor TEMPO.
 
-3. **Interpretability via SHAP on decomposed components.** Figure 2 provides SHAP values showing that the seasonal component dominates predictions on ETTm1 and that the residual ("error") component's importance grows with prediction horizon. This decomposability-based interpretability is a concrete advantage over black-box time series models and is a natural benefit of the paper's design.
+3. **Introduction of the TETS multimodal benchmark**: The paper releases TETS (Text for Time Series), a new dataset combining S&P 500 time series with contextual text summaries. This is a useful community resource that enables evaluation of multimodal time series forecasting, an underexplored area. The zero-shot results on both TETS and GDELT demonstrate the framework's versatility.
 
-4. **Multimodal extension and new benchmark.** The paper extends TEMPO to incorporate textual context (via text embeddings concatenated as prompts) and introduces the TETS dataset (S&P 500 data paired with text). Results show that TEMPO+text outperforms baselines in cross-sector zero-shot settings, demonstrating the method's flexibility beyond pure time series.
-
----
+4. **Ablation study validates joint contribution of components**: The ablation table systematically compares TEMPO against variants without decomposition, without prompts, and without decomposition loss. The average metrics consistently favor the full model (e.g., ECL Avg MSE: TEMPO=0.216 vs. w/o Pro=0.219 vs. w/o Dec Loss=0.225; ETTm1 Avg MSE: TEMPO=0.501 vs. w/o Pro=0.506 vs. w/o Dec Loss=0.515), confirming that both components contribute positively on aggregate.
 
 ## Weaknesses
 
@@ -24,81 +20,51 @@ This paper introduces TEMPO, a method for time series forecasting that integrate
 None.
 
 ### Major
-
-1. **Unclear zero-shot evaluation protocol for non-pre-trained baselines (undermines central empirical claim).**  
-   The paper claims "state-of-the-art zero-shot performance" by comparing TEMPO (pre-trained on multiple source datasets, tested on unseen targets) against baselines including PatchTST, FEDformer, Informer, DLinear, and TimesNet. The paper states that "we adopt a uniform training methodology to ensure fair performance assessment across datasets unseen during model training" (Section 4, paragraph 1) and reports results under the "many-to-one" setting. However, the paper never explains how non-pre-trained models (e.g., PatchTST, which has no pre-training stage) were adapted to this zero-shot protocol. Were they trained on the combined source datasets and tested on held-out targets? Or were they trained on target-domain data (the standard in-distribution protocol)? The paper also does not list which source datasets were used for each target, so it is impossible to verify that no target leakage occurred. The TETS/GDELT experiments (Section 4.2) further reveal that "transformer-based architectures training from scratch... tend to underperform," explicitly confirming those baselines were trained from scratch (presumably on target-domain data) — suggesting the comparison regime is not uniform. This ambiguity cuts across all main results and the paper's central contribution cannot be evaluated without clarification. This is the most consequential weakness in the paper.
-
-2. **Overclaimed "foundational model" framing.**  
-   The paper positions TEMPO as a "foundational model-building framework" (abstract) and claims to "pave the path to foundational models for time series." In practice, TEMPO fine-tunes a frozen GPT-2 on a few benchmark datasets (ETTm1, ETTm2, ETTh1, ETTh2, Electricity, Traffic, Weather) for the single task of forecasting. This is orders of magnitude smaller in scope than foundation models in NLP or CV, which are pre-trained on diverse web-scale data and evaluated on many downstream tasks (classification, detection, generation, etc.). The framing overstates what is demonstrated.
+None.
 
 ### Minor
 
-3. **Ambiguous ablation design.** The "w/o Dec" ablation removes both the prompt design *and* the decomposition simultaneously (Section 5.1: "the model without the prompt design and without decomposition"). This conflation makes it impossible to disentangle which removal causes the performance drop. While the "w/o Pro" variant (no prompt, with decomposition) provides a partial control, there is no "with prompt, without decomposition" condition. The paper's conclusion that "both prompt and decomposition elements are essential" would be more convincing with a proper 2×2 ablation.
+1. **Ablation exceptions are not discussed**: While the paper correctly states that "averagely" the exclusion of prompts or decomposition loss leads to deterioration, there are specific cases where ablations outperform the full model (e.g., ECL horizon 720: w/o Dec Loss achieves 0.262 MSE vs. TEMPO's 0.279; ETTm1 horizon 720: w/o Pro achieves 0.582 MSE vs. TEMPO's 0.591). The paper does not acknowledge or discuss these exceptions. A brief discussion of when/why the components help versus hurt would substantially strengthen the analysis and is important scientific honesty. This does not invalidate the core claim (which holds on average), but it limits the claim that these components are universally necessary.
 
-4. **Insufficient description of the TETS dataset.** The TETS dataset is introduced as a new benchmark (Section 4.2), but the paper provides only that it is "built upon S&P 500 dataset combining contextual information and time series." No details are given about: the number of time series, their length, the nature of the text (earnings reports? news headlines? summaries?), how text and time series are aligned, the train/validation/test split, or dataset statistics. Without these, the multimodal results (Table 3) cannot be reproduced or critically assessed. This violates standard expectations for introducing a new dataset.
+2. **Theoretical justification (Theorem 3.1) is weak and adds little**: The theorem states a mathematical tautology — if two signals are not orthogonal, no orthogonal basis can separate them onto disjoint subsets. The paper then cites a debatable claim from prior work that "self-attention learns an orthogonal transformation" to argue that attention cannot disentangle non-orthogonal trend/seasonal components. This chain has several issues: (a) the cited claim about self-attention learning orthogonal transformations is not established fact, (b) STL decomposition itself does not produce orthogonal components, so the theorem does not actually support using STL over attention. The paper would be better off providing a simpler, intuitive motivation — STL is a well-established preprocessing technique that helps isolate distinct temporal patterns, which is known to aid forecasting (as in N-BEATS, PatchTST, Autoformer). The theorem can be de-emphasized without affecting the paper's core contribution.
 
-5. **No statistical significance or variance reporting.** All results in Table 1 are reported as point estimates without standard deviations, confidence intervals, or significance tests. Given that many improvements are modest (e.g., ≈0.01 MSE differences), it is impossible to distinguish signal from noise. The field standard for empirical ML papers is at minimum 3–5 seeds with mean ± std. This is especially critical when the comparison protocol itself is in question (Weakness 1).
+3. **Experimental setup for baselines needs clarification**: The paper states "we adopt a uniform training methodology" for zero-shot comparison but does not specify how the non-pretrained baselines (PatchTST, DLinear, FEDformer, etc.) are trained. From line 161 ("transformer-based architectures training from scratch"), it appears baselines are trained on the target dataset in a standard supervised manner, while TEMPO operates zero-shot. This asymmetry actually favors the baselines (they see target data), making TEMPO's results more impressive, but the paper should clearly state this protocol in the experimental section for reproducibility and transparency. This is a clarity issue, not a methodological flaw.
 
-6. **Vague decomposition loss specification.** The decomposition loss \(L_{Dec}\) is defined as aligning local decomposition with "global decomposition after normalization \(\hat{X}^g_T\)" (Section 3.2, equation). How \(\hat{X}^g_T\) is computed is not explained: is it STL decomposition over the entire training corpus, per-dataset, or per-instance with a larger window? The term "global" is ambiguous and the procedure is not reproducible as described.
+4. **Limited analysis of prompt design choices**: The ablation only compares "with prompts" vs. "without prompts" entirely. The paper claims the "semi-soft" design strikes a balance between interpretability and adaptability, but does not compare against simpler alternatives (e.g., hard prompt only, soft prompt only, no prompt with just decomposition). Additional ablation on the prompt design itself would better substantiate the claimed benefits of the semi-soft approach.
 
-7. **Model backbone and compute details unreported.** The paper uses "GPT" as the backbone but does not specify which GPT variant (GPT-2 small/medium/large?), the number of LoRA parameters, training time, or computational budget. For a paper making "foundational model" claims, these are important context.
+5. **Interpretability analysis is superficial**: The SHAP analysis is shown for only one dataset (ETTm1), with a brief observation that the seasonal component dominates. The claim of an "interpretable framework" is an overstatement given this limited scope. Showing SHAP values across multiple datasets and providing quantitative cross-dataset comparisons would make this analysis more meaningful.
 
-8. **Theoretical motivation for decomposition is overclaimed.** Theorem 3.1 is a correct linear-algebra fact (non-orthogonal signals cannot be separated by orthogonal bases). However, the link to self-attention relies entirely on the claim from \citep{one_fits_all} that "self-attention layer naturally learns an orthogonal transformation," which is not rigorously established for time series contexts. Furthermore, attention is not limited to disjoint basis representations — a single head can capture cross-frequency interactions through weighted sums. The paper's language that attention "would be ineffective at disentangling" (Section 3.2) overstates what the theory establishes. The approach would stand just as well on empirical grounds without this theoretical framing.
+6. **TETS dataset is under-described**: The paper introduces TETS as a new benchmark in a single sentence. For reproducibility and community adoption, key details (number of time series, text sources, training/validation/test splits, sampling frequency) should be provided either in the main text or an appendix.
 
 ### Trivial
-
-None.
-
----
+- The paper states as a limitation only "superior LLMs with better numerical reasoning capabilities might yield better results," but does not discuss the more immediate limitations raised by the ablation exceptions or scope of the SHAP analysis.
 
 ## Nice-to-Haves
-
-- A proper 2×2 ablation (prompt ± × decomposition ±) to cleanly isolate each component's contribution.
-- More comprehensive interpretability analysis: comparing datasets with different seasonal strengths or varying prediction horizons to show how component importance shifts.
-- A controlled synthetic experiment demonstrating that GPT attention maps fail to separate non-orthogonal trend and seasonal components, which would be more convincing than the current abstract theorem.
-- Discussion of failure cases or data where STL decomposition is ill-suited (e.g., random walks, change points).
-
----
+- Reporting confidence intervals or standard deviations for the main results would be helpful for assessing stability in the zero-shot setting.
+- Showing actual forecast plots (especially for the multimodal case) would help illustrate what kinds of textual information improve predictions.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-
-- **"Missing related work comparison (TEST, Promptcast)"**: Hard rule prohibits mentioning missing related works.
-- **"Patch length/stride values not reported"**: These would be in the appendix section that is stripped by the parser; hard rule prohibits weaknesses about missing appendix content.
-- **"The paper does not state whether code and data will be publicly available"**: The hard rule prohibits questioning the existence/release status of cited resources.
-- **"The theoretical motivation weakness is fatal"**: Downgraded from the harsh critic's framing because the theorem itself is correct; the overclaiming is about the link to attention, which is a minor overreach, not a structural flaw. The approach is empirically motivated even without this theoretical framing.
-- **"Section-by-section notes about Introduction/Related Work organization"**: These are presentation preferences, not substantive weaknesses.
-- **"Only one dataset for SHAP analysis"**: The paper's claim is about demonstrating interpretability, not exhaustive analysis across all datasets. The SHAP analysis is illustrative, not comprehensive.
-
----
+- **"Ablation study contradicts the paper's core claims"** (raised as Critical Issue #1 by Harsh Critic) — On average across both datasets and all horizons, TEMPO achieves the best MSE/MAE, consistent with the paper's claim that the components are beneficial "averagely." The individual exceptions are real but do not contradict the average-based claim; they merely warrant discussion. Moved from Fatal to Minor after verification.
+- **"Zero-shot comparison is unfair to baselines"** (Critical Issue #2) — The asymmetry (TEMPO zero-shot vs. baselines trained on target data) favors the baselines, not TEMPO. Per the rules, this type of asymmetry strengthens rather than weakens the paper's results. Retained as a clarity issue (Minor #3).
+- **"Strength: Theoretical motivation for decomposition"** (from Strength Finder) — Conflicts with verified weakness about the theorem being weak. Per rule "when a strength and weakness disagree, the weakness wins." The STL decomposition is empirically well-motivated but the theorem itself is not a genuine strength.
+- **"Strength: Interpretability via SHAP values"** (from Strength Finder) — Conflicts with verified weakness about the SHAP analysis being superficial. Retained as a minor positive but not a major strength.
+- **"The paper should also cover Y / domain Z"** — Scope creep demands that would stretch the paper beyond its intended contribution.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews raise legitimate concerns about evaluation rigor but do not surface novel research questions or unexpected connections beyond what is already in the paper.
-
----
+The most interesting observation from the combined reviews is that the ablation table reveals a more nuanced story than the paper tells: at the longest prediction horizons (720), the full TEMPO model sometimes underperforms its own ablations. This suggests that the prompt and decomposition loss may be most beneficial at shorter-to-medium horizons, and that the inductive biases could become overly constraining for very long-range forecasting. Investigating this horizon-dependent effect could be a fruitful direction for future work and would sharpen the paper's claims about when and why the components matter. The reviewer's skepticism about the theorem also correctly identifies that the paper's formal theoretical motivation is a "ribbon" rather than a load-bearing wall — the empirical results are the real contribution.
 
 ## Suggestions
-
-1. **Clarify the zero-shot protocol for every baseline.** For each non-pre-trained baseline (PatchTST, FEDformer, Informer, DLinear, TimesNet), state explicitly: "We trained model X on source datasets {A, B, C} and tested on target dataset Y, with no exposure to Y during training." Provide per-target source-set lists. If this was not done, reframe the contributions as "transfer learning" rather than "zero-shot" and discuss the advantage of not needing target data.
-
-2. **Add standard deviations** from at least 3 random seeds to all main results.
-
-3. **Expand the TETS dataset description** with basic statistics, sample text-time-series pairs, and train/validation/test split information.
-
-4. **Fix the ablation** by adding a "with prompt, without decomposition" condition so that a clean 2×2 comparison is possible.
-
-5. **Specify the GPT backbone size** (number of parameters, layers, hidden dimension), LoRA rank, training hyperparameters, and compute budget.
-
-6. **Define \(\hat{X}^g_T\) precisely** — how is the "global" STL decomposition computed?
-
-7. **Tone down the "foundational model" language** or justify it with broader pre-training (more data, more tasks). The current scope supports "effective zero-shot transfer learning" rather than "foundation model."
-
----
+1. **Discuss the ablation exceptions honestly**: Add a paragraph acknowledging that at the longest horizon (720) on ECL and ETTm1, removing prompts or decomposition loss sometimes yields lower error. Explain possible reasons (e.g., the inductive biases may be most helpful for shorter horizons where pattern regularity matters more).
+2. **Clarify baseline training protocol**: Explicitly state in Section 4.1 that baselines are trained in a supervised manner on the target dataset, while TEMPO is evaluated zero-shot without seeing the target. This transparency only strengthens the results.
+3. **De-emphasize Theorem 3.1 or replace it**: The theorem does not genuinely support the use of STL. Replace the theoretical framing with a simpler, intuitive motivation citing existing decomposition-based forecasting literature (N-BEATS, Autoformer, PatchTST's channel-independence motivation).
+4. **Add a finer-grained prompt ablation**: Compare hard prompt only, soft prompt only, and semi-soft prompt to justify the claimed design advantages.
+5. **Expand the SHAP analysis**: Show SHAP values for at least 2-3 datasets and provide a brief quantitative summary across all datasets.
+6. **Provide TETS dataset details**: Include dataset statistics (number of series, text sources, splits) in the main text or appendix.
 
 ## Score and Decision
 
-This paper presents a technically sound and well-motivated method. The core ideas — explicit decomposition with component-specific soft prompts for LLM-based time series forecasting — are sensible and the empirical pattern across datasets is consistent. However, the central empirical claim rests on an unclear comparison protocol: the paper never clarifies whether non-pre-trained baselines were evaluated under a genuine zero-shot regime or were trained on target data, and evidence from the multimodal experiments suggests the latter. This ambiguity is too consequential to overlook — it undermines the paper's main contribution. The ablation study is also ambiguously designed. These issues are addressable in a major revision but are not fixable in a standard rebuttal. I assess the paper as requiring major revisions before it can be accepted.
+This paper presents a solid and well-executed contribution: a novel integration of STL decomposition with component-specific semi-soft prompting on a GPT backbone for zero-shot time series forecasting, backed by comprehensive experiments showing consistent improvements over strong baselines. The weaknesses identified are real but minor — they concern presentation, scope of analysis, and discussion quality rather than any fundamental flaw in the methodology or results. The paper's core claims (TEMPO achieves SOTA zero-shot performance, and both decomposition and prompts contribute positively on average) are well-supported by the evidence. The issues are addressable in a revision.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

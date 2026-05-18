@@ -1,22 +1,22 @@
-Now I have verified the paper content thoroughly. Let me construct the final review.
+Now I have verified all the relevant content. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes a multilingual visual speech recognition (VSR) method using a single model. The key idea is to discretize visual speech features from a self-supervised model (mAV-HuBERT) into **visual speech units**, which reduces input data size to 0.016% of raw video and enables efficient pre-training in a unit-to-text translation framework. A curriculum learning strategy gradually transitions from audio-visual to visual-only inputs. The model is then finetuned on continuous features. Experiments on 5 languages show the single multilingual model achieves best or second-best WER on all five compared to prior language-specific methods.
+This paper presents the first sentence-level multilingual Visual Speech Recognition (VSR) system with a single model. Key innovations include: (1) **visual speech units** — discretized representations from a newly proposed multilingual self-supervised model (mAV-HuBERT, trained on 5,512 hours across 9 languages) that reduce input data size to 0.016% of raw video; (2) **curriculum learning** that transitions from audio-visual speech unit inputs to visual-only inputs during pre-training; and (3) leveraging automatic labels to construct 4,545 hours of multilingual video-text paired data. The trained model achieves competitive or better performance compared to prior language-specific SOTA methods across 5 languages (En, Es, It, Fr, Pt) using a single model, with ~12× faster pre-training.
 
 ## Strengths
 
-1. **First successful sentence-level multilingual VSR with a single model.** The paper demonstrates that a single model can match or exceed the performance of prior language-specific models across five languages (Table 7). It achieves best WER on Es (12.4%), It (15.1%), and Fr (11.6%), and second-best on En (24.4%) and Pt (14.2%), all with one model versus multiple specialist models.
+1. **First sentence-level multilingual VSR with a single model.** The paper explicitly and correctly positions itself as the first work to demonstrate that a single model can recognize multiple languages in VSR at the sentence level (Section 1, Contribution 1). This is a genuinely novel framing that addresses a real gap — multilingual audio ASR is common, but VSR has remained language-specific.
 
-2. **Dramatic training efficiency via visual speech units.** The input data size is reduced to 0.016% of raw video (Section 3.1), enabling a ~12× faster total training time compared to standard VSR training (6.6 h pre-training + 34.9 h finetuning vs. 52.5 h standard), with a 6× batch size increase (Table 3). This efficiency gain is a core practical contribution.
+2. **Visual speech units enable drastic efficiency gains.** The discretization reduces input data to 0.016% of the original (61,952 bits per frame → 10 bits per unit). Table 3 shows a ~12× training speedup (6.6 hours for 11 epochs of pre-training vs. 52.5 hours for 8 epochs of standard VSR training), a concrete and significant computational improvement.
 
-3. **Multilingual AV-HuBERT (mAV-HuBERT) and its impact.** mAV-HuBERT is trained on 5,512 hours across 9 languages. Table 2 shows it outperforms English-only AV-HuBERT by >10% WER on non-English languages (Es, It, Fr, Pt) for multilingual VSR, directly enabling multilingual visual speech unit extraction.
+3. **mAV-HuBERT substantially outperforms English-only AV-HuBERT on non-English languages.** Table 2 shows WER reductions of over 10% absolute on Es, It, Fr, and Pt when using the proposed multilingual encoder, validating the need for language-diverse self-supervised pretraining. The mAV-HuBERT component is soundly motivated and empirically justified.
 
-4. **Curriculum learning with progressive audio masking is critical.** Section 3.2 describes a curriculum where audio speech units are progressively masked from 0% to 100%. Table 5 shows removing this curriculum causes dramatic drops (e.g., Es WER rises from 14.7% to 36.2%, Pt from 9.9% to 36.8%), confirming it is essential for learning from visual speech units.
+4. **Curriculum learning from audio-visual to visual inputs is critical.** The ablation in Table 5 demonstrates that removing curriculum learning causes catastrophic degradation (e.g., English WER jumps from 24.4 to 40.7; Spanish from 50.6 to 77.7), confirming the importance of the progressive masking strategy. This ablation cleanly isolates the contribution.
 
-5. **New state-of-the-art multilingual VSR results.** Table 6 shows the proposed method outperforms the AV-HuBERT multilingual baseline by >4% WER on all non-English languages. Table 7 shows it achieves best or second-best scores across all five languages relative to prior monolingual SOTA methods.
-
-6. **Systematic ablation study.** Table 5 isolates the effect of each component (unit pre-training, curriculum learning, finetuning), with each removal degrading performance, providing clear evidence that all proposed components contribute.
+5. **Competitive results against dedicated monolingual systems.** Table 7 shows that the single multilingual model achieves best scores on 3 of 5 languages (Es, It, Fr) and second-best on the remaining 2 (En, Pt) when compared with prior language-specific SOTA methods. This is the strongest evidence for the paper's central claim.
 
 ## Weaknesses
 
@@ -24,60 +24,55 @@ This paper proposes a multilingual visual speech recognition (VSR) method using 
 None.
 
 ### Major
-None.
+None. The paper's core contributions are sound, and no verified flaw invalidates the main claims.
 
 ### Minor
 
-1. **Efficiency comparison (Table 3) mixes metrics and epoch counts, reducing interpretability.** The baseline is defined in the text as "standard VSR method that uses raw video as inputs" (Section 4.3.2), but the comparison reports "Test Acc" (subword-level prediction accuracy without beam search) rather than WER used everywhere else in the paper. It also compares 11 pre-training epochs against 8 standard-training epochs, making the "~12× speedup" claim harder to interpret. Reporting WER at comparable optimization progress would make this core selling point more convincing.
+1. **The "state-of-the-art" claim is imprecisely framed.** The paper asserts "new state-of-the-art multilingual VSR performances" (abstract, conclusion), but the only direct multilingual baseline (Table 6) is a self-constructed AV-HuBERT finetuned on the same data — there is no established prior work on this exact task. The meaningful empirical contribution is in Table 7 (competitive with/beating language-specific SOTA using a single model), which is strong enough to stand on its own. The SOTA framing as written invites unnecessary skepticism and should be qualified to reflect what was actually demonstrated: a single multilingual model that is competitive with or surpasses prior language-specific approaches.
 
-2. **Visual speech unit analysis lacks a direct quantitative measure of content preservation.** Section 4.3.3 provides qualitative phoneme mapping (Figure 2) and speaker verification EER (Table 4), which together show the units suppress speaker information. However, the claim that units "mainly contain viseme information" would be strengthened by a direct content-retention metric (e.g., phone classification accuracy or ABX discriminability). The VSR results indirectly validate content preservation, but the analysis section itself would be more rigorous with such a measure.
+2. **The efficiency comparison omits the upfront cost of training mAV-HuBERT.** Table 3 reports 6.6 hours for pre-training vs. 52.5 hours for standard VSR training, but the mAV-HuBERT itself required 350k steps on 64 GPUs (Section 4.2). While mAV-HuBERT is a reusable resource (analogous to a pretrained backbone in other pipelines), the "~10× faster" framing should transparently acknowledge this upfront cost. A fair total-system comparison would include the mAV-HuBERT training cost amortized or stated separately.
 
-3. **The dramatic importance of curriculum learning (Table 5) is noted but not explained.** The "−Curriculum" condition causes WER to jump from 14.7% to 36.2% on Es and 9.9% to 36.8% on Pt — a much larger effect than removing unit pre-training itself. The paper does not discuss why this matters so much (e.g., is it simply that visual-only discrete training is too hard from scratch, or does the audio initialization provide a qualitatively different optimization landscape?). A brief explanation would help readers understand the mechanism.
+3. **The curriculum learning ablation reveals a phenomenon that deserves deeper analysis.** The "−Curriculum" condition (pre-training on visual speech units directly, without progressive masking) produces WERs that are *worse than no pre-training at all* for several languages (Spanish: 77.7 vs. 56.9; French: 65.3 vs. 40.5; Portuguese: 80.6 vs. 63.9). The paper's explanation — "directly performing the visual speech unit to text translation from scratch is challenging" — is plausible but does not address why pre-training on visual units alone actively *hurts* relative to a random initialization. This raises interesting questions about whether the visual speech units are too lossy to bootstrap useful representations without audio guidance. The authors should at minimum discuss this negative transfer phenomenon.
 
-4. **The paper trains mAV-HuBERT on 9 languages but evaluates VSR on only 5 (En, Pt, Es, Fr, It).** The reason is implicit (the other 4 languages — De, Ru, Ar, El — lack text labels from the automatic labeling pipelines cited). This is a reasonable limitation but should be stated explicitly in the main text, along with a discussion of how automatic label noise may affect results, especially for lower-resource languages.
+4. **The "curse of multilinguality" explanation is invoked imprecisely.** The paper attributes English performance degradation to the curse of multilinguality (Sections 4.3.1, 4.3.5), but English has by far the most training data (Table 1: 3196 hours vs. ≤500 hours for other languages). The classic curse of multilinguality describes a trade-off with roughly balanced data across languages; here the data is heavily skewed. A more precise explanation would discuss capacity constraints and the specific data distribution, not just the number of languages.
+
+5. **No evaluation on languages outside the 5 training languages.** The mTEDx dataset provides 8 languages, and mAV-HuBERT is trained on 9 languages (including De, Ru, Ar, El). Evaluating the pre-trained model on these unseen languages (even in a zero-shot manner or with minimal adaptation) would substantially strengthen the multilingual generalization claim. Without this, the "multilingual" claim is limited to the 5 seen languages.
 
 ### Trivial
-None.
+
+- **Unreported Whisper confidence threshold.** The paper does not report the confidence threshold used for Whisper-based language identification when constructing the mAV-HuBERT training data from VoxCeleb2 and AVSpeech (Section 3.1). Reporting this threshold and the resulting language distribution would improve reproducibility.
 
 ## Nice-to-Haves
 
-- **Confidence intervals or variance estimates.** All WER numbers are reported as single values. Given the computational cost of multiple seeds this is understandable, but even a small number of repeated runs would strengthen reliability.
-- **Direct quantitative content-retention metric for visual speech units** (e.g., phone classification accuracy from forced alignments), as noted above.
-- **Discussion of automatic label noise.** The paper uses noisy labels from Ma et al. (2023) and Yeo et al. (2023c). A brief discussion of how label quality might vary across languages and affect results would be appropriate.
+- **Ablation on quantization depth** (e.g., 100, 500, 2000 visual speech units) to test sensitivity to the unit vocabulary size and whether there is a sweet spot between compression and linguistic content.
+- **A fixed-p=0 ablation** (always audio-visual units throughout pre-training) to isolate whether the *progressive* nature of the masking schedule matters, or whether any audio-augmented pre-training would suffice.
+- **Incremental language addition** to quantify the curse of multilinguality: measuring English WER as languages are added one at a time.
+- **Error analysis** (confusion matrices, language confusions, error types) comparing the multilingual model against the monolingual baselines.
+- **Testing on unseen mTEDx languages** (De, Ru, Ar, El) to demonstrate cross-lingual zero-shot capability.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were flagged for removal per the review guidelines and should be treated with caution:
 
-- **Harsh Critic Critical Issue 1 (baseline "never explicitly defined"):** The paper explicitly states in Section 4.3.2: "We compare the batch size, training iteration time, and total training time between the **standard VSR method that uses raw video as inputs** and the proposed method." The baseline IS defined. The confusion about mixed metrics is kept in Minor Weakness 1 above, but the claim of non-definition is factually wrong and removed.
-- **Harsh Critic Critical Issue 2 (first-work claim "misleading"):** The reviewer argues the paper trains AV-HuBERT as a baseline, contradicting its "first work" claim. However, Section 4.3.5 states "Since there is **no prior work** exploring multilingual VSR with a single model, we train AV-HuBERT to perform multilingual VSR and set it as the baseline." The AV-HuBERT baseline is the authors' own creation for comparison, not a prior published work. The claim is about the published literature and is not contradicted. Removed as a misunderstanding.
-- **Strength Finder "analysis confirms linguistic content and speaker suppression":** This is accurate and supported. However, the weakness about lacking a direct quantitative content measure (Minor Weakness 2) partially constrains the strength — the analysis is useful but incomplete. The strength stands but is implicitly qualified by the weakness.
-- **Strength Finder "ablation study systematically validates each component":** Accurate and kept.
+- **"Figure 2 is absent from the text, making it impossible to evaluate the claim."** — The figure is clearly referenced in the text (line 130: "Figure 2: Visualization of speech units"). The image was dropped by the PDF parser, not by the authors. This criticism reflects a parser artifact, not an author error.
+- **"The paper should compare with a model pre-trained on audio speech units alone (no visual units)."** — This is a reasonable suggestion but framed as a "missed experiment" rather than a genuine weakness. The paper's contribution centers on *visual* speech units; the curriculum already uses audio units as auxiliary input. This is moved to Nice-to-Haves.
+- **Generic strength claims from Strength Finder** (e.g., vague statements about addressing important problems without specific evidence) were dropped as they lacked concrete content or citation support.
 
 ## Novel Insights
 
-The key insight from the reviews is that the paper's contributions are largely solid, but the **efficiency argument** — a central selling point — needs more careful framing. The mixed metrics (Test Acc vs. WER) and epoch counts in Table 3 mean readers cannot easily verify the claimed speedup against a performance-matched baseline. A clearer comparison (e.g., hours to reach a given WER threshold for both methods) would eliminate this ambiguity. Additionally, the outsized impact of the curriculum learning component (dwarfing even the unit pre-training effect in some languages) is under-analyzed and could reveal deeper insights about why multi-modal initialization helps discrete visual speech modeling.
+The most striking finding is the *negative* effect of pre-training on visual speech units alone (the −Curriculum ablation in Table 5). The fact that this condition is worse than no pre-training at all for multiple languages suggests that the visual speech units, when presented in isolation, may actually mislead the model — possibly because the discretization discards information needed to disambiguate homophenes (visually similar phonemes), and without the audio signal to break ties during early training, the model converges to poor local minima. The curriculum learning papered over this by letting audio units provide the disambiguating signal initially, effectively letting the model "learn to read" the lossy visual units through the lens of the richer audio modality first. This dynamic is worth explicit study in future work: are visual speech units inherently insufficient for a cold-start, or could a different training objective (e.g., reconstruction rather than translation) make them viable without audio?
 
 ## Suggestions
 
-1. Revise Table 3 to report WER (not Test Acc) for both methods at comparable optimization steps. Compare total wall-clock time to reach a specific WER threshold rather than mixing epoch counts and metrics.
-2. Add a sentence explaining the dramatic curriculum learning effect: is it purely about optimization difficulty, or does the audio-visual initialization provide a qualitatively different learning signal?
-3. Explicitly state why only 5 of the 9 mAV-HuBERT languages are used for VSR (lack of text labels for De, Ru, Ar, El) and briefly discuss the impact of automatic label noise.
-4. Add a quantitative content-preservation metric (e.g., phone classification accuracy) for the visual speech unit analysis, or at minimum acknowledge this as a direction for future work.
+1. **Reframe the SOTA claim.** Replace "new state-of-the-art multilingual VSR performances" with language such as "competitive with or surpassing prior language-specific SOTA methods" to align the claim with what the experiments actually show.
+2. **Acknowledge the upfront mAV-HuBERT cost** in the efficiency discussion. A brief sentence stating "mAV-HuBERT training requires 350k steps on 64 GPUs as a one-time cost" would satisfy transparency without weakening the contribution.
+3. **Add a paragraph discussing the negative transfer in the −Curriculum ablation.** Even a brief analysis of why visual-unit-only pre-training hurts (e.g., hypothesis about unit lossiness leading to confirmation bias in early representations) would substantially strengthen the analysis section.
+4. **Report the Whisper confidence threshold** and language distribution after filtering for reproducibility.
+5. **Refine the curse of multilinguality discussion** to reference the heavily imbalanced data distribution rather than attributing English degradation solely to the number of languages.
 
 ## Score and Decision
 
-**Originality:** High — visual speech units for multilingual VSR are novel; using discrete pre-training for efficiency is well-motivated.
-
-**Importance of research question:** High — multilingual VSR is an underexplored area with practical significance.
-
-**Claims well-supported:** Mostly yes — core VSR claims are well-supported by Tables 6-7 and ablations. The efficiency claim (Table 3) is the weakest due to metric/epoch mixing.
-
-**Soundness of experiments:** Solid — systematic ablations, comparisons to both multilingual and monolingual baselines, and analysis of visual speech units. No fatal flaws.
-
-**Clarity of writing:** Good overall, with some room for improvement in the efficiency comparison presentation.
-
-**Value to community:** High — the approach and mAV-HuBERT model will be useful resources.
+This paper presents a genuinely novel contribution — the first single-model sentence-level multilingual VSR system — supported by a well-designed technical approach (visual speech units, mAV-HuBERT, curriculum learning) and solid empirical results (competitive with dedicated monolingual systems, ~12× training speedup). The weaknesses are primarily framing imprecision and shallow analysis of one ablation phenomenon, none fatal to the core contribution. The paper's strengths clearly outweigh its weaknesses, and the contributions are publishable with moderate revisions.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

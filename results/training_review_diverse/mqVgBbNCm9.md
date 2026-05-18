@@ -1,36 +1,20 @@
-Now I have all the evidence I need. Let me verify the key claims against the paper content.
-
-**Verification results:**
-
-1. **Speed-up estimation claim**: Confirmed. Lines 132-136 clearly describe profiling-based estimation for open-source models. Line 135 references actual latency comparisons in the appendix ("\cref{sec:app-actual-eff-test}"). The critic's factual claim is correct.
-
-2. **GPT-4 judge bias claim**: The paper's limitations section (line 381) explicitly states: "Our answer quality evaluation is far from perfect due to... the potential bias of GPT-4 judges." So the critic's claim that "The paper does not acknowledge this" is *factually wrong* — the paper does acknowledge it. The critic's specific sub-claim about "self-enhancement bias" (GPT-4 judging its own outputs) is a more specific form of this general acknowledgment.
-
-3. **Router evaluation details**: Lines 313-314 defer annotation details to appendix. Per the hard rule about parser-stripped appendices, this criticism must be removed.
-
-4. **Small category sizes**: Confirmed — Vicuna has 80 questions across 9 categories (line 123), yielding ~9 per category on average. This is a valid concern.
-
-5. **Discrepancy between frameworks**: Paper acknowledges it (line 194) and notes consistency on key conclusions. The critic's framing as a serious issue is somewhat overstated.
-
----
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes Skeleton-of-Thought (SoT), a prompting method that reduces LLM generation latency by having the model first produce a skeleton answer outline and then expand each point in parallel via batched decoding or parallel API calls. A router extension (SoTR) adaptively triggers SoT only for suitable question types. Experiments across 12 LLMs report speed-ups up to 2.39× with maintained or improved answer quality on several question categories.
+This paper proposes Skeleton-of-Thought (SoT), a prompting strategy that reduces LLM generation latency by first extracting a skeleton outline of the answer, then expanding each skeleton point in parallel via batched decoding (for open-source models) or parallel API calls (for API-based models). The method requires no model modifications, system changes, or hardware alterations. Evaluated across 12 LLMs, SoT reports speed-ups of up to 2.39× on several models while maintaining or improving answer quality on certain question categories (generic, knowledge, common-sense, roleplay, counterfactual). The paper also introduces SoTr, a router-based extension that selectively applies SoT only when beneficial.
 
 ## Strengths
 
-1. **Novel data-level approach to parallelizing LLM generation without model changes**: Unlike prior model- and system-level methods (quantization, FlashAttention, speculative decoding), SoT tackles sequential decoding by prompting the LLM itself to plan and expand its output in parallel. The paper explicitly contrasts with these lines of work (Section 2, Section 5) and demonstrates that off-the-shelf LLMs can be parallelized "without any changes to their model, system, or hardware," opening a new data-centric direction for inference efficiency.
+1. **Novel data-level paradigm for inference efficiency**: Instead of modifying models (quantization, pruning) or systems (batching, scheduling), SoT reduces latency by guiding the LLM to plan and parallelize its output content. The paper explicitly distinguishes this from model- and system-level techniques (Section 5, Section 6) and makes a compelling case for "content co-organization for efficiency" as a new research direction.
 
-2. **Measurable speed-ups across 12 LLMs with up to 2.39×**: The paper reports speed-ups on 9 open-source and 3 API-based models (Section 3.1). Figure 1 and Figure 2 show that 8 out of 12 models achieve >2× average speed-up, with per-model and per-category breakdowns supported by token-length statistics. The speed-up is consistent across models that follow the SoT prompts well.
+2. **Consistent speed-ups across 12 diverse LLMs without architectural changes**: SoT achieves >2× speed-up on 8 out of 12 models spanning 7B–33B open-source models and API-based models (ChatGPT, Claude, GPT-4). The speed-up is achieved purely through prompting—no model retraining, quantization, or system-level optimization is required. This is demonstrated in Figures 1 (right) and the per-model breakdown in Section 3.1.
 
-3. **Answer quality maintained or improved on suitable question categories**: Using two LLM-based judges (FastChat, LLMZoo) with order-controlled evaluation, SoT achieves win/tie rates around 60% overall (Figure 4). Net win rates are positive on *generic*, *common-sense*, *knowledge*, *roleplay*, and *counterfactual* categories (Figures 5-7). The paper further shows SoT improves diversity and relevance metrics, providing evidence that parallel expansion can enhance output quality on structural questions.
+3. **Answer quality can be maintained or improved on suitable question types**: On generic, knowledge, common-sense, roleplay, and counterfactual categories, SoT yields positive net win rates against baseline sequential decoding (Figure 6). The analysis in Section 3.2.3 attributes improvements to increased diversity and relevance, supported by detailed metrics from LLMZoo. The paper honestly identifies categories where SoT underperforms (math, coding, writing).
 
-4. **Router extension (SoTR) adaptively improves practical applicability**: To handle categories where SoT is unsuitable (math, coding), the paper proposes a router that selectively triggers SoT. Figure 9 shows SoTR significantly raises net win rates on problematic categories while retaining speed-ups for suitable ones. The trained RoBERTa router (120M parameters) aligns well with human annotations, making the method more deployable — this component is well-motivated and honestly evaluated.
+4. **Adaptive routing (SoTr) makes the method practical**: The router extension (prompting-based using GPT-4, or a trained 120M RoBERTa) selectively applies SoT only for suitable questions. SoTr preserves speed-ups (>1× for most models, Figure 7) while significantly improving quality on categories where SoT alone hurts (coding, math, writing, fermi; Figure 8). The trained router performs comparably to human annotations on Vicuna-80 and better on WizardLM.
 
-5. **Detailed analysis of why SoT works and fails**: The paper identifies that SoT succeeds when answers can be decomposed into independent points and fails when step-by-step reasoning is required. It also traces low net win rates on some models to poor prompt adherence or already-strong baselines (Section 3.2.2-3.2.3). This diagnostic insight is valuable for guiding usage and future improvements.
-
-6. **Opens a new research direction**: The paper frames SoT as a first attempt at using prompting for efficiency, distinguishing it from prior data-centric work focused only on quality. The discussion of future directions (Graph-of-Thoughts, self-improvement via fine-tuning, adaptive triggering) provides a clear roadmap for follow-up work.
+5. **In-depth analysis of when and why SoT works**: The paper identifies key factors affecting SoT's success—model instruction-following ability, point count, length balance between points, and question type. It shows that SoT succeeds when answer points can be expanded independently, but fundamentally struggles on step-by-step reasoning tasks. This provides actionable insights for future work.
 
 ## Weaknesses
 
@@ -38,51 +22,59 @@ This paper proposes Skeleton-of-Thought (SoT), a prompting method that reduces L
 None.
 
 ### Major
-None. The paper's core claims are supported and no individual weakness invalidates the contribution.
+
+1. **Primary efficiency results for open-source models rely on estimated rather than measured latencies.** Section 3.1 (lines 132–136) describes that for open-source models, SoT latency is estimated by looking up entries in a pre-built profiling table. The headline speed-up numbers in Figure 2 and the speed-up axis of Figure 1 (right) are based on this estimation for these models. While the paper mentions that actual latency comparisons exist in the appendix and the estimation methodology is transparent, the central claim of the paper is about efficiency, and the primary evidence for that claim is estimated rather than directly measured for the majority of evaluated models. The paper would be stronger by presenting actual measured latencies as the primary results, or at minimum including a validation of the estimation against real runs in the main text rather than deferring it to the appendix. *(Note: actual latency comparisons do exist in the appendix, which was stripped by the parser—this criticism concerns their absence from the main presentation, not their absence from the paper.)*
 
 ### Minor
 
-1. **Speed-up for open-source models relies on profiling-based estimation in the main text, not direct end-to-end measurements.** The paper reports speed-ups for local models using a precomputed latency profiling table that estimates latency by looking up prefilling/decoding times at various batch sizes and sequence lengths (lines 132-136). While this estimation method is reasonable and the paper references actual latency comparisons in the appendix (line 135), the main paper would be stronger with at least one representative direct latency comparison. The concern is that batching multiple expansion points with padded sequences can introduce overhead (memory allocation, attention masking) not fully captured by a precomputed table. This does not invalidate the results but reduces confidence in the exact speed-up numbers for local models.
+2. **Answer quality evaluation lacks human validation and is entirely automated with GPT-4 as judge.** The paper acknowledges this limitation (Section 6), noting that human evaluation is avoided because SoT answers have a distinctive pattern that could bias raters. However, prior work has documented systematic preferences in LLM-as-judge evaluations (e.g., favoring longer answers, list-like structures) that align with SoT's artifacts. The discrepancy between FastChat and LLMZoo metrics (45.8% vs. 29.5% win rates in Figure 3) further suggests that evaluation prompt design heavily influences results. A small human evaluation on a focused subset (e.g., 20–30 questions per category) would substantially strengthen the quality claims. Without it, the quality results should be treated as suggestive rather than conclusive. The paper's main contribution is efficiency, which limits the severity of this concern, but the quality claims are part of the paper's narrative.
 
-2. **LLM-as-judge evaluation has known biases that are acknowledged but not specifically addressed.** GPT-4 serves as both a tested model and the primary judge (line 176, lines 144-145). The paper acknowledges "the potential bias of GPT-4 judges" in the limitations (line 381), but the specific self-enhancement concern — that GPT-4 may systematically prefer answers structured like its own outputs — is not separately analyzed. The evaluation framework mitigates some forms of bias (order swapping in lines 184-185), and ChatGPT is used as a secondary judge in the appendix, but the core concern remains partially unaddressed. Given that GPT-4 is only one of 12 models and the paper's quality conclusions are consistent across two different evaluation frameworks (FastChat and LLMZoo), this is a real but manageable concern.
+3. **Router overhead is mentioned but not concretely quantified.** The paper states the router induces "a small latency overhead" (line 322) but does not provide concrete latency or cost numbers for either the prompting-based router (which requires a separate GPT-4 call—more expensive and slower than the models being accelerated) or the trained RoBERTa router. Since the speed-up comparison between SoT and SoTr in Figure 7 is a key result, the lack of explicit overhead quantification makes it difficult for readers to assess the net benefit in practical deployment.
 
-3. **The Vicuna dataset has small per-category sample sizes.** The dataset contains 80 questions across 9 categories (line 123), yielding approximately 5-10 questions per category for categories like *math* and *coding*. Net win rates on individual categories are presented as percentages (Figures 6-7), but with such small N, a single win/loss flip can change the value by 10-20 points. No confidence intervals or statistical tests are reported. The paper's main category-level conclusions (5 "good" categories vs. 4 "poor") are coarse enough that this is unlikely to reverse them, but the precision of the reported per-category percentages is overstated.
-
-4. **Speed-up results are reported as point estimates without variance.** All speed-ups are averages across questions (Figures 2-3). No standard deviation, min/max, or confidence intervals are provided. A model achieving 2× speed-up on easy questions but 1.2× on hard ones would still average close to 2×, masking inconsistency. This makes it difficult to assess how reliable the speed-up is across individual queries.
+4. **No ablation on the number of skeleton points.** The paper instructs 3–10 skeleton points and reports average point counts per model (Figure statistics) but does not analyze how speed-up or quality varies with the number of points. Since the speed-up is directly tied to B (the number of parallel-decoded points), understanding this relationship would provide practical guidance and deepen the analysis.
 
 ### Trivial
 
-1. **Left-padding choice for batched decoding is not justified.** The paper states that "paddings are added to the left of the point-expanding requests" (line 108) but does not discuss or ablate the choice of left-padding vs. right-padding, which can affect attention mask behavior and potentially output quality.
+5. **The "data-centric" framing is somewhat imprecise.** The paper describes SoT as "data-centric optimization for inference efficiency," but SoT is really a prompting/planning strategy rather than data selection or augmentation. The term does not add much analytical value to the contribution. This is a minor issue of framing rather than substance.
+
+6. **Answers generated by SoT are 1–2× longer than baseline answers** (acknowledged in the paper, line 151). While speed-ups still hold because generation is parallelized, the comparison with baseline sequential generation is not token-matched. A reader may wonder how the baseline would compare if allowed to generate longer answers. The paper acknowledges this but does not discuss its implications for the fairness of quality comparisons.
 
 ## Nice-to-Haves
 
-- Include a representative direct latency comparison (e.g., 2-3 local models on a handful of questions) in the main paper to validate the profiling-based estimates.
-- Report confidence intervals or bootstrapped error bars on net win rates, especially for category-level analysis.
-- Provide a brief analysis of why the FastChat and LLMZoo metrics disagree on absolute win rates (45.8% vs. 29.5%) — the paper notes the discrepancy but does not diagnose it.
-- Add variance statistics (e.g., standard deviation or interquartile range) for speed-up results.
+- **Validate latency estimation against actual runs**: Taking a representative subset of model–question pairs (e.g., one model per architecture, 10 questions per category) and comparing estimated speed-up against actual wall-clock latency would turn the efficiency results from plausible into convincing.
+- **Small human evaluation of answer quality**: A focused human evaluation on the five categories where SoT claims improvement and the two where it clearly loses would provide a sanity check on the GPT-4 judgments.
+- **Comparison with a simple speculative decoding baseline** would help benchmark SoT's practical value, though the two approaches target different mechanisms (parallel token verification vs. parallel content planning).
+- **Analysis of how speed-up varies with skeleton point count (B)** would provide practical guidance for users.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were raised by reviewers but do not hold up under verification against the paper:
 
-- **"Router evaluation lacks details on training and annotation reliability"** — REMOVED per hard rule: the paper explicitly defers annotation details, inter-annotator agreement, and training details to the appendix (\cref{app:annotation_process_router,app:training_details_roberta}). The parser strips appendices; these details exist in the original submission. Criticizing their absence in the main paper is a "missing appendix" concern.
-- **"The paper does not acknowledge [GPT-4 judge bias]"** — REMOVED as factually incorrect. The paper's limitations section (line 381) states: "Our answer quality evaluation is far from perfect due to... the potential bias of GPT-4 judges." The paper does acknowledge this. (The more specific claim about GPT-4 judging its own outputs is retained in Minor above.)
-- **"Profiling table or curve should be shown"** — This is a presentation preference. The paper describes the profiling methodology (lines 132-136) and the speed-up results are the key output. Showing the raw profiling curves would add depth but is not necessary for the paper's claims.
+- **"No comparison with speculative decoding in the main evaluation"**: Speculative decoding requires a draft model and operates at the token level, making it a fundamentally different approach. The paper discusses it in the related work (Section 5). A direct comparison would require a substantial expansion of scope. Not a weakness.
+
+- **"Speed-ups are unverifiable without real runs"**: The paper explicitly provides actual latency comparisons in the appendix (line 135: "we also compare the actual latency... in \cref{sec:app-actual-eff-test}"). The appendix exists in the original submission but was stripped by the parser. The estimation is a methodology for fast analysis, not the only evidence available.
+
+- **"The paper should also cover additional domains/tasks"**: The paper evaluates on two datasets (Vicuna-80, WizardLM) spanning nine categories with 12 models. This is a thorough evaluation within a reasonable scope.
+
+- **"Missing token-level parallel decoding comparisons"**: Addressed above under speculative decoding.
+
+- **Formatting/style nitpicks** and concerns about appendix sections being "missing" (stripped by parser): Removed per hard rules.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface an interesting tension: the paper's central claim (SoT accelerates generation while maintaining quality) rests on two different types of evidence — profiling-based estimates for local models and wall-clock measurements for API models — and the quality evaluation relies on an LLM judge that is also a tested model. This creates an asymmetry in evidential standards across the results' two dimensions (speed and quality). The paper's router extension partially compensates by showing that the method can be deployed selectively, which is pragmatically more important than perfect speed-up or quality numbers on every input. A genuine insight is that the paper's honesty about limitations (Section 6) is itself a strength: the paper admits SoT is unsuitable for reasoning tasks, that speed-up is less predictable than system-level methods, and that quality evaluation is imperfect. This transparency strengthens credibility more than sweeping claims would.
+The reviews surface an important tension not fully explored in the paper: the profiling-based latency estimation for open-source models is a methodological shortcut that, while reasonable for rapid iteration, sits uncomfortably alongside the paper's central efficiency claim. This tension is amplified by the fact that the actual latency comparisons exist only in the appendix. A second insight is that the quality evaluation's reliance on GPT-4 as judge is particularly problematic for this method because SoT produces exactly the kind of structured, list-like outputs that GPT-4 evaluators are known to favor systematically—meaning the evaluation bias may not be evenly distributed but instead tilted in SoT's favor in ways that are hard to disentangle without human judgment.
 
 ## Suggestions
 
-1. For a camera-ready version, move one representative direct-latency comparison (e.g., 2 local models on 10 questions each) from the appendix into the main paper to ground the profiling-based speed-up estimates.
-2. Add bootstrapped confidence intervals to the per-category net win rate plots (Figures 6-7) and explicitly note the small-N caveat.
-3. Acknowledge the self-evaluation concern specifically for GPT-4 outputs alongside the general bias acknowledgment already present.
-4. Report speed-up variance (e.g., standard deviation or box plots) alongside the averages in Figures 2-3.
+1. **Promote actual latency measurements to the main text** for open-source models, at least for a representative subset, and present the estimation as a methodological tool for analysis rather than the primary evidence.
+2. **Quantify router overhead explicitly**—report the average latency added by the prompting-based router (GPT-4 call) and the trained RoBERTa router separately.
+3. **Add a small human evaluation** of answer quality on a focused subset (e.g., 20 questions × 3 categories) to validate the GPT-4 judgments, or at minimum temper the quality claims further given the known biases.
+4. **Include a scatter plot or analysis of speed-up vs. number of skeleton points (B)** to understand how the method's efficiency scales with its main free parameter.
+5. **Clarify in the "data-centric" framing** what specifically makes SoT data-level rather than prompt-level, or reduce emphasis on this terminology.
 
 ## Score and Decision
 
-The paper introduces a simple, intuitive, and model-agnostic method for reducing LLM generation latency. The idea is clever, the writing is clear, the evaluation spans 12 models and two datasets, and the limitations are discussed candidly. The weaknesses identified (profiling-based speed-up estimates in the main text, LLM judge bias, small category samples, missing variance) are real but addressable and do not undermine the paper's core contribution. The method is likely to be discussed, built upon, and adopted.
+The paper presents a clever, intuitive idea with a reasonably broad evaluation across 12 models. The core insight—that LLMs can be prompted to plan and parallelize their output structure—is sound and likely useful. The main weaknesses are (1) the efficiency results for open-source models rely on estimated rather than directly measured latencies in the main text, which undermines the primary claim, and (2) the quality evaluation relies entirely on LLM-as-judge without human validation. Neither weakness invalidates the paper's contribution, but both prevent the empirical claims from being fully established. The contribution is promising and the direction is compelling, but the current presentation of evidence leaves enough uncertainty that the paper would benefit from strengthening before publication.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

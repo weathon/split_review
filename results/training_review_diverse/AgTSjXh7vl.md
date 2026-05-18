@@ -1,89 +1,75 @@
-Here is the complete final consolidated review:
+Now I have all the information I need. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper introduces P-Align, a self-alignment framework for physical dynamical system forecasting that enables models to generate, curate, and train on their own physically-consistent data. The method adapts the self-alignment paradigm from LLMs to spatiotemporal forecasting by using anchor-based discretization in latent space to discover multiple candidate future states, selecting those with highest physics-aware rewards via beam search, and iteratively retraining on the augmented dataset. Experiments are conducted across 10 backbone models and 5 datasets spanning meteorology, traffic, extreme events, and combustion dynamics.
+This paper proposes P-Align, a self-alignment framework for physical dynamical system modeling. The method uses a VQ-inspired anchor mechanism in the latent space to generate multiple candidate predictions, a physics-aware beam search to select the most physically consistent candidates, and iterative retraining on the augmented data. Experiments across ten backbones and five datasets (WeatherBench, TaxiBJ, SEVIR, DRS, FireSys) show consistent improvements in MAE/MSE/SSIM, including under sparse data and extreme event settings.
 
 ## Strengths
 
-- **Novel cross-domain adaptation of self-alignment to physical systems**: The paper introduces a principled framework that transfers the self-alignment paradigm (self-discovery → self-curation → self-updating) from LLMs to dynamical system forecasting. This is a genuinely different approach from prior physics-constrained methods (PINNs, HNNs, etc.) that require explicit governing equations or custom architectures. Evidence: Section 4.1 and Figure 1, which explicitly draw the parallel between LLM self-alignment and the proposed P-Align pipeline.
+- **Consistent and large performance gains across diverse backbones and datasets**: The paper demonstrates that P-Align improves standard metrics (MAE, MSE, SSIM) across all ten evaluated backbones (ConvLSTM, PredRNN-V2, ViT, SimVP, Earthfarseer, FNO, etc.) on five datasets spanning meteorology, traffic, extreme weather, control systems, and combustion. This breadth of evaluation is a genuine strength and supports the claim of method generality. For example, ViT on WeatherBench drops from 19.22 to 17.16 MAE; similar gains are shown across the board.
 
-- **Consistent empirical gains across diverse backbones and datasets**: The method shows consistent improvements across 10 backbone architectures (ConvLSTM, PredRNN-V2, ViT, MAU, SimVP, MmvP, Earthfarseer, FNO, U-Net) and 5 datasets with very different physical characteristics (WeatherBench, TaxiBJ, SEVIR, DRS, FireSys). Evidence: Table 1 reports MAE/MSE improvements for every model/dataset combination, e.g., ViT MAE from 19.22→17.16 on WeatherBench, and the radar chart in Figure 3 shows percentage improvements.
+- **Effectiveness in challenging sparse-data and extreme-event settings**: RQ2 shows substantial improvements under high sparsity (e.g., FNO's out-t MSE drops by 21.2% at 75% sparsity from 0.2869 to 0.2260; U-Net by 11.2%). RQ4 demonstrates that P-Align improves predictions for extreme precipitation events on SEVIR even when initial conditions are removed, suggesting genuine robustness.
 
-- **Demonstrated physical consistency improvement**: Beyond pointwise error metrics, the paper evaluates energy spectrum preservation (Figure 3, second row) and shows that Earthfarseer+P-Align produces spectra closest to ground truth, indicating adherence to physical laws rather than just statistical accuracy. Evidence: Section 5.2 Obs.2 and Figure 3.
-
-- **Strong performance under data sparsity**: P-Align improves predictions when up to 75% of input data is randomly masked, with FNO Out-t MSE dropping from 0.2869 to 0.2260 (21.2% improvement). Evidence: Table 2 in Section 5.3.
-
-- **Outperforms existing plug-in methods**: On the WeatherBench benchmark with SimVP backbone, P-Align achieves the best MSE (7.96) and SSIM (0.9011) compared to CPAE, NUWA, PURE, and MixUP, with a notable SSIM gap indicating better spatial structure preservation. Evidence: Table 3 in Section 5.4.
+- **Novel adaptation of self-alignment to continuous physical latent spaces**: The core idea — adapting the LLM self-alignment paradigm to physical system models by using discrete anchor vectors to approximate continuous latent representations and generating candidates via top-K anchor expansion — is novel and well-motivated. The beam-search curation over time steps with physics-aware rewards is a reasonable design for the temporal nature of dynamical systems.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **The claimed "over 32% average statistical skill score boost" is undefined and not directly traceable to reported results**: The abstract and conclusion claim a "statistical skill score boost of more than 32%," but the term "statistical skill score" is never defined anywhere in the paper. The evaluation uses MAE, MSE, and SSIM — none of which are called "statistical skill scores." The 32% figure cannot be computed or verified from the numbers in Table 1 or any other table. This is an overclaim without a transparent definition or computational path. The authors should either define the metric precisely, show how the 32% is derived, or remove the claim.
+- **The central claim of improved "physical consistency" lacks quantitative evidence.** The paper's title and abstract emphasize enhancing physical consistency, yet the only evidence provided is a qualitative energy spectrum visualization (Figure 3, second row) and a similar analysis for extreme events (Figure 6). Tables 1–3 report only standard statistical metrics (MAE, MSE, SSIM). No quantitative physical metrics are reported for any dataset (e.g., energy spectrum error, divergence violation, conservation error). For a paper whose core thesis is improving physical consistency, this is a significant gap that weakens the entire narrative. The claim in the abstract that P-Align "significantly enhances physics-aware metrics" is unsubstantiated without domain-relevant quantitative evaluation.
 
-- **The theoretical analysis (Theorem 1) is vacuous and does not specifically support P-Align**: Theorem 1 states that if the filtered hypothesis space H' is a subset of H, then the Rademacher complexity bound is tighter. This is a generic property of any data-filtering procedure — it says nothing about whether P-Align's specific physics-aware selection criterion produces a useful H', whether training on augmented data actually shrinks the hypothesis space (it may expand it), or whether the empirical risk on selected samples is an unbiased estimate of the true risk. The theorem's assumption (H' ⊆ H) is not justified for the iterative data augmentation procedure described. The paper presents this as formal support for the method, but the analysis is disconnected from the actual algorithm. Evidence: Section 4.4, lines 230–248.
+- **No ablation or sensitivity analysis.** P-Align has multiple interacting components: anchor-based self-discovery with top-K expansion, physics-aware beam search of width M, iterative retraining over T rounds, and a threshold τ for data incorporation. The paper reports none of: (a) the contribution of individual components (e.g., self-discovery without physics-aware curation, curation without iteration), (b) sensitivity to hyperparameters K, M, T, τ, or (c) whether similar improvements could be achieved by simpler alternatives (e.g., adding noise and filtering by reward). Without this, it is unclear whether the gains are driven by the physics-aware reward, the self-training loop, or generic data augmentation. A single ablation isolating the reward function would meaningfully strengthen the paper.
 
-- **The 32% claim and the theoretical weakness together undermine the paper's central narrative**: The combination of an unverifiable headline number and a theory that does not actually validate the method creates a gap between the paper's claims and its evidence.
+- **The theoretical analysis (Theorem 1) is flawed and overclaimed.** The "Generalization Error Upper Bound Reduction Theorem" does not properly establish its conclusion. The generalization bound for the filtered hypothesis space includes a term \(3M\sqrt{\frac{\log(2/\delta)}{2N'}}\) that scales inversely with \(\sqrt{N'}\). Since \(N' \leq N\), this term can be *larger* than the corresponding term in the original bound, so the claimed inequality \(R'(\theta)-\hat{R}'(\theta) \leq R(\theta)-\hat{R}(\theta)\) does not follow from the stated premises. Additionally, the argument that \(\mathcal{H}' \subseteq \mathcal{H}\) implies reduced Rademacher complexity applies to *any* filtering scheme and says nothing specific about P-Align's physics-aware selection. This section should either be fundamentally revised with a valid argument or repositioned as heuristic motivation rather than a formal theorem.
 
 ### Minor
 
-- **No standard deviations or confidence intervals for main results**: Table 1 states it reports "results (five runs)" but shows only point estimates with no variance measures. Given that improvements are presented as the paper's central evidence, the absence of error bars makes it impossible to assess whether these differences are reliable or within noise. This is especially important since the reported improvements vary considerably across models.
+- **Method description has ambiguities affecting reproducibility.** The core mechanism of Self-Discovery generates candidate states at each time step, but how the beam search expands over time is not fully specified — specifically, where new candidate predictions come from at each beam-search step. The notation switches between \(\mathcal{V}_t^m\) and \(\mathcal{Y}_t^m\) (lines 123–130) without clarifying whether these are reconstructions or future predictions; the context supports the latter but the text is ambiguous. A single concrete walkthrough of one iteration on one sample would resolve this.
 
-- **Missing critical hyperparameters for reproducibility**: The paper does not specify the number of anchors N, anchor dimension d, number of candidates K, beam width M, the number of iterative alignment iterations T, or any training hyperparameters (learning rates, batch size, epochs). The physics-aware reward function r(θ) is described with examples (divergence, energy spectrum, TKE) but not concretely specified per dataset, so the curation step is not reproducible. For TaxiBJ (traffic) and FireSys (combustion) — where fluid-dynamics metrics may not directly apply — this is especially problematic.
+- **The physics-aware reward function is not specified per dataset.** Section 4.2 mentions that the reward "can be physical metrics such as divergence of the velocity field, energy spectrum, or turbulence kinetic energy," but the paper never states which metric was used for WeatherBench, TaxiBJ, SEVIR, DRS, or FireSys. This is essential for reproducibility and for understanding what "physical consistency" means in each domain.
 
-- **Extreme event experiment (RQ4) lacks quantitative evaluation**: The experiment "removing initial conditions" on SEVIR is a non-standard setup shown only with qualitative visual comparisons (Figure 6). No quantitative metrics (MSE, critical success index, or any extreme-event-specific score) are reported. The paper should include quantitative metrics to support the claim of improved extreme event prediction.
-
-- **Absence of ablation studies**: The method has several design choices (number of anchors, number of candidates K, beam width M, threshold τ, number of iterations) whose individual effects are not isolated. Without ablations, it is impossible to attribute the reported gains to the self-discovery mechanism, the physics-aware curation, or the iterative retraining — or to rule out that the gains come simply from having more training data.
-
-- **Ambiguous phrasing in the method description**: The decoder is described as recovering "the original features" (line 120), and V_t^m is said to have dimensions "as same as X_t." While the intended meaning is that V_t^m is a future-state prediction with the same spatial dimensions as the input, the phrase "original features" could be misread as reconstructing the input at the same time step. This creates confusion about whether the method is autoencoding or forecasting — the paper should clarify that the decoder maps the anchored latent code back to the *physical feature space* to produce a *future* state prediction.
+- **Comparison with other plug-in methods is limited to one backbone and one dataset (SimVP on WeatherBench).** While RQ1 already demonstrates broad improvements, the direct comparison in RQ3 would be more convincing if extended to additional backbones or datasets.
 
 ### Trivial
-- Some minor notational inconsistencies (e.g., line 51 uses D_t where Y_t is intended).
-- The paper could benefit from a precise definition of "statistical skill score" or removal of the term.
+
+- The acronym "SWE" (shallow water equations) is used in RQ2 (line 307) but never defined.
+- The claim of "over 32% average improvement" appears in the abstract but the per-backbone averages are not reported in the text; the reader cannot verify how this figure is computed from the presented results.
 
 ## Nice-to-Haves
 
-- Computational cost comparison: P-Align involves iterative data generation and retraining. A comparison of training/inference time and FLOPs against the baselines and other plug-in methods would help practitioners assess the practical trade-off.
-- Per-dataset specification of the physics-aware reward function in a table for reproducibility.
-- Analysis of whether the anchor-based candidate generation actually produces outputs on or near the true data manifold vs. physically implausible states (which would then get filtered out by the curation step).
+- Reporting per-dataset physical metrics (energy spectrum error, conservation error, divergence violation) would directly support the paper's thesis.
+- A sensitivity analysis on K, M, T, and τ would demonstrate robustness.
+- A baseline comparison of P-Align against simply adding noise + filtering by the same reward would isolate the contribution of the anchor-based self-discovery.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-1. **"The method's mechanism is inconsistent with the forecasting objective" (Harsh Critic #1)**: The critic claims the decoder reconstructs the input rather than predicting the future state. This is based on misreading "as same as X_t" (referring to spatial dimensionality, C×H×W) as identity of content. The paper's framework overview (Section 4.1) explicitly states the method "generat[es] and evaluat[es] multiple potential future states," Algorithm 1 calls it a "predicted feature," and the loss (Eq. 17) computes MSE against the future target V_t. The decoder maps anchored latent codes to the physical feature space (i.e., "recovers original features" in the sense of returning from latent to physical space), not to the same time step. Removed as factually incorrect.
-
-2. **"FATAL" classification of the above point**: The same issue is not a fatal structural flaw; it is a clarity problem at most. Removed as severity inflation.
-
-3. **"Code release" complaint**: The critic notes the paper "promises code release via GitHub but provides no repository URL." The paper states code will be released, which is standard for camera-ready. Removed per hard rule: do not question availability of cited resources.
-
-4. **"Missing related works"**: Removed per instructions: do not mention missing related works without external sources to confirm existence.
-
-5. **"Sparse-data experiment uses different models"**: The critic claims U-Net and FNO used in RQ2 are "not among the ten backbones used in the main table." In fact, Table 1 includes FNO as one of the backbones, and U-Net is intentionally used for the separate sparse-data analysis. Removed as factually incorrect.
-
-6. **"Strawman weakness about integration with FNO"**: The critic questions how P-Align integrates with FNO since FNO is "not autoencoder-based." The paper explicitly states that P-Align can use any backbone as the encoder E_φ and employs a separate decoder D_φ (line 72, 120). This is standard practice for extracting latent representations. Removed as the paper already addresses this.
+- **Criticism that the core algorithm is "non-reproducible" and a "decisive flaw" due to ambiguity about input vs. future states**: Removed. The paper's notation and context (e.g., using Y for outputs in line 130, the loss comparing curated candidates with ground-truth targets in Eq. 20) make it clear that the candidates are future predictions, not reconstructions of the input. The ambiguity is about presentation clarity, not a fundamental flaw. Downgraded to Minor.
+- **Criticism that Table 1 is an image placeholder and the 32% claim "cannot be verified"**: Removed. The table images are parser artifacts from PDF extraction; the original submission had proper tables. The 32% figure is stated in the abstract and the per-model improvements are cited in the text (e.g., ViT on WeatherBench).
+- **Criticism about missing appendix, missing proofs, or absent references**: Removed per the rule that the parser strips these sections from all papers.
+- **Strength about theoretical justification (from Strength Finder)**: Removed. Conflicts with the verified weakness about the theorem being flawed. The theory is not a strength in its current form.
 
 ## Novel Insights
 
-None beyond the paper's own contributions, though the reviews collectively surface a notable tension: the paper's claimed headline number (32%) and its formal theorem are the two most prominent pieces of "support" in the abstract, yet both are substantially weaker than they appear — the number is undefined and the theorem is generic. The actual contribution (a novel framework with credible-if-incomplete empirical support) would be better served by removing or honestly qualifying these two items rather than defending them.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. Precisely define what "statistical skill score" means, show the formula, and trace how the 32% figure is computed from Table 1 — or remove the claim.
-2. Either remove Theorem 1 or replace it with analysis that specifically connects the physics-aware selection criterion to the properties of the filtered hypothesis space.
-3. Add standard deviations or confidence intervals to Table 1, or at minimum report per-run results.
-4. Add a reproducibility table with all hyperparameter values (N, d, K, M, τ, T, learning rates, epochs) and per-dataset specification of the reward function r(θ).
-5. Add an ablation study isolating the effect of each component (self-discovery only, curation only, number of iterations, etc.).
-6. Add quantitative metrics (e.g., MSE, CSI) to the extreme event experiment.
-7. Clarify in Section 4.2 that the decoder outputs a *future* state prediction in the physical feature space, not a reconstruction of the input.
+1. **Provide quantitative physical metrics.** For each dataset, report at least one domain-relevant metric — e.g., energy spectrum error for WeatherBench/SEVIR, divergence violation for DRS, or conservation error for FireSys. This would directly substantiate the paper's central claim.
+2. **Run ablation experiments.** Compare: (a) full P-Align, (b) self-discovery with random selection instead of physics-aware curation, (c) no iterative retraining (single round), (d) random noise augmentation + same reward filtering. This would isolate which component drives the improvement.
+3. **Revise or remove the theoretical section.** If kept, either fix the bound to properly account for the reduced sample size, or reposition it as a heuristic motivation rather than a formal theorem.
+4. **Clarify the method with a concrete walkthrough.** Use one dataset sample to walk through one iteration: which candidate states are generated, how the beam search expands, and what is added to the augmented dataset.
+5. **Specify per-dataset reward functions** in the experimental settings section.
+6. **Define SWE** at first use in RQ2.
 
 ## Score and Decision
 
-The paper introduces a genuinely novel framework and provides extensive empirical evaluation across many backbones and datasets. The consistent improvements are encouraging, and the idea of adapting self-alignment to physical systems is valuable. However, the paper is undermined by an undefined headline claim (32% statistical skill score), a vacuous theoretical analysis presented as formal support, and significant reproducibility gaps (missing hyperparameters, no error bars, no ablation studies, qualitative-only extreme event evaluation). These are addressable, but in their current form they prevent independent verification of the results and overstate the paper's contributions.
+The paper's experimental breadth (10 backbones × 5 datasets) is its strongest asset, and the novel adaptation of self-alignment to physical systems is a worthwhile contribution. However, the paper's central claim about improving physical consistency has only qualitative support, the mechanism is not ablated, and the theory is overclaimed. These are significant weaknesses in a methods paper that positions physical consistency as its headline contribution.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+**Score**: 5.0
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

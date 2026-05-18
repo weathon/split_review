@@ -1,62 +1,92 @@
-Now I have a thorough understanding of the paper. Let me compile my final review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ## Summary
-This paper formalizes the problem of black-box RAG Dataset Inference (RAG-DI), where a data owner aims to detect unauthorized inclusion of their dataset in a RAG system's corpus. It introduces the FRAD dataset (synthetic, fact-redundant articles built from RepliQA to avoid LLM training data contamination), adapts RAG MIA baselines (SIB, IBM), and proposes Ward—a proactive method that embeds LLM watermarks into a data owner's documents and detects them in RAG responses via a joint p-value test. The main result is that Ward achieves 100% accuracy across three LLMs, two system prompts, and both easy and hard (fact-redundant) settings, while all baselines fail in the hard setting.
+
+This paper formalizes the novel problem of black-box RAG Dataset Inference (RAG-DI), where a data owner aims to detect unauthorized inclusion of their dataset in a RAG system's corpus. The authors introduce FRAD (Fact-Redundant Article Dataset), a synthetic dataset built from fictional Repliqa articles that avoids LLM training-data overlap and models real-world fact redundancy. They adapt existing RAG membership inference attacks as baselines and propose Ward, a proactive method that embeds LLM watermarks into protected documents and detects them via a joint statistical test across RAG responses. Experiments show Ward achieving 100% accuracy across challenging settings with fact redundancy and defended prompts, where all baselines fail.
 
 ## Strengths
-- **Formalization of a novel problem (RAG-DI) with clear scope and realistic challenges.** The paper explicitly defines RAG-DI as a distinct black-box problem (Section 3) and demonstrates that existing datasets (EnronEmails, HealthcareMagic) are unsuitable because they lack fact redundancy and may have been seen in LLM training data (Section 3.1). This framing justifies the need for the new dataset and method.
-- **FRAD dataset with controlled fact redundancy, designed to isolate the key difficulty.** The dataset uses RepliQA fictional articles provably absent from LLM training data, with groups of 4 articles sharing 5 key facts (Section 3.1, Figure 2). This enables, for the first time, evaluation under realistic fact redundancy, which is empirically shown to be the decisive factor separating successful methods from failing baselines (Section 5.1, Figure 5).
-- **Ward provides rigorous statistical guarantees that no baseline matches.** By using a joint p-value test on collected responses (Section 4, Equations 2–3), Ward bounds Type I error at a user-specified level. Table 1 (Table 1 in the paper) shows that even the maximum p-values for the in-case are orders of magnitude below the decision threshold (~3×10⁻⁵), and the minimum p-values for the out-case are far above it, directly validating the guarantee.
-- **Ward achieves 100% accuracy across all challenging settings while baselines fail.** In the main experiment (Section 5.1, Figure 5), Ward obtains perfect classification on both easy and hard (fact-redundant) settings, for three different LLMs (Haiku, GPT-3.5, Llama3.1-70b), under both naive and defended system prompts. All baselines (FACTS, IBM, SIB) fail in the hard setting.
-- **Monotonic improvement with query count.** Ward's accuracy consistently rises with |D_owner|, reaching perfect accuracy at 80 documents, while baselines show highly variable accuracy that sometimes decreases with more queries (Section 5.2, Figure 6).
-- **Robustness to strong defenses.** Ward maintains 100% accuracy under a defended system prompt designed to prevent information leakage, and even under MemFree decoding that strictly prevents n-gram overlap with retrieved documents (Section 5.2). Baselines' accuracy collapses under these defenses because they rely on the model's willingness to leak information.
-- **Practical validation with imperfect retrieval.** When using a real embedding-based retrieval system (text-embedding-3-large, k=3), Ward still achieves 100% accuracy with 93.6% retrieval success, and p-values scale correctly with query count (Section 5.3, Figure 9), demonstrating that the perfect-retrieval assumption is not a limiting factor.
-- **Watermarked text maintains high quality.** Quality evaluations using GPT-4 ratings and P-SP metric show that watermarked paraphrases have nearly identical scores to originals (Table 3), and response quality is indistinguishable between in-case and out-case, confirming that watermarking does not degrade RAG utility.
+
+- **First formalization of the RAG-DI problem.** Section 3 clearly defines the entities (data owner, RAG provider), the dataset-level decision, black-box query access, and desiderata (monotonicity, guarantees, robustness), providing a principled foundation for a previously underexplored problem.
+
+- **Novel dataset (FRAD) designed to address RAG-DI-specific challenges.** FRAD uses fictional Repliqa articles (ensuring no LLM training-data overlap) with controlled fact redundancy across groups of four independently authored articles. The paper empirically validates (Figure 2) that the easy setting (no redundancy) is trivially solvable by a simple baseline, while the hard setting (with redundancy) causes all baselines to fail — confirming that fact redundancy is essential for realistic RAG-DI evaluation.
+
+- **Ward provides rigorous statistical guarantees.** Unlike all baselines, Ward inherits the watermark detector's p-value, enabling a well-controlled hypothesis test for dataset inclusion. Table 1 shows in-case p-values orders of magnitude below the decision threshold and out-case p-values well-calibrated near 1, directly satisfying the guarantee desideratum.
+
+- **Ward achieves 100% accuracy across all challenging settings.** In the main experiments (Figure 2), Ward obtains perfect accuracy on both easy and hard settings, across three LLMs, under both naive and defended system prompts. All baselines fail in the hard setting, especially under the defended prompt where they produce both false positives and false negatives.
+
+- **Ward exhibits monotonic improvement with query count.** Figure 3 shows Ward's accuracy increasing smoothly with |D_owner|, reaching 100% with at most 80 documents, while baselines like SIB show high variance and non-monotonic behavior. This satisfies the monotonicity desideratum.
+
+- **Comprehensive evaluation and ablations.** The paper adapts existing RAG MIAs to the dataset-level setting, introduces a Facts baseline, ablates watermark parameters (δ, h), retrieval settings (k), and even tests against MemFree decoding defense (details in appendix). Quality evaluation confirms watermarked documents maintain high text quality and do not degrade RAG response quality (Table 2, Section 5.3).
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None. The paper's core claims (problem formalization, dataset, method with statistical guarantees, empirical superiority) are all well-supported. The weaknesses below are minor issues or scope for future improvement.
+
+- **The end-to-end retrieval experiment is underanalyzed, leaving a quantitative gap unexplained.** Section 5.3 reports that a realistic embedding-based retriever succeeded in retrieving the targeted watermarked article in only 93.6% of requests, yet Ward still achieves "100% accuracy across all settings." The paper does not explain how the 6.4% retrieval failures are absorbed — presumably the joint p-value across n=200 queries remains significant even with ~12-13 missing signals, but this is never explicitly quantified or analyzed. The accuracy curves are deferred to the appendix, and the main text provides only a one-sentence claim. Given that the main experiments assume perfect retrieval, the end-to-end validation needs a more detailed breakdown (e.g., does accuracy degrade when retrieval success drops below some threshold? How much safety margin does the joint test provide?). As presented, the reader cannot assess how robust Ward is to realistically imperfect retrieval.
 
 ### Minor
-- **The "provable" framing is slightly inflated relative to what the method delivers.** The paper titles itself "Provable RAG Dataset Inference" and states that Ward can "provably ... detect unauthorized data usage" (line 53). What the method provides is a statistically well-calibrated test (a valid p-value under the null hypothesis), not a logical guarantee. While this terminology is standard in the LLM watermarking literature (KGW et al. also use "provably"), the paper would be more precise by consistently describing Ward as providing *rigorous statistical tests* rather than "provable" inference. This does not undermine the contribution but the framing sets expectations slightly above what is delivered.
 
-- **The perfect-retrieval assumption in the main experiments is only partially validated.** The paper acknowledges the assumption (line 247) and validates it with one end-to-end experiment using OpenAI text-embedding-3-large at k=3 (Section 5.3.1), showing 100% accuracy and 93.6% retrieval success. However, this validation covers only a single embedding model, one k value, and reports only average p-values without showing variance across queries or the effect on p-values in the ~6.4% of cases where retrieval fails. Given that the perfect-retrieval experiments are presented as primary evidence, a more thorough characterization of retrieval-dependent failure modes would strengthen the paper's claims about real-world applicability. This is a gap the authors partially address but do not fully close.
+- **Limited threat model discussion.** The paper evaluates two system prompts (naive and defended) and one decoding-level defense (MemFree), but does not systematically define the RAG provider's knowledge, capabilities, or potential countermeasures. A proper threat model would list what the provider knows (e.g., that Ward is in use, the watermark scheme, the detection algorithm) and enumerate considered countermeasures (e.g., paraphrasing retrieved text, adding noise, perturbing token distributions). The current evaluation feels ad hoc rather than systematic.
 
-- **The FRAD dataset is entirely LLM-generated, leaving open questions about ecological validity.** The paper is transparent about FRAD's construction (Section 3.1): fictional articles from RepliQA are distilled into facts, and LLMs generate articles incorporating those facts. While this cleverly avoids training data contamination, the documents are generated by instruction-following models that may produce artifacts (e.g., formulaic structure, consistent register) not present in real user-authored content. The paper acknowledges expandability but does not discuss how the synthetic nature might affect either baseline methods (which rely on factual overlap) or watermark propagation (which might behave differently on more varied real text). The dataset is a useful starting point, but generalization to organic web content remains unvalidated. The paper should be more explicit that FRAD is a *synthetic proxy* and that this is a limitation.
+- **FRAD's synthetic construction limits external validity, and this limitation is understated.** FRAD articles are LLM-generated from a fixed set of key/additional facts, with watermarked versions being paraphrases of that LLM-generated text — a best-case scenario for watermark preservation. Real-world documents have varied writing styles, lengths, and quality, and natural fact redundancy is messier (different sources selecting different facts, temporal variation, chunking artifacts). The paper acknowledges FRAD's design choices but does not discuss what would be needed to extend evaluation to more naturalistic settings or what kinds of real-world documents might break the watermark propagation assumption.
 
-- **Limited discussion of when and why Ward could fail.** The paper demonstrates Ward works under defended prompts and MemFree decoding, but does not systematically characterize the boundary conditions where the watermark signal would degrade to the point of failure. For instance: (a) when retrieved documents are truncated before being fed to the LLM, (b) when the RAG system uses highly abstractive readers that thoroughly paraphrase, or (c) when the data owner's documents are poorly suited to paraphrasing with a watermarked LLM (e.g., code, structured data). A characterization of the relationship between response-document n-gram overlap and resulting p-value would make the method's scope of applicability concrete.
+- **No discussion of computational or API cost.** The paper reports query counts but not token counts, API costs, or the overhead of watermarking the dataset. For practitioners considering whether Ward is practically deployable, this information matters (e.g., watermarking 200 documents, plus 200 queries to the RAG system, plus watermark detection on responses — what is the total cost in dollars and time?).
+
+- **Ablation on very small dataset sizes is missing.** The paper varies |D_owner| from 20 to 200 but does not probe the lower bound (e.g., |D_owner| = 5 or 10). Since the joint p-value requires accumulating enough green tokens to reach significance, understanding the minimum dataset size for reliable detection would help practitioners assess Ward's applicability to their setting.
 
 ### Trivial
+
 None.
 
 ## Nice-to-Haves
-- A quantitative analysis of how imperfect retrieval (varying the success rate below 93.6%) affects the number of queries required to reach a given confidence level, similar to the monotonicity experiment but with retrieval noise.
-- A brief discussion of potential adversarial countermeasures beyond those tested (e.g., the RAG provider applying a generic paraphrasing filter on all responses, or detecting systematic probing patterns), and how Ward might be extended to handle them.
-- A note on the computational/monetary cost of watermarking a large dataset for the data owner, and whether the method applies when only a subset of documents can be watermarked.
-- Mention of the unlikely but theoretically interesting edge case where both the data owner and the RAG generator use the same watermarked LLM with the same key, which would confound detection.
+
+- **Compare against other proactive methods.** The paper compares Ward against passive baselines adapted from RAG MIA. The contribution would be strengthened by also comparing against other proactive approaches (e.g., inserting canary strings, invisible perturbations, rare-sequence insertion) to show that watermarking specifically is the right proactive tool for RAG-DI.
+
+- **Characterize the lower bound on |D_owner|.** A brief experiment with |D_owner| = 5, 10, 15 would help practitioners understand the minimum dataset size needed for reliable detection.
+
+- **Sensitivity analysis of baseline thresholding.** The paper uses the midpoint of s_in and s_out as a threshold for baselines. A brief note on whether results are sensitive to this choice, or a comparison with ROC-based thresholding, would be helpful.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-- The reviewer's point about SIB gray-box adaptation not being compared to the original: The paper transparently states the adaptation (line 156) and uses it in the intended black-box setting. The original gray-box results would require a different access model that is inconsistent with the problem definition. This is a scope-appropriate adaptation, not a weakness.
-- The reviewer's point about "the paper could also mention that [EnronEmails and HealthcareMagic] contain personal text... A brief discussion would strengthen the motivation": This is a minor suggestion, not a weakness. The paper already provides sufficient motivation by highlighting the lack of fact redundancy and potential training data overlap.
-- The reviewer's point about "no discussion of the 'RAG provider's countermeasures' beyond prompt-level defenses": The paper already evaluates defended prompts AND MemFree decoding, which are the two most direct countermeasures. Additional speculative countermeasures are outside the paper's scope and typical for a first work on a new problem.
+
+These points were identified from the reviewer inputs but are flagged as removed per the review guidelines. Treat them with caution if referenced.
+
+1. **"Proactive watermarking assumption limits practical applicability / paper misaligns problem framing."** — The paper explicitly states in Section 3 that the data owner "may proactively modify D_owner before publishing it." The problem definition includes proactive modification; the paper does not claim to solve passive detection of already-published content. The reviewer's characterization is a misreading.
+
+2. **"Unfair comparison with baselines due to proactive/passive asymmetry."** — The asymmetry favors the author's method (proactive watermarking), which is the paper's core innovation. Showing that existing passive methods fail while a proactive approach succeeds is the point of the paper, not a flaw. The comparison is informative, not unfair.
+
+3. **"Query generation not fully specified."** — The paper states that all prompts (including query generation) are in the appendix (line 252). The appendix is stripped by the parser; it exists in the original submission. Per guidelines, this criticism is invalid.
+
+4. **"MemFree defense experiment relegated to appendix with only one-sentence summary."** — Full results are in the appendix (app:more_results:memfree), stripped by the parser. The main text appropriately summarizes the key finding. Per guidelines, this is an artifact of parsing.
+
+5. **"Baseline thresholding method is arbitrary (mean of s_in and s_out)."** — The paper uses a training-validation split with grid search over parameters, which is a standard and defensible approach for adapting document-level methods to dataset-level decisions.
+
+6. **"Table 1 (p-values) is hard to read."** — This is a formatting/style nitpick, not a substantive weakness. Per guidelines, pure formatting/style nitpicks are removed.
+
+7. **"Guarantees section conflates statistical significance with practical guarantees."** — The paper correctly states that the guarantee is Type 1 error control at threshold α, which is standard. The reviewer's point is pedantic and does not identify a genuine flaw.
+
+8. **"Ablation on very small dataset sizes (5 or 10) is missing."** — Keep as minor weakness (included above), but the reviewer's framing as a major gap is disproportionate for what is a reasonable scope limitation.
 
 ## Novel Insights
-The most interesting insight from the review process is that the paper's core contribution — using LLM watermarks as a proactive detector for RAG corpus inclusion — is validated by the clean separation between the watermark propagation mechanism and the fact-redundancy challenge that breaks all passive baselines. The passive baselines (FACTS, SIB, IBM) fail because fact redundancy causes false positives: when multiple documents share facts, a response can be correct without relying on the specific target document. Ward sidesteps this entirely because the watermark is a content-independent signal that survives regardless of which redundant article the RAG system draws from. This reveals a deeper structural advantage: proactive watermarking is not just another baseline but a fundamentally different approach that is *invariant* to the exact property (fact redundancy) that makes the problem hard for passive methods. The paper's experimental design (Easy vs. Hard settings) cleanly exposes this invariance.
+
+The most interesting insight from the review process is the tension between the paper's proactive framing and the broader RAG-DI problem definition. The paper formalizes RAG-DI as including proactive modification in the problem definition itself, but the high-level narrative (abstract, introduction) sometimes suggests a more general detection problem. This creates a subtle framing gap: the paper's contribution is a proactive solution to a problem that, in its most general form, also includes a passive subproblem that Ward does not address. Clarifying this boundary would strengthen the paper without changing any results. Additionally, the 93.6% retrieval → 100% accuracy result is more interesting than the paper acknowledges — it implies the joint p-value test has considerable slack, which is worth quantifying and discussing as a robustness property.
 
 ## Suggestions
-- Rephrase "provable" claims throughout to emphasize "rigorous statistical guarantees" or "well-calibrated statistical tests" to avoid overclaiming relative to what a z-test provides.
-- Add a richer end-to-end retrieval evaluation with multiple embedding models and k values, and report not just averages but the distribution of p-values (e.g., min, max, percentiles) across the ~6.4% of retrieval failures to quantify the worst-case degradation.
-- Explicitly state "synthetic proxy" when describing FRAD's limitations regarding real-world generalization.
-- Add a dedicated paragraph characterizing the boundary conditions: measure the correlation between the RAG response's n-gram overlap with the watermarked document and the resulting per-query p-value, to give practitioners a concrete sense of when Ward will and won't work.
+
+1. **Expand the end-to-end analysis.** Provide a breakdown of how the 6.4% retrieval failures affect the joint p-value distribution, and quantify the safety margin. Ideally, sweep over retrieval accuracy (e.g., by varying the number of retrieved documents k or using a weaker retriever) to show where Ward begins to degrade.
+
+2. **Add a threat model subsection.** Clearly state what the RAG provider knows, what countermeasures are considered realistic, and systematically evaluate robustness (e.g., response paraphrasing, token-level noise, instruction-tuned "don't repeat" prompts beyond the two tested).
+
+3. **Report computational and API costs.** Provide token counts for watermarking the dataset, querying the RAG system, and running detection. This is essential for practitioners assessing deployability.
+
+4. **Soften the language around "realistic conditions."** FRAD is a purpose-built synthetic dataset that captures one specific dimension of realism (fact redundancy) while sacrificing others (natural text variation, organic redundancy patterns). Acknowledge this trade-off more explicitly and discuss what naturalistic evaluation would require.
 
 ## Score and Decision
 
-The paper formalizes a novel problem, provides a carefully designed dataset that isolates the key difficulty (fact redundancy), establishes baselines, and proposes a principled method (Ward) that delivers strong empirical results with statistical guarantees. The weaknesses are minor — the "provable" framing is a matter of precision, the perfect-retrieval validation is limited but not absent, and the synthetic dataset is a justified design choice. The core contribution is sound and significant.
+The paper makes a clear contribution: formalizing a novel problem, providing a purpose-built benchmark, and introducing an effective method with statistical guarantees. The weaknesses are real but addressable and do not undermine the core contribution. The paper is ready for acceptance with minor revisions.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

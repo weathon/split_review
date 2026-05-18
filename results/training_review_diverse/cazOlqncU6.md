@@ -1,85 +1,69 @@
-Now I have a thorough understanding of the paper and can verify each criticism against the actual text. Here is my consolidated review.
-
----
+Now I have a thorough understanding of the paper and all the reviewer claims. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper introduces Trustworthy Dataset Proof (TDP), a problem formalizing the verification that a model was trained on a claimed dataset *in its entirety* (not just in distribution or with a few specific samples). The authors propose Data Probe, a technique that selects a small subset of probe samples via a keyed hash of the full dataset, implants them during training (via label flips, oversampling, etc.), and detects their presence through distribution-level differences in model outputs. The core claim is that the hash-based binding ensures any modification to the training data changes the probes, so only the complete original dataset can pass verification.
+This paper introduces the Trustworthy Dataset Proof (TDP) problem — verifying that a model was trained on the exact claimed dataset, not a modified version — and proposes a "Data Probe" technique. The core idea is to use a keyed hash of the full dataset to pseudo-randomly select a small probe subset, apply data-level modifications to it (e.g., oversampling, label perturbation), and then detect the probe's effect on model outputs during verification. Any change to the dataset would change the hash and thus the selected probe, causing verification to fail. The paper formalizes the problem, evaluates four probe types and four scoring methods across four datasets and four architectures, and compares against watermarking and dataset inference in case studies including a Witches' Brew backdoor attack.
 
 ## Strengths
 
-- **Novel problem formulation.** The paper is the first to formalize TDP as a distinct problem: verifying the *complete and authentic* use of a claimed dataset, as opposed to ownership verification (watermarking) or distribution-level similarity (dataset inference). The formalization in Section 3 (defender/attacker goals G1–G4) is clear and captures an important trust gap in deep learning.
+- **First formalization of the TDP problem with a clear threat model.** The paper defines TDP as distinct from ownership verification (which existing watermarking, membership inference, and dataset inference address), introducing explicit defender goals (fidelity, low-invasiveness, harmlessness, efficiency) and attacker capabilities (Section 3). This provides a useful conceptual foundation regardless of the specific implementation.
 
-- **Extensive empirical coverage across many settings.** The evaluations span four datasets (CIFAR-10/100, SVHN, Tiny-ImageNet), four architectures (ResNet-18, MobileNet, ShuffleNet, DenseNet), four probe types, and four score calculation methods. The results in Table 2 demonstrate that when the claimed and actual datasets match, most probe schemes produce PSA >> 0.5 and pV < 0.1, while mismatched cases yield near-0.5 PSA, with accuracy degradation consistently < ±1%.
+- **Hash-bound probe selection ties integrity to the claimed dataset.** The probe selection mechanism uses a keyed hash of the entire dataset as a random seed, so any modification to the training data during training changes the hash and thus the probe set, causing verification to fail. The case studies (Section 7, Table 4) demonstrate this convincingly against both simulated modifications and a Witches' Brew backdoor attack, where Data Probe succeeds while watermarking and dataset inference fail.
 
-- **Low-invasiveness and harmlessness are validated.** The paper convincingly shows that the proposed operations (oversampling, absence weighting, label flips) can be applied without modifying model architecture or training hyperparameters, and with negligible impact on model accuracy (< ±1%). This is a genuine usability advantage over methods like PoTD (which requires full training transcripts).
+- **Model-agnostic and minimally invasive design.** The probe implantation operates entirely at the data level (weighted sampling, label perturbation) and does not require access to model architecture, training hyperparameters, or white-box model access (Section 5). This directly addresses usability challenges that the paper identifies in prior work.
+
+- **Comprehensive empirical evaluation.** Experiments span four datasets (CIFAR-10, SVHN, CIFAR-100, Tiny-ImageNet-200), four architectures (ResNet18, MobileNet, ShuffleNet, DenseNet), four probe types, and four scoring methods (Section 6). Results are reported with means over five runs, including mismatched-dataset baselines and standard deviations. The finding that most probes harm accuracy by <1% supports the harmlessness goal.
+
+- **Demonstrated advantage over existing methods in realistic attack scenarios.** The case study using Witches' Brew (Section 7, Figure 6) shows that Data Probe is the only method among watermarking, Dataset Inference, and Data Probe that consistently detects dataset tampering while maintaining low overhead and minimal security risk (Table 4).
 
 ## Weaknesses
 
 ### Fatal
 
-- **The integrity guarantee (G1) does not hold under the paper's own threat model.** The paper claims that binding probe selection to the dataset via a keyed hash ensures "successful probe implantation and detection can only occur when the dataset is used in its entirety for training" (Section 4.2, line 102) and that "any minor modifications to D will result in changes to the hash value, which in turn leads to changes in the selection of data probe x_p" (Section 5, line 120). **This reasoning assumes the trainer runs `ProbeSelect` on their actual training data.** A dishonest trainer can instead: (1) compute probes from the *claimed* dataset D using the key k (which they choose and submit), (2) train on a different dataset D* while *explicitly including those probe samples* from D, and (3) pass verification. The verifier recomputes the same probes from D, finds them present in the model, and outputs 1 — even though D was never used for training in its entirety. The protocol provides no mechanism to prevent this substitution. This is a **structural flaw** that collapses the core claim of the paper: the method reduces to verifying membership of a small known subset, not complete dataset usage.
-
-  The paper's own adaptive attack experiment (RQ4, Section 6.2) tests a *different* and weaker scenario: post-hoc embedding of probes into a model already trained on D*. The most natural attack — including the D-probes in the training set from the start — is not tested anywhere (Section 7, Table 4; lines 261–271). The paper acknowledges that "keeping the user's key k hidden from the users, such as by implementing it through a server API, might be a solution" (line 246), but even verifier-provided keys do not prevent this attack: the trainer can still compute probes from D with the verifier's key and include them in D*'s training.
+None.
 
 ### Major
 
-- **The experimental evaluation does not test the attack that matters.** The case studies (Section 7, Table 4) test scenarios where the dataset is modified (duplication, backdoor insertion) and `ProbeSelect` is implicitly run on the modified data — causing probes to change and verification to fail. This is expected behavior but does not test the attack described above, where the trainer *actively retains the original probe samples* while changing the rest of the data. RQ4 (Table 3) tests post-hoc probe forging after training on D*, which is a different (and arguably harder) attack vector. Without experiments where the attacker includes the D-computed probes during initial training on D*, the paper's claims of robustness are unsupported.
+- **The key-secrecy tension weakens the integrity guarantee against a dishonest trainer.** The protocol (Algorithm 1) requires the trainer to know the key *k* to select and implant probes during T-Train_DP. A dishonest trainer who knows *k* can: train on a different dataset D', compute the correct probe set for the *claimed* dataset D using *k*, then fine-tune the model on that small probe set to implant the expected output difference, and pass verification. The paper evaluates this exact scenario in RQ4 (Table 3) and finds that some probe types (especially PP) have non-trivial Attack Success Rates. The paper acknowledges this and suggests "keeping the user's key k hidden from the users...through a server API" (Section 6.2), but this suggestion is not developed or evaluated. If the key is hidden from the trainer, how does the trainer compute the probe set for their specific dataset? The paper does not resolve this tension, which directly impacts the fidelity goal (G1). This is a structural limitation of the current protocol, not a minor implementation detail.
 
-- **The protocol places key selection in the attacker's hands** (Section 5, line 111: "user-specific key k"). The trainer chooses and submits the key. This means the attacker controls the randomness used for probe selection, enabling probe choice that minimizes detectability or maximizes attack success. The paper does not discuss a verifier-chosen key protocol, which would be the natural starting point for a security scheme.
-
-- **No formal security argument or proof for G1.** The paper offers only informal reasoning (Section 5) that the hash-binding ensures integrity. Given that the claim is a security guarantee against an active adversary, an informal argument that assumes honest behavior during the step the attacker would subvert is insufficient. A proper treatment would need to specify what cryptographic assumptions hold and prove that fidelity (G1) follows from them under the defined threat model.
+- **The paper's core claim — "only permits probe detection when the entire claimed dataset is utilized in training" — is not fully supported under active attacks.** While the hash binding ensures that any modification *during training* changes the probe, the adaptive attack scenario (train on D', then post-hoc implant probe from D) is only partially mitigated. The paper reports that "all probe schemes, except for PP, exhibit a certain degree of robustness" (Section 6.2), but "a certain degree" means some probes are vulnerable and the paper does not provide a formal security argument or bound on the attacker's success probability.
 
 ### Minor
 
-- **Probe types are largely re-implementations of existing techniques.** TP (targeted label flip to a fixed class) is a standard backdoor watermark; UP (random label flip) is untargeted poisoning; PP/AP (oversampling/undersampling) are standard class imbalance techniques. The paper frames these as a "weakened" backdoor requiring only distribution-level differences, but does not demonstrate that this weakening yields a concrete advantage over a well-designed clean-label backdoor watermark in a controlled comparison. A direct apples-to-apples comparison with a simple random-subset backdoor watermark would clarify the contribution.
+- **The p-value threshold of 0.1 implies a 10% false positive rate, which is not adequately analyzed for a trust-enhancement application.** In a setting where the verifier is deciding whether a model was trained on compliant data, a 10% false alarm rate is substantial. The paper does not report ROC curves, discuss the trade-off between false positives and false negatives, or analyze how different thresholds would affect reliability. While the PSA metric (>0.5) is also used, its calibration is not characterized either. Some results in Table 2 (e.g., AP on SVHN: PSA 52.1, pV 0.18) are borderline even for honest trainers, raising questions about decision reliability in practice.
 
-- **No calibration of false positive rates.** The paper uses a p-value threshold of 0.1 and a PSA threshold of 0.51, but does not analyze the false positive rate of honest training under these thresholds. The natural variation in model output distributions across seeds could produce false alarms. For a deployment-ready verification scheme, this calibration is essential.
-
-- **Missing discussion of probe overlap with non-probe samples.** When probe samples are included in training on D* (the attack scenario), the non-probe samples from D* may also differ from the claimed dataset's non-probe distribution, potentially making the probe/non-probe distinction harder to detect. The paper does not analyze how the attack's detection difficulty depends on the similarity between D and D*.
+- **No formal security definition or security game.** The threat model (Section 3.2) defines attacker goals and defender goals qualitatively, but there is no formal cryptographic game (specifying oracle access, success conditions, security parameter) that would clarify exactly what guarantees the scheme can and cannot provide. This makes it harder to assess whether the protocol's security is adequate or where it falls short.
 
 ### Trivial
 
-- None that survive filtering — the parser-extracted text is clean of formatting artifacts.
+- The term "data-drobe" appears once in Section 1 (line 4 of the abstract section) — possibly a rendering artifact, but should be checked.
+- Some figure references (e.g., "Fig. 9" mentioned but may not be present in the main body) could be clarified.
 
 ## Nice-to-Haves
 
-- A protocol variant where the verifier provides the key *after* the trainer commits to D (e.g., by publishing a hash) would be a natural and potentially effective mitigation, though it would require the trainer to be able to re-train if probes cannot be precomputed. Discussing this tradeoff would strengthen the paper.
-- Exploring implicit probes whose behavior emerges only from the full dataset distribution (e.g., data-dependent features that cannot be simulated with isolated samples) would address the structural flaw at a deeper level.
+- A detailed protocol resolving the key-secrecy tension would significantly strengthen the paper. Options include: (a) a commitment-based protocol where the trainer commits (hashes) the dataset before receiving the probe set from a verifier-run service, (b) a trusted execution environment approach, or (c) a security analysis that formally characterizes what guarantees remain even when the attacker knows *k*.
+- ROC curves or an operating-characteristic analysis for probe detection at multiple thresholds, clarifying the false-positive/false-negative trade-off.
 
 ## Removed Points
 
-These points were flagged by the reviewer or strength finder but are removed or downgraded with justification:
-
-1. **"The 100% blocking success in Table 4 is an artifact"** — Removed. The 100% success rate in Table 4 is expected behavior: if the dataset is modified and `ProbeSelect` is run on the modified data, the probes change, so verification correctly fails. The real issue is that this tests a different scenario than the attack. The criticism is kept in the *Major* section but rephrased.
-
-2. **"Strength: Data Probe technique with integrity-guaranteeing probe selection ensures only the complete claimed dataset passes verification"** — Removed (conflicts with verified fatal weakness). The hash-binding does not prevent the trainer from computing probes from the claimed dataset and training on a different dataset that includes those probes.
-
-3. **"Strength: Comprehensive threat model and goal-driven design"** — Removed (conflicts with verified weakness). While the threat model is formally defined, the protocol does not actually achieve G1 (fidelity) against the defined attacker, so the design does not meet its own goals.
-
-4. **"The paper would benefit from a clearer security model: specify who chooses the key"** — The reviewer's point about the key is valid and kept in Major. The rest of this criticism (about auditing, computational resources) is too vague to retain.
+- **Mechanical issues/typos** ("intergrity," "data-drobe," "generdetected"): Removed per instructions — these are parser artifacts from PDF extraction, not author errors.
+- **Criticism that "the integrity guarantee collapses" entirely**: Removed as an overstatement. The paper explicitly tests adaptive attacks (RQ4, Table 3), reports varying ASR values, acknowledges the limitation, and suggests mitigations. The integrity guarantee is weakened but does not "collapse" for all probe types.
+- **Criticism about missing appendix content**: Removed per instructions — appendix content is stripped by the parser and exists in the original submission.
+- **Complaint that key-secrecy "undermines G2 (low-invasiveness)"**: This is the same underlying issue as the first major weakness, not a separate structural problem. It's addressed by the major weakness above.
 
 ## Novel Insights
 
-The key insight that emerges from the critique is that the paper's hash-based binding solves a *different* problem from the one it claims. The hash ensures that if the trainer runs `ProbeSelect` on their actual training data, any modification to that data changes the probes. This is useful for *detecting accidental or passive* tampering but does not prevent an *active* adversary who can selectively compute probes from a claimed dataset and include them in a different training set. This distinction — passive tamper-detection vs. active adversary verification — is fundamental and suggests that the TDP problem, as defined, requires either (a) cryptographic commitment enforced before key revelation, or (b) a fundamentally different approach where probe behavior is implicitly induced by the full dataset distribution rather than by explicit sample inclusion.
+None beyond the paper's own contributions. The reviews largely converge on the paper's framing (TDP as a new problem) and its empirical strengths, while the main disagreement is about the severity of the key-secrecy tension — the harsh critic views it as fatal, while a more measured assessment sees it as a significant but addressable gap that does not invalidate the paper's broader contribution.
 
 ## Suggestions
 
-1. **Acknowledge the structural limitation explicitly.** Reframe the method as a *dataset membership proof* (certifying that specific samples from the claimed dataset were used in training) rather than as a full integrity guarantee. This would be an honest and still-useful contribution.
+- **Resolve the key-secrecy tension explicitly** in the next revision by proposing and evaluating a concrete protocol that either: (1) uses a commitment scheme where the trainer hashes D and sends the hash to a verifier-run service, receives the probe set in return, and the verifier stores the key; or (2) formally analyzes what security remains when the attacker knows *k*, with bounds on ASR. Without this, the protocol is best described as a *heuristic deterrent* against dataset modification rather than a rigorous integrity guarantee.
 
-2. **Test the relevant attack.** Run experiments where the attacker computes probes from the claimed dataset D (with the known key), then trains on a modified/different dataset D* with those probe samples included from the start. Report how detection metrics change as D and D* diverge.
+- **Add an operating-characteristic analysis** for probe detection, reporting false positive and false negative rates across a range of PSA and pV thresholds. This is essential for any trust-enhancement application where the consequences of false alarms are significant.
 
-3. **Consider a commitment-based protocol.** Discuss a variant where the trainer commits to D (publishes its hash) before receiving the key from the verifier. Analyze whether this prevents or mitigates the attack, and under what assumptions.
-
-4. **Compare directly with a simple random-subset backdoor watermark.** Training a model with a small set of randomly selected samples from D whose labels are flipped to a fixed target class, and measuring detection via output behavior on those samples, would provide a clean baseline for evaluating whether the "weakened" probe design offers any advantage.
+- **Clarify the threat model** by formally defining which secrets the attacker has access to (the key *k*, the claimed dataset D, the probe type, the scoring method) and which operations the attacker can perform (post-hoc fine-tuning, full retraining, etc.). The current adaptive attack evaluation (RQ4) is a good start, but a game-based security definition would make the assumptions and guarantees precise.
 
 ## Score and Decision
 
-The paper addresses an important problem and demonstrates careful experimental methodology across diverse settings. However, the core claim — that Data Probe can certify the *complete and authentic* use of a claimed dataset — is not supported. The protocol has a structural bypass: a dishonest trainer can compute probes from the claimed dataset and include them in training on a different dataset, passing verification. This is not a minor oversight or missing ablation; it is a fundamental gap between what the protocol achieves and what it claims. The experimental evaluation does not test this most relevant attack. While the problem formulation has value, the proposed solution does not solve it under its own threat model.
-
-**Score: 4.0 / 10** — The paper has non-trivial merit in problem formulation and experimental scope, but the central contribution (the integrity guarantee) is invalid, and fixing it would require a major redesign of the protocol or a significant relaxation of the claims.
-
-**Decision: Reject**
-
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

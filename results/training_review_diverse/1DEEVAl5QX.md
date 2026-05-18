@@ -1,79 +1,82 @@
-Now I have all the information needed. Let me compose the final review.
+Now I have a thorough understanding of the paper and the reviews. Let me compose the final consolidated review.
+
+---
 
 ## Summary
-2-3 sentence summary of the paper's contribution.
 
-The paper introduces the first mini-batch algorithm for maximizing non-negative monotone decomposable submodular functions, with weighted and uniform sampling variants. It provides theoretical guarantees showing that the mini-batch approach achieves near-optimal approximation ratios while reducing oracle complexity, and develops a smoothed analysis framework (Models 1 and 2) that explains—both theoretically and empirically—why simple uniform sampling outperforms weighted sampling in practice.
+This paper introduces the first mini-batch algorithm for maximizing a non-negative monotone decomposable submodular function under constraints. Instead of constructing a single sparsifier upfront (the prior state of the art), the algorithm samples a fresh mini-batch of constituent functions at each greedy iteration. The paper provides theoretical guarantees for weighted mini-batch sampling, introduces additive approximate incremental oracles as a relaxation, and attempts to use smoothed analysis to explain the surprising empirical finding that uniform mini-batch sampling outperforms weighted sampling. Experiments on four datasets (Uber pickups, Discogs, CIFAR100, FashionMNIST) demonstrate that uniform mini-batch performs well in practice.
 
 ## Strengths
 
-- **First mini-batch algorithm for decomposable submodular maximization with formal guarantees.** The paper introduces Algorithm 3 and proves (Theorem 1.3) that with appropriate batch sizes it provides approximate incremental oracles at each greedy step, yielding near-optimal approximation guarantees (Theorem 1.4) under both cardinality and p-system constraints. This is a genuinely novel algorithmic contribution.
+- **First mini-batch algorithm for decomposable submodular maximization.** The paper replaces the sparsifier paradigm (sample once, then optimize) with per-iteration mini-batch sampling. Algorithms 2 and 3 are clearly presented, and the analysis shows that sampling a new batch each iteration enables tighter concentration.
 
-- **Smoothed-analysis framework that explains the practical superiority of uniform sampling.** Models 1 and 2 are natural and well-motivated. Theorem 4.2 shows that under Model 1, both the sparsifier and mini-batch achieve the same guarantees with uniform sampling (at a Θ(1/nφ) factor). Lemma 4.3 shows that even under the weaker Model 2 (requiring conditions only for a single element), the mini-batch guarantees survive. The empirical φ values are Θ(1) for all datasets (CIFAR-100: 0.38, FashionMNIST: 0.35, Uber: 0.61, Discogs: 0.13), directly validating the model.
+- **Additive approximate incremental oracle.** Theorem 1.2 extends the standard multiplicative-approximate oracle framework to additive approximations, enabling the analysis to handle unbounded curvature. This is a genuine technical contribution that goes beyond existing multiplicative-only guarantees and is reused in the smoothed analysis (Lemma 4.3).
 
-- **Experimental demonstration that uniform mini-batch outperforms both weighted and sparsifier baselines.** Experiments on four real-world datasets show that uniform mini-batch achieves higher utility than both weighted mini-batch and the sparsifier approach, especially at small batch sizes β, while using comparable or fewer oracle evaluations (Section 3, Figure 1). The finding is consistent across datasets and is the key empirical observation that motivates the smoothed analysis.
+- **Clear theoretical comparison with prior work.** Table 1 gives a structured comparison of query complexities for naive, sparsifier, weighted mini-batch, and uniform mini-batch under both bounded and unbounded curvature, for cardinality and p-system constraints. This makes the improvement over Rafiey & Yoshida (2022) and Kenneth & Krauthgamer (2023) immediately visible.
 
-- **General theoretical framework for additive approximate oracles.** Theorem 1.2 extends existing approximate-oracle results to an additive error model, providing guarantees for both cardinality and p-system constraints. This is used in the unbounded-curvature case and is a useful standalone contribution.
-
-- **Practical simplicity and elimination of preprocessing cost.** Uniform sampling requires no preprocessing (zero O(Nn) cost), making the algorithm's complexity independent of N. The paper explicitly contrasts this with the weighted approach's O(Nn) preprocessing overhead.
+- **Empirical validation across diverse datasets.** Experiments cover four datasets representing different types of decomposable submodular functions (facility location, maximum coverage, exemplar clustering). The consistent finding that uniform mini-batch performs well across datasets is practically valuable and genuinely surprising.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None.
+
+1. **The empirical validation of the smoothing models checks the wrong quantity.** Model 2 requires that there exists an element e ∈ E such that *every* fⁱ(e) has expectation at least φ (i.e., E[fⁱ(e)] ≥ φ for all i). However, the empirical validation (Section 4) computes min_e (1/N) Σ_i fⁱ(e) — the *average* over i, not the minimum over i. An average of 0.35 across 50,000 functions is entirely consistent with many functions having near-zero expectations. Similarly for Model 1, the paper computes max_e (1/N) Σ_i fⁱ(e) but the model requires that *every* fⁱ(e) for *every* e has E[fⁱ(e)] ≥ φ. The paper provides no argument — theoretical or empirical — that the per-function lower bound holds for any dataset. The central claim that "Model 2 is able to explain the empirical success of the uniform mini-batch algorithm on all datasets" (line 235) is therefore not supported by the evidence presented.
+
+2. **The concentration bound used in the smoothed analysis is not justified for the setting.** Theorem 4.1 (Pemmaraju, 2001) is cited as requiring "identically distributed random variables." The fⁱ(e) in Models 1 and 2 need not be identically distributed — they can have different expectations and potentially different variances. The paper does not address this gap or cite a version of the bound that holds for non-identical distributions with bounded dependency. This affects the validity of both Theorem 4.2 and Lemma 4.3.
+
+These two issues together undermine the paper's central claimed contribution: using smoothed analysis to provide a theoretical foundation for the uniform mini-batch algorithm's empirical success. The weighted mini-batch results (Section 2) are unaffected, but the paper's headline theoretical contribution rests on a foundation that has not been properly validated or justified.
 
 ### Minor
 
-- **No variance reporting in experiments.** Figure 1 reports only averages over 20 runs with no error bars, confidence intervals, or measures of spread. The main empirical finding—that uniform sampling outperforms weighted sampling—is a key driver of the paper's narrative, yet the reader cannot assess the statistical significance or variability of the observed differences. While the consistency of results across four datasets partially mitigates this concern, adding error bars would substantially strengthen the empirical claims.
+3. **The bounded dependency parameter d is never estimated or bounded for any dataset.** The theoretical guarantees in Section 4 depend on N = Ω((d/φ) log(nd)). Without any empirical handle on d, the applicability of the smoothed analysis to the experimental datasets is unclear.
 
-- **The dependency parameter d in the smoothing models is not empirically validated.** The smoothed analysis (Theorem 4.2, Lemma 4.3) relies on both the expectation condition (φ) and the bounded-dependency condition (d). The paper carefully validates φ empirically for both models, but never verifies—or even argues for the plausibility of—the bounded-dependency assumption. The bounded-dependency Chernoff bound (Theorem 4.1) explicitly depends on d, and the proof of Theorem 4.2 uses N = Ω((d/φ) log(nd)). Without any evidence about d, the link between the theory and the experiments is partially incomplete. The paper should at minimum acknowledge this limitation or discuss why bounded dependency is a reasonable modeling assumption for these datasets.
+4. **The specific k values used in the experiments are not reported.** The paper states experiments were run "for different values of k" (line 188) but never specifies which values. This makes it impossible to connect the experimental results to the theoretical claims about curvature (since curvature could depend on k) and limits reproducibility.
+
+5. **The experimental comparison of oracle evaluations is not fully explained.** Mini-batch samples βN functions per iteration for k iterations (kβN total sampled functions), while the sparsifier samples βN functions once. Despite this, the paper shows mini-batch using *fewer* oracle evaluations for small β (Figure 1(b)). The interaction between lazy-greedy and the sampling procedures that would explain this is not discussed. This reduces transparency of the experimental comparison.
+
+6. **No discussion of limitations.** The paper does not discuss what happens when φ is small or when dependencies are high, even though the theoretical guarantees degrade polynomially in 1/φ and d. A limitations paragraph would strengthen the paper.
 
 ### Trivial
 
-- **The claim that the smoothing model is "even more general" (line 42) is stated without justification.** The paper asserts that a density-bounded distribution implies the expectation condition, which is true, but does not discuss whether the converse fails or whether bounded dependency is strictly weaker. This is a minor overstatement in a single sentence and does not affect the paper's main contributions.
-
-- **The comparison between mini-batch and sparsifier in the theoretical results relies on Table 1 (an image), and the text only provides a high-level discussion** without restating the sparsifier's exact query complexity bounds in the same notation as Theorem 1.4. While the table and theorems collectively support the claims, a more self-contained textual comparison would help the reader.
+- The paper uses the notation "Model 2" in the proof of Theorem 4.2 (line 205) where it should say "Model 1" — a copy-paste error.
 
 ## Nice-to-Haves
 
-- A brief discussion of memory/I/O trade-offs between sampling once (sparsifier) vs. sampling every iteration (mini-batch) would help practitioners.
-- The bounded-dependency definition from Pemmaraju (2001) could be restated more explicitly in the text to improve self-containedness.
-- It would be interesting to see whether the stochastic-greedy variant (sampling elements rather than functions) can be combined with the mini-batch approach in further ways beyond what is noted.
+- A direct experimental comparison with stochastic-greedy (Buchbinder et al., 2015) as a standalone baseline (not combined with sparsifier/mini-batch) would help situate the method within the broader literature on sampling-based submodular optimization.
+- Estimating d empirically for at least one dataset (e.g., via pairwise correlation of fⁱ(e) values) would significantly strengthen the smoothed analysis claims.
+- Absolute (not just relative) oracle evaluation counts for at least one configuration would help assess practical significance.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+- **Weakness about curvature claim being "undersold."** The paper states "We can get improved performance if the curvature of F is bounded" (line 51) in the same section as the superiority claims, and Table 1 clearly separates bounded vs. unbounded curvature cases. The qualification is adequate.
 
-- **"Unsubstantiated claim that weighted mini-batch improves over the sparsifier in theory"** — REMOVED. The paper explicitly provides this comparison in Table 1 (an embedded image) and through the stated theorems (Theorem 1.3, 1.4). The reviewer's inability to parse the table is a PDF extraction artifact, not an author omission. The paper's claims are backed by explicit query complexity bounds.
+- **Weakness about missing p-system implementation details (setting A_j).** This is standard for a p-system constraint and the algorithm description is appropriately abstract for a theory paper.
 
-- **"Parameter d is never defined formally"** — REMOVED. The paper defines d at line 40: "Elements in A_e have dependency at most d (every f^i(e) depends on at most d other elements in A_e)." This is a clear definition. The reviewer's concern about citing Pemmaraju (2001) is addressed by Theorem 4.1.
+- **Weakness about missing comparison with stochastic-greedy as a standalone baseline.** The paper's scope is comparing mini-batch vs. sparsifier approaches; adding more baselines is a nice-to-have, not a weakness.
 
-- **"Missing error bars or confidence intervals"** — Already captured as a Minor weakness above. The redundant mentions are consolidated.
-
-- **"A direct, side-by-side table of query complexity"** — REMOVED. The paper already has this table (Table 1). The reviewer could not read it due to extraction artifacts.
-
-- **"Memory requirements discussion"** — MOVED to Nice-to-Haves. This is a useful suggestion, not a weakness.
-
-- **"Unfair comparison"** — REMOVED. The experiments compare methods under the same expected batch size and β, which is a fair and standard setup.
+- **Strength about smoothed analysis providing "direct theoretical explanation."** This conflicts with verified Weakness #1 (empirical validation mismatch). Per the rules, when a strength and verified weakness disagree, the weakness wins. The theoretical framework exists but its empirical support is insufficient to claim it "explains" the results.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface no insights about the paper that go beyond what the authors already present.
+None beyond the paper's own contributions. The reviews do not surface a genuinely novel observation that the paper itself misses.
 
 ## Suggestions
 
-1. **Add error bars or confidence bands to Figure 1.** With 20 runs per point, reporting standard deviations or using shaded regions would significantly strengthen the empirical credibility without requiring additional experiments.
-2. **Discuss the bounded-dependency assumption (parameter d) explicitly.** Either provide an empirical argument (e.g., measuring pairwise correlations among the f^i(e) values), cite domain-specific reasons why it should hold, or at minimum acknowledge it as an unverified modeling assumption and discuss whether the results are robust to violations.
-3. **Restate the sparsifier's query complexity in the same notation as Theorem 1.4** in the text (not just in the table image) to make the theoretical comparison fully self-contained.
+1. **Restructure the paper's theoretical claims.** The weighted mini-batch analysis and additive approximate oracle are solid contributions that do not depend on smoothed analysis. Consider either: (a) revising the smoothing models so the assumptions match the quantities actually measured (e.g., a lower bound on the *average* of fⁱ(e) rather than per-function), and re-deriving the guarantees accordingly, or (b) honestly acknowledging that the theoretical explanation for uniform sampling's success is open, and presenting the uniform mini-batch algorithm as an empirically motivated heuristic whose strength is its simplicity and lack of preprocessing cost.
+
+2. **Fix the empirical validation in Section 4.** If Model 2 is retained as-is, compute the per-function minimum (min_i fⁱ(e)) rather than the average over i, and report whether this quantity is bounded away from zero. Alternatively, adjust the model definition to match what is empirically computed.
+
+3. **Address the concentration bound gap.** Either cite a version of the bounded-dependency Chernoff bound that does not require identical distributions, or provide an argument that the bound still applies to non-identical distributions (e.g., by a standard reduction using a Doob martingale argument).
+
+4. **Report experimental parameters clearly.** Include the specific k values used, add error bars or variance information to the plots, and explain the mechanism by which mini-batch achieves lower oracle evaluation counts than the sparsifier.
+
+5. **Add a limitations paragraph** discussing when the method might fail (small φ, high dependencies, small N relative to n).
 
 ## Score and Decision
 
-The paper makes a solid contribution: a novel mini-batch algorithm for decomposable submodular maximization, a clean theoretical analysis, a well-motivated smoothed analysis framework, and convincing experimental results. The weaknesses are minor and addressable. The theoretical results are sound, the experiments are well-designed (apart from the variance reporting gap), and the smoothed analysis provides genuine insight into why a simple heuristic works well.
+The paper introduces a novel algorithmic approach (mini-batch sampling for decomposable submodular maximization) with a solid weighted-sampling analysis and a useful technical contribution (additive approximate oracles). The empirical finding that uniform mini-batch works well is practically valuable. However, the paper's central claimed contribution — using smoothed analysis to theoretically explain this empirical success — is undermined by two significant issues: the empirical validation checks the wrong quantities relative to the model assumptions, and the concentration bound used is not properly justified for non-identically distributed variables. These are fixable in revision, but in the current state the paper overclaims what the smoothed analysis establishes. The weighted mini-batch results alone, while solid, represent an incremental improvement over existing sparsifier methods.
 
-**Score:** 7.5
+On originality and importance: the mini-batch perspective is novel and the problem is well-motivated. On soundness: the weighted analysis is sound, but the smoothed analysis has verification gaps. On clarity: generally well-written but could be more transparent about experimental methodology and limitations.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

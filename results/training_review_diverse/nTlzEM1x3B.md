@@ -1,74 +1,86 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and can verify each reviewer claim against the actual content.
+
+Let me produce the consolidated review.
 
 ## Summary
 
-This paper introduces a frequency-driven analysis of zero-shot time series forecasting, identifying "frequency confusion" (performance degradation when training includes multiple unrelated frequencies) and "frequency generalization" (poor performance on unseen frequencies). Based on this analysis, the authors propose Freq-Synth, a lightweight synthetic data generator that creates harmonic sine waves from only the target domain's sampling rate. Training models from scratch on Freq-Synth data (5000 samples, 0.1 seconds to generate) achieves lower average MSE than training on ~1000× larger real datasets across 6/8 benchmarks and 6 models, with particular gains on datasets whose sampling rates are absent from the real training corpus.
+This paper introduces a frequency-driven framework for zero-shot and few-shot time series forecasting. It identifies two failure modes—**frequency confusion** (models degrade when trained on multiple frequencies) and **poor frequency generalization** (failure on unseen frequencies)—and proposes **Freq-Synth**, a synthetic data generator that creates sinusoidal signals using harmonics of a fundamental frequency derived from the target domain's sampling rate. The paper shows that training solely on 5,000 Freq-Synth samples outperforms training on real data (~1,000× larger) on 6/8 benchmarks, achieving a 29% lower average MSE across six models, while requiring only 0.1 seconds to generate 1M time points.
 
 ## Strengths
 
-- **Novel frequency-based analysis with controlled experiments.** The paper introduces frequency confusion (Def. 1) and frequency generalization (Def. 2) and demonstrates them through systematic sine-wave experiments (Fig. 1) across six models. The transfer-learning analysis (Fig. 2) shows that periodogram-based frequency alignment predicts zero-shot transfer accuracy better than domain or sector membership — a concrete empirical finding that grounds the paper's Fourier-centric thesis.
+- **Novel identification of frequency-based failure modes.** The paper introduces frequency confusion and frequency generalization (Def. 1 & 2) and empirically demonstrates their impact. Fig. 1 shows that adding more training frequencies steadily degrades test performance across all six tested models, and removing the target frequency from training causes large performance drops. This provides a principled lens for understanding zero-shot failures in time series forecasting.
 
-- **Freq-Synth consistently outperforms both real-data training and prior synthetic methods across most benchmarks, with far less data.** In zero-shot evaluation (Table 1), synthetic-only training achieves lower average MSE than real-data training for all six models (e.g., TTM: 0.454 vs. 0.602; GPT4TS: 0.426 vs. 0.606). In the synthetic-vs-synthetic comparison (Table 2, known sampling rate), Freq-Synth reduces MSE by 12.7% over TimesFM-style data (0.407 vs. 0.466). In few-shot evaluation (Table 3), it yields 10–19% MSE reduction across three models. These results directly support the central claim that task-specific harmonic data can outperform generic real-data training in low-data regimes.
+- **Freq-Synth achieves superior zero-shot performance with drastically less data.** In Table 1, training solely on 5,000 Freq-Synth samples outperforms training on real data (~1,000× larger) on 6/8 benchmarks. On ETTm1 (whose 15-minute sampling rate is unseen in real training data), Freq-Synth reduces average MSE by **60%** (1.253→0.454 for TTM). The average MSE across all models drops from ~0.63 (real) to ~0.45 (synth), a 29% relative improvement.
 
-- **Data generation is orders of magnitude faster than existing approaches.** Generation time for one million points: 0.1 seconds (Freq-Synth) vs. 3 seconds (TimesFM), 14.6 seconds (ForecastPFN), and 138.2 minutes (KernelSynth). This practical advantage makes the contribution immediately actionable.
+- **Freq-Synth is orders of magnitude faster to generate than competing synthetic approaches.** Section 5.2 reports generation times for 1M time points: 0.1 seconds for Freq-Synth vs. 3 seconds for TimesFM, 14.6 seconds for ForecastPFN, and 138.2 minutes for KernelSynth. Despite this efficiency, Freq-Synth achieves 12.7% lower MSE than TimesFM (0.407 vs. 0.466) in the known-sampling-rate comparison (Table 2).
 
-- **Analysis of pre-trained foundation models confirms frequency-specific overfitting.** Section 6.1 evaluates off-the-shelf TimesFM, Timer, and TTM on synthetic signals and shows that models perform well only on the 1/24 frequency (which dominates pre-training corpora) while error rises sharply on other frequencies. This reinforces the claim that poor frequency generalization is a widespread, structurally-rooted issue, not one introduced by the paper's training setup.
+- **Analysis extends to pre-trained foundation models.** Fig. 3 shows that off-the-shelf pre-trained models (TimesFM, Timer, TTM) perform well only on common frequencies like 1/24 and degrade significantly on less common ones, especially with multiple harmonics. This directly explains observed zero-shot failures and grounds the need for frequency-aware training data.
+
+- **Freq-Synth improves few-shot forecasting.** Table 3 shows that fine-tuning models pre-trained on Freq-Synth onto 10% of real target data yields consistent gains: 10.6% average MSE reduction for TTM (0.366→0.327), 19.5% for Timer, and 17.3% for PatchTST.
+
+- **Method depends only on the sampling rate of the target domain.** Table 2 shows that knowing the target sampling rate enables large gains vs. blind synthetic approaches. Even without this knowledge, Freq-Synth Natural (common natural frequencies) outperforms KernelSynth by 21.5% (0.493 vs. 0.628), demonstrating practical utility of frequency-aware design.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None. The paper's core claims — that frequency confusion/generalization are measurable phenomena and that training on harmonic synthetic data can outperform real-data training in multiple zero-shot settings — are supported by the presented experiments.
+
+- **Missing volume-controlled comparison between synthetic and real data.** The real-data baselines train on ~1,000× more data than Freq-Synth's 5,000 samples (stated in Section 4.1). This asymmetry makes it impossible to determine whether Freq-Synth's advantage comes from its frequency-aligned design or simply from training on a smaller, simpler dataset with less noise and complexity. The paper needs a controlled experiment training real-data baselines on a similarly sized subset (e.g., 5,000 random samples from the same Monash+PEMS pool) to isolate the effect of data source from data volume. Without this, the central comparison in Table 1 conflates two variables. *(Note: this concern works in the opposite direction from typical "more data is better" criticisms — the issue is not that synthetic has too little data, but that the comparison confounds data volume with data source.)*
+
+- **The fundamental-frequency-from-sampling-rate assumption is not validated, particularly on failure cases.** The method assumes that the dominant periodicity of the target domain follows directly from its sampling rate (e.g., hourly data → 1/24 daily cycle). While this holds for many periodic processes, datasets like Exchange and Weather — where Freq-Synth *underperforms* real-data training (Table 1) — likely have dominant periodicities that are not simple harmonics of the sampling rate (e.g., yearly cycles in weather). The paper acknowledges the failures in passing but does not analyze whether they align with violations of the core assumption. A rigorous treatment of when this assumption holds vs. fails is necessary for the method to be practically useful. Table 2's right block (unknown sampling rate) partially softens this concern (Freq-Synth Natural works reasonably), but the core assumption for the primary method remains untested.
+
+- **No ablation isolating whether improvements stem from frequency alignment vs. other factors.** The paper attributes Freq-Synth's gains to frequency alignment (matching target frequencies via harmonics), but provides no ablation comparing harmonic frequencies against random frequencies while controlling for data structure (both being sine-based, same number of samples). Freq-Synth Mix (Table 2, right block) uses "random frequencies from the pool P" but operates in the *unknown-sampling-rate* setting and P itself is composed of harmonics — so this does not cleanly isolate the frequency-alignment benefit. A direct comparison between Freq-Synth (harmonics of target) and an otherwise identical generator using random frequencies matched on all other dimensions would validate the paper's core causal claim.
 
 ### Minor
 
-- **The connection between frequency confusion (random/unrelated frequencies) and Freq-Synth (harmonic frequencies) is not explicitly made.** Definition 1 states that *unrelated* frequencies cause confusion. Freq-Synth generates *harmonic* frequencies, which are mathematically related to the fundamental (line 65: "Harmonics... contribute to the structure of the signal"). The paper's implicit reasoning — harmonics are part of the target's natural periodogram structure, not the "unrelated" frequencies that cause confusion — is plausible but never stated outright. This leaves an unnecessary logical gap where a single clarifying sentence ("Since harmonics are constituent components of periodic signals with the target fundamental frequency, they are not the kind of unrelated frequencies shown to cause confusion in Fig. 1") would suffice.
+- **No error bars, confidence intervals, or significance tests.** Results are reported as averages over three random seeds with no variance estimates (Tables 1–3). Some improvements are modest (e.g., TTM on ETTh2: 0.415→0.412; TTM on ETTh2 in few-shot: 0.332→0.331), making it impossible to assess reproducibility. While single-seed aggregation is common in large-scale TSF benchmarks, the absence of any variance reporting weakens the reliability of the conclusions, especially for small-margin comparisons.
 
-- **No variance or significance measures reported.** All tables report averages over 3 seeds and 4 horizons without standard deviations, confidence intervals, or significance tests. Many of the reported improvements are modest (e.g., ETTh2 in Table 1: 0.415→0.412, 0.604→0.482). Without variance information, the reader cannot assess whether the gains are statistically reliable or within the noise floor. While this is common in large-scale forecasting benchmarks, it is a limitation that should be acknowledged and, ideally, addressed with per-seed results or error bars on the main table.
+- **Periodogram-based categorization thresholds (PCC ≥0.9, 0.7–0.9, <0.7 in Fig. 2) are presented without justification.** The figure suggests higher PCC correlates with lower error, but the bins are coarse, sample sizes per bin are not reported, and no continuous analysis of the periodogram-similarity-to-performance relationship is provided. This weakens the motivation for using the periodogram as the key analytical tool.
 
-- **Failure cases on Exchange and Weather are noted but not analyzed.** The paper acknowledges (line 152) that Freq-Synth underperforms on Exchange and Weather datasets but offers no analysis of why. Understanding these failure modes — whether they stem from weak/irregular periodicity, non-sinusoidal structure, or some other factor — would strengthen the paper's "bounded applicability" narrative and guide users on when the method is (and is not) appropriate.
-
-- **Zero-shot comparison pits synthetic data against real data trained from scratch, not against off-the-shelf foundation model checkpoints.** The real-data baseline in Table 1 trains models from scratch on a Monash+PEMS collection. While this is a valid comparison for the paper's stated goal (comparing training data quality), the "zero-shot" framing naturally invites comparison with published foundation model checkpoints (e.g., off-the-shelf TimesFM, Chronos, Lag-Llama). Including these would either strengthen the result (if Freq-Synth-trained models beat them) or clarify the practical regime of the method. The paper's Section 6.1 does evaluate pre-trained models on synthetic sine waves, but not on the benchmark datasets used in Table 1.
+- **Failure cases (Exchange, Weather) are not analyzed.** The paper notes that Freq-Synth struggles on these datasets but does not examine whether their dominant periodicities deviate from harmonics of the sampling rate. A periodogram analysis of these failure cases would clarify the method's scope and guide practitioners.
 
 ### Trivial
 
-- **Table 2 column headers are ambiguous.** The table lists "TimesFM" and "ForecastPFN" as column headers for both the Known and Unknown sampling rate blocks. Since the paper generates data *using the procedures from* those papers (not the pre-trained models themselves), the headers should say "TimesFM-style data" and "ForecastPFN-style data" to avoid confusion. The text (line 215-217) clarifies the intent, but the table itself could mislead a casual reader.
+- None beyond the Minor weaknesses above.
 
 ## Nice-to-Haves
 
-- **Add a random-sinusoid baseline.** Comparison against synthetic data with random (non-harmonic) frequencies matched to the target sampling rate range would isolate the benefit of harmonic structure and directly address whether harmonics avoid frequency confusion.
-- **Investigate model capacity and scaling.** The paper trains on 5000 synthetic samples. An analysis of how performance changes with dataset size, sequence length, or model size would strengthen the practical guidance.
-- **Include off-the-shelf foundation model checkpoints** in the zero-shot comparison (Table 1) to calibrate the reader's expectations relative to the broader literature.
+- An ablation on hyperparameters \(h\) (number of harmonics), \(l\) (sines per variate), and \(m\) (pool size) would help understand design choices, though the paper states these are in the appendix.
+- Including training time alongside generation time in the efficiency comparison (Section 5.2) would provide a fuller picture, though the generation-time advantage alone is already substantial.
+- A limitations section explicitly discussing the sampling-rate assumption and failure cases would improve the paper's candor.
 
 ## Removed Points
 
-These points were flagged by reviewers but removed (with justification):
+These points are flagged to be removed; treat them with caution.
 
-- *"The paper does not clarify how it differs from prior work using synthetic data with many frequencies"* — The paper does discuss this (line 43: "In this paper, we further extend this research direction and harness Fourier analysis to study synthetic data"). The difference is embodied in the Freq-Synth method itself.
-- *"Hyperparameters m, h, A', l are not given in the main text"* — They are referenced to the appendix (line 127-128), which is standard practice. The parser strips appendix content; the original submission contains these details.
-- *"Definitions are intuitive but fuzzy"* — The definitions are precise: "performance degradation when train set consists of target frequencies along with other, unrelated frequencies" for frequency confusion, and "model's ability to perform well during inference on data with frequencies unavailable during training" for frequency generalization.
-- *"Fig. 1 y-axis is log scale and numbers are not given"* — This is a figure formatting issue. The paper describes the effect in text and the figure conveys the qualitative trend.
-- *"KernelSynth comparison may be against an inefficient implementation"* — KernelSynth (Gaussian process-based) is inherently slower; the 138-minute time is expected and the paper's advantage is genuine.
-- *"No exploration of multi-seasonal data"* — The benchmark datasets include multiple domains (energy, weather, traffic, finance) with various periodicities. Testing on additional multi-seasonal datasets is scope creep.
-- *Strength Finder's generic strengths* — Some claimed strengths (e.g., "simple and requires minimal prior knowledge") are generic; the core strengths listed above capture the paper's actual contributions.
+- **"Definitions of frequency confusion/generalization are essentially special cases of known phenomena and the paper does not clearly distinguish them."** — **Removed.** The paper explicitly acknowledges this relationship at lines 84–85: "It is closely related to *capacity*... and *domain confusion*... This definition is closely related to *domain generalization*." The paper does distinguish them by framing them specifically in the frequency domain of forecasting, which is a valid scoping choice.
+
+- **"Generation time comparison should include model training time."** — **Removed.** Section 5.2 is clearly scoped as *data generation time*, not total pipeline time. Demanding training-time comparison is scope creep; the generation-time advantage is independently informative.
+
+- **"The paper should also cover Y/domain Z/additional tasks."** — **Removed.** No such demands appeared in substantiated form. (If present in unsubstantiated form, they constitute scope creep.)
 
 ## Novel Insights
 
-The most insightful observation across the reviews is the tension between the paper's two analyses. The frequency confusion experiment (Fig. 1 left) shows that *adding any extra frequencies* degrades performance, yet Freq-Synth adds multiple harmonic frequencies and *improves* performance. Resolving this tension — by explicitly testing whether harmonic frequencies *do not* cause confusion while random frequencies *do* — would significantly strengthen the paper's theoretical foundation. The reviews also highlight that the zero-shot framing raises natural expectations about off-the-shelf foundation model comparisons, which the paper does not fully satisfy. Neither point is fatal, but together they suggest the paper's strongest framing is as a *data generation method for training from scratch* rather than as a *zero-shot forecasting approach* per se.
+The reviews converge on a useful observation: the paper's methodological contribution (frequency-aligned synthetic data) is empirically strong, but the paper's *explanatory* narrative (that frequency confusion and frequency generalization are the *causal mechanism* behind the gains) is less well-supported than the empirical results themselves. This gap between what the paper *demonstrates* (Freq-Synth works) and what it *claims to explain* (why it works) is the paper's central tension. The missing controlled-volume experiment and frequency-alignment ablation are the specific experiments that would bridge this gap. Additionally, the failure of Freq-Synth on Exchange and Weather, when viewed through the lens of the sampling-rate assumption, actually provides a natural testbed for the paper's own hypothesis — these datasets are not just weaknesses to be noted, but potential validation points that the authors could leverage to strengthen their argument.
 
 ## Suggestions
 
-1. **Add one clarifying sentence** in Section 4.2 stating explicitly that harmonic frequencies are part of the target signal's natural structure (as defined in Section 3) and therefore differ from the "unrelated" frequencies in the frequency confusion experiment.
-2. **Add per-seed results or error bars** to at least the main zero-shot table (Table 1) to establish statistical reliability.
-3. **Rename Table 2 column headers** to "TimesFM-style data", "ForecastPFN-style data", etc., to avoid ambiguity.
-4. **Analyze the Exchange and Weather failure cases** — even a brief paragraph speculating whether these datasets have weak/irregular periodicity would improve the paper's completeness.
-5. **Consider adding a single column** in Table 1 showing the best off-the-shelf checkpoint performance on each dataset to contextualize the results within the broader zero-shot literature.
+1. **Add a volume-controlled baseline:** Train the same models on a random subset of the real Monash+PEMS data matched in size to Freq-Synth (5,000 samples). Report both the full-real and subset-real results alongside synthetic. This single addition would clarify whether the advantage is due to data source or data volume.
+
+2. **Add an ablation isolating frequency alignment:** Create a variant of Freq-Synth using random (non-harmonic) frequencies drawn from the same distributional range, keeping the same sine-wave structure, number of samples, and number of harmonics. If harmonic Freq-Synth outperforms random-frequency Freq-Synth, the frequency-alignment hypothesis is validated.
+
+3. **Analyze failure cases via periodograms:** For Exchange and Weather (where Freq-Synth underperforms), compute the periodogram and compare the dominant frequencies to the harmonics generated from the sampling rate. If they do not align, this both explains the failures and delineates the method's scope.
+
+4. **Report error bars or per-seed results** for the main tables. Even standard deviations over three seeds would help.
+
+5. **Justify the PCC thresholds** in Fig. 2 or replace the binned analysis with a continuous scatter plot showing periodogram similarity vs. transfer error.
 
 ## Score and Decision
 
-The paper makes a genuine contribution: it identifies a measurable phenomenon (frequency confusion/poor frequency generalization) and proposes a simple, computationally lightweight solution (Freq-Synth) that produces competitive to better results than training on substantially larger real datasets. The weaknesses identified are all addressable with clarifications and additional analysis; none invalidate the core claims. The paper is well-positioned to influence practice in zero-shot time series forecasting with synthetic data.
+The paper makes a genuine contribution: it identifies a plausible explanation for zero-shot forecasting failures (frequency mismatch), validates it through multiple experiments (sine-wave diagnostics, transfer learning analysis, pre-trained model evaluation), and proposes a simple, efficient, and effective solution (Freq-Synth) that outperforms both real-data training and other synthetic approaches across most benchmarks. The core empirical results are strong and the method is practical.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+However, the paper's central causal claim — that frequency alignment *specifically* drives the improvements — is not fully isolated from confounds (data volume, data simplicity). The sampling-rate assumption is also not validated, particularly on the failure cases. These weaknesses are substantive but addressable; they do not invalidate the paper's contributions but do prevent full acceptance without revision.
+
+Given the balance of genuine contributions and addressable but significant gaps, the paper is best characterized as a borderline accept with required major revisions.
+
+**MY FINAL SCORE: <pineapple>6.0</pineapple>**
+**MY FINAL DECISION: <orange>Reject</orange>**

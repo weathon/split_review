@@ -1,22 +1,22 @@
-Now I have a thorough understanding of the paper. Let me construct the final consolidated review.
-
----
+Now I have a thorough understanding of the paper and the reviewer inputs. Let me write the final consolidated review.
 
 ## Summary
 
-This paper proposes conditioning the prior distribution in flow-based generative models on the input condition (class or text). For discrete classes, the prior is a Gaussian centered at the per-class data mean with per-class covariance. For continuous text conditions, a learned mapper network projects CLIP embeddings into data-space means, with isotropic covariance as a hyperparameter. The idea is that shorter source-to-target distances reduce truncation error, enabling high-quality generation with fewer sampling steps. Experiments on a 2D toy problem, ImageNet-64 (class-conditional), and MS-COCO (text-to-image) show FID, KID, and CLIP-score improvements over CondOT, BatchOT, and DDPM, particularly at low NFE.
+This paper proposes a method for designing condition-specific prior distributions (Gaussian mixture models) for flow-based generative models. For discrete conditions (classes), it computes per-class means and covariances from training data. For continuous conditions (text), it trains a mapper from CLIP embeddings to data space. The key idea is that by starting from a prior that is closer to the conditional target, flow paths are shorter, reducing training time and enabling high-quality generation with fewer sampling steps. The method is evaluated on ImageNet-64 (class-conditional) and MS-COCO (text-to-image), showing consistent improvements over CondOT, BatchOT, and DDPM baselines in FID, KID, and CLIP score, particularly at low NFE values.
 
 ## Strengths
 
-- **Clear, well-motivated idea with theoretical framing.** Section 4.2 formalizes the conditional prior and provides a heuristic argument linking shorter source–target distances to lower global truncation error (Eq. 20). This principled connection between the prior design and sampling efficiency is a genuine contribution to the flow-matching literature.
+1. **Novel and well-motivated conditional prior design.** The paper identifies an underexplored opportunity in conditional flow matching: designing the prior distribution based on the condition rather than defaulting to a standard Gaussian. The GMM formulation is clean and the motivation (shorter average source-target distances → straighter flows → fewer steps) is intuitive and well-supported by prior work (Pooladian et al., Tong et al.).
 
-- **Substantial quantitative improvements at low NFE.** Figure 5 shows that at 15 NFEs on ImageNet-64, the method achieves FID 13.62 vs. baselines not surpassing 16.10; on MS-COCO at 15 NFEs, FID 18.05 vs. baselines not surpassing 28.32. These are large margins, not incremental gains, and they directly support the paper's central claim that the conditional prior enables better generation with fewer steps.
+2. **Strong empirical improvements at low NFE, verified in the paper.** On ImageNet-64 at 15 NFEs, CPD achieves FID 13.62 vs. best baseline 16.10+; on MS-COCO at 15 NFEs, CPD achieves FID 18.05 vs. baselines above 28.32 (Figure 5a, 5b). These gaps are large and practically meaningful — they demonstrate that the method delivers on its main promise of high-quality generation with fewer sampling steps.
 
-- **Faster training convergence.** Figure 6 demonstrates that the proposed method yields both lower NFE and better FID at every training epoch on MS-COCO compared to CondOT and BatchOT. This confirms that the shorter paths from the informative prior translate into tangible training efficiency benefits.
+3. **Faster training convergence.** Figure 6 shows that CPD achieves lower NFEs and better FID per training epoch compared to baselines on MS-COCO, supporting the claim that the informative prior also accelerates training.
 
-- **Generalization to unseen conditions demonstrated.** The toy experiment in Figure 4 shows that when trained on a subset of classes, the model still produces accurate conditional samples for held-out classes, supporting the claim that the method extends to unseen text prompts at inference time.
+4. **Generalization to continuous conditions.** The mapper-based approach for text conditioning (CLIP embedding → data space mean) is validated both quantitatively (MS-COCO) and qualitatively (Figure 7), showing the method handles unseen prompts at inference time.
 
-- **Ablation study confirms design choices.** Table 2 shows optimal performance at σ=0.7 and a sharp degradation when CLIP is replaced with bag-of-words encoding, validating both the isotropic covariance choice and the CLIP-based mapper as essential components.
+5. **Controlled toy experiments provide clean validation.** Figures 2–4 on a 2D GMM-squares setup intuitively demonstrate straighter trajectories, faster convergence, and generalization to unseen classes — a useful sanity check before scaling to real datasets.
+
+6. **Ablation study informs design choices.** Table 2 systematically ablates the hyperparameter σ and compares CLIP vs. bag-of-words for the mapper, confirming that the selected configuration is meaningful.
 
 ## Weaknesses
 
@@ -28,55 +28,49 @@ None.
 
 ### Minor
 
-- **Missing implementation details hinder reproducibility.** The paper states "same architecture, training scheme, and latent representation" (line 287) without specifying: the auto-encoder architecture (only cites van den Oord et al. 2018 generically), the vector-field network architecture, the mapper $\mathcal{P}_\theta$ architecture (a critical component for the continuous case), or any training hyperparameters (batch size, learning rate, number of epochs, optimizer). While code release upon acceptance is promised, these details are needed in the paper itself to allow independent assessment and reproduction.
+1. **The truncation-error argument (Section 4.2) is heuristic, not a rigorous justification.** The paper presents a scaling thought experiment (uniform scaling by C multiplies the Lipschitz constant by C) to argue that shorter paths reduce truncation error. However, real conditional flows are not uniformly scaled versions of each other — the velocity field is a nonlinear function of position, time, and condition. The paper does not provide a concrete bound linking its prior construction to either the maximum local truncation error or the Lipschitz constant of the learned field. The empirical evidence (strong low-NFE results) stands on its own, but the paper overstates the theoretical support by claiming to "show that our formulation results in a low truncation error" (line 25). The authors should either present this as a heuristic motivation or provide a more formal analysis.
 
-- **The "state-of-the-art" claim is overreaching.** The conclusion states "Our approach achieves state-of-the-art performance on MS-COCO and ImageNet-64" (line 318), but the only comparison methods are CondOT, BatchOT, and DDPM. These are appropriate baselines for validating the conditional-prior claim, but they do not constitute a comprehensive state-of-the-art survey. The claim should be scoped to "state-of-the-art among flow-matching methods with informative priors" or similar.
+2. **The "state-of-the-art" claim in the conclusion is overreaching.** Line 318 states: "Our approach achieves state-of-the-art performance on MS-COCO and ImageNet-64." This is misleading because the comparisons are limited to three baselines (CondOT, BatchOT, DDPM) using the same architecture. Many other conditional generative models (e.g., DALL·E 2/3, Imagen, various latent diffusion models) achieve substantially lower FID on these benchmarks. The paper correctly qualifies the comparison scope in the experiments section (line 287: "using the same architecture, training scheme, and latent representation"), but the conclusion drops this qualification. The claim should be explicitly bounded (e.g., "among flow-matching methods with identical backbones").
 
-- **Truncation error argument is heuristic, not rigorous.** The reasoning in Section 4.2 (lines 198-206) argues that shorter paths reduce the Lipschitz constant and therefore lower global truncation error. However, the scaling argument ("if we scale a path uniformly by a factor $C$") does not establish that the paths generated by CPD are related to baseline paths by a uniform scaling. The theoretical motivation is directionally sensible but should be positioned as intuition rather than a proof.
+3. **The continuous-condition prior construction has under-explored limitations.**
+   - The mapper $\mathcal{P}_\theta$ is trained with MSE to *individual* $x_1$ samples, whose minimizer is $\mathbb{E}[x_1|E(c)]$, not $\mathbb{E}[x_1|c]$. For rare or ambiguous captions, the CLIP embedding may be insufficiently informative, and the paper does not analyze this failure mode.
+   - The covariance $\sigma^2 I$ is fixed across all conditions (unlike the discrete case where class-dependent covariances are used). The paper does not discuss why condition-dependent $\sigma$ was not explored, nor whether estimating a variance predictor alongside the mean would improve performance for conditions with varying uncertainty.
+   - The training overhead of the mapper (wall-clock time, parameters) is not reported separately, making it difficult to assess the true cost of the approach relative to baselines in the training-efficiency comparison (Figure 6).
 
-- **Table 1 lacks a clear definition of "average distances."** The table reports average distances between prior and data samples for CondOT, BatchOT, and CPD, but does not specify the pairing procedure: is it the expected distance between a random Gaussian sample and a random data sample? The average OT distance? The distance between the conditional Gaussian mean and individual data samples? Without this definition, the table is difficult to interpret precisely.
+   These do not invalidate the contribution, but addressing them would strengthen the method's credibility for the continuous setting.
 
-- **No statistical confidence intervals.** FID and KID are reported without error bars or multiple-seed runs. While single-run reporting is common in flow-matching papers, given the scale of the claimed improvements, confidence intervals would significantly strengthen credibility.
-
-- **Limited validation of the unimodal Gaussian assumption for text-to-image.** The paper assumes $p(x|c)$ is approximately Gaussian (centered at the conditional mean with isotropic covariance). For text-to-image, where many different images can correspond to the same caption, this assumption is nontrivial. The ablation on $\sigma$ partially addresses this, but the paper would benefit from a direct analysis (e.g., measuring distances between prior samples and real data, visualizing learned means) rather than relying solely on downstream FID scores.
+4. **The BatchOT baseline characterization is unclear.** The paper states that BatchOT "requires quadratic time and memory, which is not applicable to large mini-batches," yet includes it as a baseline. It is not explained how BatchOT was implemented for high-resolution data — whether compromises were made (small batch size, lower-dimensional projections) and how these affect the comparison. Without this, the reader cannot assess whether the advantage over BatchOT is a fair reflection of the methods' relative merits.
 
 ### Trivial
-- Line 215: "represntation" → "representation"
-- Line 300: "perfromance" → "performance"
-- The notation in Eq. 17-18 could be cleaner: $p(x_0)$ is used in two related but formally distinct roles.
+
+1. **$\sigma_{\text{min}}$ is not specified.** The flow interpolation equations (Eqs. 25–26) use $\sigma_{\text{min}}\mathrm{I}$ as the target spread around $x_1$ at $t=1$, but its numerical value is never given. This is a standard hyperparameter in flow matching and should be reported.
+
+2. **Latent space details are missing.** The paper states it operates in the "latent representation of a pre-trained auto-encoder" (citing van den Oord et al., 2018 — VQ-VAE), but does not specify the latent dimensionality or whether the same latent space is used for both datasets.
 
 ## Nice-to-Haves
 
-- A direct measurement of path straightness (e.g., average curvature or displacement $\|x_1 - x_0\|$) for the proposed method vs. baselines, which would directly substantiate the truncation-error argument.
-- An ablation using per-condition estimated covariance (rather than isotropic fixed $\sigma$) in the continuous setting.
-- Qualitative visualization of the learned mapper outputs (predicted conditional means for different captions, with nearest training images) to help readers assess whether the prior is placed in sensible regions of data space.
-- Wall-clock timing measurements alongside NFE to confirm that lower NFE translates to faster actual sampling.
+- Analyzing the distribution of residuals $\|\mathcal{P}_\theta(E(c)) - x_1\|$ for different captions, with a visualization of prior samples vs. real conditional samples (e.g., t-SNE or PCA), would strengthen the motivation for the continuous prior.
+- An unconditional ablation (e.g., unconditional GMM prior) on ImageNet-64 would isolate whether the improvement comes from the prior being generally close to the data or from the condition-specific matching specifically.
+- Reporting the number of training epochs, learning rates, and computational cost of BatchOT as implemented would improve the training-time comparison.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **"Insufficient comparison to modern fast-sampling baselines (consistency models, DPM-solver, rectified flows, etc.)"** — The paper's contribution is specifically about *designing a conditional prior for flow matching*, and the baselines (CondOT, BatchOT, DDPM) are the correct comparisons within this class. Consistency models, DPM-solver, and progressive distillation are architecturally or algorithmically different approaches that change the model or solver, not the prior. Demanding comparison to these would turn the paper into a broad survey rather than a focused method paper. The one valid aspect (the overreaching "state-of-the-art" claim) is already captured above as a minor weakness.
-
-- **"Figure 6 shows NFE from adaptive solver, not wall-clock time"** — Figure 6 uses NFE (which is a meaningful efficiency metric standard in flow matching) and FID during training. The claim about training efficiency is supported by lower NFE and better FID at every epoch. Wall-clock time would be a nice addition but is not necessary to support the claim.
-
-- **"The paper should also cover additional conditions such as segmentation maps or depth maps"** — The paper explicitly scopes this as future work (line 318-319). Criticizing its absence is scope creep.
-
-- **General reproducibility nitpicks about "not yet released" code** — The paper states code will be released upon acceptance. Questioning its existence or availability is disallowed.
+- The harsh critic's claim that the truncation-error argument is presented "as if it were a proof" overstates the paper's framing — the paper describes it as "substantiating" a claim via a scaling thought experiment, not as a formal theorem. The underlying concern about insufficient rigor is retained in Minor Weakness #1.
+- The strength finder's description of the theoretical argument as "rigorous" is incompatible with the verified weakness; the strength is retained only to acknowledge the paper's conceptual connection between shorter paths and truncation error, not the rigor of its proof.
 
 ## Novel Insights
 
-The most interesting observation across the reviews is the tension between the paper's justified theoretical framing (shorter source-target paths reduce truncation error) and the heuristic nature of the specific argument presented. The paper correctly identifies that adapting the prior to the condition is a relatively unexplored lever in flow matching, but stops short of a rigorous characterization of *when* this approach works well vs. when the unimodal Gaussian assumption breaks down. A more systematic analysis of the conditions under which the conditional-prior benefit is largest or smallest would be a natural follow-up.
+None beyond the paper's own contributions. The reviews surface a useful tension: the paper's core practical contribution (condition-specific priors → shorter paths → better sampling efficiency) is empirically strong but its theoretical framing is heuristic. Neither reviewer identifies an aspect of the problem or method that the paper itself overlooks in its analysis.
 
 ## Suggestions
 
-1. Provide full architectural and hyperparameter details in the main text or appendix: the auto-encoder used, the vector-field network, the mapper $\mathcal{P}_\theta$ architecture, and training hyperparameters.
-2. Scope the "state-of-the-art" claim to the family of flow-matching methods with informative priors.
-3. Add a clear definition of how the distances in Table 1 are computed.
-4. Add confidence intervals (e.g., bootstrap over three seeds) for the main FID/KID results.
-5. Include a brief qualitative analysis of the learned conditional means for text prompts (e.g., nearest training images to the predicted mean for several captions) to validate the unimodal assumption.
+1. Replace "state-of-the-art" in the conclusion with a qualified statement (e.g., "significantly improves upon standard flow-matching and DDPM baselines using the same backbone").
+2. Either present the truncation-error analysis as a heuristic motivation (not a demonstrated result) or provide a more rigorous connection between the prior construction and the Lipschitz constant / truncation error bound.
+3. Report $\sigma_{\text{min}}$, latent space dimensionality, and training hyperparameters (epochs, learning rates) for all methods.
+4. Clarify how BatchOT was implemented for high-dimensional data and any computational compromises involved.
+5. Discuss the limitation of fixed $\sigma$ in the continuous setting and, if feasible, explore condition-dependent $\sigma$ or provide reasoning for why it was not pursued.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

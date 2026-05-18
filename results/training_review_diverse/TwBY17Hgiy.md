@@ -1,18 +1,18 @@
-Now I have a thorough understanding of the paper and can verify each claim against the actual text. Let me produce the final consolidated review.
+Now I have all the information I need. Let me construct the final consolidated review.
 
 ## Summary
 
-The paper proposes a 3D-aware regularization method for multi-task learning (MTL) of dense prediction tasks. It maps shared encoder features to a tri-plane representation, uses small MLPs and volume rendering to produce task predictions during training, and discards the regularizer at inference — incurring no extra cost at test time. The method is evaluated on NYUv2 (4 tasks) and PASCAL-Context (5 tasks) with two backbones (CNN-based MTI-Net and transformer-based InvPT), showing consistent improvements across all tasks and both architectures.
+This paper introduces a 3D-aware regularizer for multi-task learning (MTL) in dense prediction tasks. The regularizer projects shared encoder features into a tri-plane representation, uses light-weight MLPs to decode task-specific fields, and renders predictions via differentiable volume rendering. It is used only during training and discarded at inference, incurring zero additional cost at test time. Experiments on NYUv2 and PASCAL-Context show consistent improvements when plugged into two strong backbones (MTI-Net with HRNet-48 and InvPT with ViT-L), with ablations confirming the benefit is not trivially due to extra parameters.
 
 ## Strengths
 
-- **Consistent multi-task gains across architectures and benchmarks.** The regularizer improves all tasks on NYUv2 over MTI-Net (e.g., Seg +0.70 mIoU, Depth -0.0155 RMSE) and InvPT (e.g., Seg +1.31 mIoU, Depth -0.0177 RMSE) (Table 1). On PASCAL-Context, all five tasks improve, including +1.51 mIoU on PartSeg and +1.00 odsF on Boundary over InvPT (Table 2). This architecture-agnostic improvement across two fundamentally different backbones is the paper's strongest empirical contribution.
+- **Architecture-agnostic with consistent improvements across diverse backbones**: The regularizer boosts performance when added to both CNN-based (MTI-Net with HRNet-48) and transformer-based (InvPT with ViT-L) architectures on both benchmarks. On NYUv2, segmentation mIoU improves from 45.97→46.67 (MTI-Net) and 53.56→54.87 (InvPT); on PASCAL-Context, part segmentation mIoU improves from 67.61→69.12 (InvPT). This breadth of improvement across architecture families and datasets supports the generality of the approach.
 
-- **No additional inference cost.** The regularizer is discarded after training (lines 37‑38, 438). All reported gains are obtained with zero extra computation at test time — a practically appealing property.
+- **Zero additional inference cost**: The regularizer is explicitly removed at test time ("the regularizer is removed. Hence our method does not bring any additional inference cost"), making it practical for deployment scenarios where training overhead can be amortized.
 
-- **Auxiliary heads ablation isolates the regularizer's effect from extra capacity.** Adding auxiliary task-specific heads to InvPT yields no consistent improvement (Seg actually drops 1.11 mIoU), while the proposed method improves all four tasks (Table 3). This rules out the trivial explanation that any additional parameters help.
+- **Auxiliary head ablation cleanly rules out trivial explanations**: Adding identical-architecture auxiliary heads with different random initializations to InvPT actually *hurts* segmentation (53.56→52.45 mIoU) and yields mixed results, while the proposed regularizer improves all four tasks. This confirms the gains are attributable to the structured representation, not to extra parameters or ensemble-like effects.
 
-- **Effectiveness in low-data regimes.** On 25%, 50%, and 100% of NYUv2 data, the method consistently outperforms the InvPT baseline on all tasks (Table 6), demonstrating robustness to data scarcity.
+- **Joint multi-task rendering outperforms single-task rendering**: Ablating the regularizer to render only one task at a time shows that rendering all tasks jointly achieves the best or tied-best performance on all four metrics (Table `tab:nyuv2rendertask`), supporting the synergistic cross-task nature of the 3D regularization.
 
 ## Weaknesses
 
@@ -21,43 +21,36 @@ None.
 
 ### Major
 
-- **The contribution of the *3D* structure (tri-plane) vs. a generic structured feature grid is not isolated.** The paper compares against auxiliary heads with the same architecture as task-specific heads, ruling out extra-capacity-with-same-architecture. However, it does not ablate whether the improvement comes from the tri-plane's explicit 3D structure or from the more general effect of projecting features onto any explicit coordinate grid and decoding through volume rendering. A direct comparison would be: replace the tri-plane with a single 2D feature grid (same resolution, same bilinear interpolation) and feed the z-coordinate as an additional MLP input while keeping the volume rendering pipeline otherwise identical. Without this control, the paper's repeated central claim — that *3D awareness* specifically drives the gains — is incompletely supported. The method demonstrably works, but the attribution to 3D geometry remains a hypothesis rather than a validated conclusion.
+1. **Missing error bars / statistical significance on modest margins with a small training set**: The paper reports only single-run results. The NYUv2 training set contains only 795 images, and several improvements are modest in absolute terms (e.g., InvPT segmentation mIoU: 53.56→54.87, a ~2.4% relative gain; MTI-Net segmentation mIoU: 45.97→46.67). Without variance estimates over multiple seeds, it is difficult to assess whether these gains are statistically reliable. Given the margins and dataset size, this is a substantive gap in empirical rigor that should be addressed for the core claims to be fully convincing.
 
-- **No variance or statistical significance is reported.** All results are single numbers. The improvements over baselines are often modest (e.g., +0.5–1.5 mIoU, −0.01–0.02 RMSE), and without standard deviations or multiple-run averages, it is impossible to assess whether these differences are meaningful or within noise. This is especially salient for NYUv2 (795 training images). The claim that this is "standard practice in the field" does not make the results more credible; it is a weakness of the paper regardless of convention.
+2. **Causal attribution of 3D vs. structured bottleneck not fully isolated**: The paper's key claim is that *3D* structure specifically eliminates geometrically-inconsistent cross-task correlations. The auxiliary head ablation rules out "extra capacity" but does not rule out the possibility that any *structured, shared bottleneck* (e.g., a 2D spatial feature grid with shared task heads and a rendering-like integration) would yield similar gains. The regularizer differs from the baselines along multiple dimensions: tri-plane, raycasting, shared density field, etc. A control with a comparably-structured 2D regularizer (same resolution, MLPs, and integration procedure but without the third dimension) would substantially strengthen the causal attribution. As it stands, the paper establishes that the proposed 3D regularizer improves MTL performance but does not fully establish that the *3D nature* is the mechanism behind the improvement.
 
 ### Minor
 
-- **The "3D-aware" framing somewhat overstates what can be learned from single views.** The paper acknowledges single-view training (lines 144‑146) but consistently calls the representation "3D-aware" and claims it "enforces 3D consistency." From single views, the regularizer can at best learn a 2.5D front-facing volume. The cross-view experiment (Section 4.4) is intended to address this, but the multi-view gains are negligible (Seg 54.93 → 54.99, Depth 0.4879 → 0.4850). The paper should more honestly characterize the representation as *structured along the camera's z-axis* rather than truly 3D-aware.
+1. **Orthographic camera assumption left unexamined**: The paper states (Section 3, *Discussion*) that rendering assumes "the camera is orthogonal to image center" and does not condition on viewpoint. Real images have perspective effects, and the paper does not discuss how well this assumption holds for the datasets used (NYUv2: indoor frontal views; PASCAL-Context: diverse viewpoints). While the empirical results suggest the assumption is not fatal, the paper would benefit from either an analysis of its impact or a justification (e.g., "the tri-plane features operate at coarse resolution where orthographic approximation is reasonable").
 
-- **The number of added video frames in the cross-view experiment is not specified.** The paper mentions merging "additional video frames" (lines 175‑178, 268) but never states how many frames were used, what the sampling strategy was, or the total dataset size after merging. This makes the setup difficult to reproduce.
+2. **Resolution mismatch between rendered output and ground truth not explained**: The paper states the regularizer renders at small spatial sizes (e.g., 56×72 for NYUv2) but does not explain how the loss L_t(g_t∘f(I), y_t) is computed — whether the ground truth is downsampled to match, the rendered output is upsampled, or the loss is computed at original resolution through some other mechanism. This affects interpretation of what the regularizer is being penalized for.
 
-- **Training cost (GPU memory/time) is not reported.** Since the regularizer adds a tri-plane encoder, per-task MLPs, and volume rendering, the additional training overhead should be quantified. The paper mentions memory limitations (line 128) but never reports actual consumption.
-
-- **Table 6 (tasks for regularizer): rendering only Seg yields higher Seg mIoU (55.04) than rendering all tasks (54.87).** The paper's claim that "All tasks obtains the best performance on the majority of tasks" is accurate (best on 3/4), but the Seg-only result is not discussed. A brief explanation would strengthen the ablation.
+3. **Training overhead and hyperparameter sensitivity not reported**: The paper does not quantify the additional memory or training time incurred by the regularizer. Since the method adds a non-trivial tri-plane encoder, MLPs, and volume rendering during training, readers should know the cost of the reported gains. Additionally, the balancing hyperparameters α_t are said to be cross-validated, but no ablation of their sensitivity is shown.
 
 ### Trivial
-
-- The footnote URL for the NYUv2 video frames dataset is truncated (line 176). This should be corrected in a camera-ready version.
+- None.
 
 ## Nice-to-Haves
 
-- An ablation that uses only the xy-plane of the tri-plane (with z-coordinate as MLP input) would directly test whether the tri-plane's 3D structure drives the gains.
-- Reporting mean ± std over 3–5 runs with different seeds would greatly strengthen the credibility of the modest improvements.
-- A brief analysis of whether the regularizer actually reduces "noisy cross-task correlations" — e.g., by measuring task-task agreement on ambiguous regions — would connect the empirical results to the paper's motivating intuition.
+- A 2D structured regularizer control (same architecture minus the third dimension) to isolate the specific benefit of 3D.
+- Error bars (mean and std over 3–5 seeds) for the main comparisons.
+- An analysis of how the orthographic camera assumption affects different scene types (e.g., close-up vs. wide-angle, indoor vs. outdoor).
+- A sensitivity study for the loss-balancing hyperparameters α_t.
+- Reporting of training-time GPU memory and throughput overhead.
 
 ## Removed Points
 
-These points are flagged to be removed — treat them with caution.
+These points are flagged to be removed; treat them with caution:
 
-- **"The cross-view improvements are tiny, contradicting the 3D claim."** The paper itself calls the improvements "modest" (line 296) and explicitly argues that "coarse 3D scene information obtained from single views can be sufficient" (line 297). There is no contradiction — the paper is transparent about the magnitude. Removed as the authors already address this.
+- *Cross-view consistency undermines 3D geometry claim*: The critic argued that small cross-view gains (54.93→54.99 mIoU) suggest the regularizer does not truly capture 3D geometry. **Removed** because the paper explicitly and honestly addresses this (lines 296–297: "coarse 3D scene information obtained from single views can be sufficient"), and single-view regularization is presented as the primary contribution, with multi-view as an optional extension. The modest gains do not contradict the paper's claims.
 
-- **"2D grid ablation that keeps rendering pipeline otherwise identical."** The critic's specific suggestion — replace the tri-plane with a single plane "without the explicit z‑axis" while keeping rendering identical — misunderstands the method: volume rendering inherently requires sampling along the z-axis. A feasible ablation would use a 2D grid with z as an MLP input (which I kept in Major Weaknesses). The critic's exact phrasing is technically infeasible as stated. Removed as factually inaccurate in its specifics, though the underlying concern is valid and retained.
-
-- **"Missing comparison to methods using depth as an auxiliary task for segmentation."** The paper compares against SOTA MTL methods and provides an auxiliary-heads ablation. Demanding specific auxiliary-task combinations is scope creep. Removed.
-
-- **"Low resolution of the regularizer limits its learning of high-frequency details."** The paper explicitly acknowledges this (lines 332, 429) and discusses it as a limitation. Already transparently addressed. Removed.
-
-- **"The authors should discuss limitations."** The paper already has a Limitations section (lines 437‑443). Removed.
+- *Missing ray sample count and near/far plane settings*: **Removed** per hard rule — these are standard implementation details likely in the supplementary material, which is cited (line 192: "We refer to the supplementary material for further details").
 
 ## Novel Insights
 
@@ -65,15 +58,18 @@ None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. Add a controlled ablation comparing the full tri-plane against a single 2D feature grid (with z-coordinate concatenated to the interpolated features before the MLP), keeping the volume rendering pipeline otherwise identical. This would directly test whether the tri-plane's explicit 3D structure is responsible for the improvements.
-2. Report mean ± std over multiple runs (3–5) with different random seeds for the main tables.
-3. Specify the number of video frames used, the sampling strategy, and the total dataset size in the cross-view experiment.
-4. Report training GPU memory and time overhead compared to the base model.
-5. Add a brief discussion in Section 4.4 (or the limitations section) acknowledging that from single views the representation is more accurately described as 2.5D.
+1. Add error bars (multiple seeds) for the main results in Tables 1 and 2, especially for NYUv2 where the training set is small and margins are modest. This is the most important change to support the paper's empirical claims.
+2. Add a 2D-structured ablation control (e.g., a 2D feature grid with shared MLPs and spatial integration but no z-dimension) to tighten the causal argument that *3D* specifically is driving the gains.
+3. Clarify in the main text how the rendered low-resolution predictions (e.g., 56×72) are compared to full-resolution ground truth in the loss computation.
+4. Discuss the implications of the orthographic camera assumption — ideally with a brief analysis or at minimum a justification of why it is a reasonable approximation for the tested benchmarks.
+5. Report training-time overhead (GPU memory, hours to train) so practitioners can assess the cost-benefit trade-off.
 
 ## Score and Decision
 
-The paper proposes a creative and useful method — a tri-plane + volume rendering regularizer for MTL — and provides solid empirical evidence that it consistently improves performance across architectures, benchmarks, and data regimes without inference cost. The writing is clear and the ablations are generally well-designed. However, the central claim about *3D awareness* specifically driving the gains is not fully isolated (the tri-plane vs. 2D-grid question), and the lack of variance reporting weakens confidence in the modest improvements. These are addressable gaps rather than structural flaws, and the method itself is a genuine contribution. The paper merits acceptance with the expectation that the authors address the key open questions in a revision.
+**Score**: 7.0  
+**Decision**: Accept
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+The paper introduces a novel, well-motivated idea that is orthogonal to existing MTL methods and shows consistent empirical improvements across architectures and benchmarks. The main weaknesses (missing error bars, incomplete causal isolation, and several implementation details left unspecified) are addressable and do not invalidate the core contribution. With the suggested revisions, this would be a solid contribution to the field.
+
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,60 +1,74 @@
-Now I have a thorough understanding of the paper. Let me compile the final review.
+Now I have thoroughly verified all claims against the paper. Let me write the final consolidated review.
 
-## Final Consolidated Review
+---
 
 ## Summary
-This paper proposes a unified scaling law for dense and sparse pre-training of LLMs by modifying the Chinchilla scaling law to use the average number of active parameters over training instead of the total dense parameter count. It validates this law empirically across 3 model sizes (58M–468M), 5 sparsity levels, and 2 training durations (30 data points, 0.016 avg. prediction error). The paper also conducts a systematic search over 80 sparse pre-training configurations, identifying a practical 25%–50%–25% compute allocation rule (dense, iterative pruning, sparse recovery) that achieves near-optimal loss.
+
+This paper studies sparse pre-training of LLMs and makes two main contributions. First, it proposes a unified scaling law that replaces the total parameter count in the Chinchilla law with the *average number of active parameters* during training, showing empirically that this modified law (Equation 2) fits 30 data points (3 model sizes × 5 sparsity levels × 2 training durations) with a mean absolute error of 0.016. Second, through a systematic search over 80 configurations, it identifies a simple schedule — 25% dense training, 50% iterative pruning, 25% sparse recovery — that achieves near-optimal final loss across sparsity levels and training durations for a 162M model, and finds that optimal hyperparameters transfer from dense pre-training.
 
 ## Strengths
-- **Unified scaling law bridging dense and sparse pre-training**: The core insight—replacing $N$ with $\bar{N}$ in the Chinchilla law—is simple yet well-validated. The empirical fit across 3 model sizes, 5 sparsities, and 2 durations achieves a 0.016 average absolute error (Section 5.3, Figure 3). This is the first demonstration that a single functional form can model both dense and sparse pre-training loss.
-- **First systematic search over sparse pre-training configurations for LLMs**: The evaluation of 80 schedule × sparsity × duration combinations (Section 6.1) on 162M models is thorough and yields an actionable prescription (25% dense, 50% pruning, 25% recovery) that is near-optimal across sparsity levels and both 10× and 20× Chinchilla-optimal regimes (Figures 4, 6a–d).
-- **Direct empirical validation of the average-active-parameter concept (Figure 1)**: Four pairs of sparse and dense models with matching average active parameters and total compute achieve nearly identical final loss. This clean experiment directly supports the paper's central claim and is the single most convincing piece of evidence.
-- **Analysis of failure modes**: Section 6.2 systematically examines what happens when the schedule deviates from the optimal allocation (e.g., too much dense compute hurts high-sparsity models; excessive pruning degrades loss). This adds practical depth beyond just reporting the best configuration.
-- **Hyperparameter continuity**: The LR and batch size sweep (Figure 5) shows that hyperparameters optimal for dense pre-training transfer well to sparse pre-training (within 0.01 loss difference), lowering adoption barriers.
+
+- **Unified scaling law with empirical validation.** The central idea — that replacing total dense parameters with the average number of active parameters suffices to extend the Chinchilla law to sparse pre-training — is elegant and empirically supported. Figure 1 directly shows four sparse/dense model pairs with matching average active parameters achieving nearly identical final loss despite different training dynamics. The fitted law achieves a mean absolute prediction error of 0.016 across 30 diverse configurations (Section 5.3, Figure 3), which is competitive with the fit quality of the original Chinchilla law.
+
+- **Systematic identification of a simple optimal schedule.** The paper evaluates 80 sparse pre-training configurations (Section 6.1) and identifies a clear prescription: allocate 25% of total compute to dense training, 50% to gradual pruning, and 25% to sparse recovery. This finding is robust across sparsity levels (20–80%) and training durations (10× and 20× Chinchilla-optimal) for the 162M model, and the optimal hyperparameters (learning rate, batch size) transfer directly from dense pre-training (Figure 5). This is actionable for practitioners.
+
+- **Largest-scale study of sparse pre-training to date.** The largest model requires 4.5×10²⁰ FLOPs, over 5× the compute of the largest model in prior sparse pre-training scaling law work (Frantar et al., 2023). The study covers model sizes from 58M to 468M with up to 80% sparsity, substantially extending the empirical basis for sparse pre-training research.
+
+- **Honest treatment of limitations.** The paper explicitly acknowledges the lack of adequate hardware support for unstructured sparsity (Section 7), the reliance on perplexity as a proxy for model quality, and the limited scale of the study due to computational constraints. This transparency is commendable.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None. The paper's core claims are empirically supported and its limitations are acknowledged.
+
+- **Optimal schedule validated on only one model size.** The sparsity schedule search in Section 6.1 (Figures 4, 5) and the closer analysis in Section 6.2 (Figures 6a–6d) are conducted entirely on the 162M model. The resulting prescription (25%/50%/25%) is then applied to all three model sizes (58M, 162M, 468M) for the scaling law fitting without verifying that it is also optimal for 58M and 468M. If the optimal schedule is model-size dependent, the scaling law fit could be based on suboptimal configurations for those sizes. While the good fit quality (MAE 0.016) provides some indirect evidence that the schedule is reasonable across sizes, direct validation on at least one additional size is needed to support the claim that the prescription generalizes.
+
+- **Scaling law fitted to a narrow range of model sizes.** The scaling law is fitted to only 3 model sizes (58M, 162M, 468M), spanning roughly an 8× range. By comparison, Chinchilla (Hoffmann et al., 2022) uses 7 sizes spanning 40M to 16B (~400× range). While the paper acknowledges computational constraints, the practical value of the law for predicting the behavior of much larger models (a stated goal) is uncertain without validation over a wider size range or a held-out analysis. The good in-sample fit (30 data points, 5 free parameters) does not guarantee predictive robustness.
 
 ### Minor
-- **Theoretical derivation (Section 5.2) is heuristic, not rigorous.** The derivation relies on a Taylor expansion and asserts that the weighting term $C_{0:k-1}^{-\alpha-1}$ "remains very stable" based on a single model size (410M) and a single $\alpha$ estimate (Figure 2, right). The claim that loss spikes at pruning steps "do not effect the final loss" is asserted without supporting evidence. The final summation step that yields proportionality to $\bar{N}$ is an approximation. While heuristic justifications are common in scaling-law papers and the main contribution is empirical, the paper lists this as Contribution #2, which overstates its rigor. The paper would be better served by presenting this as an intuitive justification or dropping the "theoretical" framing.
-- **The scaling law fit could benefit from held-out validation.** The fit uses all 30 data points (5 sparsities × 3 sizes × 2 durations) with no held-out evaluation or confidence intervals on the fitted parameters ($A, B, E, \alpha, \beta$). While 30 points for a 5-parameter model is a reasonable ratio, holding out one or two configurations (e.g., a sparsity level or model size) and reporting prediction error on unseen points would substantially strengthen the claim that the law is predictive, not just descriptive.
-- **The optimal schedule is determined on 162M models and assumed to transfer.** The schedule sweep (Section 6.1) is conducted only on 162M-10× and 162M-20× models. The same 25%/50%/25% allocation is then applied to 58M and 468M models when generating the scaling-law data points. While the good fit of the scaling law (avg. error 0.016) suggests the schedule is at least reasonable across sizes, the paper does not verify whether the optimal schedule shifts with model scale. This is a gap.
-- **No downstream task evaluation.** The paper exclusively uses evaluation perplexity. While scaling-law papers traditionally rely on perplexity, and the authors acknowledge this limitation explicitly (Section 7), the lack of even a small set of standard benchmarks (e.g., HellaSwag, ARC) makes it impossible to assess whether the perplexity-based findings translate to practical model quality.
-- **Limited scope of pruning algorithm and architecture.** Only iterative magnitude pruning (IMP) and the LLaMA 2 architecture are tested. It is unclear whether the unified scaling law or the optimal schedule generalizes to other pruning algorithms (e.g., Sparse Evolutionary Training, RigL) or other architectures (e.g., GPT-NeoX, Mistral).
+
+- **Theoretical justification (Section 5.2) falls short of a rigorous derivation.** The section claims to provide an "analytical derivation" of the scaling law (Equation 2), but what is actually presented is a heuristic motivation. Starting from a single-term power law in compute (L(C) = (A/C)^α) and performing a Taylor expansion, the argument shows that the total change in loss is proportional to the average number of active parameters. This provides useful intuition for *why* N̄ might be the right quantity, but it does not derive the specific two-term additive Chinchilla form (A/N̄^α + B/D^β + E). The contribution list (item 2) states "a theoretical analysis... that justifies using the average number of active parameters" — this is a fair characterization of what is delivered, but the phrasing "analytical derivation" (line 118) overpromises. The paper would benefit from either strengthening the derivation or reframing this section as an intuitive justification.
+
+- **"Lossless compression" claim is unqualified.** The paper states that sparse pre-training yields a "2× lossless compression rate" at 80% sparsity (Section 7). This is based solely on validation perplexity on the C4 dataset. The paper acknowledges the limitation of not evaluating downstream tasks, but the term "lossless" in the main text is not explicitly qualified to reference perplexity. A reader scanning the paper could easily over-interpret this claim. A short qualification (e.g., "lossless with respect to validation perplexity") would prevent misinterpretation.
 
 ### Trivial
-- The "compression rate" is defined unconventionally as $\frac{\texttt{average active params}}{\texttt{final active params}}$. While internally consistent and clearly stated, this differs from typical definitions (initial/final size). The "2× lossless compression" claim under this definition is technically correct but could mislead readers expecting compression relative to the original dense model's loss.
-- The reproducibility statement (Section 7) references Sections 4 and 6 but omits some implementation details (e.g., exact learning rate schedule shape, per-iteration pruning fraction, weight re-initialization policy).
+
+- **Figure 2 discussion could be clearer.** The explanation of how the stability of C_{0:k-1}^{-α-1} follows from the estimated α values is somewhat terse (line 153–155), and the garbled text in the parser output suggests the exposition may benefit from tightening.
+
+- **Fitted parameter values (A, B, E, α, β) and their confidence intervals are not reported.** Providing these would allow other researchers to use the proposed scaling law.
 
 ## Nice-to-Haves
-- Held-out validation of the scaling law (e.g., leave-one-sparsity-level-out) would strengthen the predictive claims.
-- A coarse verification of the 25%/50%/25% schedule at 58M and 468M scale (even 3–5 key configurations) would confirm transferability.
-- Adding 1–2 downstream tasks (e.g., HellaSwag, ARC-easy) for the Figure 1 model pairs would substantiate the practical significance.
-- The "theoretical justification" section could be reframed as an intuitive or heuristic justification to better match its actual rigor.
+
+- Validate the optimal schedule on at least one additional model size (e.g., 58M or 468M) using a few schedule variations at a representative sparsity level. This is the highest-leverage addition given the paper's central practical claim.
+- Add a hold-out or cross-validation analysis for the scaling law (e.g., fit on 2 model sizes and predict the 3rd, or leave-one-sparsity-level-out). This would substantially strengthen confidence in the law's robustness.
+- Report the fitted values of A, B, E, α, β and their uncertainty intervals.
+- If possible, include a small set of downstream task evaluations to corroborate the perplexity-based findings, even on a subset of configurations.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
 
-- **"The comparison that supposedly demonstrates the value of sparse pre-training is not a direct comparison"** (Harsh Critic #4): The paper's comparison (sparse vs. dense with matching average active params and compute, Figure 1) is appropriate for its claims. The sparse model ends smaller than its dense comparison point, which IS the advantage. Asking for a comparison to a dense model of final size answers a different question and does not invalidate the paper's stated contribution. Removed because the reviewer misinterprets the paper's experimental design.
-- **"The 'first comprehensive study' claim is overstated"**: The paper explores 80 configurations across 5 sparsity levels and 2 training durations on LLMs up to 468M—the largest such study to date. The claim is defensible within the LLM sparse pre-training literature.
-- **"Novelty is modest"** (Section 5.1 note): This is a subjective opinion, not an evidence-based weakness. The paper's contribution is empirical validation, not theoretical novelty.
-- **Formatting/style nitpicks** (Figure 4 axis labels, etc.): These are readability concerns typical of any first submission; they carry no weight in evaluation.
+- The harsh critic's concern about Figure 2 clarity being "incomplete" is partly attributable to parser-induced garbled text (line 154). The paper's argument is serviceable. This is a minor presentation issue that does not affect the core claims.
+- The harsh critic's suggestion that the paper should "stop claiming it as a theoretical contribution" — the contribution list (item 2) describes a "theoretical analysis," which is accurate. Only the in-section phrasing "analytical derivation" (line 118) overreaches. The weakness is kept but downgraded to Minor.
+- No other removed points: the remaining criticisms were verified against the paper and found to be substantively accurate.
 
 ## Novel Insights
-The reviews surface a clear tension in the paper: the authors present the average-parameter scaling law as having "theoretical justification" (Contribution #2), but the derivation in Section 5.2 is actually a heuristic argument supported by empirical observations plotted for a single model size. This mismatch between the paper's framing and the actual rigor of the justification is the most significant unaddressed issue. The reviews also collectively highlight that while the 30-point scaling-law fit is described as "accurate modeling," the paper never tests its predictive power on unseen configurations—a standard requirement for a claim that a law "models" or "predicts" loss. These two gaps (overclaimed theoretical justification, missing held-out validation) are the areas where the paper's presentation most exceeds its evidence.
+
+The most interesting insight to emerge from the reviews — beyond the paper's own contributions — is the tension between the paper's two main claims. The scaling law (using average active parameters) is validated across all three model sizes simultaneously, yet the schedule that generates the data for that law is only shown to be optimal for one of them. The fact that the law fits well despite this potential mismatch either (a) suggests the 25/50/25 schedule is indeed near-optimal across sizes (which would strengthen the paper if confirmed), or (b) implies the scaling law is robust to modest deviations from the optimal schedule, which is itself a useful property. The paper does not disentangle these two possibilities, and doing so would be a valuable extension.
 
 ## Suggestions
-1. Reframe the "theoretical justification" in Section 5.2 as an intuitive/heuristic motivation consistent with its actual rigor, or remove Contribution #2.
-2. Add held-out validation: fit on a subset of the 30 points (e.g., leave out one sparsity level or one model size) and report prediction error on the held-out points.
-3. Run a small verification of the optimal schedule at one other model size (58M or 468M) for 3–5 key schedule configurations.
-4. Add 1–2 downstream evaluations (e.g., HellaSwag, ARC) for the Figure 1 model pairs to bridge the gap between perplexity and practical utility.
-5. Clarify the compression rate definition early in the paper to avoid confusion with conventional compression metrics.
+
+1. Run a small number of schedule variations (e.g., 0%, 25%, 50% dense compute) for the 58M or 468M model at one representative sparsity level (e.g., 60%) to validate that the 25/50/25 prescription generalizes.
+2. Perform a leave-one-out cross-validation on the scaling law data: fit on 2 model sizes and predict the 3rd; report prediction errors.
+3. Soften the "analytical derivation" language in Section 5.2 to "theoretical motivation" or "heuristic justification."
+4. Qualify the "lossless compression" claim explicitly (e.g., "lossless with respect to validation perplexity on C4").
+5. Report the fitted parameter values (A, B, E, α, β) for reproducibility.
 
 ## Score and Decision
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+
+This paper makes a solid empirical contribution: it proposes a simple, unified scaling law for dense and sparse pre-training, validates it across 30 configurations with good fit quality, and identifies an actionable optimal schedule through systematic search. The weaknesses are real — the schedule is validated on only one model size, the scaling law covers a narrow size range (~8×), and the theoretical section overreaches — but none are fatal to the core claims. The main empirical findings are well-supported by the experiments presented, and the paper is transparent about its limitations. With the suggested additions (particularly schedule validation on another size and scaling law cross-validation), the paper would be a strong contribution.
+
+**Originality**: Good — the average-active-parameter framing is a novel perspective that unifies prior dense and sparse scaling laws.
+**Quality**: Solid — careful experimental design, systematic sweeps, honest limitations.
+**Clarity**: Generally clear, with minor exposition issues in the theory section.
+**Significance**: Useful for practitioners working on efficient LLM training and for researchers studying scaling laws.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

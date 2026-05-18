@@ -1,79 +1,72 @@
-Here is my consolidated meta-review.
+Now I have all the information I need. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper introduces 3D Intention Grounding (3D-IG), a new task in 3D object detection where the model must infer the desired object from a free-form human intention text (e.g., "I need a place to sit down and relax" → all chair instances) rather than from a referential description. The authors contribute the Intent3D dataset (44,990 intention texts over 209 fine-grained classes from 1,042 ScanNet scenes), benchmark several categories of baselines (expert, foundation, LLM-based), and propose IntentNet, a method combining verb-object alignment, candidate box matching, and cascaded adaptive learning.
+This paper introduces 3D Intention Grounding (3D-IG), a new task where AI agents must detect objects in 3D scenes based solely on human intention text (e.g., "I want something to support my back") rather than referential descriptions that name the target category, attributes, or location. The authors construct the Intent3D dataset (44,990 intention texts, 209 classes, 1,042 ScanNet scenes) using ChatGPT with carefully designed prompts, establish baselines across three method families (expert models, foundation model, LLM-based model), and propose IntentNet — a method that introduces Verb-Object Alignment and Cascaded Adaptive Learning to handle the unique structure of intention language.
 
 ## Strengths
 
-- **Well-motivated new task formulation**: The paper clearly distinguishes 3D Intention Grounding from 3D Visual Grounding (Figure 1, Section 1). The argument that 3D-VG requires humans to observe, reason, and provide referential descriptions—which is impractical in scenarios like visual impairment or intensive activities—is compelling and makes a strong case for the AI performing this reasoning autonomously.
+- **Novel task formulation with clear practical motivation**: The paper identifies a genuine gap — current 3D-VG requires the human to observe and reason before providing a reference, which is impractical when users are visually impaired, engaged in intensive activities, or otherwise unable to articulate referential descriptions. 3D-IG shifts this reasoning burden to the AI, which is a meaningful and well-motivated redefinition.
 
-- **Carefully constructed Intent3D dataset with strong diversity**: The dataset generation pipeline (Section 3.2) applies three object selection criteria (common, non-trivial, unambiguous), uses ChatGPT with a carefully designed prompt that avoids referential leakage, and includes manual cleaning. The resulting 44,990 texts span 209 classes with 1,568 unique verbs and 2,894 unique nouns (Figure 3), demonstrating the linguistic richness needed for the task.
+- **Large-scale, linguistically diverse dataset**: Intent3D contains 44,990 texts with 1,568 distinct verbs and 2,894 distinct nouns (Figure 2), demonstrating far richer language diversity than existing referential 3D-VG datasets. The construction pipeline (object selection with three filtering criteria, prompt design that explicitly forbids category/location/attribute disclosure, manual cleaning) is well-documented and produces texts that genuinely require independent reasoning.
 
-- **Comprehensive baselines across method categories**: The paper evaluates three distinct types of language-based 3D object detection methods—expert models (BUTD-DETR, EDA), a foundation model (3D-VisTA), and an LLM-based model (Chat-3D v2)—under multiple regimes (training from scratch, fine-tuning, zero-shot) as described in Section 5.1 and Tables 2-3. This provides a solid reference for future work on this task.
+- **IntentNet's Verb-Object Alignment directly addresses the linguistic structure of intention language**: Unlike referential language where the target is typically a single noun, intention language requires understanding multiple verb–object pairs. IntentNet models this explicitly through verb position prediction ($L_{vPos}$), query-verb contrastive learning ($L_{vSem}$), and verb-modulated query-object alignment ($L_{voSem}$). Ablation (Table 4) confirms removing Verb drops Top1-Acc@0.25 from 58.34% to 53.09%, establishing its critical role.
 
-- **IntentNet achieves large and consistent improvements**: On the test set (Table 3), IntentNet outperforms the second-best method by +11.06% Top1-Acc@0.25 and +6.72% AP@0.25, despite using a weaker detector (GroupFree) than the 3D-VisTA baseline (Mask3D). This suggests the proposed components are genuinely effective.
+- **Strong and consistent quantitative improvements across multiple metrics and thresholds**: IntentNet outperforms the best baseline (BUTD-DETR) by +11.22% Top1-Acc@0.25 and +8.05% Top1-Acc@0.5 on the val set, with similar margins on the test set (+11.06% and +10.84%). The method also achieves substantial AP gains (e.g., 27.60% AP@0.5 on test vs. the next best at 13.46%), demonstrating robustness across confidence thresholds rather than just top-1 accuracy.
 
-- **Ablation studies confirm each component contributes**: Table 4 shows that removing any of the four components (Verb alignment, Verb2Obj, MatchBox, Adaptive) causes a performance drop, with each component contributing 0.47–5.25 points to Top1-Acc@0.25. The qualitative results in Figure 5 provide visual support for these ablation findings.
+- **Comprehensive baseline coverage**: The paper evaluates four baselines spanning three distinct methodological families (expert models BUTD-DETR/EDA, foundation model 3D-VisTA, LLM-based model Chat-3D-v2 in both zero-shot and fine-tuned settings), providing a thorough and informative benchmark for the new task.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None.
+
+- **Dataset quality is insufficiently validated given its reliance on ChatGPT generation**: The manual cleaning step is described qualitatively (filtering "gibberish," discarding failed generations, recreating ambiguous cases, regenerating repeats) but never quantified — how many samples were discarded or regenerated, what error types occurred at what rates, and what fraction of the final 44,990 texts required intervention? More critically, there is no human evaluation of the intention-to-object mapping. Without measuring inter-rater agreement on whether a given intention text unambiguously maps to its intended target, the benchmark risks measuring how well models memorize ChatGPT's associations rather than genuine intention understanding. For a dataset that is one of the paper's primary contributions, this level of validation is essential and currently absent. The paper should include at minimum: (i) quantified cleaning statistics, (ii) a human agreement study on a representative sample (200–300 texts) reporting accuracy and ambiguity rates.
 
 ### Minor
-- **Cascaded Adaptive Learning is underspecified and its logic is questionable**: The mechanism is described as `f(x) = x.sigmoid() + 0.5` (Section 4.4, line 226). For non-negative loss values, this yields a scaling factor in [1.0, 1.5), so the claim "larger than 1" is slightly imprecise (equal to 1 when loss is 0). More importantly, the intended priority logic is unclear: when Loss_A (a prerequisite) is high, f(Loss_A) is also high, making Loss_B larger and *increasing* the model's attention on the downstream task before the prerequisite is learned, which seems to contradict the stated priority chain (L_{vPos}→L_{vSem}→L_{voSem}→L_{box}). The paper does not compare against simpler alternatives (fixed weighting, uncertainty weighting) or provide a theoretical/empirical justification for why the proposed scheme enforces the claimed priority. The ablation shows a small gain (57.39→58.34), so the component is not critical, but the formulation and explanation need significant clarification.
 
-- **Dataset quality lacks systematic human evaluation**: The intention texts are generated by ChatGPT with manual cleaning for gibberish and ambiguity (Section 3.2, Step 3), but there is no human evaluation of whether the resulting texts sound natural, cover realistic use cases, or are comparable in quality to human-written intentions. Given that the entire task hinges on the quality of these intention texts, some validation beyond filtering (e.g., annotator ratings on a sample) would significantly strengthen confidence in the benchmark.
+- **The task distinction from 3D Visual Grounding could be more crisply articulated**: The paper distinguishes 3D-IG from 3D-VG conceptually (Figure 1: human does the reasoning in 3D-VG vs. AI does the reasoning in 3D-IG) and operationally (the prompt explicitly forbids category, location, and attribute mentions). However, the paper does not provide explicit **linguistic criteria** for what makes an expression "intention" vs. "reference," nor does it analyze whether existing 3D-VG datasets contain any intention-like language (even if mixed with referential cues). A sharper definition and a small-scale analysis of existing 3D-VG data would help readers assess the true novelty of the task. This does not undermine the contribution — the dataset construction ensures the practical difference — but the conceptual framing would benefit from more precision.
 
-- **Ablation studies missing AP metrics**: Table 4 only reports Top1-Acc metrics for the ablation. Since the paper correctly notes that 3D-IG is multi-instance (Section 1), and since AP is the more appropriate metric for multi-instance detection, the ablation should also report AP@0.25 and AP@0.5 to show that the contributions improve detection recall and precision, not just top-1 accuracy.
+- **The Cascaded Adaptive Learning mechanism is empirically effective but its design choices are under-explained**: The method uses $f(x) = \text{sigmoid}(x) + 0.5$ to scale each loss by the preceding loss value, with a manually defined priority chain ($L_{vPos} \rightarrow L_{vSem} \rightarrow L_{voSem} \rightarrow L_{box}$). The connection to Focal Loss is tenuous (Focal Loss down-weights easy examples per-sample based on predicted probability; here, a scalar loss value scales another loss irrespective of per-example difficulty). No ablation is provided for the sigmoid offset hyperparameter (0.5), nor are simpler alternatives (fixed weighting, linear decay) compared. The ablation (Table 4, row d vs. e) shows a modest 0.95-point gain on Top1-Acc@0.25 but a notable 3.9-point gain on Top1-Acc@0.5 — the paper would benefit from analyzing *why* the improvement is concentrated at the stricter IoU threshold. This is a minor concern because the mechanism does improve results, but its design is currently a black-box heuristic.
 
-- **Ambiguous split description**: Line 130 states "each with disjoint scenes" and that "val and test sets are derived from its val split." The paper claims scenes are disjoint, which is the correct practice, but the phrasing that both val and test come from ScanNet's val split is ambiguous. The authors should clarify whether ScanNet's val scenes were partitioned into two disjoint subsets for Intent3D's val and test, as stated; the current wording could mislead readers into thinking they share scenes.
-
-- **No limitations discussion**: The paper ends with a brief conclusion (Section 6) without discussing limitations such as reliance on a pre-trained detector (GroupFree), potential parsing errors from spaCy, dataset biases from the ChatGPT generation process, or failure case analysis. Including a limitations section would improve credibility and guide future work.
-
-- **Qualitative results only for ablation, not for comparison with baselines**: Figure 5 shows ablation qualitative results, but there are no qualitative comparisons with baselines (BUTD-DETR, 3D-VisTA, etc.). Such comparisons would help illustrate *why* IntentNet outperforms prior methods.
+- **No accuracy analysis of the spaCy dependency parsing**: The Verb-Object Alignment module crucially depends on spaCy's part-of-speech tagging and dependency parsing to extract verb positions and verb-object pairs (line 196). Parsing errors on free-form, diverse intention text would cascade into noise in the training signals for $L_{vPos}$, $L_{vSem}$, and $L_{voSem}$. Reporting parsing accuracy on a sample of the dataset would improve reproducibility and help users understand potential failure modes.
 
 ### Trivial
-- The verb-object alignment depends on spaCy POS tagging (Section 4.3), but there is no discussion of how often parsing produces incorrect verb-object pairs or how this affects downstream performance.
-- The candidate box matching threshold of IoU > 0.25 (Section 4.2) is not justified; a sensitivity analysis would strengthen the paper, though this is a minor omission.
+
+- **No limitations or failure cases section**: The paper concludes abruptly (Section 6) without discussing scenarios where IntentNet performs poorly (e.g., ambiguous intentions, rare objects, scenes with many similar instances). This would be a valuable addition, especially for a new task.
 
 ## Nice-to-Haves
-- A small human evaluation (e.g., 200 samples rated for naturalness by annotators) to validate the quality of ChatGPT-generated intentions.
-- AP metrics in the ablation table (Table 4) to complement the Top1-Acc results.
-- Qualitative comparisons with baselines to complement the ablation visualizations.
+
+- **A simple two-stage baseline** that (i) classifies the intention text into an object category (e.g., using a text encoder trained on the 209 fine-grained classes) and then (ii) detects all instances of that category using a pretrained 3D detector. This would separate intention understanding from detection and reveal whether the primary difficulty is in mapping intention to category, localizing multiple instances, or both. Such a baseline would help readers gauge where IntentNet's Verb-Object Alignment actually contributes.
+
+- **Comparison with simpler alternatives for the cascaded adaptive learning** (e.g., fixed weighting, linear decay, or gradient normalization) to better justify the specific design choice.
+
+- **Statistical significance reporting** (variance across runs) would be good practice, though the large performance gaps make this less critical.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution:
 
-1. **"Val/test splits share scenes — structural flaw"**: The reviewer claimed val and test share ScanNet scenes and are not disjoint. However, the paper explicitly states "each with disjoint scenes" (line 130). The reviewer's reading contradicts the paper's explicit claim. If the authors indeed partitioned ScanNet's val scenes into disjoint subsets (as stated), this criticism is invalid. I have moved this from "Fatal" to "Minor" as a clarification point rather than a structural flaw.
-
-2. **"Factor can be as low as 0.5"**: The reviewer claimed `sigmoid(x)+0.5` can be as low as 0.5, which would *downweight* the subsequent loss. However, x = Loss_A is a non-negative loss value, so sigmoid(x) ∈ [0.5, 1), giving f(x) ∈ [1.0, 1.5). The factor is always ≥ 1. The paper's claim of "larger than 1" is technically imprecise only at Loss_A=0 (factor = 1.0). The reviewer's stronger mathematical criticism is factually incorrect for the losses used.
-
-3. **"Code not included / reproducibility concern"**: The paper promises code and model release upon acceptance (line 38), which is standard practice. Per evaluation norms, code unavailability at submission time is not a valid weakness for a double-blind review.
-
-4. **"Non-trivial Objects bias"**: The reviewer's criticism that selecting categories with fewer than six instances per scene "may bias the dataset toward rare objects, making the task artificially harder or easier" is vague and the paper explicitly justifies this as "enhancing the challenge." This is a design choice, not a weakness.
-
-5. **"Unambiguous Objects — how many were removed?"**: While quantifying removed objects would improve reproducibility, this is a minor documentation detail rather than a substantive weakness.
+- **"The test set derives from ScanNet's val split" criticism**: The paper explicitly acknowledges this in Section 3.3 (line 130: "Our train set comes from ScanNet's train split, while the val and test sets are derived from its val split"). This is transparently disclosed, not a weakness. Removed per rule: factual correctness.
+- **"LLM-based model's low AP may be due to ad-hoc confidence scoring"**: The reviewer acknowledges this as a limitation of the baseline, not a flaw in the paper. The paper already discusses this (line 319: "due to hallucination problems in the LLM..."). Removed per rule: the paper already addresses this.
+- **Strength about Cascaded Adaptive Learning being "principled"**: Conflicts with the verified weakness that the mechanism is under-justified. Per rule: when strength and weakness disagree, weakness wins. Dropped.
 
 ## Novel Insights
 
-The most interesting observation emerges from comparing the cascaded adaptive learning's behavior (Section 4.4) against the baselines. The large performance gap between IntentNet and 3D-VisTA (+6.72% AP@0.25 despite using a weaker detector) suggests that explicit modeling of verb-object structure in intention language—rather than generic multimodal fusion—is the key driver of performance. This is non-trivial because it shows that intention grounding benefits from linguistic structure analysis (verbs → objects) in a way that referential grounding (which focuses on nouns and spatial relations) does not. However, the cascaded adaptive mechanism itself is the weakest part of the method and its ablation gain (0.95 points) is smaller than the other components, so the paper's strongest empirical signal is the verb-object alignment, not the cascaded optimization.
+None beyond the paper's own contributions. The reviews surface a tension worth noting: the paper's core contributions are the task and dataset, yet the dataset quality validation (the primary concern) is the least-developed part of the paper, while the method (IntentNet) — arguably secondary to the task definition — is more thoroughly evaluated. Addressing dataset validation would significantly strengthen an already sound contribution.
 
 ## Suggestions
 
-1. **Clarify the data split**: Explicitly state that ScanNet's validation scenes were partitioned into two disjoint subsets for Intent3D's val and test sets, confirming the claim "each with disjoint scenes."
-2. **Fix or remove the cascaded adaptive learning**: Either provide a clear justification for why scaling Loss_B up when Loss_A is high enforces the claimed priority (or explain it as loss-balancing rather than strict prioritization), or simplify the loss weighting scheme. The current description is confusing and the gain is marginal.
-3. **Add AP to the ablation table**: This is important because 3D-IG is multi-instance and AP is the more informative metric.
-4. **Add a limitations section**: Discuss failure cases, dependence on the pre-trained detector, potential spaCy parsing errors, and dataset biases.
-5. **Consider a small human evaluation** of generated intention texts to validate dataset quality.
+1. **Quantify the data cleaning process**: Report the number/percentage of samples discarded, regenerated, and manually corrected, along with error type categories. This establishes trust in dataset quality.
+2. **Conduct and report a human agreement study**: For a random sample of 200–300 intention texts, have multiple annotators identify the intended target object and report inter-rater agreement and ambiguity rates. This grounds the task's difficulty and validates that the intention-to-object mapping is reasonably unambiguous.
+3. **Sharpen the task definition**: Provide explicit linguistic criteria for what constitutes an "intention" expression vs. a "referential" expression. Consider annotating a subset of 3D-VG benchmarks to demonstrate that intention-like language is absent or rare there.
+4. **Analyze spaCy parsing accuracy on a sample of intention texts** to quantify the noise introduced into Verb-Object Alignment training signals.
+5. **Add a limitations/discussion section** covering failure cases, ambiguous intentions, and scenarios where IntentNet struggles.
 
 ## Score and Decision
 
-This paper introduces a genuinely new and well-motivated task, a carefully constructed dataset, thorough baselines, and a method that demonstrates strong empirical results. The weaknesses are mostly about clarity, missing details, and an underspecified loss mechanism—none are fatal. The core contributions (task definition, dataset, and benchmark) are solid. With clarifications on the split and loss mechanism, plus minor additions to the ablation and limitations, this paper would be a valuable contribution to the community.
+The paper introduces a genuinely new task and a large-scale dataset, proposes a well-motivated method that substantially outperforms adapted baselines, and provides a comprehensive evaluation. The main concern is insufficient validation of dataset quality (the ChatGPT-generated texts), which is a significant gap for a dataset-centered contribution but fixable with additional analysis. The task novelty and methodological weaknesses are minor and do not threaten the core contribution. 
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

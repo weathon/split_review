@@ -1,0 +1,556 @@
+\title{LogicMP: A Neuro-symbolic Approach for Encoding First-order Logic Constraints}
+
+\begin{abstract}
+Integrating first-order logic constraints (FOLCs) with neural networks is a crucial but challenging problem since it involves modeling intricate correlations to satisfy the constraints.
+This paper proposes a novel neural layer, LogicMP, which performs mean-field variational inference over a Markov Logic Network (MLN).
+It can be plugged into any off-the-shelf neural network to encode FOLCs while retaining modularity and efficiency.
+By exploiting the structure and symmetries in MLNs, we theoretically demonstrate that our well-designed, efficient mean-field iterations greatly mitigate the difficulty of MLN inference, reducing the inference from sequential calculation to a series of parallel tensor operations.
+Empirical results in three kinds of tasks over images, graphs, and text show that LogicMP outperforms advanced competitors in both performance and efficiency.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+The deep learning field has made remarkable progress in the last decade, owing to the creation of neural networks (NNs)~\citep{Goodfellow-et-al-2016,vaswani2017attention}.
+They typically use a feed-forward architecture, where interactions occur implicitly in the middle layers with the help of various neural mechanisms.
+However, these interactions do not explicitly impose logical constraints among prediction variables, resulting in predictions that often do not meet the structural requirements. 
+
+\begin{figure}[htp]
+     \centering
+     \begin{subfigure}[b]{0.18\textwidth}
+         \centering
+         \includegraphics[width=\textwidth, height=1.0\textwidth]{figures/cases/83624198.pdf}
+         \caption{Input Image}
+         \label{fig:caseinput}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.18\textwidth}
+         \centering
+         \includegraphics[width=\textwidth, height=1.0\textwidth]{figures/cases/83624198.gt.pdf}
+         \caption{Ground Truth}
+         \label{fig:casegt}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.18\textwidth}
+         \centering
+         \includegraphics[width=\textwidth, height=1.0\textwidth]{figures/cases/83624198.base.pdf}
+         \caption{LayoutLM}
+         \label{fig:casebase}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.18\textwidth}
+         \centering
+         \includegraphics[width=\textwidth, height=1.0\textwidth]{figures/cases/83624198.semanticloss.pdf}
+         \caption{SLrelax}
+         \label{fig:casesemanticloss}
+     \end{subfigure}
+     \hfill
+     \begin{subfigure}[b]{0.18\textwidth}
+         \centering
+         \includegraphics[width=\textwidth, height=1.0\textwidth]{figures/cases/83624198.logicmp.pdf}
+         \caption{LogicMP}
+         \label{fig:caselogicmp}
+     \end{subfigure}
+        \caption{
+The document understanding task predicts whether every two tokens coexist in the same block in an input document image (\textbf{a}).
+The FOLC regarding the transitivity of coexistence can be used to obtain the structured output.
+The ground truth (\textbf{b}) typically forms several squares for the segments.
+Both NN~\citep{DBLP:conf/kdd/XuL0HW020} (\textbf{c}) and advanced method~\citep{DBLP:conf/icml/XuZFLB18} (\textbf{d}) struggle to meet the FOLC where many $\mathtt{coexist}$ variables are incorrectly predicted.
+In contrast, LogicMP (\textbf{e}) is effective while maintaining modularity and efficiency. 
+See \textcolor{cfcolor}{Sec.~\ref{sec:exp}} for complete experimental details.}
+\label{fig:case}
+\end{figure}
+This paper investigates the problem of incorporating \textit{first-order logic constraints} (FOLCs) into neural networks.
+An example of FOLCs can be found in the document understanding task~\citep{DBLP:conf/icdar/JaumeET19}, which aims to segment the given tokens into blocks for a document image (\textcolor{cfcolor}{Fig.~\ref{fig:case}(a)}).
+We formalize the task into the binary coexistence prediction of token pairs $\mathtt{C}(a, b) \in \{0, 1\}$ where $\mathtt{C}$ denotes the co-existence of tokens $a, b$ (\textcolor{cfcolor}{Fig.~\ref{fig:case}(b)}).
+There is a FOLC about the transitivity of coexistence predictions: when tokens $a$ and $b$ coexist in the same block, and tokens $b$ and $c$ coexist in the same block, then $a$ and $c$ must coexist, i.e., $\forall a, b, c: \mathtt{C}(a, b) \wedge \mathtt{C}(b, c) \implies \mathtt{C}(a, c)$, to which we refer as ``transitivity rule''.
+NNs generally predict $\mathtt{C}(\cdot,\cdot)$ independently, failing to meet this FOLC (\textcolor{cfcolor}{Fig.~\ref{fig:case}(c)}), and the same applies to the advanced regularization method~\citep{DBLP:conf/icml/XuZFLB18} (\textcolor{cfcolor}{Fig.~\ref{fig:case}(d)}).
+We aim to incorporate the transitivity rule into NNs so that the predicted result satisfies the logical constraint (\textcolor{cfcolor}{Fig.~\ref{fig:case}(e)}).
+FOLCs are also critical in many other real-world tasks, ranging from collective classification tasks over graphs~\citep{richardson2006markov,singla2005discriminative} to structured prediction over text~\citep{DBLP:conf/conll/SangM03}.
+
+Incorporating such FOLCs into neural networks is a long-standing challenge.
+The main difficulty lies in modeling intricate variable dependencies among massive propositional groundings.
+For instance, for the transitivity rule with 512 tokens, 262K coexistence variables are mutually dependent in 134M groundings.
+Essentially, modeling FOLCs involves the weighted first-order model counting (WFOMC) problem, which has been extensively studied in the previous literature~\citep{DBLP:conf/aaai/BroeckD12,dalvi2013dichotomy,DBLP:conf/aaai/GribkoffBS14}.
+However, it is proved \#P-complete for even moderately complicated FOLCs~\citep{dalvi2013dichotomy}, such as the transitivity rule mentioned above.
+
+Markov Logic Networks (MLNs)~\citep{richardson2006markov} are a common approach to modeling FOLCs, which use joint potentials to measure the satisfaction of the first-order logic rules.
+MLN is inherited from WFOMC, and is difficult to achieve exact inference~\citep{DBLP:conf/aaai/GribkoffBS14}.
+Although MLN formalization allows for approximate inference, MLNs have long suffered from the absence of efficient inference algorithms.
+Existing methods typically treat the groundings individually and fail to utilize the structure and symmetries of MLNs to accelerate computation~\citep{yedidia2000generalized,richardson2006markov,DBLP:conf/aaai/PoonD06}.
+ExpressGNN~\citep{DBLP:conf/nips/Qu019,expressgnn} attempts to combine MLNs and NNs using variational EM, but they remain inherently independent due to the inference method's inefficiency. 
+Some lifted algorithms exploit the structure of MLNs to improve efficiency but are infeasible for neural integration due to their requirements of symmetric input~\citep{DBLP:conf/ijcai/BrazAR05,DBLP:conf/aaai/SinglaD08,DBLP:conf/starai/Niepert12} or specific rules~\citep{DBLP:conf/aaai/BroeckD12,DBLP:conf/aaai/GribkoffBS14}.
+\begin{figure}
+\centering
+\includegraphics[width=0.95\textwidth]{figures/illustrate.pdf}
+\caption{
+\textbf{A high-level view of LogicMP.}
+NNs typically use the softmax layer for independent prediction (\textbf{left}), which can be replaced by a LogicMP encoding FOLCs (\textbf{middle}). 
+LogicMP is implemented (\textbf{right}) by efficient mean-field iterations which leverage the structure of MLN (\textcolor{cfcolor}{Sec.~\ref{sec:logicmp}}).
+}
+\label{fig:illustrate}
+\end{figure}
+
+This paper proposes a novel approach called \textit{\textbf{Logic}al \textbf{M}essage \textbf{P}assing} (LogicMP) for general-purpose FOLCs.
+It is an efficient MLN inference algorithm and can be seamlessly integrated with any off-the-shelf NNs, positioning it as a neuro-symbolic approach.
+Notably, it capitalizes on the benefits of parallel tensor computation for efficiency and the plug-and-play principle for modularity. 
+\textcolor{cfcolor}{Fig.~\ref{fig:illustrate}} illustrates the computational graph of LogicMP. 
+Bare NNs (\textcolor{cfcolor}{Fig.~\ref{fig:illustrate}a}) predict each output variable independently. 
+LogicMP can be stacked on top of any encoding network as an efficient modular neural layer that enforces FOLCs in prediction (\textcolor{cfcolor}{Fig.~\ref{fig:illustrate}b}).
+Specifically, LogicMP introduces an efficient mean-field (MF) iteration algorithm for MLN inference (\textcolor{cfcolor}{Fig.~\ref{fig:illustrate}c}). This MF algorithm enables LogicMP's outputs to approximate the variational approximation of MLNs, ensuring that FOLCs can be encoded into LogicMP's inputs. In contrast to vanilla MF algorithms that rely on inefficient sequential operations~\citep{DBLP:journals/ftml/WainwrightJ08,koller2009probabilistic}, our well-designed MF iterations can be formalized as Einstein summation, thereby supporting parallel tensor computation. This formalization benefits from our exploitation of the structure and symmetries of MLNs (\textcolor{cfcolor}{Sec.~\ref{sec:einsum}}), which is supported by theoretical guarantees (\textcolor{cfcolor}{Sec.~\ref{sec:reduce}}).
+In \textcolor{cfcolor}{Sec.~\ref{sec:exp}}, we demonstrate the versatility of LogicMP by evaluating its performance on various real-world tasks from three domains: visual document understanding over images, collective classification over graphs, and sequential labeling over text.
+First, we evaluate LogicMP on a real-world document understanding benchmark dataset (FUNSD)~\citep{DBLP:conf/icdar/JaumeET19} with up to 262K mutually-dependent variables and show that it outperforms previous state-of-the-art methods (\textcolor{cfcolor}{Sec.~\ref{sec:expimage}}).
+Notably, the results demonstrate that LogicMP can lead to evident improvements even when imposing a single FOLC on prediction variables, which is beyond the capacity of existing methods using arithmetic circuits (ACs).
+For the second task (\textcolor{cfcolor}{Sec.~\ref{sec:expgraph}}), we conduct experiments on relatively large datasets in the MLN literature, including UW-CSE~\citep{richardson2006markov} and Cora~\citep{singla2005discriminative}.
+Our results show that LogicMP significantly speeds up by about 10x compared to competitive MLN inference methods, which enables larger-scale training for better performance.
+Finally, we evaluate LogicMP on a sequence labeling task (CoNLL-2003)~\citep{DBLP:conf/conll/SangM03} and show that it can leverage task-specific rules to improve performance over competitors (\textcolor{cfcolor}{Sec.~\ref{sec:exptext}}).
+
+\textbf{Contributions.} 
+We: 
+\textbf{(\textit{i})} Present a novel, modular, and efficient neural layer LogicMP, the first fully differentiable neuro-symbolic approach capable of encoding FOLCs for arbitrary neural networks.
+\textbf{(\textit{ii})} Design an accelerated mean-field algorithm for MLN inference that leverages the structure and symmetries in MLNs, formalizing it to parallel computation with a reduced complexity from $\mathcal{O}(N^ML^2D^{L-1})$ to $\mathcal{O}(N^{M'}L^2)$ ($M'\le M$) (\textcolor{cfcolor}{Sec.~\ref{sec:logicmp}}). For instance, LogicMP can incorporate FOLCs with up to 262K variables within 0.03 seconds, where AC-based methods fail during compilation. %For collective classification task, we obtain 10X acceleration against previous competitors.
+\textbf{(\textit{iii})} Demonstrate its effectiveness and versatility in challenging tasks over images, graphs, and text, where LogicMP outperforms state-of-the-art neuro-symbolic approaches, often by a noticeable margin.
+
+
+\section{Markov Logic Networks}
+
+An MLN is built upon a knowledge base (KB) $\{E, R, O\}$ consisting of a set $E=\{e_k\}_k$ of entities, a set $R=\{r_k\}_k$ of predicates, and a set $O$ of observation.
+Entities are also called constants (e.g., tokens).
+Each \textbf{predicate} represents a property or a relation, e.g., $\mathtt{coexist}$ ($\mathtt{C}$).
+With particular entities assigned to a predicate, we obtain a \textbf{ground atom}, e.g., $\mathtt{C}(e_1, e_2)$ where $e_1$ and $e_2$ are two tokens.
+For a ground atom $i$,  we use a random variable $v_i$ in the MLN to denote its status, e.g.,  $v_{\mathtt{C}(e_1,e_2)} \in \{0, 1\}$ denoting whether $e_1$ and $e_2$ coexist.
+The MLN is defined over all variables $\{v_i\}_i$ and a set of first-order logic formulas $F$.
+Each formula $f\in F$ represents the correlation among the variables, e.g., $\forall a, b, c: \mathtt{C}(a, b) \wedge \mathtt{C}(b, c) \implies \mathtt{C}(a,c)$  which equals to  $\forall a, b, c: \neg \mathtt{C}(a,b) \vee \neg\mathtt{C}(b,c) \vee \mathtt{C}(a,c)$ by De Morgan's law. 
+With particular entities assigned to the formula, we obtain a ground formula, aka \textbf{grounding}, e.g., $\neg \mathtt{C}(e_1,e_2) \vee \neg\mathtt{C}(e_2,e_3) \vee \mathtt{C}(e_1,e_3)$.  
+For a grounding $g$, we use $\textbf{v}_g$ to denote the variables in $g$, e.g., $\{v_{\mathtt{C}(e_1,e_2)},v_{\mathtt{C}(e_1, e_2)},v_{\mathtt{C}(e_1,e_3)}\}$.
+In MLN, each $f$ is associated with a weight $w_f$ and a potential function $\phi_f(\cdot): \mathbf{v}_g\mapsto \{0, 1\}$ that checks whether the formula is satisfied in $g$.
+For each formula $f$, we can obtain a set of groundings $G_f$ by enumerating all assignments. 
+We adopt the open-world assumption (OWA) and jointly infer all \textbf{unobserved facts}.
+
+Based on the KB and formulas, we express the MLN as follows:
+\begin{equation}
+p(\textbf{v}| O) \propto \exp(\underbrace{\sum_{i} \phi_u(v_i)}_{neural\ semantics} + \underbrace{\sum_{f\in F} w_f \sum_{g \in G_f} \phi_f(\textbf{v}_g))}_{symbolic\ FOLCs}\,,
+\label{equ:mln}
+\end{equation}
+where $\mathbf{v}$ is the set of unobserved variables.
+The second term is for symbolic FOLCs, where $\sum_{g \in G_f} \phi_f(\textbf{v}_g)$ measures the number of satisfied groundings of $f$.
+We explicitly express the first term to model the evidence of single ground atom $i$ in status $v_i$ using the unary potential $\phi_u(\cdot): v_i \mapsto \mathcal{R}$.
+By parameterizing $\phi_u$ with an NN, this formulation enables semantic representation, allowing external features, such as pixel values of an image, to be incorporated in addition to the KB.
+Note that $\phi_u$ varies with different $i$, but for the sake of simplicity, we omit $i$ in the notation.
+
+\subsection{Mean-field Iteration for MLN Inference}
+\label{sec:mf}
+The MLN inference is a persistent and challenging problem, as emphasized in~\citep{domingos2019unifying}.
+In an effort to address this issue, we draw inspiration from CRFasRNN~\citep{DBLP:conf/iccv/0001JRVSDHT15} and employ the MF algorithm~\citep{DBLP:journals/ftml/WainwrightJ08,koller2009probabilistic} to mitigate the inference difficulty, which breaks down the Markov network inference into multiple feed-forward iterations. 
+Unlike the variational EM approach~\citep{expressgnn}, which requires additional parameters, MF does not introduce any extra parameters to the model.
+
+We focus on the MLN inference problem with a fixed structure (i.e., rules).
+The MF algorithm is used for MLN inference by estimating the marginal distribution of each unobserved variable. 
+It computes a variational distribution $Q(\mathbf{v})$ that best approaches $p(\mathbf{v}|O)$, where $Q(\mathbf{v})=\prod_{i} Q_i(v_i)$ is a product of independent marginal distributions over all unobserved variables.
+Specifically, it uses multiple \textbf{mean-field iterations} to update all $Q_i$ until convergence.
+Each mean-field iteration updates the $Q_i$ in closed-form to minimize $D_{KL}(Q(\mathbf{v})||p(\mathbf{v}|O))$ as follows (see derivation in \textcolor{appcolor}{App.~\ref{app:meanfield}}):
+\begin{equation}
+\begin{aligned}
+Q_i(v_i) &\gets \frac{1}{Z_i} \exp(\phi_u(v_i) + \sum_{f\in F} w_f \sum_{g\in G_f(i)} \hat{Q}_{i, g}(v_i))  \,, \label{equ:meanfield} \\
+\end{aligned}
+\end{equation}
+where $Z_i$ is the partition function, $G_f(i)$ is the groundings of $f$ that involve the ground atom $i$, and
+\begin{equation}
+\begin{aligned}
+\hat{Q}_{i, g}(v_i)&\gets \sum_{\mathbf{v}_{g_{-i}}} \phi_f(v_i, \mathbf{v}_{g_{-i}})\prod_{j \in {g_{-i}}} Q_j(v_j) \, \label{equ:grounding}
+\end{aligned}
+\end{equation}
+ is the \textbf{grounding message} that conveys information from the variables ${g_{-i}}$ to the variable $i$ w.r.t. the grounding $g$.
+${g_{-i}}$ denotes the ground atoms in $g$ except $i$, e.g., ${g_{-\mathtt{C}(e_1,e_3)}}=\{{\mathtt{C}(e_1,e_2)},{\mathtt{C}(e_2,e_3)}\}$.
+
+\subsection{Computational Complexity Analysis}
+\textbf{Complexity Notation.} Although MF simplifies MLN inference, vanilla iteration remains computationally expensive, with its exponential complexity in the arity and length of formulas.
+Let us examine the time complexity of a single iteration using \textcolor{cfcolor}{Eq.~\ref{equ:meanfield}}.
+Denote $N$ as the number of constants in $E$, $M=\max_f |\mathcal{A}^f|$ as the maximum arity of formulas, $L=\max_f |f|$ as the maximum length (number of atoms) of formulas, and $D$ as the maximum number of labels of predicates (for typical binary predicates, $D=2$; while for multi-class predicates in many tasks, $D$ may be large).
+
+\textbf{Expectation calculation of grounding message.} 
+The computation of grounding message $\hat{Q}_{i,g}(v_i)$ in \textcolor{cfcolor}{Eq.~\ref{equ:grounding}} involves multiplying $\prod_{j \in {g_{-i}}}Q_j(v_j)$ (which is $\mathcal{O}(L)$) for all possible values of $\mathbf{v}_{g_{-i}}$ (which is $\mathcal{O}(D^{L-1})$), resulting in a complexity of $\mathcal{O}(LD^{L-1})$.
+When $D$ is large, $D^{L-1}$ is essential.
+
+\textbf{Aggregation of massive groundings.}
+Since the number of groundings $|G_f|$ is $\mathcal{O}(N^M)$, and a grounding generates grounding messages for all involved variables, we have $\mathcal{O}(N^ML)$ grounding messages.
+With the complexity of computing a grounding message being $\mathcal{O}(LD^{L-1})$, the total time complexity of an MF iteration in \textcolor{cfcolor}{Eq.~\ref{equ:meanfield}} is $\mathcal{O}(N^ML^2D^{L-1})$, which is exponential in $M$ and $L$.
+
+
+
+\section{Efficient Mean-field Iteration via LogicMP}
+
+\label{sec:logicmp}
+
+We make two non-trivial improvements on the vanilla MF iteration, enabling LogicMP to perform efficient MLN inference. 
+(1) We find that the calculation of a single grounding message in \textcolor{cfcolor}{Eq.~\ref{equ:grounding}} contains considerable unnecessary computations and its time complexity can be greatly reduced (\textcolor{cfcolor}{Sec.~\ref{sec:reduce}}). 
+(2) We further exploit the structure and symmetries in MLN to show that the grounding message aggregation in \textcolor{cfcolor}{Eq.~\ref{equ:meanfield}} can be formalized with Einstein summation notation. 
+As a result, MF iterations can be efficiently implemented via parallel tensor operations, which fundamentally accelerates vanilla sequential calculations (\textcolor{cfcolor}{Sec.~\ref{sec:einsum}}).
+In the following, we will introduce several concepts of mathematical logic, such as clauses and implications (see more details in \textcolor{appcolor}{App.~\ref{app:terminology}}).
+
+\begin{figure}
+\begin{minipage}{0.25\textwidth}
+\captionsetup{type=table} %% tell latex to change to table
+\centering
+\scriptsize
+\caption{For the grounding message of $g$ w.r.t $\mathtt{C}(e_1,e_2) \wedge \mathtt{C}(e_2,e_3) \Rightarrow \mathtt{C}(e_1,e_3)$, only one assignment of $g_{-\mathtt{C}(e_1,e_3)}$ makes difference to $\mathtt{C}(e_1,e_3)$, i.e., useful. }\label{tab:reduce}
+\begin{tabular}{@{}c|c|rr|r@{}}
+\toprule
+\multicolumn{2}{l}{\multirow{2}{*}{$\phi_f(v_g)$}} & \multicolumn{2}{|c|}{$v_{\mathtt{C}(e_1,e_3)}$} & \multirow{2}{*}{\rotatebox{90}{useful}} \\ \cmidrule{3-4}
+\multicolumn{2}{l|}{}               & $0$ & $1$ &        \\ \midrule
+\multirow{4}{*}{\rotatebox{90}{$g_{-\mathtt{C}(e_1,e_3)}$}} & $(0, 0)$ & \multicolumn{2}{c|}{$1= 1$} & \XMARK \\ \cmidrule{2-5}
+                          & $(0, 1)$ & \multicolumn{2}{c|}{$1=1$} & \XMARK \\ \cmidrule{2-5}
+                          & $(1, 0)$ & \multicolumn{2}{c|}{$1=1$} & \XMARK \\ \cmidrule{2-5}
+                          & $(1, 1)$ & \multicolumn{2}{c|}{$0\neq1$} & \CMARK \\ \bottomrule
+\end{tabular}
+\end{minipage}
+\hfill
+\begin{minipage}{0.70\textwidth}
+\centering
+\includegraphics[width=\textwidth,height=0.43\textwidth]{figures/logicmp-iclr2024.pdf}
+\caption{Instead of sequentially generating groundings (\textbf{left}), we exploit the structure of rules and formalize the MF iteration into Einstein summation notation, which enables parallel computation (\textbf{right}).}\label{fig:einsum}
+\end{minipage}
+\end{figure}
+\subsection{Less Computation per Grounding Message}
+\label{sec:reduce} 
+\textbf{Clauses} are the basic formulas that can be expressed as the disjunction of literals, e.g., $f:= \forall a, b, c:\neg\mathtt{C}(a,b) \vee \neg\mathtt{C}(b, c) \vee \mathtt{C}(a,c)$. 
+For convenience, we explicitly write the clause as $f(\cdot; \mathbf{n})$ where $n_i$ is the preceding negation of atom $i$ in the clause $f$, e.g., $n_{\mathtt{C}(a,b)}=1$ due to the $\neg$ ahead of $\mathtt{C}(a,b)$.
+A clause corresponds to several equivalent \textbf{implications} where the premise implies the hypothesis, e.g.,  $\mathtt{C}(a,b) \wedge \mathtt{C}(b, c) \implies \mathtt{C}(a,c)$,  $\mathtt{C}(a,b) \wedge \neg\mathtt{C}(a,c) \implies \neg\mathtt{C}(b, c)$, and $\mathtt{C}(b,c) \wedge \neg\mathtt{C}(a,c) \implies \neg\mathtt{C}(a,b)$. 
+Intuitively, the grounding message $\hat{Q}_{i, g}$ in \textcolor{cfcolor}{Eq.~\ref{equ:grounding}} w.r.t. $g_{-i} \to i$ corresponds to an implication (e.g., $\mathtt{C}(e_1,e_2) \wedge \mathtt{C}(e_2, e_3) \implies \mathtt{C}(e_1,e_3)$). 
+Since the grounding affects $i$ only when the premise $g_{-i}$ is true, most assignments of $\mathbf{v}_{g_{-i}}$ that result in false premises can be ruled out in $\sum_{\mathbf{v}_{g_{-i}}}$ in \textcolor{cfcolor}{Eq.~\ref{equ:grounding}}.
+\begin{theorem}
+(Message of clause considers true premise only.)
+For a clause formula $f(\cdot; \mathbf{n})$, the MF iteration of \textcolor{cfcolor}{Eq.~\ref{equ:meanfield}} is equivalent for $
+\hat{Q}_{i,g} (v_i) \gets \1_{v_i=\neg n_i} \prod_{j \in {g_{-i}}} Q_j(v_j=n_j)$. % where $\1$ returns 1 if $v_i=\neg n_i$.
+\label{theorem:premise}
+\end{theorem}
+The proof can be found in \textcolor{appcolor}{App.~\ref{app:theorem}}. 
+\textcolor{cfcolor}{Table~\ref{tab:reduce}} briefly illustrates the idea of the proof: for assignments of $g_{-i}$ resulting in false premises, the potential can be ruled out since it makes no difference for various assignments of the hypothesis $i$. 
+Therefore, only the true premise $\{v_j=n_j\}_{j\in {g_{-i}}}$ needs to be considered.
+Compared to \textcolor{cfcolor}{Eq.~\ref{equ:grounding}}, the complexity is reduced from $\mathcal{O}(LD^{L-1})$ to $\mathcal{O}(L)$.
+The formulas in conjunctive normal form (CNF) are the conjunction of clauses.
+The simplification can also be generalized to CNF for $\mathcal{O}(L)$ complexity.
+The following theorem demonstrates this claim:
+\begin{theorem}
+(Message of CNF = $\sum$ message of clause.)
+For a CNF formula with distinct clauses $f_k(\cdot; \mathbf{n})$, 
+the MF iteration of \textcolor{cfcolor}{Eq.~\ref{equ:meanfield}} is equivalent for $\hat{Q}_{i,g}(v_i)\gets \sum_{{f_k}} \1_{v_i=\neg n_i} \prod_{j \in {g_{-i}}}{Q_j(v_j=n_j)}$.
+\label{theorem:cnf}
+\end{theorem}
+See \textcolor{appcolor}{App.~\ref{app:cnf}} for proof. 
+This theorem indicates that the message of CNF can be decomposed into several messages of its clauses.
+Therefore, we only need to consider the clause formulas. 
+We also generalize the theorem for the formulas with multi-class predicates to benefit general tasks (\textcolor{appcolor}{App.~\ref{app:multiclass}}). 
+\subsection{Parallel Aggregation using Einstein Summation}
+\label{sec:einsum}
+
+This subsection presents an efficient method for parallel message aggregation, i.e.,  $\sum_{g\in G_f(i)} \hat{Q}_{i, g}(v_i)$ in \textcolor{cfcolor}{Eq.~\ref{equ:meanfield}}. 
+In general, we can sequentially generate all propositional groundings of various formats in $G_f(i)$ to perform the aggregation. 
+However, the number of possible groundings can be enormous, on the order of $\mathcal{O}(N^M)$, and explicitly generating all groundings is infeasible in space and time. 
+By exploiting the structure of MLN and treating the grounding messages of the same first-order logic rule symmetrically, LogicMP automatically formalizes the message aggregation of first-order logic rules into \textit{Einstein summation} (Einsum) notation.
+The Einsum notation indicates that aggregation can be achieved in parallel through tensor operations, resulting in acceleration at orders of magnitude.
+
+The virtue lies in the summation of the product, i.e., $\sum_{g\in G_f(i)}\prod_{j \in {g_{-i}}} Q_j(v_j=n_j)$ by \textcolor{cfcolor}{Theorem~\ref{theorem:premise}}, which indicates that the grounding message corresponds to the implication from the premise $g_{-i}$ to the hypothesis $i$. 
+Due to the structure of MLN, many grounding messages belong to the same implication and have the calculation symmetries, so we group them by their corresponding implications. 
+The aggregation of grounding messages w.r.t. an implication amounts to integrating some rule arguments, and we can formalize the aggregation into Einsum.
+For instance, the aggregation w.r.t. the implication $\forall a, b, c: \mathtt{C}(a,b) \wedge \mathtt{C}(b, c) \implies \mathtt{C}(a,c)$ can be expressed as $\mathtt{einsum}(\text{``}ab,bc\to ac\text{''}, {\mathbf{Q}}_{\mathtt{C}}(\mathbf{1}),{\mathbf{Q}}_{\mathtt{C}}(\mathbf{1}))$ where $\mathbf{Q}_{r}(\mathbf{v}_{r})$ denotes the collection of marginals w.r.t. predicate $r$, i.e., $\mathbf{Q}_{r}(\mathbf{v}_{r})=\{{Q}_{r(\mathcal{A}_{r})}(v_{r(\mathcal{A}_{r})})\}_{\mathcal{A}_{r}}$ ($\mathcal{A}_{r}$ is the arguments of $r$).
+\textcolor{cfcolor}{Fig.~\ref{fig:einsum}} illustrates this process, where we initially group the variables by predicates and then use them to perform aggregation using parallel tensor operations (see \textcolor{appcolor}{App.~\ref{app:parallel}})
+We formalize the parallel aggregation as follows:
+\begin{proposition*}
+Let $[f, h]$ denote the implication of clause $f$ with atom $h$ being the hypothesis and ${\Phi}_u(\mathbf{v}_r)$ denote the collection of $\phi_u(v_i)$ w.r.t. predicate $r$.
+For the grounding messages w.r.t. $[f, h]$ of a clause $f(\mathcal{A}^f;\mathbf{n}^f)$ to its atom $h$ with arguments $\mathcal{A}^f$, their aggregation is equivalent to: 
+\begin{equation}
+\check{\mathbf{Q}}^{[f,h]}_{r_h}(\mathbf{v}_{r_h}) \gets  \1_{\mathbf{v}_{r_h}=\neg n_h} \mathtt{einsum}(\text{``}...,\mathcal{A}_{r_{j\neq h}}^{f},...\to\mathcal{A}_{r_h}^{f}\text{''},...,\mathbf{Q}_{r_{j\neq h}}(n_{j\neq h}),...)\,,
+\label{equ:einsum}
+\end{equation} 
+where $r_h$ is the predicate of $h$, $\mathcal{A}_{r_h}^{f}$ is the arguments of $r_h$. 
+The MF iteration of \textcolor{cfcolor}{Eq.~\ref{equ:meanfield}} is equivalent to: 
+\begin{equation}
+\mathbf{Q}_{r}(\mathbf{v}_r) \gets \frac{1}{\mathbf{Z}_r} \exp({\Phi}_u(\mathbf{v}_r) + \sum_{[f,h], r=r_h} w_f \check{\mathbf{Q}}^{[f,h]}_{r_h}(\mathbf{v}_{r_h}))\,.
+\label{equ:meanfieldeinsum}
+\end{equation} 
+\label{prop:einsum}
+\end{proposition*}
+
+An additional benefit of using Einsum notation is it indicates a way to simplify complexity in practical scenarios.
+Let us consider a chain rule $\forall a,b,c,d:\mathtt{r_1}(a, b) \wedge \mathtt{r_2}(b, c) \wedge \mathtt{r_3}(c, d) \rightarrow \mathtt{r_4}(a,d)$.
+The complexity of $\mathtt{einsum}(\text{``}ab,bc,cd\to ad\text{''},{\mathbf{Q}}_{\mathtt{r_1}}(\mathbf{1}),{\mathbf{Q}}_{\mathtt{r_2}}(\mathbf{1}),{\mathbf{Q}}_{\mathtt{r_3}}(\mathbf{1}))$ is $\mathcal{O}(N^4)$. 
+By \textbf{Einsum optimization}, we can reduce it to $\mathcal{O}(N^3)$. 
+Note that the Einsum optimization is almost free, as it can be done within milliseconds.
+This optimization method is not limited to chain rules and can be applied to other rules, which we demonstrate in \textcolor{appcolor}{App.~\ref{app:einsum}}.
+For any rule, the optimized overall complexity is $\mathcal{O}(N^{M'}L^2)$ where $M'$ is the maximum number of arguments in the granular operations (\textcolor{appcolor}{App.~\ref{app:junction}}), in contrast to the original one $\mathcal{O}(N^{M}L^2D^{L-1})$.
+In the worst case, $M'$ equals $M$, but in practice, $M'$ may be much smaller.
+\begin{wrapfigure}[15]{l}{0.48\textwidth}
+\begin{minipage}{0.48\textwidth}
+\begin{algorithm}[H]
+\small                                                                       
+\caption{LogicMP.}
+\begin{algorithmic}
+\Require{Grouped unary potential $\{\Phi_u(\mathbf{v}_r)\}_r$, the formulas $\{f(\mathcal{A};\mathbf{n})\}_f$ and rule weights $\{w_f\}_f$, the number of iterations $T$.}
+\State $\mathbf{Q}_r(\mathbf{v}_r) \gets \frac{1}{\mathbf{Z}_{r}} \exp(\Phi_u(\mathbf{v}_r)))$ for all predicates $r$.
+\For{$t \in \{1,...,T\}$} \Comment{Iterations}
+\For{$f \in F$} \Comment{formulas}
+\For{$h \in f$} \Comment{Implications}
+    \State Obtain $\check{\mathbf{Q}}_{r_h}^{[f,h]}(\mathbf{v}_{r_h})$ by Eq.~\ref{equ:einsum}. \Comment{Parallel}
+\EndFor
+\EndFor
+\State Update $\mathbf{Q}_{r}(\mathbf{v}_{r})$ by Eq.~\ref{equ:meanfieldeinsum} for all predicates $r$.
+\EndFor
+\State \textbf{return} $\{\mathbf{Q}_{r}(\mathbf{v}_{r})\}_r$.
+\end{algorithmic}
+\label{alg:einsumupdate}
+\end{algorithm}
+\end{minipage}
+\end{wrapfigure}
+
+\subsection{Multiple MF Iterations as LogicMP}
+\textcolor{cfcolor}{Algorithm~\ref{alg:einsumupdate}} presents LogicMP, which requires the grouped unary potentials $\{\Phi_u(\mathbf{v}_r)\}_r$, formulas $\{f(\mathcal{A};\mathbf{n})\}_f$, and rule weights $\{w_f\}_f$, and outputs updated marginals $\{\mathbf{Q}_r(\mathbf{v}_r)\}_r$ for all predicates.
+LogicMP performs $T$ iterations and firstly computes an initial distribution for every variable using unary potentials and softmax normalization at each iteration. 
+Then, it enumerates all implications to perform Einsum via \textcolor{cfcolor}{Eq.~\ref{equ:einsum}}.
+The unary potentials and outputs of Einsum are combined to obtain a new estimate of the marginals (\textcolor{cfcolor}{Eq.~\ref{equ:meanfieldeinsum}}). 
+Finally, it returns the output from the last iteration.
+An execution example is shown in \textcolor{appcolor}{App.~\ref{app:example}}.
+
+
+\section{Related Work}
+
+
+
+\textbf{MLN inference.}
+MLNs are suitable for FOLCs, but have been absent in the neuro-symbolic field for a long time due to inference inefficiency.
+The most relevant work is the ExpressGNN~\citep{DBLP:conf/nips/Qu019,expressgnn}, which has preliminary attempted to combine MLNs with NNs via variational EM.
+Although both ExpressGNN and LogicMP are based on variational inference, they have clear differences: (1) LogicMP uses the MF algorithm, which permits closed-form iterations (\textcolor{cfcolor}{Sec.~\ref{sec:mf}}). (2) LogicMP obtains essential acceleration by exploiting the structure and symmetries in MLNs (\textcolor{cfcolor}{Sec.~\ref{sec:logicmp}}). (3) These enable LogicMP to be applied in general tasks, including computer vision (CV) and natural language processing (NLP) (\textcolor{cfcolor}{Sec.~\ref{sec:exp}}).
+Conventional MLN inference methods perform inference either at the level of propositional logic or in a lifted way without performing grounding.
+The former is inefficient due to the complicated handling of the propositional graph, e.g., Gibbs sampling~\citep{richardson2006markov}, MC-SAT~\citep{DBLP:conf/aaai/PoonD06}, BP~\citep{yedidia2000generalized}.
+The latter consists of symmetric lifted algorithms which become inefficient with distinctive evidence, such as lifted BP~\citep{DBLP:conf/aaai/SinglaD08}, and asymmetric lifted algorithms which often requires specific formulas~\citep{DBLP:conf/aaai/BroeckD12,DBLP:conf/aaai/GribkoffBS14} or evidence~\citep{DBLP:conf/aaai/BuiHB12}. %, limiting their application scenarios.
+LogicMP situates itself within the MLN community by contributing a novel and efficient MLN inference method. %which remains effective even with distinctive evidence.
+\citet{DBLP:conf/ijcai/DasarathaPPTD23,DBLP:conf/ecai/MarraDGGM20} attempted to combine neural networks with first-order logic but the training remains separate.
+
+\textbf{Neuro-symbolic reasoning.}
+A branch of neuro-symbolic methods aims to represent the logic into neural networks~\citep{DBLP:conf/ijcai/DasarathaPPTD23}.
+Besides, some neuro-symbolic methods~\citep{DBLP:conf/aaai/HoernleKBG22,DBLP:journals/jair/GiunchigliaL21,DBLP:conf/acl/LiS19,DBLP:conf/aaai/HoernleKBG22,DBLP:journals/jair/GiunchigliaL21,DBLP:conf/acl/LiS19,DBLP:conf/icml/FischerBDGZV19,DBLP:conf/icml/Yang0P22} integrate logical constraints by handling propositional groundings individually.
+Other methods, e.g., semantic loss (SL) ~\citep{DBLP:conf/icml/XuZFLB18} and semantic probabilistic layer (SPL)~\citep{DBLP:conf/nips/AhmedTCBV22}, are rooted in probabilistic logic programming (PLP) that utilizes ACs. 
+However, ACs are often limited to propositional logic and may be insufficient to handle FOLCs unless specific formulas are employed~\citep{DBLP:conf/aaai/BroeckD12}. 
+Research applying ACs for FOLCs is currently ongoing in both the MLN and PLP fields, including probabilistic database~\citep{DBLP:journals/pvldb/JhaS12} and asymmetric lifted inference~\citep{DBLP:conf/aaai/BroeckN15}, but it remains a challenging problem.
+LogicMP exploits the calculation symmetries in MLN for efficient computation by parallel tensor operations.
+Consequently, LogicMP contributes to developing neuro-symbolic methods for FOLCs using MLNs. 
+Notably, popular neuro-symbolic methods such as DeepProbLog~\citep{DBLP:conf/nips/ManhaeveDKDR18} and Scallop~\citep{DBLP:conf/nips/HuangLCSNSS21} also use ACs and are typically used under closed world assumption rather than OWA.
+
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+\subsection{Encoding FOLC over Document Images}
+\label{sec:expimage}
+\textbf{Benchmark Dataset.} 
+We apply LogicMP in a CV task, i.e., the information extraction task on the widely used FUNSD form understanding dataset~\citep{DBLP:conf/icdar/JaumeET19}.
+The task involves extracting information from a visual document image, as shown in \textcolor{cfcolor}{Fig.~\ref{fig:caseinput}}, where the model needs to segment tokens into several blocks.
+The maximum number of tokens is larger than 512.
+The evaluation metric is the F1 score.
+The dataset details and general settings are provided in \textcolor{appcolor}{App.~\ref{app:imagesetup}}.
+
+\textbf{Our Method.}
+We formalize this task as matrix prediction as in~\citep{DBLP:conf/emnlp/XuXSWC22}.
+Each element in the matrix is a binary variable representing whether the corresponding two tokens coexist in the same block.
+A matrix with ground truth is shown in \textcolor{cfcolor}{Fig.~\ref{fig:casegt}}.
+We adopt the LayoutLM~\citep{DBLP:conf/kdd/XuL0HW020}, a robust pre-trained Transformer, as the backbone to derive the vector representation of each token.
+The matrix $\Phi_u$ is predicted by dot-multiplying each pair of token vectors. 
+We call this model \textit{LayoutLM-Pair}.
+Independent classifiers often yield unstructured predictions (\textcolor{cfcolor}{Fig.~\ref{fig:casebase}}), but we can constrain the output via the transitivity of the coexistence, i.e., tokens $a,c$ must coexist when tokens $a,b$ coexist, and $b,c$ coexist.
+Formally, we denote the predicate as $\mathtt{C}$ and the FOLC as $\forall a,b,c:\mathtt{C}(a, b) \wedge \mathtt{C}(b, c) \implies \mathtt{C}(a, c)$.
+LogicMP applies this FOLC to LayoutLM-Pair.
+Each experiment is performed 8 times, and the average score is reported. See \textcolor{appcolor}{App.~\ref{app:imagemodel}} for more details.
+
+\textbf{Compared Methods.}
+We compare LogicMP to several robust information extraction methods, including \textit{BIOES}~\citep{DBLP:conf/kdd/XuL0HW020}, \textit{SPADE}~\citep{DBLP:conf/acl/HwangYPYS21}, and \textit{SpanNER}~\citep{DBLP:conf/acl/FuHL20}.
+We also compare LogicMP to other neuro-symbolic techniques.
+\textit{SL}~\citep{DBLP:conf/icml/XuZFLB18} is the abbreviation of Semantic Loss, which enforces constraints on predictions by compiling an AC and using it to compute a loss that penalizes joint predictions violating constraints.
+However, compiling the AC for all variables (up to 262K) is infeasible. 
+Therefore, we use an unrigorous relaxation (\textit{SLrelax}), i.e., penalizing every triplet and summing them via the parallel method proposed in \textcolor{cfcolor}{Sec.~\ref{sec:einsum}}. 
+\textit{SPL}~\citep{DBLP:conf/nips/AhmedTCBV22} models joint distribution using ACs, but the same relaxation as SL cannot be applied since all variables must be jointly modeled in SPL.
+
+\textbf{Main Results.}
+\textcolor{cfcolor}{Table~\ref{tab:funsd}} shows the results on the FUNSD dataset, where ``full'' incorporates all blocks, and ``long'' excludes blocks with fewer than 20 tokens. 
+Upon integrating FOLC using LogicMP, we observe consistent improvements in two metrics, particularly a 7.3\% relative increase in ``long'' matches.
+This is because FOLC leverages other predictions to revise low-confidence predictions for distant pairs, as shown in \textcolor{cfcolor}{Fig.~\ref{fig:case}}. 
+However, SL and SPL both fail in this task.
+While attempting to ground the FOLC and compiling AC using PySDD~\citep{DBLP:conf/ijcai/Darwiche11}, we found that it fails when the sequence length exceeds 8 (\textcolor{appcolor}{App.~\ref{app:ac}}). 
+In contrast, LogicMP can perform joint inference within 0.03 seconds using just 3 tensor operations (\textcolor{appcolor}{App.~\ref{app:cvcode}}) with a single additional parameter.
+SLrelax is beneficial but is outperformed by LogicMP. 
+Additionally, LogicMP is compatible with SLrelax since LogicMP is a neural layer and SLrelax is a learning method with logical regularization. 
+Combining them further improves performance.
+More visualizations are attached in \textcolor{appcolor}{App.~\ref{app:imageexp}}.
+\begin{figure}
+\begin{minipage}{0.45\textwidth}
+\captionsetup{type=table} 
+\scriptsize
+\centering
+\caption{Comparison of F1 on FUNSD. Better results are in bold. ``full'' denotes the full set while ``long'' only considers the blocks with more than 20 tokens. ``-'' means failure.}
+\begin{tabular}{@{}l|ll@{}}
+\toprule
+Methods                       & full & long \\ \midrule
+LayoutLM-BIOES~\citep{DBLP:conf/kdd/XuL0HW020}                            & 80.1 & 33.7 \\
+LayoutLM-SpanNER~\citep{DBLP:conf/acl/FuHL20}                        & 74.0 & 22.0 \\
+LayoutLM-SPADE~\citep{DBLP:conf/acl/HwangYPYS21}                          & 80.1 & 43.5 \\
+LayoutLM-Pair~\citep{DBLP:conf/emnlp/XuXSWC22}                           & 82.0 & 46.7 \\ \midrule
+LayoutLM-Pair w/ SL~\citep{DBLP:conf/icml/XuZFLB18}          & - & - \\
+LayoutLM-Pair w/ SPL~\citep{DBLP:conf/nips/AhmedTCBV22}                     & -    & -    \\
+LayoutLM-Pair w/ SLrelax                      & 82.0 & 47.8 \\
+LayoutLM-Pair w/ LogicMP                & \textbf{83.3} & \textbf{50.1} \\ \midrule
+LayoutLM-Pair w/ SLrelax+LogicMP & \textbf{83.4} & \textbf{50.3} \\ \bottomrule
+\end{tabular}
+\label{tab:funsd}
+\end{minipage}
+\hfill
+\begin{minipage}{0.50\textwidth}
+\scriptsize
+\captionsetup{type=table}
+\caption{Comparison of F1 on CoNLL2003. Better results are in bold. adj (list) denotes the adjacent (list) rules. ``-'' means failure.}
+\begin{tabular}{@{}l|l@{}}
+\toprule
+Methods & F1 \\ \midrule
+BLSTM~\citep{DBLP:conf/acl/HuMLHX16} & 89.98 \\  
+BLSTM (lex)~\citep{DBLP:journals/tacl/ChiuN16} & 90.77 \\
+BLSTM w/ CRF~\citep{DBLP:conf/naacl/LampleBSKD16} & 90.94 \\
+BLSTM w/ CRF (mean field)~\citep{DBLP:conf/emnlp/WangJBWHHT20} & 91.07 \\
+\midrule
+BLSTM w/ SL~\citep{DBLP:conf/icml/XuZFLB18}          & - \\
+BLSTM w/ SPL~\citep{DBLP:conf/nips/AhmedTCBV22}                     & -    \\
+BLSTM w/ SLrelax  & 90.38 \\
+BLSTM w/ LogicDist (adj)~\citep{DBLP:conf/acl/HuMLHX16} & p: 89.80, q: 91.11 \\
+BLSTM w/ LogicDist (adj+list)~\citep{DBLP:conf/acl/HuMLHX16} & p: 89.93, q: 91.18 \\
+BLSTM w/ LogicMP (adj) & 91.25 \\
+BLSTM w/ LogicMP (adj+list) & \textbf{91.42} \\
+ \bottomrule
+\end{tabular}
+\label{tab:ner}
+\end{minipage}
+\end{figure}
+
+\subsection{Encoding FOLCs over Relational Graphs}
+\label{sec:expgraph}
+\textbf{Benchmark Datasets.}
+We evaluate LogicMP on four collective classification benchmark datasets, each with specific FOLCs. 
+Smoke~\citep{DBLP:journals/ai/BadreddineGSS22} serves as a sanity check (see results in \textcolor{appcolor}{App.~\ref{app:graphexp}}). 
+Kinship~\citep{expressgnn} involves determining relationships between people.
+UW-CSE~\citep{richardson2006markov} contains information about students and professors in the CSE department of UW. 
+Cora~\citep{singla2005discriminative} involves de-duplicating entities using the citations between academic papers. 
+It is noteworthy that Cora has 140+K mutually dependent variables and 300+B groundings, with only around 10K known facts.
+The dataset details and general settings are given in \textcolor{appcolor}{App.~\ref{app:graph}}.
+We conduct each experiment 5 times and report the average results.
+
+\textbf{Compared Methods.}
+We compare with several strong MLN inference methods.
+\textit{MCMC}~\citep{gilks1995markov,richardson2006markov} performs samplings over the ground Markov network.
+\textit{BP}~\citep{yedidia2000generalized} uses belief propagation instead.
+\textit{Lifted BP}~\citep{DBLP:conf/aaai/SinglaD08} groups the ground atoms in the Markov network.
+\textit{MC-SAT}~\citep{DBLP:conf/aaai/PoonD06} performs sampling using boolean satisfiability techniques.
+\textit{HL-MRF}~\citep{DBLP:journals/jmlr/BachBHG17,DBLP:conf/aaai/SrinivasanBFG19} is hinge-loss Markov random field.
+\textit{ExpressGNN} denotes the graph neural network proposed in \citep{expressgnn}, which is trained to fit the data.
+\textit{ExpressGNN w/ GS} denotes that ExpressGNN is trained to maximize the grounding scores, i.e., the satisfaction of formulas for the groundings using sequential summation (i.e., ExpressGNN-E~\citep{expressgnn}).
+Following ExpressGNN w/ GS, we adopt the OWA setting where all unobserved facts are latent variables to infer and use the area under the precision-recall curve (AUC-PR) as the performance evaluation metric.
+
+\textbf{Our Method.}
+For a fair comparison with ExpressGNN w/ GS, we set the rule weights to 1 and use ExpressGNN as the encoding network to obtain unary potentials $\phi_u$. 
+We stack LogicMP with 5 iterations over it. 
+The encoding network is trained to approach the output of LogicMP, which regularizes the output of the encoding network with FOLCs. 
+This learning approach is similar to ExpressGNN w/ GS, as discussed in \textcolor{appcolor}{App.~\ref{app:graphmodel}}.
+The main advantage of using LogicMP is its computational efficiency, which enables larger-scale training for better performance.
+\begin{figure}
+\begin{minipage}{.45\textwidth}
+\includegraphics[width=\textwidth, height=0.5\textwidth]{figures/speed.pdf}
+\caption{Efficiency comparison of acceleration techniques.}\label{fig:speed}
+\end{minipage}
+\hfill
+\begin{minipage}{.45\textwidth}
+\includegraphics[width=\textwidth, height=0.5\textwidth]{figures/curves.pdf}
+\caption{AUC-PR w.r.t minutes during the training in UW-CSE.}\label{fig:curve}
+\end{minipage}
+\hfill
+\end{figure}
+
+\textbf{Main Results.}
+\textcolor{cfcolor}{Fig.~\ref{fig:speed}} shows the training efficiency of LogicMP, which is about 10 times better than ExpressGNN w/ GS, reducing the computational time per grounding to just 1 millisecond.
+Thus, we can scale the training from the original 16K~\citep{expressgnn} to 20M groundings in a reasonable time.
+Surprisingly, we found that the performance of LogicMP steadily improved with more training (\textcolor{cfcolor}{Fig.~\ref{fig:curve}}).
+This observation suggests that the performance of ExpressGNN w/ GS reported in the original work may be hindered by its inefficiency in performing sufficient training.
+
+\textcolor{cfcolor}{Table~\ref{tab:two}} shows the AUC-PR results for the three datasets with a mean standard deviation of 0.03 for UW-CSE and 0.01 for Cora. 
+ A hyphen in the entry indicates that it is either out of memory or exceeds the time limit (24 hours).
+Note that since the lifted BP is guaranteed to get identical results as BP, the results of these two methods are merged into one row.
+LogicMP obtains almost perfect results on a small dataset (i.e., Kinship), exhibiting its excellent ability in precise inference. 
+In addition, it performs much better than advanced methods on two relatively large datasets (i.e., UW-CSE and Cora), improving relatively by 173\%/28\% over ExpressGNN w/ GS. %and 56\%/21\% over HL-MRF.
+The improvement is due to its high efficiency, which permits more training within a shorter time (less than 2 hours). 
+Without LogicMP, ExpressGNN w/ GS would take over 24 hours to consume 20M groundings.
+\begin{table*}[]
+\center
+\scriptsize
+\caption{AUC-PR on Kinship, UW-CSE, and Cora. The best results are in bold. ``-'' means failure.
+}
+\setlength{\tabcolsep}{0.8mm}{
+\begin{tabular}{l|l|cccccc|cccccc|cccccc}
+\toprule
+\multicolumn{2}{l|}{\multirow{2}{*}{Method}} & \multicolumn{6}{c|}{Kinship} & \multicolumn{6}{c|}{UW-CSE} & \multicolumn{6}{c}{Cora} \\ \cmidrule(l){3-20} 
+\multicolumn{2}{l|}{} & S1   & S2   & S3   & S4   & S5  &avg. & A. & G. & L. & S. & T. & avg. & S1 & S2 & S3 & S4 & S5 & avg. \\ \midrule
+\multirow{4}{*}{\rotatebox{90}{MLN}} & MCMC~\citep{richardson2006markov} & .53 & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - & - \\
+& BP/Lifted BP~\citep{DBLP:conf/aaai/SinglaD08} & .53 & .58 & .55 & .55 & .56 & .56 & .01 & .01 & .01 & .01 & .01 & .01 & - & - & - & - & - & - \\
+& MC-SAT~\citep{DBLP:conf/aaai/PoonD06}  & .54 & .60  & .55 & .55 & - & - & .03 & .05 & .06 & .02 & .02 & {.04} & - & - & - & - & - & - \\
+& HL-MRF~\citep{DBLP:journals/jmlr/BachBHG17}  & \textbf{1.0}    & \textbf{1.0}    & \textbf{1.0}    & \textbf{1.0}    & -  & - & .06 & .09 & .02 & .04 & .03 & .05 & - & - & - & - & - & - \\ \midrule
+\multirow{2}{*}{\rotatebox{90}{NN+}} 
+& ExpressGNN & .56 & .55 & .49 & .53 & .55 & .54 & .01 & .01 & .01 & .01 & .01 & .01 & .37 & .66 & .21 & .42 & .55 & .44 \\
+& ExpressGNN w/ GS~\citep{expressgnn}   & .97  & .97 & .99 & .99 & .99 & .98 & .09 & .19 & .14 & .06 & .09 & .11 & .62 & .79 & .46 & .57 & .75 & .64 \\
+& ExpressGNN w/ LogicMP & .99 & .98 & \textbf{1.0}   & \textbf{1.0}   & \textbf{1.0}  & \textbf{.99} & \textbf{.26} & \textbf{.30} & \textbf{.42} & \textbf{.25} & \textbf{.28} & \textbf{.30} & \textbf{.80} & \textbf{.88} & \textbf{.72} & \textbf{.83} & \textbf{.89} & \textbf{.82} \\
+\bottomrule
+\end{tabular}
+}
+\label{tab:two}
+\end{table*}
+
+\textbf{Ablation Study.}
+\textcolor{cfcolor}{Fig.~\ref{fig:speed}} also illustrates the efficiency ablation of the techniques discussed in \textcolor{cfcolor}{Sec.~\ref{sec:logicmp}}. 
+As compared to LogicMP, the parallel Einsum technique (\textcolor{cfcolor}{Sec.~\ref{sec:einsum}}) achieves significant acceleration, while other improvements, i.e., Einsum optimization and RuleOut (\textcolor{cfcolor}{Sec.~\ref{sec:reduce}}), also enhance efficiency. 
+More comparison results are shown in \textcolor{appcolor}{App.~\ref{app:graphexp}}.
+
+\subsection{Encoding FOLCs over Text}
+\label{sec:exptext}
+\textbf{Benchmark Dataset \& Compared Methods.}
+We further verify LogicMP in an NLP task, i.e., the sequence labeling task.
+We conduct experiments on the well-established CoNLL-2003 benchmark~\citep{DBLP:conf/conll/SangM03}.
+The task assigns a named entity tag to each word, such as B-LOC, where B is Beginning out of BIOES and LOC stands for ``location'' out of 4 entity categories.
+This experiment aims not to achieve state-of-the-art performance but to show that specific FOLCs can also be applied.
+The compared methods use the bi-directional LSTM (BLSTM) as the backbone and employ different techniques, including  \textit{SLrelax} and logic distillation (\textit{LogicDist})~\citep{DBLP:conf/acl/HuMLHX16}.
+
+\textbf{Our Method.}
+For a fair comparison, we also use BLSTM as the backbone and stack LogicMP on BLSTM to integrate the following FOLCs used in LogicDist.
+(1) \textbf{adjacent rule}:  The BIOES schema contains constraints for adjacent labels, e.g., the successive label of B-PER cannot be O-PER.
+We explicitly declare the constraints as several adjacent logic rules, such as $\forall i: \mathtt{label}(i) \in \{\text{B/I-PER}\} \Leftrightarrow \mathtt{label}(i+1) \in \{\text{I/E-PER}\}$, where $\mathtt{label}(i)$ is the multi-class predicate of $i$-th token label (see the extension for multi-class predicate in \textcolor{appcolor}{App.~\ref{app:multiclass}}). %$\forall i: \mathtt{label}(i) \in \{\text{O}, \text{E/S-any}\} \Leftrightarrow \mathtt{label}(i+1) \in \{\text{O}, \text{B/S-any}\}$
+(2) \textbf{list rule}: we exploit a task-specific rule to inject prior knowledge from experts.
+Specifically, named entities in a list are likely to be in the same categories, e.g., “Barcelona” and “Juventus” in “1. Juventus, 2. Barcelona, 3. ...”. The corresponding FOLC is $\forall i, j: \mathtt{label}(i) \in \{\text{B/I/E-LOC}\} \wedge \mathtt{samelist}(i, j) \Leftrightarrow \mathtt{label}(j) \in \{\text{B/I/E-LOC}\}$, where $\mathtt{samelist}(i, j)$ indicates the coexistence of two tokens in a list.
+\textbf{Main Results.}
+\textcolor{cfcolor}{Table~\ref{tab:ner}} presents our experimental results, with the rule-based methods listed at the bottom.
+Along with the BLSTM baselines, LogicMP outperforms SLrelax and LogicDist, where ``p'' denotes BLSTM and ``q'' post-regularizes the output of BLSTM.
+These methods implicitly impose constraints during training, which push the decision boundary away from logically invalid prediction regions. 
+In contrast, LogicMP always explicitly integrates the FOLCs into the BLSTM output. 
+For samples with a list structure, LogicMP improves F1 from 94.68 to 97.41.
+
+
+
+
+\section{Conclusion}
+
+We presented a novel neuro-symbolic model LogicMP, an efficient method for MLN inference, principally derived from the MF algorithm.
+LogicMP can act as a neural layer since the computation is fully paralleled through feed-forward tensor operations.
+By virtue of MLN, LogicMP is able to integrate FOLCs into any encoding network.
+The output of LogicMP is the (nearly) optimal combination of the FOLCs from MLN and the evidence from the encoding network.
+The experimental results over various fields prove the efficiency and effectiveness of LogicMP.
+
+
+
+
+
+

@@ -1,18 +1,16 @@
-Now I have all the information I need. Let me produce the final consolidated review.
+Now I have thoroughly analyzed the paper and all reviewer claims. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes a neural video codec that replaces probabilistic entropy models with codebook-based vector quantization, thereby avoiding the cross-platform floating-point inconsistency that plagues existing neural video codecs. The method transmits index sequences of learned codebooks rather than arithmetically coded latents, and uses a window-based cross-attention context model for temporal redundancy fusion instead of optical flow. Experiments show the approach matches or exceeds H.265 (medium) in SSIM-based rate-distortion on several 1080p benchmarks while enabling cross-platform decoding between V100 and P40 GPUs, with a light-decoder variant achieving real-time throughput.
+This paper proposes a neural video codec that eliminates all entropy models by using codebook-based vector quantization, thereby achieving inherent cross-platform consistency (no arithmetic-coding failures when switching between hardware). The method uses a multi-stage multi-codebook VQ architecture (no autoregressive modeling), a window-based cross-attention context model that replaces both optical flow and entropy models, and achieves bitrate control by adjusting codebook sizes rather than retraining rate-distortion trade-offs. On SSIM, the method achieves an average 33.7% BD-rate saving over H.265 (medium), with strong decoding efficiency (35.8ms per 1080P frame for the light-decoder variant).
 
 ## Strengths
 
-- **Window-based cross-attention (WCA) provides large RD gains with dramatically lower compute.** The ablation in Table 3 shows WCA-based-4 retains essentially the same SSIM BD-rate saving (~−41%) as a much larger window-64 variant, while cutting context-modeling time from 74.2 ms to 13.0 ms (82.5% reduction). Verification: Table 3 reports CA-based-64 at −40.8% SSIM BD-rate / 74.2 ms vs. WCA-based-4 at −40.7% SSIM BD-rate / 13.0 ms.
+- **Inherent cross-platform property via elimination of entropy models**: The paper provides a clean theoretical argument — by transmitting only codebook indices and removing all probability-distribution estimation, the decoding process is reduced to table lookup, which is platform-independent by construction. This is a fundamentally different approach from prior work that relies on integer quantization or calibration-information transmission. The experiment showing 0% BD-rate difference between V100 encoding and P40 decoding (Table 5) confirms that the approach works in practice.
 
-- **Light-decoder achieves real-time 1080p decoding on V100 while still surpassing H.265 in SSIM.** The same table shows a reduced model (46.2M params, 0.74T MACs) decodes in 35.8 ms per frame (~28 fps) yet delivers −23.7% SSIM BD-rate over H.265 (medium). Verification: Table 3, row "light-decoder" — 35.8ms decode time, −23.7% SSIM BD-rate.
+- **Efficient window-based cross-attention context model that replaces both optical flow and autoregressive modeling**: The WCA-based context model achieves nearly identical BD-rate savings to a global CA variant (−40.7% vs −40.8% SSIM) while reducing context model time by 82.5% (13.0ms vs 74.2ms). This architectural simplification eliminates two computationally expensive components (optical-flow-based motion estimation and autoregressive entropy priors) that dominate prior neural codecs.
 
-- **Multi-stage multi-codebook design provides a simple, entropy-model-free rate-control mechanism.** The paper demonstrates three distinct bitrate operating points by changing only the codebook sizes for predicted frames ({8192,2048,512}, {64,2048,512}, {8,2048,512}) rather than tuning rate-distortion loss weights. This is a practical engineering advantage over conventional neural codecs. Verification: Section "Codebook settings," lines 159-161.
-
-- **The padded sliding-window cross-attention strategy is a clean architectural contribution.** By pairing non-overlapping windows (size 4) for the current frame with overlapping windows (size 8) for the reference frame, the model captures motion-induced spatial shifts without optical flow or pixel-level alignment. Verification: Section 3.4, lines 135-136.
+- **Competitive SSIM performance despite the absence of any entropy-based bit allocation**: The method achieves substantial SSIM-based BD-rate savings across all three test datasets (−43.7% on UVG, −38.2% on HEVC-B, −19.1% on MCL-JCV) relative to H.265 (medium). These results demonstrate that the codebook-based approach can match or exceed a widely-used traditional codec on perceptual quality metrics even with a fixed (non-content-adaptive) bit budget, leaving room for further improvement.
 
 ## Weaknesses
 
@@ -20,61 +18,54 @@ This paper proposes a neural video codec that replaces probabilistic entropy mod
 None.
 
 ### Major
-None.
+
+- **No comparison to any neural video codec baseline**, even within-platform, makes it impossible to contextualize the contribution. The introduction states that "the latest neural video codecs ... have exceeded that of H.266/VTM to some extent," which sets the expectation that a neural method should be positioned relative to other neural methods. The paper justifies comparing only to H.264/H.265 by noting that existing neural codecs cannot decode cross-platform (lines 181–188). However, a within-platform comparison (encoding and decoding on the same GPU) would directly answer the central question: how much compression efficiency is sacrificed for the cross-platform guarantee? Without this, the reader cannot tell whether the method is within striking distance of lightweight neural codecs (e.g., DVC, DCVC) or far behind them. This omission limits the paper's contribution to "another codec that beats H.265 on SSIM" rather than demonstrating a practical alternative to existing neural video codecs. The claim of outperforming H.265 (medium) is further weakened because (a) H.265 (medium) is at the efficient end of the preset spectrum and (b) the PSNR advantage is marginal on average (−1.7%) and negative on MCL‑JCV (+23.7%).
 
 ### Minor
-- **Cross-platform evidence is thinner than claimed.** Table 2 reports a BD-rate of exactly 0% when decoding a V100-encoded bitstream on both V100 and P40. The BD-rate is reported as an integer percentage, so small per-frame differences could round to 0% — but the paper does not report per-frame PSNR/SSIM differences, does not test on a CPU or a more architecturally distinct GPU (e.g., A100, RTX 3090), and does not show that no reconstruction failure of the type in Fig. 1 occurs on P40. The theoretical argument (no entropy model → no arithmetic-coding failure) is sound, but the empirical validation is too sparse to fully substantiate the "error-free" claim. The authors should provide per-frame PSNR differences between V100 and P40 decoders and test at least one more platform pair.
 
-- **The fixed-bitrate design limits the fairness of the RD comparison with H.265.** As the authors honestly acknowledge (Conclusions), the method produces constant bitstreams regardless of video content, while H.265 adapts its bit allocation per frame. The BD-rate metric, designed for variable-rate codecs, is applied asymmetrically. On simple/low-motion content, the method wastes bits, potentially inflating its distortion scores relative to H.265; on complex content, it is starved of bits. Aggregate BD-rate tables mix these effects. The paper does partially address this by showing per-dataset results (not just the average), and the −19.1% to −43.7% SSIM BD-rate range across datasets is informative. However, a per-video breakdown would be needed to assess how much the fixed-rate limitation biases the headline numbers.
+- **Cross-platform validation is limited to two NVIDIA GPUs from the same vendor.** The experiment tests only V100 (encode) to P40 (decode) — both NVIDIA GPUs sharing CUDA math libraries and floating-point semantics. The paper's title claims "effortless" cross-platform deployment, but this is not demonstrated on genuinely heterogeneous hardware (e.g., AMD GPUs, ARM CPUs, Intel CPUs, or different deep-learning frameworks). The theoretical argument is sound (no entropy model → no cross-platform mismatch), which reduces the severity of this gap, but the empirical evidence remains thin for the scope of the claim.
 
-- **Several implementation details are missing, harming reproducibility.** The paper does not specify: (a) how the light-decoder is obtained (fewer channels? fewer stages? reduced resolution?); (b) training hyperparameters (optimizer, learning rate, batch size, number of training steps, codebook update mechanism); (c) the exact bitstream format (how indices are packed — fixed-length codes of ⌈log₂K⌉ bits? how indices from multiple stages and codebooks are serialized?). Without (a) and (b), the efficiency and RD results cannot be independently reproduced.
+- **Bitrate computation formula is not explicitly stated.** The paper describes the multi-stage multi-codebook VQ architecture (lines 145–149) and states that codebook sizes determine bitrates (lines 159–161), but it never provides a formula for total bits per frame: e.g., for each stage, number of spatial positions × number of codebooks per stage × log₂(codebook size). This makes it harder for readers to reproduce the BD-rate curves or verify the rate calculation, especially given the downsampling between stages that changes spatial dimensions.
 
-- **The metric label is inconsistent.** Section 4.1 says metrics are "PSNR and MS-SSIM," but all tables (Table 1, 2, 3) label the distortion metric as "SSIM" / "SSIM-BPP." MS-SSIM and SSIM are different metrics, and the paper should state clearly which was used for the BD-rate calculations in each table.
+- **The fixed bit-allocation limitation, while acknowledged, is quantitatively demonstrated to be severe in PSNR on high-redundancy content.** The paper is transparent about this in the conclusion (lines 280–281) and in the text (line 202), but the BD-rate penalty on MCL‑JCV (PSNR +23.7% relative to H.265) shows that the lack of content-adaptive bit allocation is not merely a theoretical concern — it degrades practical performance on a standard benchmark. This weakness is inherent to the approach and is not addressed.
 
 ### Trivial
-- **Dataset cropping ambiguity.** The paper states test frames are center-cropped to 1920×1024 "to ensure the input image shape is divisible by 128" (line 178). It does not state whether H.264 and H.265 baselines also operate on cropped frames or on the original 1920×1080. If the baselines use the full resolution while the method uses cropped frames, the bits-per-pixel comparison would differ by a factor of ~1.055. This likely is not the case (standard practice applies identical preprocessing), but should be clarified.
 
-- **The "CA-based-64" label is confusing** since it is actually a WCA method with window size 64, not global cross-attention. While explained in the text (line 248), a clearer label (e.g., "WCA-64") would avoid misinterpretation.
+- **The "Resblock-based" ablation baseline is not explicitly defined in the method section.** While its meaning (context model with resblocks only, no cross-attention) is clear from context in the ablation study (line 248), explicitly defining it in Section 3.2 would improve clarity.
+
+- **The design choice of keeping the second and third codebook sizes at {2048, 512} when the first is reduced to 8 is not discussed.** This is a reasonable design (later stages compensate high-frequency residuals and need capacity), but the paper could benefit from a brief explanation.
 
 ## Nice-to-Haves
 
-- **Compare against a representative neural codec (e.g., DCVC) under cross-platform conditions** to empirically demonstrate the decoding failure (Fig. 1) that justifies the paper's motivation. This would turn the well-known theoretical problem into a concrete baseline for the proposed solution. The current paper omits this because "existing neural video codecs cannot achieve cross-platform decoding directly" (line 188), which is a reasonable justification but leaves the motivating phenomenon unquantified against a contemporary method.
-
-- **Per-video breakdown of RD results** would allow readers to assess which motion/content types favor or disfavor the fixed-bitrate codebook approach, and would address the fairness concern about the H.265 comparison more directly than aggregate BD-rate tables.
-
-- GPU memory footprint of the model, especially since global cross-attention was infeasible due to out-of-memory errors (line 248), would be useful for deployment assessment.
+- A within-platform comparison to one or two lightweight neural video codecs (e.g., DVC or a small DCVC variant) to contextualize the RD-performance sacrifice for cross-platform guarantees.
+- Cross-platform testing on at least one non-NVIDIA platform (e.g., an AMD GPU or an ARM CPU running PyTorch) to strengthen the "effortless" claim with more diverse hardware evidence.
+- A simple post-hoc entropy model (e.g., fixed Huffman coding on the index distributions) to quantify the efficiency gap between the current fixed-rate design and a minimally adaptive version.
 
 ## Removed Points
 
-These points were flagged by reviewers but are not included in the main review. They should be treated with caution.
+- *"Weaknesses that demand the paper use stronger H.265 presets (veryslow) or H.266/VTM."* — The paper's choice of H.265 (medium) as the anchor is standard and defensible; asking for veryslow or VTM comparisons is an incremental improvement that does not change the paper's evaluation. Removed per rule about not requiring the strongest possible baseline.
 
-1. **Harsh critic's claim that BD-rate of exactly 0% across V100 and P40 is "highly improbable" and implies the evidence is unsupported.** The paper reports BD-rate as integer percentages; small floating-point differences in decoder-network outputs would round to 0% at this precision. For a codebook-based method where decoding is primarily table lookups followed by a feedforward network, near-identical RD curves across two NVIDIA GPU families are entirely plausible. The evidence could be stronger (per-frame numbers), but it is not invalid or improbable. This criticism was downgraded from an "evidential issue" to a minor weakness.
+- *"Weakness about 'CA-based-64' naming being misleading."* — The paper explicitly states in line 248 that "CA-based-64 is the WCA method with window size 64," so there is no ambiguity. This is a trivial clarification that does not affect the contribution.
 
-2. **Harsh critic's assertion that the fixed-bitrate RD comparison "cannot substantiate the claimed outperformance" of H.265.** This overstates the problem. The paper acknowledges the limitation (Conclusions, line 280), and the datasets span diverse content types (UVG: high motion; MCL-JCV: varied). The asymmetric comparison still shows the method outperforms H.265 in SSIM across all three datasets and in PSNR on two of three — a meaningful result even if the comparison is not perfectly apples-to-apples. The weakness was downgraded from structural/fatal to minor.
+- *Strength from Strength Finder: "Real-world cross-platform validation with heterogeneous hardware"* — Conflicts with the verified weakness that the validation is limited to same-vendor GPUs. Per rules, the weakness prevails.
 
-3. **Demand for comparison against neural video codecs on cross-platform.** The paper cites established work (Ballé et al. 2019) documenting the cross-platform failure of entropy-based neural codecs, and showing Fig. 1 as a qualitative example. Running a neural codec cross-platform to demonstrate its failure would be a useful addition but is not required to validate the paper's own claims. Moved to Nice-to-Haves.
-
-4. **CA-based-64 naming issue** — a trivial presentation concern but explained in the text. Moved to Trivial.
+- *Strength: "Competitive RD performance despite no entropy constraints. . . meaning there is headroom for further improvement."* — The "headroom" claim is speculative; this strength is partially retained but reframed more conservatively.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The key insight from the review process is that the paper makes a clean architectural trade-off — removing all entropy models to guarantee cross-platform stability — at a quantifiable cost in compression efficiency. The most instructive unresolved question is not whether the method works (it does) but how large the efficiency gap is relative to standard neural codecs that do not have this constraint. The paper would be significantly strengthened by directly measuring this gap rather than only showing results against traditional codecs. The SSIM-vs-PSNR asymmetry is also noteworthy: the codebook method is substantially better on SSIM than PSNR, suggesting that the VQ reconstruction quality is perceptually favorable even when pixel-level accuracy lags.
 
 ## Suggestions
 
-1. **Strengthen the cross-platform validation.** Report per-frame PSNR/SSIM differences between V100 and P40 decoders, and test on at least one more architecturally distinct platform (e.g., CPU, or an A100/RTX 3090). This would turn a plausible theoretical claim into a solidly evidenced one.
+1. **Add a within-platform neural codec comparison.** Even a single baseline (e.g., DVC or a small DCVC variant evaluated on the same GPU) would allow readers to assess the cost of the cross-platform guarantee and would greatly strengthen the paper's positioning.
 
-2. **Provide per-video RD results** for all three operating points across all test datasets. This would allow readers to assess the effect of the fixed-bitrate limitation and make the H.265 comparison more transparent.
+2. **Explicitly state the bitrate formula.** Show total bits per frame = Σ_stages [ (spatial positions at stage) × (number of codebooks) × log₂(codebook size) ]. This aids reproducibility and clarifies the rate computation for the BD-rate curves.
 
-3. **Clarify the bitstream format.** Specify: (a) the number of bits allocated per index for each codebook size, (b) how indices from three stages and two codebooks per stage are serialized, (c) the downsampling factors used between stages in the multi-stage VQ. This would make the reported bpp values verifiable.
+3. **Test on at least one non-NVIDIA platform.** An ARM CPU (e.g., Apple Silicon, mobile) or AMD GPU decoding the same bitstream would empirically validate the "effortless cross-platform" claim beyond what the theoretical argument alone provides.
 
-4. **Add training details** (optimizer, learning rate schedule, batch size, number of training steps/epochs, codebook update mechanism) and describe how the light-decoder is constructed.
-
-5. **Resolve the MS-SSIM vs. SSIM inconsistency** between the Experiments section and the tables.
+4. **Provide per-frame rate-distortion analysis for MCL-JCV** to illustrate why the fixed bit allocation degrades PSNR on high-redundancy content, and discuss potential mitigations.
 
 ## Score and Decision
 
-The paper proposes a genuinely novel approach to the cross-platform problem in neural video codecs by sidestepping entropy models entirely through codebook-based compression. The WCA context model is a clean, efficient architectural contribution. The experimental results demonstrate meaningful RD improvements over H.265 (especially in SSIM) and the light-decoder variant achieves real-time throughput. The weaknesses are real but incremental — the cross-platform evidence needs strengthening (not just one GPU pair, not just BD-rate), some implementation details are missing, and the fixed-rate comparison with H.265 warrants more granular reporting. None of these issues are fatal to the core contribution, and all are addressable in a revision or rebuttal.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

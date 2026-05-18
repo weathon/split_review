@@ -1,122 +1,77 @@
-Now I have all the information I need. Let me construct the final consolidated review.
-
----
+Now I have all the information needed. Let me produce the consolidated review.
 
 ## Summary
 
-This paper introduces Generative World Explorer (Genex), a video diffusion framework that enables embodied agents to "imaginatively" explore large-scale 3D environments from a first-person panorama view without physical movement. Genex incorporates spherical-consistent learning for coherent 360° video generation and formalizes imagination-driven belief revision as an extension of POMDP. The paper additionally introduces Genex-DB (synthetic training data) and Genex-EQA (an embodied QA benchmark). Results show strong generation quality and zero-shot transfer to real-world scenes, and the paper reports that equipping LLM agents with Genex-generated observations substantially improves decision accuracy on embodied QA tasks.
-
----
+This paper introduces Genex, a generative world exploration framework that produces panoramic egocentric video conditioned on an initial view and intended movement direction, enabling embodied agents to "imaginatively explore" 3D environments without physical movement. The generated observations are fed to LLM-based agents to update their beliefs about the environment and improve decision-making. The paper also presents spherical-consistent learning (SCL) for coherent panoramic video generation, a new synthetic benchmark (Genex-DB), and an embodied QA benchmark (Genex-EQA) spanning single-agent and multi-agent scenarios.
 
 ## Strengths
 
-1. **Novel and well-motivated concept**: The idea of using imagined egocentric video generation for mental exploration and belief revision in partially observable environments is creative and timely. The motivating example (inferring an ambulance from the taxi's perspective) is compelling, and the formalization as an extension of POMDP (Eq. 5) provides a principled framing.
+- **Panoramic video generation with spherical-consistent learning achieves strong quantitative results.** Genex with SCL achieves FVD 69.5, LPIPS 0.03, SSIM 0.94, and PSNR 30.2 on Genex-DB, clearly outperforming the six-view baseline and the w/o-SCL ablation on all metrics (Table 1). The improvement from SCL (FVD 81.9→69.5) provides direct evidence that the spherical regularization helps.
 
-2. **Spherical-consistent learning is a sound technical contribution**: The SCL loss that enforces pixel continuity across spherical rotations in latent space is well-designed. Ablation results (Table 1) confirm its benefit: Genex with SCL improves FVD from 81.9 to 69.5, MSE from 0.05 to 0.04, and SSIM from 0.91 to 0.94 over the variant without SCL, and dramatically outperforms the six-view baseline (FVD 69.5 vs. 196.7).
+- **Imagined observations substantially improve LLM-based decision-making.** In the embodied QA evaluation (Table 3), Genex (GPT-4o) achieves 85.22% single-agent and 94.87% multi-agent decision accuracy, compared to multimodal GPT-4o at 46.10% and 21.88% without Genex. These large margins are the paper's strongest empirical evidence that generated panoramic observations can meaningfully inform planning in partially observable settings.
 
-3. **Impressive generation quality and zero-shot generalization**: Genex achieves strong video generation metrics (FVD 69.5, PSNR 30.2, SSIM 0.94) on synthetic data. More notably, models trained purely on synthetic scenes generalize zero-shot to real-world Google Maps Street View and Behavior Vision Suite indoor scenes with IECC ≤ 0.105, demonstrating meaningful transfer.
+- **Cycle consistency metric (IECC) demonstrates coherent long-range exploration and zero-shot transfer.** Genex maintains latent MSE below 0.1 for closed-loop paths up to 20m with multiple rotations (Figure 4). Despite training only on synthetic data, it generalizes to real-world Street View (IECC ≤0.105) and indoor scenes (IECC ≤0.092) without fine-tuning (Table 2).
 
-4. **Cycle consistency metric (IECC)**: The IECC metric is a clever closed-loop approach to evaluating long-horizon exploration drift. The results showing latent MSE below 0.1 even at 20m distance with multiple rotations (Section 5.3, Fig. 5) provide evidence of coherent long-range generation.
-
-5. **Human performance improvement with Genex**: The human study data (Table 4) shows human decision accuracy rising from 91.50% to 94.00% (single-agent) and 55.24% to 77.41% (multi-agent) when humans are given Genex-generated observations, indicating that the generated content carries useful information even for human decision-makers.
-
----
+- **Multi-agent extension is clearly motivated and empirically validated.** The framework extends naturally to multi-agent reasoning, where one agent imaginatively explores another agent's perspective. The multi-agent results (94.87% vs. 21.88% for multimodal GPT-4o) are striking and suggest the approach is especially valuable for cooperative scenarios requiring perspective-taking.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **Embodied QA evaluation lacks critical documentation and has potential evaluation bias**: The paper's central claim — that imagined observations improve decision-making — relies heavily on the embodied QA results (Table 4), but several serious issues undermine their credibility:
-   - **No human study details whatsoever**: The paper reports "Human Text-only," "Human with Image," and "Human with Genex" results (e.g., 94.00% single-agent decision accuracy) but provides zero information about the number of participants, demographics, experimental protocol, how conditions were counterbalanced, how generated videos were presented, or inter-rater agreement. Without this information, the human numbers are uninterpretable.
-   - **Potentially circular LLM-as-judge**: Logic accuracy is evaluated by GPT-4o ("LLM-as-a-judge"), while the best-performing agent also uses GPT-4o. This creates a risk that the judge systematically favors reasoning patterns from its own model family.
-   - **Suspicious 0.0% logic accuracy for Gemini-1.5**: Multimodal Gemini-1.5 achieves 46.73% decision accuracy (non-trivial) but 0.0% logic accuracy on the same task. This is highly unusual and suggests the evaluation prompt or judge systematically fails for Gemini outputs, not that Gemini produces zero logical reasoning.
-   - **No error bars or confidence intervals**: All percentages in Tables 3, 4, 5, 6 are reported as point estimates without standard deviations, confidence intervals, or any measure of variance. With ~200 scenarios and binomial metrics, differences of a few percentage points may not be significant.
+1. **Missing action conditioning implementation detail.** The paper states that Genex "incorporates intended movement direction as an action input" and describes the LMM pilot setting "exploration configurations, including any 360° navigation direction and distance." Yet the diffuser backbone section (§3.2) only describes image conditioning via CLIP encoding of the initial panorama. How direction and distance are injected into the UNet — as cross-attention, an input channel, a time-step embedding, or some other mechanism — is never specified. This is a core architectural detail required for reproducibility.
 
-   **Why it matters**: These issues collectively mean the paper's main claim ("imagined observations significantly enhance decision-making") is not adequately supported by the evidence presented. The human study is unverifiable, the LLM-as-judge may be biased, and the suspicious Gemini result suggests potential evaluation artifacts.
+2. **SCL loss formulation is confusing and underspecified.** There is a direct inconsistency between the text description and the equation: the text (line 134) writes "the denoised diffused video $x_t - \epsilon_\theta(x_t, c)$" (treating $x_t$ as a pixel-space variable), while the equation (line 138) correctly uses the latent-space formulation $\mathcal{D}(z_t - \epsilon_\theta(z_t, c))$. Further, the loss backpropagates through the full chain: predicted noise → denoised latent → VAE decoder → spherical rotation → VAE encoder → MSE. The paper says the VAE is "pre-trained" but does not state whether it is frozen during training or fine-tuned — both choices have very different implications for training cost and effectiveness. The weighting constant $\lambda$ is never specified or ablated, making the loss function impossible to reproduce accurately.
 
-2. **IECC metric is not adequately defined for real-world zero-shot test sets**: The paper reports IECC for "Street" (Google Maps) and "Indoor" (Behavior Vision Suite) as evidence of zero-shot generalization. IECC requires a closed-loop path (return to starting location) and filtering of obstacles. For real-world datasets without ground-truth 3D geometry or odometry, the paper does not explain: (a) how closed-loop paths are defined, (b) how obstacles are detected and filtered, or (c) whether the initial and final images correspond to the same viewpoint in reality. The metric as applied may primarily measure self-consistency of the generator rather than fidelity to the real world.
-
-   **Why it matters**: This undermines the claim of "robust zero-shot generalization to real-world scenarios" (Finding 2), which is one of the paper's three key experimental findings.
+3. **Genex-EQA benchmark details are insufficient to validate the claimed gains.** The paper states "over 200 scenarios" but provides no examples, no train/val/test splits, no question types, no annotation procedure, and — crucially — no validation that condition (2) holds ("questions that cannot be solved by linguistic commonsense alone"). If a significant fraction of questions are answerable from text without spatial reasoning, the improvements attributed to Genex's generated observations could be inflated. Representative examples and a sanity check (e.g., comparing text-only baselines against oracle accuracy) are needed.
 
 ### Minor
 
-3. **Novel-view-synthesis comparison to 3D reconstruction baselines is asymmetrical**: Table 3 compares Genex to TripoSR, SV3D, and Stable Zero123 on novel view synthesis metrics (LPIPS, PSNR, SSIM) and claims to "surpass SoTA methods." However, the baselines take a single image of an object and generate a single novel view, while Genex generates video from a panoramic input with substantially more visual information. The large gap (PSNR 28.57 vs. 14.12) is expected under these asymmetric conditions and does not support a "surpassing SoTA" claim. The paper should either control for input conditions or reframe the comparison as demonstrating a different capability.
+4. **Novel view synthesis comparison (Table 4) lacks necessary context.** Genex is compared to TripoSR, SV3D, and Stable Zero123 — methods designed for single-object novel view synthesis from a single image. It is unclear whether these methods were fine-tuned on Genex-DB scenes or evaluated zero-shot. If zero-shot, the comparison conflates domain adaptation with model capability and is not informative. Additionally, the MSE$_{bg.}$ value of **0.00** for Genex rounds to zero at two decimal places, which is unusual for held-out generation and warrants explanation (e.g., static background with pixel-identical reconstruction, or a metric computation detail). The table should be reframed as a demonstration of capability rather than a competitive benchmark.
 
-4. **Loss weight λ is not reported or ablated**: The training objective (Eq. 6) balances the SCL loss and the noise prediction loss with a weighting parameter λ, but its value is never disclosed. Since these losses operate at different scales (one in latent/pixel space, one in noise space), the choice of λ can significantly affect training dynamics and results.
+5. **Human evaluation protocol is not described.** The paper reports human results in Table 3 (e.g., "Human with Genex" achieving 77.41% multi-agent accuracy) but provides no information about participants (number, background, whether lab members or crowdworkers), training, or the format in which generated videos were displayed. While human results are secondary to the paper's main LLM-agent claims, their presence in the main table without protocol details limits interpretability. The anomaly of Genex (GPT-4o) at 94.87% multi-agent vs. Human with Genex at 77.41% is noteworthy but not necessarily a red flag — LLMs may be better at reasoning about multi-perspective scenarios from panoramic video — but without protocol details the comparison is uninterpretable.
 
-5. **Correlation between FVD and IECC is claimed but not quantified**: Finding 1 states "a strong correlation between imaginative exploration cycle consistency and generation FVD" (Fig. 6), but no correlation coefficient is reported. The scatter plot visually suggests the relationship may be driven by the six-view outlier, making the "strong correlation" claim unsubstantiated.
-
-6. **No error bars on any metric**: As noted above, all main experimental tables report point estimates without variance. FVD, PSNR, SSIM metrics typically vary across random seeds or dataset splits, and the absence of error bars makes it impossible to assess the reliability of reported differences.
-
-7. **Computational cost not reported**: Training time, inference speed, and GPU hours are not provided. This is important for a generative method that uses multiple pretrained networks (temporal VAE encoder, decoder) during training.
-
-8. **No failure case analysis or limitations discussion**: The paper does not discuss when Genex produces inconsistent or hallucinated views, which is important for a method that aims to inform real-world decision-making.
+6. **POMDP formalism is imprecise and does not accurately describe the method.** Equation (3) replaces the standard Bayesian belief update (observation model + transition probabilities integrated over states) with a product over generated observations $\prod p_\theta(\hat{o}^{i+1} \mid o^i, \hat{a}^i)$. This is not a belief update in the POMDP sense: there is no integration over state hypotheses, no likelihood weighting, and no justification that the resulting product yields a valid posterior. The paper acknowledges an "approximation" but does not argue why or in what sense it holds. The actual method — generating plausible future observations to provide an LLM with additional visual context — is a useful heuristic that stands on its own without the POMDP framing, and the paper would be stronger by presenting it as such rather than over-claiming a formal extension.
 
 ### Trivial
 
-- The scatter plot in Fig. 6 (correlation between IECC and FVD) is difficult to read at the published size.
-- The paper states "over 200 scenarios" for Genex-EQA — the vagueness is unhelpful; an exact count should be reported in the main paper.
-
----
+7. The weighting constant $\lambda$ in the SCL loss is introduced but never given a numerical value or sensitivity analysis.
+8. The notation $x_t$ is used inconsistently: in the noise prediction loss it refers to a noisy latent ($z_t$), while in the SCL text it appears to refer to a pixel-space noisy video. This makes the description harder to follow.
 
 ## Nice-to-Haves
 
-- **Random-video ablation for the embodied QA**: Showing that a *random* generated video (or a static-image-repeated-as-video) does not produce the same improvement would strengthen the causal claim that *specific* generated content, not just extra pixels, drives the decision improvement.
-- **Ablation of λ sensitivity** would be useful to understand how robust the method is to this hyperparameter.
-- **Using a second LLM judge (or human evaluation for a subset)** to de-bias the logic accuracy metric would significantly strengthen the embodied QA results.
-- **Concrete examples** where the generated view contains critical information absent in the initial frame, and evidence that the LLM uses that specific information, would make the decision-making results more interpretable.
-
----
+- An ablation of the SCL loss measured directly on the exploration cycle consistency metric (IECC), not just on generation metrics, would directly test the claim that SCL reduces drift over long paths.
+- A walk-through of one complete Genex-EQA scenario (initial panorama → imagined path → generated frames → LLM reasoning → decision vs. ground truth) would make the application concrete.
+- Clarification on whether the closed-loop paths for real-world scenes (Street View, Behavior Vision Suite) are physically possible to close, or whether the IECC metric measures something different in those cases.
 
 ## Removed Points
 
-- **"The human study data should be verified independently"**: Removed per Hard Rules — reproducibility concerns that question existence of cited entities are not valid. However, the *lack of documentation* for the human study is a genuine weakness kept above.
-- **"Missing appendix details for dataset construction / cube-wise implementation / etc."**: Removed per Hard Rules — the paper references appendix sections (\autoref{sec:dataset_details}, \autoref{sec:cube_wise_implementation}, etc.) that exist in the original submission. The parser strips these.
-- **"The six-view baseline should be given the same computational budget"**: Removed per Hard Rules — computational budget speculation without evidence.
-- **"The introduction overpromises by claiming the ambulance example is not demonstrated"**: Weakened — the paper does demonstrate related decision-making improvements in Table 4, even if the exact ambulance scenario is not shown. The critic's phrasing is too harsh.
-- **"The belief revision (Eq. 3) is 'just a notational contribution'"**: Removed per Soft Rules — this evaluates the paper against the wrong class of expectations (expecting a novel algorithmic principle rather than a systems/empirical contribution). The paper's novelty is in *integrating* video generation with belief revision, which is a legitimate contribution.
-- **"The paper should study more domains / additional tasks"**: Removed per Hard Rules — scope creep.
-- **"The six-view baseline's poor FVD is expected" but "should discuss computational budget"**: Removed — the critic acknowledges the result is expected, making this a placeholder criticism.
-- **"Unimodal sometimes beats multimodal" analysis criticized**: The harsh critic says the effect is not robust, but the paper's claim is modest ("in some cases") and the critic's own analysis confirms the pattern is real for Gemini multi-agent. Removed as nitpicking an already-hedged claim.
-- **Strength Finder's generic strengths about "addressing an important problem" and "timely topic"**: Removed as superficial/generic without specific evidence.
-- **"Vision without imagination can be misleading" claim criticized**: The critic's point about the effect being "small" misreads the paper — the paper was making a nuanced observation that the effect exists in some configurations, not claiming it as a general law. Removed.
-
----
+- **Criticism about wrapfigure/wraptable formatting:** These are formatting/style nitpicks (parser artifacts are not author errors) and are removed per the hard rules.
+- **Criticism that human evaluation results "cannot be trusted" / "red flag":** The concern about the LLM-outperforming-humans anomaly is kept in Minor (lack of protocol details) but the stronger "red flag" language is removed because: (a) human results are secondary to the paper's main claims about LLM agents, and (b) the single-agent setting shows humans (94%) still slightly outperform Genex (85.22%), so the multi-agent anomaly has plausible explanations (LLMs may be better at systematic multi-perspective reasoning from panoramic inputs). The core issue is missing protocol details, not inherent incredibility.
+- **Criticism that POMDP claim should be moderated given GAIA-1/DriveDreamer:** The critic argues these prior works "functionally similar" because they also generate observations for downstream planners. The paper cites these works (line 61) and distinguishes them by noting they focus on specific domains (autonomous driving) and do not model beliefs. This distinction is defensible. The POMDP weakness (imprecise formalism) is kept; the prior-work comparison concern is removed as it does not materially affect the paper's contribution.
+- **Criticism about GPT-4o being both policy and judge:** This concern applies only to Logic Accuracy, which is a secondary metric. Decision Accuracy is the primary metric and is based on ground-truth optimal actions, not LLM judgment. The circularity concern is real for the logic metric but is weak grounds for a general criticism.
+- **Strength #1 from Strength Finder ("Novel integration of generative video into POMDP via imagination-driven belief revision"):** Conflicts with verified weakness #6 (POMDP formalism is imprecise). Per the conflict rule, the weakness wins, so this strength is removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews converge on the paper having a genuinely creative core idea (imaginative exploration for belief revision) but identify that the evaluation of the central decision-making claim is significantly weaker than the generation quality evaluation. The most novel insight from the review synthesis is that the paper's two main claims (good generation + improved decision-making) have very different levels of support, and the community would benefit most from seeing the generation capability paired with a more rigorous decision-making evaluation.
-
----
+None beyond the paper's own contributions. The reviews surface no insight that the paper itself does not already argue or imply.
 
 ## Suggestions
 
-1. **Provide complete human study documentation**: Number of participants, demographics, task instructions, interface design, counterbalancing, and measures of inter-rater agreement. This is essential for the human results to be interpretable.
+1. **Specify the action conditioning mechanism.** Provide exact details on how direction+distance are encoded and injected into the UNet. A brief description or a pointer to the code release would resolve the largest reproducibility gap.
 
-2. **De-bias the embodied QA evaluation**: Either (a) use a different LLM judge (e.g., Claude, Gemini) and report agreement, or (b) have human annotators evaluate a subset of reasoning chains to calibrate the LLM judge, or (c) build the evaluation around an unambiguous answer key rather than LLM-as-judge.
+2. **Fix the SCL loss description.** Resolve the notation inconsistency between text and equation. State whether the VAE is frozen or fine-tuned during SCL training. Provide the value of $\lambda$ and preferably an ablation showing its effect on IECC.
 
-3. **Add error bars / confidence intervals to all main results**: With 200 scenarios, binomial confidence intervals are easy to compute and would significantly strengthen the claims about decision accuracy improvements.
+3. **Provide Genex-EQA validation.** Include representative question examples and a sanity check confirming that the questions genuinely require spatial reasoning (e.g., show that text-only baselines perform near chance). Report dataset splits and annotation statistics.
 
-4. **Clarify IECC computation for real-world datasets**: Explain how closed-loop paths are defined for Google Street View and Behavior Vision Suite data without ground-truth 3D geometry, or acknowledge the limitation and reframe the metric as measuring self-consistency.
+4. **Reframe the POMDP formalism or drop it.** Either properly derive the belief update or present the method straightforwardly as "imagination-augmented observation" — the experiments already demonstrate the method's value without relying on the formal pretense.
 
-5. **Report the λ value and ideally run a sensitivity analysis**.
+5. **Clarify the novel view comparison setup.** State whether comparison methods were fine-tuned or evaluated zero-shot, and explain how MSE$_{bg.}=0.00$ arises.
 
-6. **Report a correlation coefficient (e.g., Pearson's r) for the FVD–IECC relationship** rather than relying on visual impression.
-
-7. **Report computational cost**: Training time, GPU hours, inference speed per frame.
-
----
+6. **Document the human evaluation protocol** or consider removing human results from the main table if they cannot be adequately described in the main paper.
 
 ## Score and Decision
 
-This paper presents a genuinely creative and well-motivated idea with solid technical contributions (SCL, panoramic video generation, POMDP formalization). The generation quality results are strong, and the zero-shot generalization to real-world scenes is impressive. However, the experimental validation of the paper's central claim — that imagined observations improve decision-making — has significant evidential gaps: no human study documentation, a potentially biased LLM-as-judge setup, suspicious results (0.0% Gemini logic accuracy), and no error bars on any metric. These are real weaknesses, but they are correctable rather than structural. The core method, the SCL technique, and the generation quality results are independently valuable contributions.
+The paper presents a genuinely interesting idea — using panoramic video generation for mental exploration in embodied decision-making — with compelling empirical results showing dramatic improvements in LLM-based planning. The spherical-consistent regularization is a reasonable technical contribution. However, the paper suffers from significant reproducibility issues (missing action conditioning detail, confusing loss formulation, underspecified benchmark) that prevent the contribution from standing in its current form. The POMDP overclaim is a presentational issue that should be corrected. These problems are fixable with a major revision, but they are substantive enough to warrant rejection of the current submission.
 
-**Score**: 6.0
-
-**Decision**: Accept
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

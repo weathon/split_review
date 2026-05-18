@@ -1,24 +1,20 @@
-Now I have a thorough understanding of the paper and can verify the reviewer's claims against the actual content. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the consolidated review.
 
 ## Summary
 
-This paper conducts a systematic empirical investigation into whether LLMs can self-correct their reasoning without external feedback. The authors define and isolate *intrinsic self-correction*, finding across four models (GPT-3.5, GPT-4, GPT-4-Turbo, Llama-2) and three reasoning benchmarks that performance consistently degrades rather than improves. The paper further demonstrates that reported gains in prior work are artifacts of oracle labels, unfair comparisons against baselines with fewer inference calls, or suboptimal initial prompt design. The contribution is a well-scoped negative result with genuine corrective value for the community.
+This paper critically examines the claim that LLMs can improve their reasoning through self-correction. The authors define *intrinsic self-correction* (self-correction without external feedback such as oracle labels or tools) and show that across four LLMs (GPT-3.5, GPT-4, GPT-4-Turbo, Llama-2) and three reasoning benchmarks (GSM8K, CommonSenseQA, HotpotQA), this form of self-correction consistently fails to improve performance and often degrades it. The paper further identifies three confounds in prior work that produced misleading positive results: reliance on oracle labels, unfair comparisons to self-consistency in multi-agent debate, and suboptimal initial prompts that conflate prompt engineering with self-correction.
 
 ## Strengths
 
-- **Controlled experiments isolating intrinsic self-correction show consistent performance degradation across all settings.** Every tested model (GPT-3.5, GPT-4, GPT-4-Turbo, Llama-2) loses accuracy after intrinsic self-correction on GSM8K, CommonSenseQA, and HotpotQA (Tables 3 and 4), directly refuting the claim that LLMs can self-correct reasoning without external feedback. Llama-2 drops from 62.0% to 36.5% on GSM8K — a massive degradation.
+1. **Rigorous empirical demonstration that intrinsic self-correction consistently fails to improve reasoning.** Tables 2–4 show that for all four models across GSM8K, CommonSenseQA, and HotpotQA, performance after intrinsic self-correction is either lower than or equal to standard prompting, and in many cases substantially lower (e.g., Llama-2 on CommonSenseQA drops from 64.0% to 36.5% after two rounds). The drop is observed across multiple feedback prompts (Tables 3–4), showing robustness to prompt variation.
 
-- **Quantitative identification of oracle-label reliance in prior work.** Tables 2 and 3 directly contrast performance *with* oracle labels (replicating prior reported gains) and *without* them (performance degrades). This clean ablation proves that earlier improvements were artifacts of ground-truth label availability.
+2. **Isolation of oracle-label reliance as the source of prior claimed gains.** The paper reproduces the large gains reported by RCI and Reflexion when using ground-truth labels (Table 1: GPT-3.5 on CommonSenseQA goes from 75.8 to 89.7), then shows these gains vanish without labels (Table 2: same setting drops to 38.1). This directly exposes a critical confound that undermines the conclusions of those prior works.
 
-- **Fair controlled comparison showing multi-agent debate provides no advantage over self-consistency.** Using equal numbers of total model responses (Table 6), multi-agent debate (83.2% with 6 responses) significantly underperforms self-consistency (85.3% with 6 responses, 88.2% with 9 responses). This demonstrates that reported debate improvements stem from ensemble averaging, not correction.
+3. **Demonstration that multi-agent debate does not outperform self-consistency when controlling for inference cost.** Table 5 shows that with 9 responses, self-consistency achieves 88.2% on GSM8K while multi-agent debate achieves only 83.0%. This reveals that the improvement attributed to debate/critique is better explained as a benefit of ensembling, not self-correction.
 
-- **Empirical analysis of answer-change dynamics.** Figure 1 quantifies that LLMs more often corrupt correct answers than fix wrong ones, providing a concrete mechanism for why performance drops. The finding that "correct → incorrect" transitions consistently outnumber "incorrect → correct" transitions across models is a clean diagnostic.
+4. **Mechanistic analysis of answer changes.** Figure 1 quantifies the proportion of correct→incorrect vs. incorrect→correct flips, showing that models are more likely to change correct answers to wrong ones. This provides a concrete explanation for the performance degradation beyond reporting aggregate scores.
 
-- **Multi-model, multi-benchmark evaluation.** Testing four LLMs (including an open-source model) across three reasoning benchmarks (including multi-hop QA and commonsense reasoning) ensures results are not model- or dataset-specific.
-
-- **Clear problem formulation.** The paper crisply defines *intrinsic self-correction* (Section 2), distinguishing it from settings with oracle labels or external feedback, and thus removes the ambiguity that has plagued prior work.
-
-- **Candid discussion of limitations.** The paper acknowledges that self-correction may work in non-reasoning domains (safety, style) and cites prior work consistent with its findings, adding nuance without undermining core claims.
+5. **Demonstration of the prompt-design confound.** On CommonGen, improving the initial prompt (adding "include *ALL* concepts") yields 81.8, which surpasses the Self-Refine self-correction result (67.0), and applying self-correction to the improved prompt *decreases* performance to 75.1. This convincingly shows that claimed improvements in prior work can stem from suboptimal initial prompts rather than self-correction itself.
 
 ## Weaknesses
 
@@ -26,55 +22,47 @@ This paper conducts a systematic empirical investigation into whether LLMs can s
 None.
 
 ### Major
-None. The paper's central claims are well-supported by the experimental evidence.
+None.
 
 ### Minor
 
-- **No statistical significance or variance reported.** The central claim is that self-correction *decreases* performance. While many drops are large (e.g., Llama-2: 62%→43.5% on GSM8K, GPT-3.5: 75.8%→38.1% on CommonSenseQA), some drops are small (GPT-3.5 on GSM8K: 75.9%→75.1% on 1,319 examples). For the 200-example subsets and the 100-example HotpotQA evaluation, some differences could be within sampling noise. Confidence intervals or bootstrap estimates would solidify the evidentiary base, especially for the smaller-magnitude differences. This is the most impactful methodological gap.
+1. **Title slightly overstates the scope of the evidence.** The title "Large Language Models Cannot Self-Correct Reasoning Yet" claims more generality than the experiments directly support. The paper tests one specific pipeline (generate → write explicit feedback text → regenerate) adapted from prior work. Other plausible forms of LLM-guided revision — such as implicit correction during generation (the "wait, that might be wrong" pattern), or verification passes without explicit critique prompts — are not tested. The paper's own limitations section (p. 10) and definition of "intrinsic self-correction" (Section 2) provide reasonable scoping, but the title and abstract omit these caveats. The claim would be more precisely served by a title like "LLMs Cannot Improve Reasoning Through Intrinsic Self-Correction" or similar wording that matches the tested pipeline.
 
-- **Temperature mixing across models without clear justification.** The paper uses temperature 1 for GPT-3.5 and GPT-4, but temperature 0 for GPT-4-Turbo and Llama-2, justified only as "to provide evaluation across different decoding algorithms" (line 83). Temperature 0 makes outputs deterministic, which could suppress the stochastic variation that self-correction mechanisms rely on to discover improvements. This is not a fatal flaw because degradation still occurs across models, but the paper should either standardize temperatures or provide a principled discussion of why mixing is appropriate.
+2. **Temperature inconsistency confounds one secondary cross-model comparison.** The paper uses temperature = 1 for GPT-3.5-Turbo and GPT-4, but temperature = 0 for GPT-4-Turbo and Llama-2 (p. 4, justified as "to provide evaluation across different decoding algorithms"). This choice does not affect the paper's core results (each model's performance is compared against its own standard-prompting baseline at the same temperature), but it does confound the cross-model observation that "both GPT-4 and GPT-4-Turbo are more likely to retain their initial answers" (p. 6) — GPT-4-Turbo at temperature 0 is deterministic, so higher answer retention is expected regardless of the model's confidence or robustness. This cross-model comparison would benefit from matched temperature settings.
 
-- **Multi-agent debate analysis limited to one dataset and one model.** Section 4 tests only GPT-3.5 on GSM8K. The paper draws the conclusion that "multi-agent debate does not outperform self-consistency" — a general claim from a single (dataset, model) pair. Testing at least one more reasoning benchmark would substantially strengthen this claim.
+3. **No confidence intervals or significance tests.** Results are reported as point estimates without confidence intervals or significance tests. This is especially relevant for GPT-4-Turbo on GSM8K where the best feedback prompt yields 91.0 vs. standard 91.5 — a 0.5% difference on 200 samples that may be within noise. While the overall pattern across all models and datasets is consistent and the claim does not rest on this single comparison, basic uncertainty quantification would strengthen the paper.
 
-- **Prompt-design example uses constrained generation, not reasoning.** Section 5 demonstrates prompt-design artifacts on CommonGen-Hard (a constrained text generation task from Self-Refine), not a reasoning task. This weakens the direct applicability of the finding to the paper's stated focus on reasoning. An analogous experiment on a reasoning dataset (e.g., showing that an incomplete reasoning instruction can be "corrected" by informative feedback prompts) would make the argument directly relevant.
+4. **The "intuitive explanation" (Section 3.3) is plausible but untested.** The paper suggests that added feedback skews the model away from optimal responses to the initial prompt. This is clearly labeled as an "intuitive explanation," not a tested claim, but it limits the paper's insight beyond the empirical observation. Controlled experiments that vary feedback framing (e.g., neutral prompts, confidence-aware revision rules) would be needed to isolate the mechanism.
 
-- **Stopping criterion framing slightly imprecise.** The paper states that intrinsic self-correction "require[s] LLMs to independently determine when to stop the self-correction process, i.e., whether to retain their previous answers" (line 139). In practice, the experiment always runs two fixed rounds of (generate→feedback→regenerate) with no explicit early-stop mechanism for the model. The model can keep its answer unchanged (implicitly "stopping"), but the framing overstates the degree of autonomy. This does not affect the validity of the results, but clarifying this distinction would improve precision.
-
-- **HotpotQA evaluation uses only 100 examples.** The paper acknowledges this and omits it from the empirical analysis in Figure 1. However, including a 100-example evaluation as a primary result (Tables 2 and 3) without confidence intervals is concerning. Either expanding the sample or dropping the dataset from quantitative comparisons would be preferable.
+5. **Multi-agent debate experiment is limited in scope.** Section 4 tests only GPT-3.5-Turbo on GSM8K (one model, one dataset). While the result is informative and the comparison to self-consistency is fair, additional model/dataset combinations would increase confidence in the generality of the conclusion that debate adds nothing beyond consistency.
 
 ### Trivial
-- **Figure 1 omits HotpotQA analysis.** The paper already explains this is due to small sample size (line 152). The explanation is fine.
+None.
 
 ## Nice-to-Haves
-
-- Add self-consistency baselines to the intrinsic self-correction experiments (Section 3) to isolate whether the degradation is due to the correction mechanism itself or simply to the use of multiple calls with inappropriate decoding.
-- Ablate the number of self-correction rounds beyond two. While evidence from two rounds is already clear, discussing whether more rounds could eventually help would be worthwhile.
-- Verify that the prompts used for multi-agent debate and self-consistency are identical for the initial generation step. (The paper uses Du et al.'s debate prompt for debate and standard prompting for self-consistency — these may differ in ways that affect results.)
-- Add a prompt-design experiment on a reasoning task to directly connect Section 5's finding to the paper's main focus.
+- An ablation varying temperature within a single model (e.g., GPT-4-Turbo at temperature 1) to verify that the main results are robust to decoding strategy.
+- Testing whether asking the model to output a confidence estimate before revision, and only correcting when confidence is low, changes the outcome.
+- Varying the number of self-correction rounds beyond two to see whether performance continues to degrade or plateaus.
 
 ## Removed Points
-
-These points were removed per the review guidelines:
-- **"Figure 1 does not report numbers for HotpotQA"** — The paper already explains this is due to small sample size. Not a weakness.
-- **"The paper should discuss that better feedback prompts could yield improvements"** — The paper already tests multiple feedback prompts across two models (Tables for GPT-4-Turbo and Llama-2), finding consistent degradation. The demand for "more" prompts is open-ended and the existing evidence is sufficient.
-- **"The paper should use the same temperature across all models"** — The paper explicitly notes it uses different temperatures "to provide evaluation across different decoding algorithms." While the justification is thin, this is a design choice, not an error, and the finding holds across both temperature settings.
-- **"Self-correction in Section 3 should be compared to self-consistency"** — The paper's claim in Section 3 is about whether the *correction mechanism* itself (reviewing and revising) improves correctness, not about whether multiple calls help generally. Self-consistency comparison is done in Section 4 for debate, which is the appropriate place.
+- **Criticism that the paper ignores "self-correction during generation" (e.g., 'wait, that might be wrong')**: This is a fundamentally different mechanism from the explicit feedback-loop pipeline studied in the paper and in prior self-correction literature. The paper's claim is about the pipeline that prior works (RCI, Reflexion, Self-Refine) proposed and tested. Criticizing the paper for not studying a different mechanism is scope creep.
+- **Criticism that the intuitive explanation being "post-hoc and untested" is a structural flaw**: The paper clearly labels this as "Intuitive Explanation." It is not presented as a core finding. The empirical analysis (Figure 1) that precedes it *is* tested. The explanation is commentary, not a contested claim.
+- **Criticism that the paper does not explore whether self-correction could help with a stronger initial prompt *and* a redesigned feedback prompt**: The paper already shows that self-correction decreases performance even from the strong prompt (81.8 → 75.1). The demand to test yet another feedback prompt on top is an endless regress; the paper's point — that improvement attributed to self-correction came from poor initial prompts — is already well-supported.
+- **Criticism about missing related work**: Cannot be independently verified per instructions.
+- **Several generic/ungrounded "strengths" from the Strength Finder**: None found — all listed strengths are specific and evidence-backed.
 
 ## Novel Insights
-
-The core novel insight is that the "self-correction" community has been systematically evaluating against the wrong baselines. The paper demonstrates three different confounds — oracle labels, unequal inference budgets, and suboptimal initial prompts — and shows that each independently explains away reported improvements. The diagnostic that LLMs more frequently corrupt correct answers than fix incorrect ones (Figure 1) provides a mechanistic explanation for why self-correction fails on reasoning tasks. This reframing from "can LLMs self-correct?" to "are we measuring the right thing?" is the paper's most valuable intellectual contribution.
+None beyond the paper's own contributions. The reviewers did not contribute a novel synthesis or cross-cutting observation not already present in the paper.
 
 ## Suggestions
-
-1. **Add bootstrap confidence intervals or standard errors** for the key performance comparisons (Tables 3, 4, 5). This is the highest-leverage improvement and can be done without additional model calls.
-2. **Extend the multi-agent debate analysis** to at least one more reasoning benchmark (e.g., CommonSenseQA) to support the general claim.
-3. **Clarify the stopping-criterion framing** in Section 3 to distinguish between "model decides whether to retain/change its answer" (what is tested) and "model decides to stop the process" (what the current phrasing suggests).
-4. **Provide a brief justification** for the temperature choice across models, or re-run a subset of experiments with matched temperatures to show the finding is robust.
-5. **Add a small prompt-design experiment on a reasoning task** (e.g., GSM8K with a stripped-down initial instruction) to directly connect Section 5 to the paper's main thesis.
+1. **Narrow the title** to better match the tested scope, e.g., "LLMs Cannot Improve Reasoning Through Intrinsic Self-Correction" or "Intrinsic Self-Correction Fails to Improve LLM Reasoning."
+2. **Add confidence intervals** (bootstrapped or asymptotic) to the main accuracy tables so readers can judge which differences are meaningful.
+3. **For the cross-model comparison about answer retention**, either match temperatures or explicitly note the confound when interpreting differences between models run at different temperatures.
+4. **Run a temperature ablation** (e.g., GPT-4-Turbo at temp 1) for the main intrinsic self-correction condition to verify the results are robust.
 
 ## Score and Decision
 
-The paper makes a clear, well-supported contribution that corrects a significant misperception in the field. The weaknesses are real but minor — none threaten the core claims, and most are addressable. The evidence across 4 models × 3 benchmarks showing consistent degradation is strong, and the three additional demonstration experiments (oracle labels, unfair baselines, prompt design) each cleanly isolate a confound in prior work.
+This paper makes a genuine and valuable contribution. It identifies important confounds in prior self-correction work (oracle labels, unfair baselines, suboptimal initial prompts) and supports each with controlled experiments across multiple models and datasets. The weaknesses are real but tractable — mostly about presentation framing, absence of confidence intervals, and one secondary confounded comparison. None of them threaten the paper's core conclusions.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

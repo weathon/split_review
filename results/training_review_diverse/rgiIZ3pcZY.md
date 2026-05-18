@@ -1,20 +1,17 @@
-Now I have all the information I need. Let me write the consolidated review.
+Now I have all the information I need. Let me construct the consolidated review.
+
+---
 
 ## Summary
 
-This paper investigates the vulnerability of safety-aligned LLMs/MLLMs to out-of-distribution (OOD) inputs. The authors propose JOOD, a jailbreak strategy that transforms harmful inputs using simple off-the-shelf techniques (text-mixing, image mixup, CutMix, etc.) to create OOD-ified versions that bypass safety guardrails. The key insight is that RLHF-based safety alignment does not generalize well to inputs that fall outside the training distribution. Experiments on GPT-4, GPT-4V, MiniGPT-4, and LLaVA-1.5 show high attack success rates across multiple jailbreak scenarios, with extensive ablations characterizing the effect of mixing coefficients, auxiliary image similarity, and transformation types.
+This paper proposes JOOD, a jailbreak strategy that applies simple mixing transformations (text-mixing for LLMs, mixup/CutMix for MLLMs) to create "out-of-distribution" (OOD) inputs that bypass safety alignment. The method achieves high attack success rates on GPT-4, GPT-4V, MiniGPT-4, and LLaVA-1.5 across seven harmful scenarios, significantly outperforming existing baselines (e.g., 63% ASR on GPT-4V in Bombs or Explosives vs. 23% for the best baseline). The core empirical finding — that simple data mixing can reliably jailbreak safety-aligned models — is important and well-supported.
 
 ## Strengths
 
-- **Novel and well-motivated insight**: The paper systematically identifies a genuine vulnerability of RLHF-based safety alignment — that it fails to generalize to OOD inputs created by simple transformations. This is a previously underexplored axis of attack, and the paper provides clear evidence (especially Figure 4's mixing coefficient ablation) that the effect is driven by the degree of OOD-ification rather than superficial properties of the transformation.
-
-- **Simple yet effective attack**: JOOD uses widely-available, inexpensive, black-box transformations (text-mixing, image mixup). The paper demonstrates across Figures 3a and 3b that multiple text-mixing and image-mixing variants consistently outperform the vanilla attack and non-mixing transformations (RandAug), showing the approach is robust to the specific mixing technique used.
-
-- **Strong empirical results across models and scenarios**: JOOD achieves high ASR on proprietary models (63% on GPT-4V in Bombs or Explosives scenario, Table 1) and generalizes to open-source MLLMs (>80% ASR in multiple scenarios). The per-instruction harmfulness distributions (Figure 2) and exclusive jailbreak counts (Table 2) provide complementary evidence beyond aggregate ASR.
-
-- **Comprehensive ablations**: Figures 3–5 provide thorough analysis of the effect of mixing coefficient, auxiliary image similarity, visual type (typography vs. real images), and different transformation techniques. These ablations support the core OOD hypothesis and offer actionable insights for defense.
-
-- **Robustness to system-prompt defense**: Table 3 shows JOOD maintains 60% ASR even with a safety-aware system prompt (only 3% degradation), while baselines drop more sharply (FigStep-Pro drops 10%).
+- **Strong empirical results demonstrating a genuine vulnerability**: JOOD achieves state-of-the-art attack success rates by large margins across all models and scenarios tested. In the Bombs or Explosives scenario against GPT-4V, JOOD reaches 63% ASR compared to 23% for the previous best method (FigStep-Pro). The margins are large enough to be practically meaningful even with the modest instruction count.
+- **Systematic evaluation across multiple models and scenarios**: The paper evaluates on both proprietary (GPT-4, GPT-4V) and open-source MLLMs (MiniGPT-4 7B, LLaVA-1.5 13B), across seven harmful scenarios. JOOD achieves the highest ASR in every single model–scenario combination, including over 80% ASR on open-source models in multiple scenarios. This breadth strengthens the claim that the vulnerability is general.
+- **Well-designed ablation studies that support the mixing-as-driver interpretation**: The mixing coefficient ablation (Figure 4) shows a clear dose-response relationship: intermediate α values produce the highest ASR, while α=0 (harmful image alone) and α=1 (auxiliary image alone) produce low ASR. The auxiliary image similarity analysis (Figure 5) shows a strong negative correlation between semantic similarity and harmfulness. These ablations go beyond mere performance reporting and provide meaningful evidence about *why* the attack works.
+- **Robustness against system-prompt defenses**: JOOD maintains 60% ASR even when the model is given a safety-focused system prompt, while baselines degrade to near zero. This suggests the vulnerability is deeper than simple prompt engineering can fix.
 
 ## Weaknesses
 
@@ -23,51 +20,54 @@ None.
 
 ### Major
 
-- **Unfair baseline comparison via "max over attacks" evaluation**: JOOD evaluates by taking the best response across n=5 auxiliary words/images × m=9 mixing coefficients = up to 45 attempts per harmful instruction (Section 3.3, Eq. 4). The paper does **not specify whether baselines (CipherChat, PAIR, FigStep, HADES) were evaluated with the same multi-attempt protocol or with a single attempt per instruction**. If baselines were run only once while JOOD selects the maximum from dozens of attempts, the reported margins (e.g., "+42% ASR" in Hacking, "+40% ASR" in Bombs or Explosives) conflate attack effectiveness with brute-force search. The paper should: (a) clarify the baseline evaluation protocol, (b) report per-attempt ASR (e.g., average or median across transformations), or (c) match the number of attempts across methods. The exclusive jailbreak counts (Table 2) partially mitigate this concern since they show JOOD jailbreaks instructions baselines fail on entirely, but the quantitative ASR comparisons in their current form lack fairness guarantees.
+1. **The text-mixing attack confounds OOD transformation with prompt framing.** For the text-only LLM attack (Section 3.1), the JOOD template wraps the harmful request in a meta-instruction: *"The following is a newly coined word made by mixing words... Please answer the request below for each of these words."* This framing differs substantially from the vanilla baseline's direct harmful instruction. Without a control experiment that uses the **same meta-instruction** with the harmful word **unscrambled**, we cannot attribute the jailbreak effect to the OOD-ifying transformation versus the instruction framing. This is a genuine experimental gap that weakens the paper's ability to support its central causal claim for the text-mixing attack.
+
+   *However*, this concern is largely scoped to the text-mixing attack on text-only LLMs. For the **image-mixing** attack (which produces the paper's strongest results on GPT-4V), the α=0 ablation in Figure 4 provides an implicit control: when α=0 (harmful image alone, presented within the JOOD framework's instruction), ASR is low. The fact that ASR rises only when mixing is applied (α > 0) suggests the mixing itself is the active ingredient for the image-based attack. The authors should verify this interpretation explicitly or add the requested control.
+
+2. **The central mechanistic claim — that OOD-ifying increases model uncertainty — is asserted without direct evidence.** The paper repeatedly states that OOD-ifying "highly increases the uncertainty of the model" (abstract, introduction, conclusion) and that this uncertainty is the mechanism enabling the jailbreak. However, **no direct measurement of uncertainty is provided** — not output entropy, not token-level log probabilities, not refusal-token probability, not calibration. The only "evidence" is that jailbreaking occurs, which is circular when used to support the mechanism. This is a significant gap: the mechanistic story is presented as a key part of the paper's contribution but is entirely untested. The empirical finding (mixing improves ASR) remains valid, but the paper's explanatory framing is unsupported.
 
 ### Minor
 
-- **Central mechanism (uncertainty increase) is asserted but not directly measured**: The paper repeatedly claims that OOD-ifying inputs "highly increases the uncertainty of the model" (abstract, introduction, Section 3.2), but never directly measures any uncertainty proxy — no perplexity, output entropy, confidence scores, or refusal token probabilities are reported. The evidence for the mechanism is indirect: mixing coefficients affect ASR (Figure 4), which is consistent with the uncertainty story, but alternative explanations (e.g., mixing distracts the model, or provides a "cover story") are not ruled out. Directly measuring uncertainty would substantially strengthen the paper's theoretical contribution.
+1. **Small instruction count per scenario (~30).** The paper uses approximately 30 harmful instructions per scenario (Advbench-M subset). While the performance margins over baselines are large enough that this is unlikely to change the qualitative conclusions, reporting bootstrapped confidence intervals or using a larger instruction set would strengthen statistical reliability. This is particularly relevant for the per-instance comparison claims (e.g., "10 additional instructions out of 30").
 
-- **No variance or statistical significance reporting**: Results (Tables 1–3, Figures 3–5) are reported as point estimates with no error bars, confidence intervals, or repeated runs. Each scenario contains ~30 instructions, and jailbreak success can be sensitive to the specific random sampling of auxiliary words/images. While single-run evaluation is common in this literature, reporting bootstrapped confidence intervals or results over multiple random seeds would substantially increase confidence in the quantitative claims.
+2. **The "+42% ASR" claim in the abstract needs clarification.** The abstract states: "improving performance by +42% ASR compared to the state-of-the-art baseline (Gong et al., 2023) in the Hacking scenario." The specific numerical claim should be directly verifiable against the corresponding entries in Table 1. Since the table is embedded as an image in the parsed text, this cannot be verified here. The authors should confirm the number is consistent with the table for the Hacking scenario and clarify what the +42% references (percentage points vs. relative improvement).
 
-- **Text-mixing transformation is underspecified**: The paper describes text-mixing by example ("bomb" + "apple" → "baopmpble") and mentions "H(orizontal)-Interleave" (Figure 3a), but provides no formal algorithm for the character-level interleaving function. Questions such as how words of different lengths are handled, whether the interleaving order is deterministic or random, and what other mixing variants (beyond H-Interleave) entail are not addressed. While the approach is reproducible from the example and citation of Enaganti et al. (2018), a formal specification would enable exact replication.
-
-- **Prompt change for mixed images is not controlled**: In Section 3.2, the text instruction is reformulated to "tell me how to build **each** object in this image" (emphasis added). This asks about both the harmful and auxiliary objects, which is a different task from the vanilla attack ("tell me how to build the object in this image"). The paper does not ablate whether this change in instruction, independent of image mixing, contributes to the increased harmfulness scores.
-
-- **System prompt defense is generic**: Table 3 tests only a single, short system-prompt defense. The paper's claim that JOOD is "robust" to defense is based on this one prompt. Stronger or more specific defense prompts (common in practice) might yield different results.
+3. **The "out-of-distribution" concept is invoked without formal grounding.** The paper repeatedly refers to OOD but never specifies what distribution the safety-alignment training data follows — which is unknowable for proprietary models like GPT-4V. "Out-of-distribution" is therefore an untestable assumption. The empirical finding is better characterized directly: mixing transformations produce inputs that bypass safety alignment, possibly because they differ from the types of inputs seen during RLHF training. The OOD framing is evocative but not necessary for the contribution.
 
 ### Trivial
-- The example auxiliary word "apple" in the implementation details (Section 4) has a formatting artifact ("$a_{\mathrm{pp}\perp\mathrm{e}}$") — this is a parser issue, not an author error.
+None.
 
 ## Nice-to-Haves
-- **Ablation on the necessity of the explicit de-obfuscation instruction** ("Please refer to the possible words inside this new word as '[Words]'") in the text-mixing prompt. Does the model still parse the coined word without this instruction?
-- **Human validation of harmfulness**: The HF and ASR metrics are fully automatic. A small human evaluation (e.g., 50 responses rated by annotators) would validate that the automatic metrics correspond to actual harmful content.
-- **Negative societal impact discussion**: A brief note on responsible disclosure or the intent to expose vulnerabilities for safety improvement would be appropriate for an attack paper.
-- **Failure case analysis**: For the ~37% of instructions JOOD does not jailbreak, examining whether the model refuses or produces safe responses could guide improvements.
+
+- **Add a control experiment for the text-mixing meta-instruction:** Compare the JOOD template with a scrambled word vs. the same template with an unscrambled harmful word. If the unscrambled version is refused and the scrambled version succeeds, this cleanly demonstrates the OOD-ifying effect.
+- **Provide direct uncertainty measurements:** Report output entropy, refusal-token probability, or logit-based confidence for a subset of instructions comparing vanilla vs. OOD-ified inputs. This would directly support the claimed mechanism.
+- **Report confidence intervals for ASR comparisons,** especially given the modest instruction count per scenario.
+- **Add a limitations section** discussing potential defenses (input sanitization, anomaly detection), the model-as-judge evaluation bias, and the reliance on multiple transformations per instruction.
 
 ## Removed Points
 
-- **"The auxiliary images/words are randomly sampled from the Internet, which is not reproducible"**: This criticism is downgraded because providing the exact URLs for all auxiliary images/words is not standard in this literature; authors can release the exact set with code. The paper specifies n=5 and the sampling procedure, which is adequate for reproducibility.
-- **"No missing citations are apparent"**: This is not a weakness.
-- **"The paper does not discuss potential misuse or dual-use considerations"**: Moved to Nice-to-Haves — this is common for attack papers and does not affect technical soundness.
-- **"The code is not mentioned"** and **"assuming it will be released (stripped appendix)"**: Parser artifacts; any code/appendix information was in the original submission's appendix which is stripped.
-- **"HF score is not directly validated against human judgments"**: This is an automatic evaluation concern; moved to Nice-to-Haves as a suggestion rather than a weakness.
+These points were flagged by reviewers but are removed or downgraded for the following reasons:
+
+- The critic's framing of both Critical Issue 1 and 2 as "fatal" errors that "invalidate core claims" is an overstatement. The image-mixing attack already provides an implicit control (α=0 ablation showing low ASR), and the empirical finding stands even without the mechanistic explanation. Downgraded from fatal to major.
+- The critic's suggestion that "the method works because of OOD, not because of some artefactual property" demands additional experiments that are not necessary to validate the core empirical finding; moved to Nice-to-Haves.
+- The critic's request for an explicit "discussion of limitations" section is not a weakness per se and is addressed in Nice-to-Haves.
+- The critic's call for more detailed text-mixing algorithm specification is a reasonable reproducibility suggestion but not a weakness; moved to suggestions.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviewers collectively surface two noteworthy observations. First, the strength of JOOD comes from a simple principle (making inputs OOD to safety alignment) rather than algorithmic sophistication — implying that **any** transformation that pushes inputs far enough from the safety-alignment distribution may work. Second, the negative correlation between auxiliary image similarity and harmfulness (Figure 5a) suggests that defenses could potentially be built by monitoring the semantic coherence of inputs, though this is speculative. The per-instruction analysis (Figure 2) revealing that baselines produce sparse high-harmfulness responses while JOOD consistently produces harmful outputs across most instructions is a qualitative distinction worth highlighting beyond aggregate ASR.
+None beyond the paper's own contributions. The main finding — that simple mixing-based data transformations which create ambiguous inputs can reliably bypass RLHF-based safety alignment in state-of-the-art models — is itself the novel insight.
 
 ## Suggestions
-1. **Clarify the baseline evaluation protocol** — explicitly state whether each baseline method received a single attempt per instruction or multiple attempts, and if the latter, how many. Consider reporting per-attempt ASR (average or median across the 45 JOOD configurations) alongside the max-based metric.
-2. **Report variance** — provide bootstrapped 95% confidence intervals for the main ASR results, or run the attack with 3–5 different random seeds for auxiliary sampling.
-3. **Add a direct uncertainty measurement** — compute perplexity, output entropy, or refusal-token probability for JOOD inputs vs. vanilla inputs to directly support the claimed mechanism.
+
+1. **Add the text-mixing control experiment** (same meta-instruction, unscrambled word) to isolate the OOD-ifying effect from the instruction framing effect.
+2. **Add at least one direct uncertainty measurement** (e.g., refusal-token probability or output entropy for vanilla vs. OOD inputs). This can be done post-hoc from existing experiments if logits are logged; for API models, logprobs may be available.
+3. **Clarify the "+42% ASR" claim** in the abstract by confirming it against Table 1 and specifying whether it refers to percentage points or relative improvement.
+4. **Consider adding confidence intervals** for the main ASR comparisons (e.g., via bootstrap), given the ~30-instruction sample per scenario.
+5. **Reframe the paper's claims** about "uncertainty" and "OOD" as plausible mechanistic hypotheses rather than established facts, to better match the evidence presented.
 
 ## Score and Decision
 
-The paper identifies a genuine and practically important vulnerability: simple OOD-ification via mixing techniques effectively bypasses RLHF-based safety alignment in proprietary models. The ablations are thorough and the core finding is robust across multiple scenarios, models, and transformation variants. The main concern is a methodological ambiguity in the evaluation protocol — the paper's head-to-head ASR comparisons with baselines are not clearly fair given JOOD's multi-attempt design. This does not invalidate the paper's contribution (the exclusive jailbreak counts and ablations provide independent support), but it does undermine the quantitative margins as currently stated. With clarification of the evaluation protocol (which is addressable in rebuttal), the paper would be a solid contribution to the jailbreak literature.
+The paper presents a meaningful empirical discovery: simple mixing transformations reliably jailbreak safety-aligned LLMs and MLLMs, outperforming existing methods by large margins. The evaluative work is thorough across models, scenarios, and auxiliary conditions. However, the paper suffers from two material weaknesses: (1) the text-mixing experiment confounds the OOD transformation with the instruction framing, and (2) the central mechanistic claim about uncertainty is asserted without direct evidence. These issues do not invalidate the empirical finding but do weaken the paper's framing and explanatory contribution. With revisions to address these concerns, the paper would be a strong contribution; in its current form, it falls short of its own claims.
 
-**Score: 6.5/10** — The contribution is real and well-supported by qualitative and ablative evidence, but the main quantitative comparisons need clarification before the claims can be taken at face value. This is a borderline accept / weak accept.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,88 +1,77 @@
-Now I have a complete understanding of the paper and can verify all reviewer claims against the source. Let me write the consolidated review.
-
----
+Now I have a thorough understanding of the paper and the reviewer claims. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes a pipeline that combines differential pairwise affinity computation, non-negative tensor factorization (NTF), and nested weighted stochastic block modeling (NWSBM) to infer dynamic functional connectomes from calcium imaging data in *C. elegans*. The key innovation is tensorizing pairwise affinities (time × worms × neuron pairs) rather than raw neural activity, enabling the extraction of time-varying community structures that align with experimental stimuli. A biological experiment silencing the predicted neuron AWB confirms its unexpected role in salt sensation, providing real validation of the method's predictive utility.
+The paper introduces an unsupervised pipeline for discovering dynamic functional connectomes from calcium imaging data in *C. elegans*. The method: (1) computes time-varying pairwise "differential affinities" between neural activity traces, (2) organizes these affinities into a time × worms × pairwise-affinities tensor and applies non-negative tensor factorization (NTF), and (3) runs the nested weighted stochastic block model (NWSBM) on the resulting affinity factors to reveal transient neuronal communities. A prediction about the aversive neuron AWB's role in salt sensing was experimentally validated (p=5.7e-11, +25% effect size). The core idea—tensorizing pairwise affinities rather than individual traces—is well-motivated for the problem.
 
 ## Strengths
 
-- **Novel tensor formulation for dynamic connectome discovery**: The paper introduces a tensor with dimensions time × worms × pairwise affinities (rather than neurons × time), which allows non-linear affinity computation prior to factorization and enables NTF to automatically discover temporal intervals where affinity patterns are preserved across animals (Section 2.2, Fig. 2b). This is a genuine methodological contribution that addresses a real gap in the connectomics literature.
+- **Novel tensor formulation (time × worms × pairwise affinities).** Instead of the conventional tensor built from raw neural traces (which restricts similarity to multi-linear forms), the paper constructs a 3-way tensor where the third mode is vectorized pairwise affinities (Section 2.2). This allows non-linear similarity measures to be computed before factorization and makes the temporal factor directly interpretable as experimental epochs (e.g., stimulus application). This is a genuine advance over prior multi-linear approaches.
 
-- **Experimental validation of a surprising biological prediction**: Silencing AWB (predicted by the algorithm to cluster with the salt-sensing circuit despite being canonically an aversive olfactory neuron) produced a significant +25% increase in salt avoidance (p = 5.7e-11). The result contradicts the expected outcome (silencing an aversive neuron should *decrease* avoidance), making it a non-trivial and biologically interesting discovery that demonstrates the method's ability to generate testable hypotheses beyond known circuit annotations (Section 3.2, Fig. 4).
+- **Principled differential affinity concept.** The paper introduces a time-varying similarity measure based on monotonic changes (absolute derivatives of activity traces), motivated by biological intuition that coinciding increases/decreases indicate interaction (Section 2.1, Fig. 2). This avoids pitfalls of static metrics (e.g., high similarity from two silent neurons) and is a well-motivated departure from global-time correlation.
 
-- **Biologically motivated differential affinity measure**: The paper defines local affinity based on the sign and magnitude of derivatives during monotonic changes, avoiding pitfalls of standard global correlation (e.g., high cosine similarity between two silent neurons). The measure captures both coincident increases and decreases in activity and is interpretable as likelihood of interaction (Section 2.1, Fig. 2). The approach is clearly differentiated from prior work using static correlation (e.g., Yemini et al., 2021).
+- **Two-stage pipeline combining NTF with generative community detection (NWSBM).** The paper proposes a novel combination: first factorizing the affinity tensor to extract time-localized functional motifs, then applying a Bayesian weighted community detection model on the resulting weighted graphs (Section 2.3). This is distinct from prior work that either analyzes static networks or uses less principled clustering methods.
 
-- **Principled community detection with automatic model selection**: The choice of NWSBM is justified by a benchmark on synthetic weighted networks (Table 1), where NWSBM achieved the highest mean NMI on 6 of 9 network types. The method uses Bayesian inference and description-length minimization, requiring no hyperparameter tuning and providing model averaging via MCMC (Section 2.3).
+- **Experimental validation of a surprising, testable prediction.** The algorithm predicted an unexpected role for the aversive neuron AWB in salt sensation. Silencing AWB significantly *increased* salt avoidance (p=5.7e-11, +25% effect size)—the opposite of what would be expected from an aversive neuron's canonical role (Section 3.2). This counterintuitive, statistically strong result confirms the method's ability to make biologically meaningful predictions that evade expert intuition.
+
+- **Interpretability via reversion to original traces.** The paper shows that communities inferred for salt sensing can be traced back to original calcium traces, confirming the affinity measure reflects genuine coordinated activity during the relevant stimulus epoch (Fig. 5c,d).
+
+- **Benchmark comparison of community detection methods.** The NWSBM was systematically compared against five alternatives on weighted LFR synthetic networks (Table 1), providing evidence for the choice of community detection algorithm.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The core differential affinity computation is underspecified to the point that the method cannot be reproduced.** The paper states that affinities are computed from "periods of monotonic increase or decrease" using "absolute derivatives" (Section 2.1), but never defines: (a) how the start and end of a monotonic interval are detected (threshold on derivative sign duration? smoothing method?); (b) whether the affinity is a single scalar per time point or per interval segment; (c) whether the measure is computed pointwise or over a sliding window; (d) what exactly is compared — the derivative values, their signs, their magnitudes, or their absolute values. The phrase "how likely it is for the two neurons to be interacting" is intuitive but mathematically vague. Since the affinity computation is the pipeline's first step, this underspecification propagates uncertainty through all downstream results. This is the most consequential weakness because it prevents independent verification and future use of the method.
+- **The differential affinity measure lacks a precise mathematical definition.** The entire pipeline rests on the computation of $a_{ij}^{(t)}$, yet the paper never states an explicit formula. The description (Section 2.1) is entirely in prose: "compare two neurons' derivatives during intervals in which both had a constant sign," "in terms of their absolute derivatives," and "two neurons with very similar but opposite sign derivatives are still likely to be interacting." It is unclear whether the affinity is the product of absolute derivatives, their integral over the interval, a thresholded binary indicator, or something else. The notation $a_{ij}^{(t)}$ is introduced but never defined by an equation. This is not a trivial omission—it is the foundation of the pipeline—and prevents independent reproduction and full evaluation of the method.
 
-- **The paper's claims substantially exceed what the evidence supports.** The abstract states the method can "robustly predict causal interactions between neurons to generate behavior," and the introduction claims "our results are confirmed with experiments that silence specific neurons." However, only *one* neuron (AWB) was silenced, and the experiment tests only whether that neuron's ablation alters a behavior — it does not validate the inferred *community structure* (which other neurons form the community, the temporal dynamics, or the tensor factorization itself). A single ablation of one neuron, even if well-executed, does not constitute robust validation of "causal interactions between neurons" (plural). The paper would be stronger if claims were calibrated to match the evidence: e.g., "generates testable hypotheses about functional roles of individual neurons, one of which was experimentally confirmed."
-
-- **Critical methodological details that govern the pipeline are missing.** The paper does not report: (a) the number of neurons remaining after restricting to sensory/interneurons (started at 189, but the filtered count is not given); (b) the time resolution of the recordings or the resulting tensor dimensions (T, W, P); (c) the number of tensor components R used and how it was selected — this is a non-trivial model selection problem in CP decomposition; (d) whether the tensor factorization was run once or with multiple random initializations, and whether shown components are representative. The paper references "~A1 for details" for the LFR benchmark parameters, but this appendix content was stripped by the parser. Some of these details are standard to report and their absence weakens reproducibility.
+- **Crucial tensor factorization details are not reported.** The paper does not state the number of components $R$ used, nor how it was selected (e.g., core consistency diagnostic, cross-validation, reconstruction error analysis). There is no discussion of initialization strategy, stability across random initializations, or potential degeneracy/collinearity among components—common issues with CP decompositions. Two interpretable components are shown (Fig. 4), but without knowing how many total components were extracted and whether the shown ones are representative, the reader cannot assess whether the decomposition is robust or selectively presented. These are standard reporting requirements for tensor factorization studies.
 
 ### Minor
 
-- **The community detection benchmark does not evaluate the full pipeline.** Section 4.3 benchmarks NWSBM against other methods on LFR synthetic networks, which tests only the community detection component in isolation. The NTF factors fed into NWSBM have unknown structural properties (sparsity, noise characteristics) that LFR networks may not simulate. Moreover, the absolute NMI scores are low for all methods (mostly 0.2–0.65), and on Net 8, three competitors achieve NMI=1.0 while NWSBM scores only 0.51. This does not convincingly justify the choice of NWSBM over simpler alternatives, though the paper's claim that NWSBM "outperformed the others in the majority of cases" (6/9) is technically correct. A full-pipeline comparison on the real data (e.g., against sliding-window correlation + Louvain) would have been more informative.
+- **The benchmark evaluates only the community detection step, not the full pipeline.** Table 1 compares NWSBM against alternatives on synthetic LFR networks, but this does not test the end-to-end method (affinity computation → NTF → community detection). The NMI scores are relatively low (most under 0.65, some below 0.3), and the paper does not discuss what this implies for the real data where no ground truth exists. While component-wise benchmarking is common and defensible, the paper would benefit from an explicit acknowledgment of this scope limitation and a discussion of how the synthetic graphs relate to the real affinity graphs.
 
-- **Incomplete statistical reporting for the validation experiment.** The p-value (5.7e-11) and effect size (+25%) are reported, but the baseline avoidance rate, the test used (t-test? permutation test?), means and standard deviations per condition, and whether the experimenter was blinded are not stated. Without these, the reader cannot fully assess the robustness of the result.
+- **The experimental validation, while striking, covers only one predicted neuron out of "multiple" claimed.** The paper states "our algorithm predicted the involvement of multiple neurons in the salt-sensing circuit" (Section 3.2), yet only AWB is tested and the remaining predictions are not even listed. The AWB result is compelling in its own right, but a single successful prediction—even a strong one—does not establish that a substantial fraction of the method's predictions are correct. The paper should acknowledge this explicitly and ideally list the other predicted neurons (with confidence measures) to give readers a sense of breadth.
 
-- **No systematic analysis of how tensor components were selected for presentation.** Figures 3 and 4 show only a few components that align with stimulus times. It is unclear how many components were extracted (R = ?), whether any were uninterpretable, and what criterion was used to select which components to analyze via community detection. The pipeline description suggests the NTF "automatically cluster[s] affinity networks," but the mapping from NTF components to community detection is ad-hoc without a principled selection criterion.
+- **Connection between affinity factors and NWSBM distributional assumptions is not discussed.** The paper states that affinities "can be readily treated as adjacencies" (Section 2.3) because they are non-negative and bounded, but does not characterize their empirical distribution or discuss whether it is compatible with the edge-weight model used by NWSBM. Given that NWSBM treats edge weights as covariates in a Bayesian framework (which is flexible), some diagnostic (e.g., comparing the affinity distribution to the model's assumptions for the inferred communities) would strengthen the methodological justification.
+
+- **The "completing" missing data claim is mentioned once and never demonstrated.** Section 2.2 notes in passing that the tensor formulation "can also help with 'completing' affinity matrices containing missing data from a few neurons," but this capability is never used, analyzed, or mentioned again. It should either be demonstrated or removed.
 
 ### Trivial
 
-- The paper states "unsupervised approach" in the abstract, which is broadly correct for the NTF step but the community detection uses a generative model with Bayesian inference. This is a minor framing imprecision.
-
-- Discussion over-generalizes to "social and ethological situations" without evidence, but this is typical and not harmful.
+- The number of neurons remaining after restricting to sensory and interneurons (from the original 189) is not stated, which affects understanding of the tensor dimensions and computational cost.
+- The worm factor loadings (which worms contribute to each component) are described qualitatively in figure captions but not reported quantitatively.
+- Software library versions (tensortools, graph-tool) are not specified.
 
 ## Nice-to-Haves
 
-- **Full-pipeline baseline comparison on real data**: Compare the proposed method against a simpler approach (e.g., sliding-window Pearson correlation + Louvain/spectral clustering) on the *C. elegans* data to quantitatively demonstrate the value of NTF and the nonlinear affinity measure.
-
-- **Validate additional predictions**: The paper identifies "several neurons not previously known to play a role" in salt sensation. A table listing all predicted neurons with prior literature support for each, plus even a computational validation (e.g., cross-worm prediction), would substantially strengthen the claim.
-
-- **Sensitivity analysis**: Show how results change with respect to key hyperparameters — the smoothing bandwidth for derivative computation, the minimum monotonic interval length, and the number of tensor components R. This would address concerns about robustness.
-
-- **Dedicated limitations paragraph**: A candid discussion of the method's assumptions (e.g., that affinity patterns are stationary within a tensor component, the lack of statistical tests for community significance, potential artifacts from the histamine-gated silencing system) would strengthen scientific credibility.
+- A small worked example of the differential affinity computation (e.g., two toy traces with the resulting affinity values) would significantly improve reproducibility.
+- Reporting the tensor reconstruction error and a stability analysis (e.g., similarity of factors across random initializations) would increase confidence in the decomposition.
+- If feasible, testing one or two additional predictions from the salt-sensing community (even with a simpler behavioral assay) would substantially broaden the validation.
 
 ## Removed Points
 
-These points were flagged by reviewers but removed based on the rules:
+These points are flagged to be removed; treat them with caution.
 
-- **"The benchmark does not validate the full pipeline"** (weakened version kept as Minor — the original framing as a structural flaw was too harsh since the paper scopes this as "Comparison with other community detection methods," not a full-pipeline evaluation)
-- **Criticisms about missing appendix content or "~A1 for details"** — the parser strips appendix sections; this is not an author error
-- **Demands for broader validation against other methods not cited in the paper** — the paper's baseline choices are defensible within its scope
-- **Claims that NWSBM's choice is unsupported** — the benchmark does show NWSBM scores highest on 6/9 networks, partially supporting the choice
-- **Nitpicks about whether the approach is truly "unsupervised"** — a framing issue with no impact on the technical contribution
-- **Demands that the paper should also cover fMRI or social network applications** — outside the paper's stated scope
+- *"Broad applicability claim is standard but unsupported."* — This is a generic remark about a standard concluding statement. Most methods papers make such claims without demonstration; singling this out as a weakness is not constructive.
+- *"The paper should state software versions."* — Trivial implementation detail; the paper cites the specific libraries (tensortools, graph-tool). Version numbers are rarely included in conference papers and do not affect the scientific contribution.
+- *The reviewer's framing that the benchmark "does not evaluate the full pipeline" was kept as Minor (not removed), but the reviewer's stronger language suggesting it "does not support the main claim" is downgraded* — benchmarking individual components is standard practice; the limitation is acknowledged but is not a structural flaw.
+- *Several of the strength finder's claims about "broad applicability" are dropped as generic/superficial.* — The paper claims this but does not demonstrate it; listing it as a strength overstates its evidentiary basis.
 
 ## Novel Insights
 
-The harsh reviewer raises the important point that the validation experiment, while positive, tests only one neuron's ablation on a population-level behavior, which does not validate the *community structure topology* or the tensor factorization's temporal segmentation. This is a genuinely insightful criticism: the paper's central claim is about discovering *dynamic community organization*, but the experiment only tests whether a single predicted neuron affects a behavior. These are different kinds of claims. Beyond this, the reviews do not produce a genuinely novel insight that the paper itself does not already articulate.
+None beyond the paper's own contributions. The reviews do not surface a genuinely novel observation about the work that the authors themselves did not articulate.
 
 ## Suggestions
 
-1. **Provide a precise, step-by-step algorithmic definition of the differential affinity measure** (pseudocode or explicit formulas). This is the single highest-impact improvement for reproducibility. Specify: how derivatives are computed (smoothing method, filter size), how monotonic intervals are detected, and how the scalar affinity value is derived from the derivative comparison at each time point.
-
-2. **Calibrate the claims to match the evidence.** Replace "robustly predict causal interactions between neurons" with language such as "generates testable hypotheses about functional circuit membership, one of which is experimentally validated here."
-
-3. **Report all standard methodological details** that govern the pipeline: tensor dimensions (T, W, P), number of components R and how it was selected, number of neurons after filtering, number of MCMC runs for model averaging, and the specific statistical test used for the behavioral assay.
-
-4. **Add a systematic overview of all tensor components** — how many there are, what fraction align with known stimulus intervals, and how components were selected for community detection analysis.
-
-5. **Include a limitations paragraph** addressing the key assumptions and potential failure modes of the pipeline.
+1. **Provide the explicit formula for $a_{ij}^{(t)}$.** This is the highest-priority revision. Include a concrete numerical example with two short traces showing how the affinity values are computed.
+2. **Report $R$ and the method used to select it.** Include reconstruction error as a function of $R$ and a stability analysis (e.g., factor similarity across random initializations). State the initialization strategy used.
+3. **Acknowledge the single-neuron validation scope explicitly**, and list all neurons predicted to be in the salt-sensing community (with loadings or confidence intervals) so readers can assess the method's breadth.
+4. **Add a diagnostic** comparing the empirical distribution of affinity values in the extracted components to the NWSBM edge-weight assumptions.
+5. **State the number of sensory/interneurons** remaining after the data restriction.
 
 ## Score and Decision
 
-The paper addresses an important problem — inferring dynamic functional connectivity from neural activity — and the central idea of tensorizing pairwise affinities rather than raw traces is novel and well-motivated. The experimental validation of AWB's role in salt sensation, while limited to one neuron, is a real strength and demonstrates the pipeline's practical utility. However, the core contribution is substantially weakened by the underspecification of the affinity computation, the mismatch between the strength of the claims and the evidence, and the missing procedural details that prevent reproducibility. The paper is on the right track and the ideas are promising, but in its current form the methodological description is too incomplete to be published as a citable reference. I recommend major revision with specific emphasis on specifying the affinity algorithm and calibrating claims.
+The paper presents a genuinely interesting conceptual framework and a compelling experimental validation. However, the two major weaknesses—(1) the core affinity measure lacks a mathematical definition, and (2) critical tensor factorization details (number of components, selection method, initialization, stability) are unreported—mean the method is not reproducible in its current form and its validity cannot be fully assessed. These are addressable in revision, but as submitted, the paper falls below the acceptance threshold.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

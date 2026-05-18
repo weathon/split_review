@@ -1,73 +1,68 @@
-Now I have a thorough understanding of the paper and can verify each reviewer claim. Let me produce the consolidated review.
+Now I have a thorough understanding of the paper. Let me compose the final review.
 
 ## Summary
 
-The paper introduces SUFO, a systematic interpretability framework combining Supervised probing, Unsupervised similarity (RSA), Feature dynamics (cluster analysis), and Outlier analysis to analyze fine-tuned transformer feature spaces. Through a case study on clinical text classification (pathology reports + MedNLI) with five 110M-parameter models spanning general-domain (BERT, TNLR), mixed-domain (BioBERT, Clinical BioBERT), and domain-specific (PubMedBERT) pre-training, the paper reports three main findings: (1) domain-specific PubMedBERT overfits to minority classes under imbalance despite having informative pre-trained features, (2) in-domain pre-training accelerates feature disambiguation, and (3) fine-tuned feature spaces sparsify, enabling outlier analysis validated by a clinician.
+This paper introduces SUFO, a systematic framework integrating Supervised probing, Unsupervised similarity analysis (RSA), Feature dynamics (PCA), and Outlier analysis to interpret fine-tuned transformer feature spaces for clinical decision-making. The authors conduct a case study on pathology report classification with five 110M-parameter transformers (BERT, TNLR, BioBERT, Clinical BioBERT, PubMedBERT), revealing: (1) domain-specific PubMedBERT overfits to minority classes under imbalance despite having the richest pre-trained features; (2) in-domain pre-training accelerates feature disambiguation; (3) fine-tuning induces feature space sparsification that enables outlier analysis. Findings are partially validated on MedNLI.
 
 ## Strengths
 
-- **Counterintuitive finding about domain-specific pre-training under class imbalance**: The paper shows PubMedBERT (domain-specific), despite having the highest probing F1 (0.494), performs poorly on the imbalanced Path-PG task (F1=0.770, std=0.12) compared to mixed-domain Clinical BioBERT (0.959, std=0.03). This pattern is partially corroborated by MedNLI simulations (Section 4.2). This finding is interesting and practically relevant for practitioners choosing pre-trained models.
+- **SUFO integrates multiple complementary analysis techniques into a systematic pipeline, going beyond prior isolated feature analyses.** The paper explicitly builds on probing, RSA, PCA, and outlier analysis from prior work (citations to tenney2018what, saphra-lopez-2019, what-happen-bert-ft, bert-qa-lp) and combines them into a single interpretability framework aimed at practitioner-facing questions. This integration — and the explicit mapping of each component to a different trust/safety question — is a novel methodological contribution over past work that applies these techniques in isolation.
 
-- **Feature dynamics analysis reveals meaningful cross-model patterns**: The PCA-based cluster analysis across layers and training time (Section 5.2) provides concrete evidence that in-domain models (BioBERT, Clinical BioBERT, PubMedBERT) disambiguate classes faster (~epoch 6) than general-domain models (~epoch 9). The observation that PubMedBERT's feature mixing on Path-PG corroborates its degraded fine-tuning performance adds convergent validity.
+- **Counterintuitive finding about domain-specific vs. mixed-domain models under class imbalance, supported by converging evidence from fine-tuning, probing, and cross-dataset validation.** Table 1 shows PubMedBERT performing poorly on Path-PG (F1=0.770±0.12) versus Clinical BioBERT (0.959±0.03), while Table 2 shows PubMedBERT has the best pre-trained probing features (0.494 avg). The MedNLI simulation (Section 3.1) corroborates the pattern: PubMedBERT outperforms Clinical BioBERT on balanced data but underperforms on highly imbalanced data. This convergence of evidence from multiple SUFO components is the paper's most striking result.
 
-- **Domain expert evaluation grounds outlier analysis in clinical practice**: The identification of five common outlier modes (wrong labels, inconsistent reports, multiple sources, truncated reports, boundary cases) with clinician feedback (Section 6.2) demonstrates that the framework can yield clinically meaningful distinctions — e.g., Clinical BioBERT and PubMedBERT detecting more missing-medical-information cases than general-domain models.
+- **Domain-expert-validated outlier analysis that reveals clinically meaningful differences between models.** Five specific outlier modes are identified (wrongly labeled, inconsistent, multiple sources, truncated/not reported, boundary), and Clinical BioBERT and PubMedBERT are shown to flag more instances of missing/unreported medical information than general-domain models. The involvement of a clinician (urologist) grounds the analysis in real clinical interpretation needs.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **The central overfitting claim confounds "from-scratch" with "domain-specific" pre-training.** The paper attributes PubMedBERT's poor Path-PG performance (F1=0.770) to its "domain-specific" nature, contrasting with "mixed-domain" models. However, BioBERT — which is also pre-trained only on PubMed abstracts (domain-specific in terms of data source) but as *continual pre-training from BERT* — achieves F1=0.933 on Path-PG, much closer to Clinical BioBERT's 0.959 than to PubMedBERT's 0.770. This suggests the key factor may be *from-scratch vs. continual pre-training* rather than domain specificity vs. mixed-domain diversity. The paper's framing collapses these two factors. This is not a fatal flaw — the finding is still worth reporting — but the causal attribution needs to be significantly softened, and alternative explanations (vocabulary mismatch, smaller pre-training data scale in PubMedBERT, instability from scratch) should be discussed.
-
-- **No significance testing or per-class metrics for the minority class.** Results in Table 1 are reported as F1 macro with standard deviations over 3 runs. Given the high variance on Path-PG (PubMedBERT std=0.12, BERT std=0.16, TNLR std=0.18), many pairwise comparisons could fall within noise. The paper's central narrative about minority-class overfitting would be substantially strengthened by reporting precision/recall for the Gleason 5 class specifically, along with bootstrapped confidence intervals or a statistical test.
+- **The central claim that PubMedBERT "overfits" to minority classes lacks per-class metrics, training curves, or mechanistic evidence to distinguish overfitting from alternative explanations.** The paper attributes PubMedBERT's poor Path-PG F1 (0.770) to overfitting, but provides no per-class precision/recall for the 3% minority class (Gleason grade 5), no training/validation loss curves over epochs, and no evidence that PubMedBERT's minority-class performance peaks early and degrades. Without these, competing explanations remain plausible — e.g., a fundamental incompatibility between PubMedBERT's specialized vocabulary and the pathology note sub-domain, or insufficient gradient signal for rare labels despite the weighted sampling mentioned in Section 3. The feature dynamics observation ("mixing of classes in PubMedBERT's scatterplots") is suggestive but also qualitative. The paper's headline empirical finding would be substantially strengthened by standard overfitting diagnostics.
 
 ### Minor
 
-- **RSA interpretation is overclaimed.** The RSA analysis (Section 5.1) compares pre-trained vs. fine-tuned versions of the *same* model to measure within-model change. The paper then claims this "indicates the versatility of BERT's feature space for its ability to match models pre-trained using in-domain data with relatively little reconfiguration." This conclusion does not follow from the experiment — cross-model RSA would be needed to establish feature matching. The RSA findings about which layers change most during fine-tuning are valid and useful; only this one interpretive sentence overreaches.
+- **The claim that in-domain pre-training accelerates feature disambiguation (epoch 6 vs. epoch 9) relies entirely on visual inspection of PCA plots, with no quantitative separability metric.** The paper states this temporal difference as a finding (Section 4.2, "Results") but provides no Silhouette scores, Davies–Bouldin indices, k-NN separability, or any other quantitative measure computed over training checkpoints. The reader cannot evaluate whether this timing difference is robust across runs or an artifact of the specific PCA projection.
 
-- **Supervised probing advantage is negligible.** The paper states PubMedBERT's pre-trained features "contain the most useful information" based on probing F1=0.494 vs. BERT's 0.493 and Clinical BioBERT's 0.487. The margin over BERT is 0.001 — well within the reported standard deviations. This claim should be caveated as negligible in practical terms.
+- **The MedNLI validation only compares two of the five models (PubMedBERT and Clinical BioBERT), limiting the generalizability claim.** The paper states it "validate[s] our findings on MedNLI" (abstract) and validates the overfitting pattern, but only two models are tested on the simulated splits. Testing all five on MedNLI — or at least acknowledging why the remaining three were excluded — would substantially strengthen the claim that the finding reflects a general principle about pre-training data categories rather than a PubMedBERT-specific artifact.
 
-- **The outlier extraction method is heuristic and not validated against task performance.** Clustering via axis-aligned intervals on PC1/PC2 projections is ad-hoc, with no cross-validation or stability analysis. The clusters are derived from the training set only, and the paper acknowledges this limits test-set generalization. While the expert evaluation shows the outliers are interesting, it does not establish that the clustering captures *model-specific* failure modes versus label-conditional structure in the data.
+- **The outlier analysis clustering method is ad-hoc and not validated against standard alternatives, and the expert evaluation does not directly connect outliers to model errors.** The clustering procedure (extracting 1D intervals on PC1 and PC2 independently, then taking their Cartesian product) is motivated by scale differences across PCs, but no comparison to k-means, DBSCAN, or Gaussian mixtures is provided to justify its use. More importantly, the expert evaluation asks whether a report "would be challenging for human classification" — not whether the model actually misclassifies it. The paper then claims these outliers relate to model "failure modes" (Section 5 intro), but without checking whether outliers are enriched for actual misclassifications, this connection remains speculative.
 
-- **No analysis of what the low-variance PCs encode.** The PC probing experiment shows a surge when adding back PC1 and PC2 (the high-variance components), but the paper does not analyze the content of the remaining PCs or explain the apparent fact that some low-variance directions might still encode discriminative signal. The relationship between variance explained and task relevance is left as an open question.
+- **Only 2 of 4 pathology tasks (Path-PG, Path-SG) use 3-class classification with minority classes; the binary tasks (Path-MS, Path-SV) have relatively mild imbalance (26%/13% minority).** The paper's most striking findings about overfitting and feature disambiguation are concentrated on Path-PG. While this is acknowledged implicitly, the scope of the empirical support for the paper's central claims is narrower than the multi-task framing suggests.
 
 ### Trivial
 
-- The claim of being "the first to conduct such extensive cluster analysis on text features" (Section 5) is overstated — cluster analysis of BERT features for task-specific probing has been done in prior work (e.g., BERT QA probing papers cited by the authors themselves). This is a minor overclaim.
+- The RSA interpretation of BERT's "versatility" (Section 3.1) could be read in reverse: moderate RSA change could equally mean BERT's pre-trained features are already well-suited to the task with little adjustment needed. Both readings are defensible but the paper should clarify the reasoning direction.
+- The paper states "models leveraging in-domain pre-training... disambiguate faster" but then notes TNLR (general-domain) has "the most dissimilar" behavior, raising the question of whether BERT + TNLR should be treated as a homogeneous baseline group given their architectural differences.
+- The TNLR confound (constrained self-attention, PMLM objective) is acknowledged but not systematically disentangled; the paper relies on the observation that TNLR's behavior is "similar to BERT."
 
 ## Nice-to-Haves
 
-- A controlled experiment isolating the "from-scratch vs. continual pre-training" confound: e.g., training a PubMedBERT-initialized model with BERT's vocabulary, or applying stronger regularization to PubMedBERT during fine-tuning.
-- Per-class precision/recall and bootstrapped confidence intervals for the minority class on Path-PG.
-- Cross-model RSA (fine-tuned BERT vs. fine-tuned PubMedBERT) to directly test whether feature spaces converge across models from different pre-training regimes.
+- Add per-class F1/precision/recall for minority classes (especially Gleason grade 5 in Path-PG) and training/validation loss curves to directly support the overfitting claim.
+- Compute quantitative feature separability metrics (e.g., Silhouette score, k-NN accuracy) over training checkpoints to replace visual inspection for the feature disambiguation timing claim.
+- Test all five models on MedNLI simulated splits to strengthen generalizability.
+- Validate outlier extraction by checking whether outlier reports are statistically enriched for misclassified test examples (precision of outlier detection).
+- A single concise pipeline diagram or table mapping each SUFO component to a specific practitioner question would improve usability.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-1. **Critic's Issue 1 (contradiction in outlier analysis)**: The critic claimed the paper's PC probing shows "the smallest PCs are crucial" while the sparsification claim focuses on top PCs, creating a contradiction. This is a **misreading**. The paper explicitly says "the first 2 PCs contribute significantly" — these are PC1 and PC2, the same high-variance components that explain 95% of the variance. The critic confused "bottom k PCs" terminology with the paper's clear statement about "first 2 PCs." There is no contradiction; the paper's outlier analysis is built on a subspace that its own evidence confirms is task-relevant. *Removed as factually wrong.*
-
-2. **Complaint about reproducibility (missing artifacts, implementation details)**: The critic's section-by-section notes include concerns about the private dataset and missing table content (parser artifacts). These are either parser artifacts (tables were stripped) or acknowledged limitations of a clinical dataset with protected health information. *Removed per hard rules.*
-
-3. **Demand for additional breadth (more tasks, more datasets)**: Various scattered demands for broader evaluation that would turn the paper into a different, larger study. *Removed as scope creep.*
+- *"The MedNLI simulation results are referenced but not visible in the provided text"* — This is a parser artifact; the table exists in the original submission. The substantive point (only 2 models tested) is retained in Minor weaknesses.
+- *Strength: "Quantitative evidence that in-domain pre-training accelerates feature disambiguation"* — The evidence is qualitative (PCA visual inspection), not quantitative, as confirmed by the verified weakness. Rephrased in Strengths to reflect the qualitative nature of the finding.
+- *"The paper does not investigate why fine-tuning degrades [PubMedBERT]"* — The paper does investigate this through probing (Table 2 shows best features before fine-tuning) and feature dynamics (class mixing in scatterplots), just not at the mechanistic depth the critic requests. The underlying concern (lack of training curves per class) is retained.
+- *"The evidence rests on one task (Path-PG) in Table 1"* — Inaccurate; MedNLI validation provides cross-dataset support, though only for 2 models.
 
 ## Novel Insights
 
-The most insightful observation from the reviews is the identification of the confound between "from-scratch" and "domain-specific" pre-training. BioBERT's strong performance on Path-PG (0.933) despite being trained only on PubMed abstracts (like PubMedBERT) suggests the paper's central attribution — that "mixed-domain pre-training confers robustness to class imbalance" — may be better framed as "continual pre-training from a general-domain initialization confers robustness." This reframing is more precise and would lead to different practical recommendations (prefer continual pre-training over from-scratch training for clinical tasks with expected imbalance). Beyond this, the reviews do not surface additional novel insights beyond what the paper itself contributes.
+None beyond the paper's own contributions. The reviews surface important methodological gaps but do not identify unclaimed patterns in the data that the paper missed.
 
 ## Suggestions
 
-1. **Reframe the overfitting claim.** Acknowledge that the observed pattern may be driven by from-scratch vs. continual pre-training, not domain-specific vs. mixed-domain per se. Report per-class metrics (precision/recall for Gleason 5) and add bootstrapped confidence intervals.
-2. **Fix the RSA sentence.** Remove or rephrase the unsupported claim about BERT's "versatility" and "matching." The within-model RSA findings about which layers change most are valuable on their own.
-3. **Add an ablation.** Training PubMedBERT with stronger regularization or with BERT's vocabulary would help disentangle the confound and deepen the paper's contribution.
-4. **Soften the supervised probing claim.** The F1 difference of 0.001 between PubMedBERT and BERT is negligible and should be discussed as such.
+1. For the overfitting claim, add a table with per-class recall for all five models on Path-PG (especially the minority Gleason grade 5) and show training loss curves separated by class for PubMedBERT vs. Clinical BioBERT.
+2. Replace visual inspection of PCA plots with quantitative separability metrics (e.g., k-NN accuracy on the [CLS] embedding) computed at each checkpoint for all models.
+3. For the outlier analysis, compute whether outlier reports are statistically over-represented among misclassified examples in the test set; report precision of outlier detection.
+4. For the MedNLI validation, either test all five models or explicitly discuss which models were excluded and why.
+5. Clarify the RSA interpretation: state explicitly that "moderate reconfiguration" could reflect either (a) the pre-trained features needing little adjustment or (b) the model being versatile — and present evidence distinguishing the two.
 
-## Score and Decision
-
-The SUFO framework is well-motivated and yields valuable methodological scaffolding for interpretability. The feature dynamics analysis (Section 5.2) and the expert-validated outlier analysis (Section 6) are solid contributions. However, the paper's headline finding — that domain-specific models overfit under class imbalance while mixed-domain models are robust — has a significant confound that the paper does not address. BioBERT (same data source as PubMedBERT but continual pre-training from BERT) performs comparably to Clinical BioBERT, suggesting the key variable may be initialization rather than corpus diversity. Combined with high variance on the critical comparison and the absence of per-class metrics, this weakness undermines the paper's most prominent claim. The remaining contributions (framework, feature dynamics, outlier analysis) are worthwhile but not strong enough to compensate for an unsupported central finding in a conference venue. With revisions addressing the confound through additional experiments (e.g., regularized PubMedBERT, per-class metrics, confidence intervals), the paper could make a solid contribution.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

@@ -1,20 +1,22 @@
-Now I have a complete picture of the paper. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and the reviews. Let me produce the consolidated review.
+
+---
 
 ## Summary
 
-This paper bridges theory and practice in continual learning by identifying that random ReLU features (used in RanPAC) are highly ill-conditioned, and proposing ICL-TSVD, which applies continual truncated SVD to stabilize the min-norm ICL formulation. The method is theoretically grounded (Theorems 1–2 bound training and generalization error under a linear model), computationally efficient (O(E(k_{t-1}+m_t)^2) vs RanPAC's O(E^3)), and achieves strong empirical results across 8 datasets and multiple incremental settings, particularly in the challenging Inc-1 setting (e.g., StanfordCars final accuracy: 74.44% vs RanPAC's 1.19%).
+This paper diagnoses instability in existing continual learning (CL) methods that use pre-trained models with random ReLU features (RanPAC, min-norm ICL), tracing it to ill-conditioned feature matrices and the emergence of extremely small eigenvalues. The authors propose ICL-TSVD, which continually truncates small singular values before solving the minimum-norm least-squares problem, and provide both theoretical guarantees (Theorems 1 and 2 bounding training and generalization errors) and extensive empirical validation (8 datasets, multiple increment sizes including challenging Inc-1). The method establishes a rare connection between principled CL theory and state-of-the-art practice.
 
 ## Strengths
 
-- **Principled identification and resolution of instability in ICL/RanPAC.** The paper clearly diagnoses that random ReLU features become highly ill-conditioned (Figure 1), causing both numerical errors in min-norm ICL and sensitivity to λ in RanPAC. ICL-TSVD's SVD truncation demonstrably stabilizes both training loss (Figure 3) and test accuracy across a wide range of truncation percentages and regularization parameters (Figure 4a,b). This directly supports the paper's core thesis.
+1. **Clear diagnosis of instability with supporting spectral analysis.** The paper identifies the root cause of failure in existing methods (ill-conditioned random ReLU features with eigenvalues as small as ~10⁻⁵) and directly links this to both numerical instability and double-descent phenomena. Figure 1(a,b,c) shows the correlation between the emergence of tiny eigenvalues and accuracy collapse, which is then confirmed in the training loss explosion (Figure 2). This diagnostic analysis is clean and motivates the TSVD remedy naturally.
 
-- **Novel theoretical guarantees for continual (not just offline) truncation.** Unlike prior PCR theory (Xu et al. 2019, Huang et al. 2022) that covers only offline truncation, the paper derives a recurrence relation (Lemma A.1) that captures the dynamics of continual SVD updates, and proves that estimation and generalization errors remain controlled when only the smallest singular values are truncated. The bounds involve quantities γ_t and a_t that the paper argues (with empirical justification) are favorable in practice.
+2. **State-of-the-art empirical performance across diverse CIL settings.** ICL-TSVD consistently outperforms RanPAC and other baselines on 8 datasets under B-0 and B-q₁, Inc-{5,10,20} settings (Table 1). In the challenging Inc-1 setting (Table 3), ICL-TSVD achieves 77.65% average final accuracy vs. 66.00% for RanPAC, with particularly dramatic gains on StanfordCars (1.19% → 74.44%). These gains are backed by stability improvements confirmed by accuracy matrices (Figure 5).
 
-- **Compelling Inc-1 results demonstrating stability under extreme conditions.** In the one-class-at-a-time setting involving hundreds of tasks, ICL-TSVD dramatically outperforms RanPAC (average final accuracy 77.65 vs 66.00). The gap on StanfordCars (74.44% vs 1.19%) and the accuracy matrices (Figure 6) provide strong evidence that ICL-TSVD avoids the catastrophic failure modes that plague RanPAC when cross-validation on small validation sets fails.
+3. **Stability with respect to hyperparameters.** Figure 3a shows ICL-TSVD maintains stable performance across a wide range of truncation percentages (0–100%), and Figure 3b shows that the TSVD-extended ridge version is practically immune to changes in the regularization parameter λ (10⁻⁵ to 10⁴). This contrasts sharply with RanPAC (Figure 2) and the original min-norm ICL (Figure 1c), providing compelling evidence that TSVD addresses the underlying instability.
 
-- **Scalable and efficient continual implementation.** Algorithm 1's incremental SVD update is O(E(k_{t-1}+m_t)^2) per task versus RanPAC's O(E^3), with speedups of up to ~1000× at E=25,000 (Figure 5). This is a practical contribution that enables ICL-TSVD to exploit larger embedding dimensions for higher accuracy.
+4. **Novel theoretical guarantees for a continual truncation setting.** The paper proves Theorem 1 (estimation bound) and Theorem 2 (generalization bound) that control error in terms of the eigenvalue gap ratio γ_t and accumulated truncated eigenvalues a_t. The authors explicitly connect these quantities to observable spectral properties (line 270: a_t ≈ 10⁻³ for hundreds of tasks when truncating eigenvalues of order 10⁻⁵), making the bounds meaningful in practice. Importantly, the analysis covers the *continual* truncation setting rather than the static PCR setting studied in prior work, and makes fewer distributional assumptions than prior theory.
 
-- **Practical insensitivity to hyperparameters.** ICL-TSVD's performance is stable across a wide range of truncation percentages (Figure 4a) and, when extended to ridge regression, effectively immune to the regularization parameter λ (Figure 4b). This is a meaningful improvement over RanPAC, which requires careful cross-validation.
+5. **Scalable and efficient continual implementation.** Algorithm 1 requires O(E(k_{t-1}+m_t)²) complexity per task compared to RanPAC's O(E³), enabling ICL-TSVD to use a larger embedding dimension (E=10⁵ vs. E=10⁴ for RanPAC). Figure 4 shows speedups of up to 1000× at equal E.
 
 ## Weaknesses
 
@@ -22,54 +24,47 @@ This paper bridges theory and practice in continual learning by identifying that
 None.
 
 ### Major
-- **The main comparison (Table 1) conflates truncation with larger embedding dimension.** ICL-TSVD uses E=10^5 while RanPAC uses E=10^4, as the paper explicitly acknowledges (line 377). The paper justifies this as "fair" because ICL-TSVD's efficiency enables the larger E, but this conflates two separate claims: (i) truncation improves accuracy at a given E, and (ii) ICL-TSVD can afford a larger E. The first claim is what isolates the method's core innovation. Several large gaps (e.g., ImageNet-A Inc-5: 62.74 vs 56.48; StanfordCars Inc-5: 74.21 vs 58.03) could be partially explained by the E difference. The paper claims there is a scaling law (fig:acc-inc5-E in appendix) but does not present a direct same-E comparison in the main text. The runtime advantage (Figure 5) is a genuine strength, but the accuracy comparison would be much cleaner with ICL-TSVD at E=10^4 vs RanPAC at E=10^4 in the main table.
+None.
 
 ### Minor
-- **No standard deviations or confidence intervals reported.** The paper reports point estimates without variance, making it impossible to assess whether differences between methods are statistically significant. Given the breadth of the evaluation (8 datasets × 3 increments × multiple baselines), single-run reporting is understandable for scaling but still limits the reader's ability to judge reliability.
 
-- **Theoretical bounds (Theorems 1–2) are not empirically validated against actual errors.** The bounds depend on unknown quantities (W*, E, Σ_cov) and the paper's argument that γ_t and a_t are favorable in practice is plausible, but no figure plots the bound alongside measured training or test loss. This weakens the claimed "bridge between theory and practice."
+1. **Lack of a direct same-embedding-dimension accuracy comparison with RanPAC.** The main empirical comparison (Table 1) uses E=10⁵ for ICL-TSVD vs. E=10⁴ for RanPAC. The paper argues this is fair because ICL-TSVD's efficiency justifies larger E, and provides runtime evidence at equal E (Figure 4). However, this confounds the benefit of the method itself with the benefit of larger E. While the paper's core claims about stability and theoretical guarantees do not hinge on beating RanPAC by a margin, the claim of "uniformly outperforming" RanPAC would be strengthened by a direct accuracy comparison at the same embedding dimension (e.g., E=10⁴ for both). The scaling-law evidence (referenced as Figure acc-inc5-E) partially addresses this but is cited rather than shown in the main paper.
 
-- **The linear model assumption (Y = W* H + E) is strong for classification with one-hot labels.** It implies labels are an exactly linear function of random ReLU features plus noise. The paper does not discuss how violations of this assumption (which are likely for one-hot targets) might affect the validity of the bounds. This doesn't invalidate the theory, but it limits its scope.
+2. **The theoretical bounds depend on quantities that are not directly computable (the ground-truth weight matrix ‖W_gt‖_F and noise ‖ε‖_F).** The paper is transparent about this (line 255) and argues that the bounds become small for suitable truncation regardless of specific values. However, no empirical validation of bound tightness is provided (e.g., estimating the unknown quantities from learned weights and residuals on one dataset to verify the bound is within an order of magnitude of the actual loss). This limits the practical force of the theoretical guarantees.
 
-- **The claim that RanPAC's instability is "primarily" due to generalization error (double descent) rather than numerical error is asserted with limited evidence.** The paper states (line 125) that since RanPAC doesn't show training loss explosion, its instability "is more likely due to generalization errors," but no direct measurement of the generalization gap or conditioning of the ridge problem is provided. This is a plausible inference but not strongly validated.
+3. **No explicit validation of the linear model assumption (Y = W_gt H + ε) on real features.** The paper notes that the joint linear classifier LC(H_{1:T}) achieves accuracy close to ICL-TSVD (Table 1), which indirectly supports the assumption. However, a more direct diagnostic — e.g., measuring the reconstruction error of a linear fit on all tasks jointly — would be valuable for assessing whether the theory's core premise holds for the actual pre-trained+ReLU features.
 
-- **The continual SVD approximation error is referenced to the appendix but not quantified in the main text.** Algorithm 1 uses \widetilde{B}_t rather than the full data matrix H_{1:t}. The paper claims the approximation is accurate (citing figures in the appendix) but the main text lacks a direct comparison of the continual vs. offline TSVD solutions.
+4. **The choice of truncation percentage ζ could be discussed more practically.** The paper shows insensitivity across a wide range (Figure 3a), which is a strength, but provides no practical guidance on how to set ζ beyond the truncation threshold interpretation. Is ζ tunable by cross-validation? Is a fixed percentage always appropriate across datasets with different spectral properties?
 
 ### Trivial
-- No limitations section is included. Important limitations worth noting: the theoretical bounds involve unknown quantities; the linear model assumption may not hold exactly for classification; and the method's reliance on pre-trained ViT features may not transfer to all model architectures or domains.
+None.
 
 ## Nice-to-Haves
-- A direct same-E comparison (E=10^4 for both ICL-TSVD and RanPAC) in Table 1 would cleanly isolate the benefit of truncation and strengthen the paper's core empirical claim.
-- Validating the theoretical bounds (Theorems 1–2) by plotting them alongside actual training/test loss for at least one dataset would meaningfully strengthen the theory-practice bridge.
-- An ablation comparing Algorithm 1's output to the exact offline TSVD solution would quantify the approximation error of the continual SVD update.
-- Reporting standard deviations (even for a subset of settings) would improve statistical rigor.
+
+- **Empirical validation of theoretical bound tightness.** Estimating the terms in Theorems 1 and 2 on one dataset (e.g., CIFAR100 Inc-5) and comparing the bound value to actual training/test MSE would demonstrate non-vacuousness.
+- **Brief empirical check of MSE vs. cross-entropy equivalence** on one dataset, to confirm that the MSE loss used throughout does not incur a systematic accuracy penalty.
+- **A direct same-E accuracy comparison** (e.g., E=10⁴ for both methods on StanfordCars Inc-5 and ImageNet-A Inc-5) to separate the benefit of the method from the benefit of larger embedding dimension.
 
 ## Removed Points
-- **"The paper should discuss how violations of the linear model assumption might affect the bounds"** → Keeping this but downgrading to minor since it's a reasonable limitation, not a flaw in the analysis itself.
-- **Various formatting/style criticisms from the harsh critic** → Removed per hard rules (parser artifacts).
-- **Criticism about missing appendix content** → Removed per hard rules (parser strips appendix).
-- **"RanPAC is described as unstable but works well on most settings"** → The paper acknowledges this (line 313-314: "RanPAC is unstable with respect to q_2 as it exhibits a large performance gap..."). The narrative is more nuanced than the critic suggests. Kept as a minor weakness but softened.
-- **"The paper's narrative would be more accurate if it acknowledged that RanPAC is strong in many settings"** → The paper already does this (lines 24, 313-314). Removed.
-- **"The choice of ζ is not discussed in detail"** → The paper states ζ=25% is used throughout and Figure 4a shows stability across a range. Moved to Nice-to-Have.
+
+- **Criticism about the continual SVD approximation quality lacking quantitative analysis in the main paper.** The paper references a theorem and figures in the appendix (Theorem eigenvalue-eigenspace-bound, Figures eigenvalues-continual, normalized-ev-diff) which provide the quantitative analysis. The parser strips appendix content; these exist in the original submission.
+- **Comment about large blocks of commented-out material visible in the raw extract.** This is a PDF parsing artifact, not an author error.
+- **Criticism about varying y-axis scales in runtime comparison (Figure 6).** This is a minor presentation preference; the data is clearly communicated.
 
 ## Novel Insights
-The most insightful observation from the review process is that the paper's central contribution is dual: the identification of ill-conditioning in random ReLU features as the root cause of instability in both ICL and RanPAC, and the demonstration that continual SVD truncation resolves this in a theoretically principled way. While the embedding-dimension confound in the main comparison is a real concern, the Inc-1 results (Table 2) are largely immune to this critique — the dramatic failures of RanPAC (e.g., 1.19% on StanfordCars) cannot be attributed to E alone since RanPAC's own default E=10^4 was used. This suggests the paper's most valuable finding may be that RanPAC's cross-validation-based λ selection fundamentally breaks down when validation sets are small, a problem that ICL-TSVD's λ-free TSVD formulation inherently avoids.
+
+None beyond the paper's own contributions.
 
 ## Suggestions
-1. **Add a same-E comparison to Table 1** — Include ICL-TSVD at E=10^4 alongside the existing E=10^5 results. This would cleanly decouple the benefit of truncation from the benefit of larger E.
-2. **Add a scaling-law plot in the main text** — If space permits, show accuracy vs. E for both methods on at least 2-3 datasets to demonstrate that ICL-TSVD's advantage persists at every E.
-3. **Report standard deviations** for at least a representative subset of experiments (e.g., 3 random seeds for 2 datasets).
-4. **Add a limitations paragraph** to the conclusion acknowledging the linear model assumption and the dependence of theoretical bounds on unknown quantities.
-5. **Consider validating the theoretical bounds** on a single dataset by estimating W* and the noise covariance, then plotting the bound alongside real loss values.
+
+1. Add a same-E accuracy comparison (E=10⁴) on at least 2-3 datasets to cleanly separate the benefit of the method from the benefit of larger embedding dimension.
+2. On one dataset, provide a rough empirical estimate of the bound quantities in Theorem 1/2 to demonstrate non-vacuousness.
+3. Add a sentence of practical guidance on selecting ζ (e.g., "in practice, any ζ in [10%, 90%] yields near-identical results, so cross-validation over a coarse grid suffices").
+4. Explicitly note that LC(H_{1:T})'s strong performance supports the linear model assumption underlying the theory.
 
 ## Score and Decision
 
-**Originality:** 7/10 — The idea of applying TSVD to ICL is novel and well-motivated, though PCR itself is a known technique. The novel contribution is the continual SVD analysis and its application to CL with pre-trained models.
-**Importance of Research Question:** 8/10 — Bridging theory and practice in CL is an important goal, and stabilizing RanPAC addresses a genuine practical problem.
-**Claims Supported:** 6/10 — The empirical comparison is partially compromised by the E confound, but the Inc-1 results and ablation studies are convincing.
-**Soundness of Experiments:** 7/10 — Broad evaluation across 8 datasets, but missing standard deviations and the E confound are notable gaps.
-**Clarity:** 7/10 — Well-structured paper with clear motivation, though the mixing of multiple variants in Table 1 is somewhat hard to parse.
-**Value to Community:** 8/10 — The method is simple, efficient, and effective; the theoretical framework for continual truncation could inspire further work.
+This paper makes a genuine contribution: it diagnoses a real instability in state-of-the-art CL methods, proposes a principled and scalable fix (continual truncated SVD), provides novel theoretical guarantees for the continual setting, and validates the approach extensively. The weaknesses are minor — the comparison confound with E is acknowledged and partially justified, the theoretical bounds depend on unknown quantities (standard in learning theory), and the remaining suggestions are incremental improvements. The work bridges an important gap between theory and practice in CL with pre-trained models and should be accepted.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>8.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

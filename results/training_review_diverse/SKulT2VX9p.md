@@ -1,78 +1,69 @@
-Now I have a comprehensive understanding of the paper and all reviewer claims. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper. Let me write the consolidated review.
 
 ## Summary
 
-This paper addresses the problem of achieving interventional fairness when the causal graph is only partially known (represented as an MPDAG). The authors propose (1) a modeling technique showing that augmenting an MPDAG with a predictor variable preserves the MPDAG property (Theorem 1), (2) identification conditions for interventional fairness on MPDAGs via the augmented graph (Proposition 1), and (3) a constrained optimization framework that balances fairness (measured as distributional discrepancy between interventional distributions) against predictive accuracy. Experiments on synthetic and two real-world datasets demonstrate trade-off curves.
+This paper addresses the problem of achieving interventional fairness when the causal graph is only partially known (specifically, as a maximally partially directed acyclic graph, or MPDAG). The authors propose: (1) a modeling technique where the predictor Ŷ is treated as a child of all observed variables, proving that the augmented graph remains an MPDAG (Theorem 1); (2) an analysis of identification conditions for the interventional effect P(ŷ | do(A), do(X_ad)) on MPDAGs (Proposition 1); and (3) a constrained optimization framework (ε-IFair) that balances unfairness (measured via MMD) against prediction accuracy, with a tunable hyperparameter λ. Experiments on synthetic linear-Gaussian data and two real-world datasets (UCI Student, Credit Risk) demonstrate trade-off curves where ε-IFair can simultaneously approach the low unfairness of a strictly fair baseline (IFair) and the low error of an unconstrained model.
 
 ## Strengths
 
-- **Handles partial causal knowledge instead of assuming a full DAG** (Section 1, Theorem 1). Most prior causal fairness work assumes the true causal DAG is fully known. This paper is the first to systematically address interventional fairness when only a partially known graph (MPDAG) is available. Theorem 1 — showing that the augmented MPDAG with the predictor preserves MPDAG consistency — is a clean technical contribution that may be of independent interest beyond fairness.
+- **Modeling technique that preserves MPDAG structure after adding the predictor (Theorem 1).** The augmented-𝒢 construction (Definition 4) and the proof that adding Ŷ as a child of all nodes yields a valid MPDAG is a clean theoretical result that enables formal causal reasoning on the predictor. This theorem may be of independent interest beyond fairness applications.
 
-- **Provides explicit identification conditions for the fairness measure on MPDAGs** (Proposition 1, Section 4.2). Proposition 1 gives a necessary and sufficient graphical condition (no undirected edge between any node in the treatment set and any node in its complement) and an exact formula for the causal effect \(P(\hat{Y} \mid do(\mathbf{A},\mathbf{X}_{ad}))\) using the partial causal ordering. This is a non-trivial extension of Perković et al.'s general identification theorem to the fairness setting with the augmented graph.
+- **Clear integration of MPDAG causal identification into a practical fairness optimization.** The paper connects the partial causal ordering (PCO) framework of Perković et al. (2020) to the fairness setting, showing how to compute the interventional distribution P(ŷ | do(A), do(X_ad)) from observable densities when the graph is partially known, and operationalizing this via Monte Carlo sampling and MMD-based constraints.
 
-- **Constrained optimization framework with demonstrable fairness-accuracy trade-off**. The \(\epsilon\)-IFair formulation with regularization parameter \(\lambda\) provides a principled way to interpolate between exact fairness (IFair) and unconstrained accuracy (Full). Experiments on synthetic graphs with 5–30 nodes and on two real datasets show that the method can match the unfairness of the exact IFair baseline while retaining RMSE near that of the Full model for appropriate \(\lambda\) values (Figures 1, 3).
+- **Demonstrated fairness-accuracy trade-off.** The experimental results (Figures 2–5) show that the ε-IFair method can interpolate between the extremes of the Full model (low error, high unfairness) and the IFair model (near-zero unfairness, high error) by varying λ, supporting the claim that the constrained optimization approach is practically usable.
+
+- **Explicit discussion of non-identification handling.** Section 4.2 discusses averaging over valid orientations of undirected edges when the causal effect is not identifiable — a pragmatic and honest treatment of a real limitation.
 
 ## Weaknesses
 
-### Fatal
-None. No weakness invalidates the core contributions of the paper.
-
 ### Major
 
-1. **Mismatch between the fairness definition and the optimization penalty (structural).**  
-   Definition 2 (\(\epsilon\)-approximate interventional fairness) demands a *pointwise* bound:  
-   \(|P(\hat{Y}=y|do(\mathbf{a},\mathbf{x}_{ad})) - P(\hat{Y}=y|do(\mathbf{a}',\mathbf{x}_{ad}))| \leq \epsilon\) for every outcome value \(y\).  
-   The optimization objective (Eq. 1) penalizes a distance between the two interventional *distributions* (the notation \(|P(\cdot)-P(\cdot)|\) is ambiguous there), and Section 4.3 operationalizes this using Maximum Mean Discrepancy (MMD). The paper provides no argument that bounding MMD (or any integral probability metric) implies the pointwise condition for all \(y\) at a given \(\epsilon\). While using a distributional distance as a surrogate for a pointwise fairness constraint is a common practical relaxation, the paper presents this as directly enforcing Definition 2 without acknowledging or justifying the gap. This overstates the theoretical guarantee. **Fix:** either relax Definition 2 to a distributional distance and state this clearly, or provide a theoretical link (e.g., MMD bound → pointwise bound under smoothness assumptions).
+1. **Proposition 1's identification condition requires stronger justification.** The paper claims (line 232) that the causal effect P(ŷ | do(S)) is identifiable *iff* there is no undirected edge between any node in V' and any node in S in the original MPDAG 𝒢. This simplified condition deviates from Perković et al. (2020, Theorem 3.6), whose identification criterion for MPDAGs involves checking *proper possibly directed paths* — a more nuanced condition that does not reduce to a simple check of undirected edges between the two sets in general. The paper states the proof is "based on" Perković et al.'s result and in the appendix, but without seeing the derivation, it is unclear whether the "iff" claim holds for all MPDAG structures. If the condition is merely sufficient rather than necessary (or missing additional constraints), the identification formula could be applied incorrectly in cases the authors believe are handled. **This is the most significant concern because the entire objective function depends on computing this causal quantity correctly.** The authors should either provide a complete proof connecting their condition to Perković et al.'s general criterion, or relax to a sufficient condition and characterize when it fails.
+
+2. **Experiments never test the distinctive aspect of interventional fairness: non-empty admissible sets.** The paper explicitly states (line 269): "Here, we focus on the scenario where the admissible variable set is empty." With X_ad = ∅, interventional fairness collapses to total causal effect fairness — the very notion that the IFair baseline already targets. The whole point of the interventional fairness definition (Definition 1) is precisely the ability to allow certain causal pathways through admissible attributes. By never demonstrating the method with X_ad ≠ ∅, the paper fails to validate the capability that distinguishes its approach from simpler causal fairness notions. This is a significant gap between the claimed contribution and the demonstrated evidence.
+
+3. **The synthetic evaluation does not test realistic partial knowledge.** The simulation derives the CPDAG directly from the true DAG (line 284) and adds background knowledge also drawn from the true DAG (line 286). This guarantees the MPDAG always contains the true DAG in its equivalence class and has no estimation errors. In practice, CPDAGs would be learned from finite observational data with statistical noise, and background knowledge may be incomplete or imperfect. Without experiments where the CPDAG is *learned* (e.g., via PC or GES) or where the MPDAG contains misspecified orientations, the claim that the method "handles partially known causal graphs" is only validated under idealized conditions. Additionally, the construction of MPDAGs for the real-world datasets (Student, Credit) is not described — the paper merely references figures without explaining whether these graphs came from domain knowledge, causal discovery, or prior literature.
+
+4. **No error bars or confidence intervals in the trade-off plots.** The synthetic results (Figures 2a–2d) report averages over 10 random graphs but show only point estimates. Given the variance induced by different graph structures and data generation, the reader cannot assess whether observed differences between methods are statistically reliable.
 
 ### Minor
 
-2. **Limited baselines.** The empirical evaluation compares only against Full, Unaware, and IFair (the exact fairness baseline). No comparison is made to methods that handle graph uncertainty (e.g., averaging predictions over all DAGs in the equivalence class, robust optimization) or to simpler non-causal fairness regularization that ignores structure. This makes it difficult to isolate the value added specifically by the MPDAG-aware identification, as opposed to just adding a distributional penalty.
+1. **Inconsistent unfairness metric in the Credit Risk experiment.** The training objective uses MMD, but the Credit Risk results (line 395) report unfairness as absolute difference in means (because the target is binary). While explained, this disconnect weakens the link between the optimization objective and the reported evaluation.
 
-3. **Incomplete description of the optimization pipeline (reproducibility gap).** Section 4.3 describes the approach at a high level (estimate conditionals via multivariate Gaussian, Monte Carlo sampling, MMD penalty, train a neural net) but omits: (a) the explicit objective function used during training (the MMD-based loss is never written down); (b) hyperparameters (learning rate, number of epochs, batch size, neural network architecture); (c) how the Monte Carlo sample size was chosen. These details are needed for reproducibility beyond stating the general approach.
+2. **Only linear-Gaussian synthetic data tested.** The conditional density estimation (multivariate normal) exactly matches the data-generating process, making the identification and estimation steps unrealistically clean. Testing with nonlinear data or misspecified density models would strengthen the evaluation.
 
-4. **Real-data MPDAG construction is underspecified.** The paper references figures for the MPDAGs used on the Student and Credit Risk datasets (\cref{fig: real_data_with_assumption}, \cref{fig: credit_mpdag}) but does not describe: what causal discovery algorithm (if any) was used to obtain the CPDAG, what specific background knowledge / domain assumptions were incorporated, or how the MPDAG was validated. Since the entire method hinges on the structure of the MPDAG, this makes the real-data results difficult to independently reproduce or assess.
-
-5. **No variance/error bars on experimental results.** The synthetic results report point estimates over 10 graphs (one run each) without confidence intervals, standard deviations, or any measure of variability. The trade-off curves cannot be assessed for stability. For the real data, the Student test set contains only 19–20 interventional samples per group (which the paper acknowledges), but the training-set curves also lack error bars.
+3. **No discussion of λ selection.** The paper uses λ ∈ {0, 0.5, 5, 20, 60, 100} but provides no guidance on how practitioners should select λ in a new dataset or how sensitive the results are to this choice.
 
 ### Trivial
 
-6. **Missing hyperparameter details.** As noted above, learning rate, architecture, epochs, batch size, and Monte Carlo sample size are absent. While individual hyperparameter values are rarely fatal, their omission adds to the reproducibility concern.
-
-7. **Notation inconsistency.** Eq. (1) uses \(|P(\hat{Y}_{\mathbf{A}\leftarrow \mathbf{a}, \ldots}) - P(\hat{Y}_{\mathbf{A}\leftarrow \mathbf{a}', \ldots})|\) where \(P\) denotes a distribution; the absolute value of a distribution is not standard notation and should be clarified (e.g., a norm or a distance).
+None.
 
 ## Nice-to-Haves
 
-- A comparison against a method that averages the predictor over all DAGs in the MPDAG equivalence class (model averaging) would help isolate the specific benefit of the proposed identification-based approach.
-- If the no-identification case arises in practice, a demonstration of the averaging procedure over MPDAGs (mentioned in Section 4.2) would be a useful extension.
+- A comparison against a non-causal fairness method (e.g., adversarial debiasing, reweighting) would help clarify whether the extra complexity of causal identification on MPDAGs provides practical benefit over approaches that do not use causal graph information.
+- Non-parametric or more flexible density estimation (e.g., conditional normalizing flows) could be tested to assess robustness beyond the linear-Gaussian setting.
 
 ## Removed Points
 
-- **Criticism about MPDAG figures not being shown.** The paper references figures (\cref{fig: real_data_with_assumption}, \cref{fig: credit_mpdag}) that exist in the original submission. Their absence in the extracted text is a parser artifact, not an author error. However, the *construction process* for these figures is indeed underspecified (kept as Minor weakness #4).
-- **Claim that the method's contribution is merely adapted from Perković et al. (2020).** Proposition 1 correctly cites and adapts existing theory to the fairness context. The adaptation is non-trivial (requires the augmented MPDAG from Theorem 1) and properly attributed. The point is factually correct but not a weakness.
-- **Complaint that the paper should also address path-specific or counterfactual fairness.** The paper explicitly scopes itself to interventional fairness (Section 4.4). This is a scope restriction, not a weakness.
-- **Generic "missing related work" style complaints.** Not verifiable without external sources.
-- **Pure formatting/style nitpicks.** Parser artifacts, not author errors.
-- **Strength about "Uses MMD as a rigorous distributional discrepancy measure."** This conflicts with the verified weakness (Major #1) about the definition-penalty mismatch. Per instructions, when strength and weakness disagree, the weakness wins; moved here.
+- **Concern about proofs being relegated to the appendix.** Removed per policy: the appendix exists in the original submission; the parser stripped it.
+- **Concern about "no comparison against existing fairness-constrained optimization methods."** Not a core weakness of this paper. The baselines (Full, Unaware, IFair) are appropriate for evaluating the benefit of using causal graph structure; adding non-causal baselines would answer a different question.
+- **Concern about Proposition 1 being "not adequately justified" in the sense of missing proof steps.** The paper states the proof is provided in the appendix; the criticism is about correctness (kept above) rather than absence.
 
 ## Novel Insights
 
-The reviewers collectively highlight an important tension that the paper does not fully resolve: the problem is to enforce a *pointwise* fairness definition, but the optimization uses a *distributional* penalty (MMD). This is more than a technical detail — it goes to whether the method's empirical fairness guarantees match what the theory promises. A solution (redefining the target notion to match the penalty, or proving a bound) would tighten the paper considerably. Beyond this, the reviews do not surface insights that go beyond what the paper itself claims.
+The most interesting observation across the reviews is the tension between the paper's clean theoretical framing (Theorem 1 ensuring the augmented graph remains an MPDAG) and the practical difficulty of verifying the identification condition in realistic settings. The paper's "no undirected edge" condition for identification is appealingly simple, but the reviewer's challenge reveals a gap between that simplicity and the known complexity of causal identification in MPDAGs. Whether this gap can be closed (the proof exists in the appendix) or represents a real limitation will determine the paper's theoretical contribution. The experimental gap (X_ad = ∅) is a separate but equally important concern: the paper motivates its work with the flexibility of interventional fairness over total effects, then never tests that flexibility.
 
 ## Suggestions
 
-1. **Align the definition and the penalty.** Either (a) relax Definition 2 to a distributional distance (e.g., "\(\text{MMD}(P(\hat{Y}|do(\mathbf{a},\mathbf{x}_{ad})), P(\hat{Y}|do(\mathbf{a}',\mathbf{x}_{ad}))) \leq \epsilon\)") and state clearly that this is the notion being optimized, or (b) provide a theoretical argument connecting the MMD bound to the pointwise bound under regularity assumptions.
-
-2. **Release the full experimental pipeline** including: the MPDAG construction details for the real datasets, the neural network architecture, all hyperparameters, and the MMD-based loss function as actually implemented. This would resolve the reproducibility concerns.
-
-3. **Add confidence intervals or error bars** to at least the synthetic experiments (across the 10 graph instantiations) to demonstrate stability of the trade-off curves.
-
-4. **Write down the actual training objective.** Show the MMD-based loss explicitly as a function of the model parameters \(\theta\), the Monte Carlo samples, and the kernel choice.
+1. **Provide a complete proof (or citation-to-condition mapping) for Proposition 1 in the main text** — at minimum, state how the "no undirected edge" condition follows from Perković et al. (2020, Theorem 3.6) for the specific augmented graph structure. If the condition is only sufficient, say so.
+2. **Add at least one experiment with a non-empty admissible set** — e.g., a synthetic setting where X_ad is a known descendant of A but considered a fair pathway, and show that the method can be tuned to block only the unfair effect.
+3. **Include a robustness experiment where the CPDAG is learned from data** (e.g., via the PC algorithm) rather than derived from the true DAG, to simulate realistic partial knowledge with estimation error.
+4. **Describe how the real-world MPDAGs were constructed** — what background knowledge or discovery algorithm was used?
+5. **Add error bars** (e.g., standard deviations or bootstrap confidence intervals) to the trade-off plots.
 
 ## Score and Decision
 
-This paper makes a genuine contribution: it is the first to address interventional fairness under partial causal graph knowledge, with clean theoretical results (Theorem 1, Proposition 1) that stand independently of any implementation. The constrained optimization framework and empirical demonstrations support the approach's viability.
+The paper tackles an important and timely problem — relaxing the full-DAG assumption for causal fairness. The augmented-𝒢 modeling technique (Theorem 1) is a clean contribution, and the constrained optimization framework is practically motivated. However, the paper has two structural weaknesses: (1) the identification condition in Proposition 1 makes a strong "iff" claim whose correctness relative to the known MPDAG identification literature is not adequately justified in the main text; (2) the experimental evaluation does not demonstrate the method's most distinctive capability (non-empty admissible sets) and tests only under idealized partial-knowledge conditions. These limitations are significant but not fatal — the paper's core framework could become convincing with a corrected/relaxed identification analysis and broader experiments.
 
-However, the paper has a significant structural weakness: the fairness definition (pointwise bound) does not match the actual penalty used in optimization (MMD-based distributional distance), and this gap is not acknowledged. The experimental evaluation lacks reproducibility-critical details (hyperparameters, MPDAG construction process, error bars). These issues are addressable in revision but reduce confidence in the current form.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

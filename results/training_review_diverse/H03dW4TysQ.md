@@ -1,18 +1,22 @@
-Now I have a thorough understanding of the paper. Let me write the consolidated review.
+Now I have all the information I need. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces MoEDM (Mixture of Expert Diffusion Models), a method that prunes mid-layers from pre-trained diffusion models and expands the remaining layers into multiple "expert" copies. A training-free gating mechanism activates exactly one expert per layer based on the diffusion time step, yielding ~2× sampling speedup. The method is evaluated on Guided Diffusion and Latent Diffusion for subset-ImageNet generation, domain shift (ImageNet→FFHQ), and text-to-image tasks, with FID/KID metrics showing maintained or improved quality relative to full-size models.
+This paper proposes MoEDM, a method to accelerate diffusion model inference for personalized/specialized tasks. The approach has two steps: (1) discard entire mid-layers of a pretrained diffusion model (removing >70% of parameters), and (2) replicate the remaining layers into multiple "expert" copies that are activated by a fixed time-step-dependent gating mechanism (different copies handle different contiguous blocks of the denoising schedule). The central claim is a 2× sampling speedup without quality loss, validated on ImageNet subsets, domain adaptation (ImageNet→FFHQ), and text-to-image generation.
 
 ## Strengths
 
-1. **Training-free time-step-based dynamic routing**: Unlike prior MoE approaches for diffusion models that use learned, static routing, MoEDM exploits the known time step *t* to partition the denoising trajectory among experts via a deterministic, one-hot gate (Equation 2). This adds zero routing overhead during sampling, a design that is both novel and practically motivated.
+1. **Novel combination of structured pruning with time-conditional expert expansion.** The idea of discarding entire mid-layers based on the observation that >90% of low-importance channels concentrate there, then recovering capacity through time-block-specific copies, is a clean architectural intervention that is not covered by existing pruning-only or distillation-only approaches. The paper provides an explicit justification for layer-level over channel-level pruning (practical overhead from group normalization and inter-layer connections).
 
-2. **Layer-level pruning guided by task-specific scoring**: The paper uses a channel-importance metric S_c (Equation 1) to demonstrate that >90% of unimportant parameters reside in mid-layers, which contain >70% of total parameters. Discarding entire mid-layers (rather than individual channels) yields substantial speed gains while preserving output quality — a finding that could inform future pruning strategies for diffusion models.
+2. **Well-motivated problem and clear targeting of personalization.** The paper correctly identifies that deploying a 3.5B-parameter general-purpose model for narrow tasks (e.g., generating cat/dog images for a pet store) wastes compute without benefit. The method is explicitly designed for this use case rather than general-purpose acceleration.
 
-3. **Consistent 2× speedup with maintained or improved FID/KID across multiple tasks**: In Table 1 (ImageNet subsets, 64×64), MoEDM achieves lower FID/KID than the full-size Guided Diffusion model. In Table 3 (Latent Diffusion subsets), MoEDM also shows better FID than the full model (e.g., 37.82 vs. 38.21 for "Cheeseburger"). The 2× speedup is claimed consistently across Guided Diffusion, Latent Diffusion, and text-to-image settings.
+3. **Custom scoring metric (S_c) designed for diffusion models.** The paper proposes a per-channel importance score that measures the L₁ change in generated distribution when the channel is zeroed (Equation 1), rather than relying on magnitude or gradient heuristics from feed-forward network pruning. This is validated in Section 4.2, where the metric identifies >90% of unimportant channels as residing in mid-layers, aligning with the paper's architectural intuition.
 
-4. **Compatibility with existing acceleration methods**: The paper demonstrates MoEDM built on both Guided Diffusion and Latent Diffusion, and notes compatibility with DPM-Solver and DDIM, showing that its benefits are additive to prior optimizations.
+4. **Training-free gating exploiting the known time step.** The expert activation scheme requires no learned router — the gating is deterministic based on the diffusion time step t, which is always available. This avoids the additional computation and training complexity of learned MoE routing, and is a genuine advantage of applying MoE-style ideas to the diffusion setting specifically.
+
+5. **Reasonable breadth of baselines and ablations.** The paper compares against full fine-tuning, training from scratch, BitFit, partial-block fine-tuning, and ablates the MoE component and the distillation component. The domain-shift experiment (Table 2) shows MoEDM (FID 25.3, KID 0.032) outperforming the full-size model (FID 33.2, KID 0.043) while halving feedforward time, which is the single strongest piece of evidence.
 
 ## Weaknesses
 
@@ -20,59 +24,59 @@ This paper introduces MoEDM (Mixture of Expert Diffusion Models), a method that 
 None.
 
 ### Major
-1. **Missing central ablation: pruned single-network baseline.** The paper does not compare MoEDM against a simple pruned-then-fine-tuned single network (i.e., discard mid-layers, keep a single copy of each remaining layer, fine-tune with the same budget). The only related condition — "w/o expansion and w/o distillation" in Table 2 — conflates two factors (no expansion AND no distillation) and may not have been fine-tuned at all (the paper says only that performance is "significantly below acceptable standard"). Without isolating whether the MoE expansion specifically contributes to quality maintenance, the core claim that "dynamic routing improves over pruning" is not properly supported. The benefit could come from the increased total parameter count of the expanded model rather than from the routing mechanism itself.
 
-2. **Distillation confound undermines fairness of comparisons.** MoEDM uses a full-size model to generate additional training images and an L2 distillation loss (Section 3.2), which provides extra high-quality training data. The baselines (fully fine-tuning, PEFT) do not receive this same benefit. While Table 3 includes a "w/o distillation" condition for MoEDM, this only partially addresses the concern — the strongest baselines still compete without the boosted training signal. In Table 2 (domain shift), it is unclear whether the baselines had access to distillation-equivalent data. The paper needs to either apply the same data augmentation/distillation to all baselines or systematically evaluate MoEDM without distillation across all settings.
-
-3. **Text-to-image evaluation lacks quantitative evidence.** The paper states that due to "constraints of FID and Clipscore," quality is evaluated "by human eyes" and claims "positive results," but reports no human evaluation ratings, no CLIP scores, and no FID values for the text-to-image task. Only sampling speed is reported (Table 3). Visualizations (Figures 4, 5) — while illustrative — are insufficient to support efficacy claims for the text-to-image setting. A proper evaluation (human ratings with inter-rater agreement, or standard automated metrics adapted for the task) is necessary.
+1. **Text-to-image evaluation lacks any quantitative quality assessment.** The paper states (Section 4.3.2) that "given the constraints of FID and Clipscore in text-to-image tasks, we propose to evaluate the quality of image generation in this task by human eyes," but then reports no human evaluation — no protocol, no sample size, no quantitative summary of judgments. The only evidence is two qualitative figures. For the method's most practically relevant application (personalized text-to-image generation), the central claim of "no compromise in quality" goes entirely unsupported by any systematic evaluation. Even a small-scale forced-choice preference test or standard metrics on a prompt set like DrawBench/PartiPrompts would materially strengthen the paper. This is the most consequential gap in the evaluation.
 
 ### Minor
-4. **No confidence intervals or variance estimates for FID/KID.** All FID/KID scores are reported as point estimates without error bars. Given that ImageNet subsets contain only ~1,300 images per class (which the paper acknowledges makes FID "not entirely precise") and that 20,000 generated images are used, score variance could be meaningful. KID is reported (which is more robust than FID for small reference sets), but uncertainty quantification would strengthen the claims.
 
-5. **Parameter-scoring procedure lacks implementation details.** The method computes S_c by comparing output distributions with and without each channel set to zero. The paper does not describe how this is approximated (e.g., number of noise samples per channel, number of channels evaluated, whether a single batch or many images are used). Without this information, the scoring step is not reproducible. (The paper references Supplementary Material for hyperparameters but does not clarify whether this detail is included.)
+2. **The 2× speedup claim is stated without caveat in the abstract and introduction, but the paper's own experiments show it does not always hold.** In Section 4.3.1, the authors acknowledge that for Guided Diffusion at 256×256 resolution, "the improvement in sampling speed is not as significant" because the computationally dominant layers are the shallow ones that remain after pruning. The paper then notes that Latent Diffusion resolves this, which is a valid mitigation. However, the abstract and introduction present 2× as a universal property ("doubles the sampling speed... across various applications," "a 100% enhancement in sampling velocity") without flagging the resolution/architecture condition. The paper would benefit from explicitly bounding the claim.
 
-6. **No FLOPs analysis; runtime measurement is narrow.** The 2× speedup claim is supported only by wall-clock time for one batch size (4) on one GPU. FLOPs counts (pre- and post-pruning, per layer) would provide hardware-independent evidence and help explain why a ~40% parameter reduction yields 2× speedup (presumably because mid-layers are also computation-dominant). The current runtime figure is useful but incomplete.
+3. **The gating mechanism is overclaimed as "dynamic routing."** The mechanism described (Section 3.2) assigns each expert copy to a fixed contiguous block of time steps (first T/kᵢ steps, second T/kᵢ steps, etc.) — a deterministic, non-adaptive, input-independent schedule. This is accurately described as a piecewise time-conditional model, not "dynamic routing" in the sense used in the MoE literature (e.g., Shazeer et al., Wang et al.), where routing depends on input content. The paper is transparent about the mechanism itself, but the framing (abstract: "dynamic routing"; introduction: "selectively activates only indispensable neurons") inflates the technical connection. This is a presentation issue rather than a technical flaw, but it should be corrected.
 
-7. **"Uneven expansion" is mentioned but results are absent.** Section 4.3.2 states that manual uneven expansion ratios were tried, but no results, comparisons, or even which layers received which ratios are reported. This reads as incomplete rather than exploratory.
+4. **Fine-tuning cost is not reported.** The "personalized" use case requires per-user fine-tuning, but the paper reports only sampling speed. The training procedure involves distributing gradients across experts based on time steps, meaning each expert sees only 1/kᵢ of the training data — the paper does not report total fine-tuning time, convergence behavior, or how this cost compares to alternatives. For practitioners evaluating whether the speedup justifies the training overhead, this information is important.
 
-8. **MoEDM outperforming the full-size model on 64×64 ImageNet subsets is not discussed.** The paper shows better FID/KID than the full-size Guided Diffusion model on some subsets, which is unusual for a pruned-then-expanded model. The claim that the full model is "over-parameterized for simple tasks" is plausible but offered without analysis (e.g., sanity-check curves comparing training dynamics or capacity needs). A brief discussion of when this behavior occurs and why would preempt skepticism.
+5. **The layer-level vs. channel-level pruning decision is not empirically validated.** The scoring analysis in Section 4.2 establishes that >90% of low-S_c channels are in mid-layers, but this does not directly imply that all mid-layer channels should be discarded (some may be important). The paper provides a practical justification (channel-level pruning introduces overhead from normalization layers), but does not ablate whether channel-level pruning within mid-layers could achieve similar speedup with better quality. This would be a straightforward experiment given the scoring machinery already exists.
 
 ### Trivial
-- The abstract says "100% enhancement in sampling velocity" which matches the body's "2×" claim, but "100% enhancement" is ambiguous (could mean 1× faster, i.e., no improvement, or 2× faster). Consider unifying phrasing.
-- Table images are described in text captions, but the actual numerical values are not accessible in the text body.
+
+6. **The uniform expansion ratio (2× for all remaining layers) is acknowledged as suboptimal** (Section 3.2: "there remains room for further refinement"). The paper evaluates a limited instantiation of the proposed idea, which is fine for a first presentation but worth noting when interpreting results — better expansion strategies could further improve the method.
+
+7. **Memory footprint after expansion** (storing kᵢ copies of remaining layers) is not reported in the main paper; the paper defers to supplementary material. For practitioners, knowing the peak memory cost is relevant.
 
 ## Nice-to-Haves
-- A FLOPs breakdown per layer before pruning, after pruning, and after MoE expansion, to complement the wall-clock runtime.
-- Error bars or bootstrapped confidence intervals on FID/KID, especially for the subset-ImageNet experiments with small reference sets.
-- Applying the distillation procedure to the strongest baseline (e.g., fully fine-tuning) to see if it closes the gap with MoEDM, helping isolate the effect of the MoE architecture from the effect of extra training data.
+
+- A bounded speedup summary: a table or figure showing runtime breakdown by architecture/resolution, with clear indication of where 2× is and is not achieved.
+- Quantitative text-to-image evaluation, even a modest human preference test (50–100 comparisons) or standard metrics on a benchmark prompt set.
+- Total fine-tuning time and convergence behavior for the personalized setting.
+- An ablation comparing layer-level discarding within mid-layers against channel-level pruning at the same parameter reduction rate.
 
 ## Removed Points
-*These points are flagged to be removed; treat them with caution.*
-- **"Model/code not released" concerns**: Critic notes about missing reproducibility details (exact layer counts, parameter counts, expansion ratios) that the paper explicitly defers to the Supplementary Material — removed per hard rules about parser-stripped content.
-- **"Distillation description is contradictory"**: The critic claimed the two parts of distillation (generating images + L2 loss) are contradictory. They are not — they are complementary components of a standard knowledge distillation pipeline (generate teacher data, then train student with distillation loss). Removed as factually incorrect.
-- **"Gate is not really dynamic"**: The paper is explicitly transparent that this is a "training-free" fixed partition based on time step, not input-dependent routing. The design choice is clearly stated and justified. The critic's objection is to terminology preference, not a flaw.
-- **"Ethics statement is generic"**: A style nitpick about a required section; removed per formatting nitpick rules.
-- **"Value-based and gradient-based methods yield sub-optimal results"**: These are the paper's own empirical findings from the scoring analysis, not weaknesses.
-- **"FID unreliable for small reference sets"**: The paper itself acknowledges this limitation and reports KID as a more robust metric. The critic's point adds no new information.
-- **Generic "related work missing"** and **"formatting/style"** nitpicks: Removed per hard rules.
+
+- **Criticism about missing comparison with progressive distillation and consistency models** — removed per instructions (missing related works should not be mentioned).
+- **Criticism about distillation procedure being ambiguous** — the paper clearly describes generating training data from the full model and training with an L₂ output-matching loss (Section 3.2). Table 3 includes a w/o distillation ablation. The description is sufficient.
+- **Criticism about FID reliability on small reference sets** — the paper explicitly acknowledges this limitation (Section 4.1: "the computed FID results are not entirely precise") and provides KID as a complementary metric. This is already addressed.
+- **Criticism about memory footprint not being reported** — the paper states in Section 4: "For more details, including hyper-parameters, parameters count and memory usage, please refer to our Supplementary Material." This information exists in the supplementary.
+- **Strength Finder's claim of "consistent 2× speedup"** — conflicts with verified weakness #2 (speedup is architecture/resolution-dependent). The underlying evidence (speed improvements in most settings) is real, so the spirit of this strength is preserved in strength #1 of the review above, but framed with appropriate caveats.
 
 ## Novel Insights
-The reviews collectively surface a genuine insight: the paper conflates three interventions (pruning, MoE expansion, and distillation) in its evaluation design, making it impossible to attribute observed quality improvements to the dynamic routing mechanism specifically. The absence of a "prune + fine-tune single network" baseline is the clearest gap. This is a methodological lesson for any paper combining pruning and dynamic architectures: the cleanest attribution requires a control that holds total parameter count and training budget constant while varying only the routing structure. Additionally, the reviews highlight that using distillation asymmetrically (for the proposed method but not baselines) can mask whether the core architectural contribution is actually driving the gains.
+
+The reviews reveal an interesting tension: the paper's strongest asset is that it proposes a genuinely different approach to diffusion model acceleration (structured pruning + time-specialized experts) compared to the dominant lines of work on efficient samplers and distillation. However, the reviews also surface that the paper's evidence is strongest where the method is least surprising (low-resolution tasks where pruning naturally helps most) and weakest where it would be most impactful (high-resolution text-to-image, where personalization applications like Dreambooth are most relevant). This mismatch between the paper's framing and its strongest evidence is the central issue that revisions should address.
 
 ## Suggestions
-1. **Add the critical missing ablation**: Prune mid-layers, keep a single copy of remaining layers, fine-tune with the same budget and data as MoEDM, and compare. This directly tests whether the MoE expansion (vs. just fine-tuning a pruned model) is responsible for quality maintenance.
-2. **Control for the distillation confound**: Either (a) provide distillation to the strongest baselines, or (b) run MoEDM without distillation across all experimental settings and show it still outperforms baselines.
-3. **Provide quantitative results for text-to-image**: At minimum, report a CLIP score or FID on a held-out set of generated images for the target concept, or a human evaluation with sample size and inter-rater agreement.
-4. **Report FLOPs** alongside wall-clock time for a hardware-independent view of efficiency.
-5. **Add confidence intervals** or bootstrapped variance estimates for FID/KID.
+
+1. **Bound the speedup claim explicitly.** Add a table showing runtime per step for each architecture/setting, and state clearly which settings achieve 2× and which do not. Modify the abstract and introduction to include the Latent Diffusion condition, e.g., "2× sampling speedup (with Latent Diffusion) without quality loss."
+
+2. **Address the text-to-image evaluation gap.** Since FID/CLIP score limitations are acknowledged, commit to a specific alternative: a human preference study (even a modest one), or USE/JSD metrics, or report FID/CLIP on a standard prompt benchmark with appropriate caveats. Without this, the text-to-image claim is unsupported.
+
+3. **Drop or qualify the "dynamic routing" framing.** The method is transparent and defensible — time-block activation is a valid design choice that exploits the structure of diffusion models. It should be called something like "time-conditional expert activation" rather than "dynamic routing" to avoid misleading readers.
+
+4. **Report fine-tuning cost** (total GPU-hours, convergence iterations) so practitioners can assess the trade-off for the personalized use case.
+
+5. **(Optional but strengthening)** Add a comparison between discarding all mid-layers and channel-level pruning within mid-layers at equivalent parameter reduction, using the existing S_c scoring machinery.
 
 ## Score and Decision
-This paper presents a well-motivated idea — combining layer-level pruning with time-step-based MoE routing for efficient task-specific diffusion models. The 2× speedup is a practically meaningful result. However, the evaluation has structural gaps: the MoE component is not properly isolated from the effects of pruning and distillation, the text-to-image experiments lack quantitative support, and the distillation confound weakens baseline comparisons. These issues are addressable but require additional experiments, not merely clarification. The core contribution is promising but not yet rigorously evidenced.
 
-**Score**: 5.0  
-**Decision**: Reject  
-
-(The authors are encouraged to revise with the suggested ablations and evaluation improvements and resubmit. The core idea has merit.)
+The paper proposes a sensible, well-motivated technique and provides good quantitative validation on ImageNet subsets and domain adaptation. The core technical contribution is real. However, the key weakness — absence of any quantitative quality evaluation for text-to-image, the most practically relevant application — is material. The abstract and introduction also overstate the universality of the 2× speedup. These issues are addressable in revision, and the underlying idea has merit.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

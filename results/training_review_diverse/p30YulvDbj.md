@@ -1,107 +1,82 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now let me write the final consolidated review.
 
 ## Summary
 
-This paper investigates the feasibility of detecting Major Depressive Disorder (MDD) from single-channel EEG using a 1D CNN. The authors evaluate five channels from different brain regions (Fp1, C3, T4, O1, P3) using leave-one-subject-out (LOSO) cross-validation on a public 58-subject dataset, reporting 88% accuracy for channels Fp1, C3, and O1 — comparable to Rafiei et al. (2022)'s 87.5% using 10 channels on the same data. The core contribution is demonstrating that deep learning can work with a single EEG channel for MDD classification, with implications for wearable deployment.
-
----
+This paper investigates whether single-channel EEG can classify major depressive disorder (MDD) using a CNN model and which individual channels perform best. Using the Mumtaz et al. (2017) dataset (58 subjects: 30 MDD, 28 control), the authors evaluate five single channels (Fp1, C3, T4, O1, P3) across different brain regions with leave-one-subject-out cross-validation and report 88% accuracy for Fp1, C3, and O1. The practical motivation — enabling wearable, low-channel-count MDD screening — is well-motivated, and the paper provides a targeted channel-comparison analysis that is uncommon in the EEG-MDD literature.
 
 ## Strengths
 
-- **First deep learning study focused on single-channel MDD detection.** The paper correctly identifies that prior deep learning work for MDD used 10–19 channels (Rafiei et al. 2022 used 10; Khan et al. 2021/2022, Dang et al. 2020 used 19), while the only single-channel work (Bachmann et al. 2018) used classical ML features. The paper fills this gap: "The aim of our study is to investigate the applicability of single channel EEG data for MDD classification using deep learning" (lines 16–17).
+- **Region-wise channel comparison across five distinct brain areas**: The paper systematically evaluates single channels from frontal (Fp1), central (C3), temporal (T4), occipital (O1), and parietal (P3) regions using the same CNN architecture. Three channels (Fp1, C3, O1) independently achieve 88% accuracy, suggesting reproducibility across brain regions rather than an artifact of a single channel (Section 3, Figure 5).
 
-- **Systematic channel comparison across five brain regions.** The paper evaluates one channel from each region (frontal Fp1, central C3, temporal T4, occipital O1, parietal P3), showing that frontal, central, and occipital channels achieve the best performance (88%) while temporal and parietal channels lag. This provides practical guidance for electrode placement in wearable devices — a contribution absent from prior multichannel studies.
+- **Leave-one-subject-out cross-validation provides rigorous subject-level generalization**: LOSO ensures that each subject's data is held out entirely during testing, preventing any subject-level leakage between training and test sets. This is a sound methodological choice that strengthens the validity of the reported results (Section 2.7).
 
-- **Subject-independent LOSO evaluation.** Leave-one-subject-out cross-validation is used (Section 2.7), which prevents data leakage between training and test subjects and provides a more realistic estimate of generalization than random k-fold cross-validation.
+- **Direct comparison against a multi-channel deep learning study on the same dataset**: The authors benchmark against Rafiei et al. (2022), which achieved 87.5% with 10 channels on the same dataset. The reported 88% single-channel accuracy is competitive, directly contextualizing the contribution (Section 4, paragraph 3).
 
-- **Comparable accuracy to prior channel-reduction work.** The 88% accuracy on single channels matches or exceeds the 87.5% reported by Rafiei et al. (2022) using 10 channels on the same dataset, suggesting that single-channel deep learning is a viable direction.
-
-- **Supporting frequency-domain evidence.** The band-power analysis (Figure 6) shows discriminative patterns between MDD and non-MDD segments across EEG frequency bands, providing a scientific basis that complements the CNN's classification.
-
----
+- **Practical wearable deployment insight**: The paper explicitly connects the technical finding to real-world utility by noting that Fp1 is located near the forehead, making it suitable for wearable devices that avoid hair preparation and conductive gel (Section 4, final paragraph).
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Hyperparameter tuning uses segment-level rather than subject-wise validation (Section 2.5).** The paper states: "hyper-parameter tuning using the 80:20 training/validation split of the total segments" (line 73). Since non-overlapping 10-second segments from the same subject are highly correlated, randomly splitting segments leaks subject-specific information into hyperparameter selection. The optimal kernel size (21) and number of pooling layers (3) may therefore be overfitted to within-subject correlations rather than MDD-generic patterns. While the final LOSO evaluation is still subject-independent (providing an unbiased accuracy estimate given those hyperparameters), the hyperparameter choices themselves are unreliable. The threshold tuning paragraph mentions "subject-wise" (line 78), creating an internal inconsistency. This is the paper's most significant methodological concern.
+1. **Ambiguous and potentially flawed hyperparameter tuning procedure**. Section 2.5 states that kernel size and number of pooling layers were tuned using "the 80:20 training/validation split of the **total segments**," while the decision threshold was tuned using an "80:20 **subject-wise** training/validation split." If the kernel size and pooling layer search used segments rather than subjects as the split unit, segments from the same subject would appear in both training and validation, creating data leakage that could optimistically bias the chosen hyperparameters. Since the paper explicitly distinguishes between these two split strategies for different hyperparameters, the ambiguity is real and needs resolution. The final LOSO evaluation is held out correctly, but the hyperparameter choices fed into it may have been influenced by leakage.
 
-2. **Critical training details missing for reproducibility.** No optimizer, learning rate, batch size, or regularization (dropout, weight decay) are specified anywhere in the paper. With ~1,740 segments, three convolutional layers with up to 256 filters and kernel size 21, the model is likely overparameterized relative to the data. The single mention of "epoch equal to 10" (line 115) is ambiguous. These omissions prevent replication and make it difficult to assess whether the reported accuracy is robust or the result of particular training choices.
+2. **Incomplete training details undermine reproducibility and raise convergence concerns**. The paper reports only that "the epoch in CNN model equal to 10" (Section 3) and describes the architecture. No optimizer, learning rate, batch size, or convergence criteria are provided. For a CNN processing 10-second EEG segments (2560 time points) with 9K–265K parameters trained on ~57 subjects (~1710 segments per LOSO fold), 10 epochs is suspiciously low and no evidence of convergence is shown. Without these details the experiments cannot be reproduced or properly assessed.
+
+3. **Only accuracy is reported for a clinical classification task**. Despite the dataset being balanced (30 vs. 28), accuracy alone is insufficient for a clinical screening application. Sensitivity, specificity, precision, F1-score, or at minimum a confusion matrix are needed to characterize the model's error profile. A model with 88% accuracy could have very different clinical utility depending on whether errors are false positives or false negatives, and this distinction matters for a wearable screening tool. The paper also reports no confidence intervals or standard deviations for any results, making it impossible to judge whether differences between channels (e.g., C3 at 88% vs. T4 at ~81% from Figure 5) are meaningful or reflect random variation given only 58 subjects.
+
+4. **No uncertainty quantification for the accuracy estimates**. With 58 subjects in LOSO, the 88% accuracy corresponds to approximately 51/58 correct classifications. A 95% exact binomial confidence interval would span roughly [77%, 95%], meaning the true performance could be substantially lower or higher than reported. Without confidence intervals, standard deviations across folds, or significance tests, the central claim that "Fp1, C3, and O1 achieved an impressive accuracy of 88%" is not properly supported as a reliable estimate.
 
 ### Minor
 
-3. **No variance or uncertainty reported for the primary result.** The LOSO evaluation with only 58 subjects yields a single point estimate (88%) without per-fold accuracies, standard deviation, or confidence intervals. With this sample size, the true accuracy could vary substantially across subject splits; the point estimate alone is not interpretable without some measure of dispersion.
+1. **Band power analysis (Figure 6) is disconnected from the CNN model**. The frequency-band analysis shows discriminative power in the data, which is interesting, but it was not integrated with the CNN's decisions. The authors acknowledge this ("this requires further investigation," Section 4), but the analysis nonetheless reads as a post-hoc justification rather than a principled component of the study.
 
-4. **Only accuracy reported — no sensitivity, specificity, or AUC.** For a clinical screening task, accuracy alone is insufficient. The authors discuss threshold selection to minimize false positives (Section 2.5), yet never report the actual false-positive rate, sensitivity, or AUC. The reader cannot assess the practical utility of the model at the chosen threshold (60%).
+2. **No baseline comparison to simple classifiers**. The paper argues that deep learning avoids manual feature engineering but provides no comparison against a simpler baseline (e.g., logistic regression on band-power features, SVM, or k-NN on raw signals). A baseline would contextualize whether the CNN's 88% is genuinely advantageous or whether a much simpler method could match it.
 
-5. **Hyperparameters tuned on C3 only and applied across all channels without verification.** Figure 4 uses only channel C3 for hyperparameter tuning (line 106). The same hyperparameters (kernel 21, 3 pooling layers) are applied to Fp1, T4, O1, and P3 without checking whether the optimum differs per channel. Given regional EEG differences, this is a methodological gap.
+3. **Framing of novelty could be more measured**. The paper states that "the only single channel detection found is in the classical machine learning technique" (Section 1). Given the breadth of the EEG-MDD literature, a more cautious framing (e.g., "to the best of our knowledge") would be appropriate, though this does not affect the paper's technical validity.
 
-6. **Normalization description is ambiguous.** Section 2.4 states "the extracted features were normalized using the standard scaler" — but the CNN takes raw signal input (Section 2.6), not pre-extracted features. It is unclear whether the raw time-series amplitudes are z-normalized per channel/segment or whether some feature extraction precedes the CNN.
-
-7. **No classical ML baseline on the same data.** While the paper's contribution is demonstrating deep learning feasibility (not superiority), a simple baseline (e.g., SVM with spectral features on the same channels and LOSO split) would contextualize whether the deep learning approach provides any advantage over standard alternatives. The paper cites Bachmann et al. (2018) achieving 92% with classical features on a different dataset, but never compares on its own data.
-
-8. **Band-power attribution to CNN decisions is speculative without attribution methods.** The paper states "The CNN model's performance can be attributed with such discriminating features" (lines 138–141), adding "however, this requires further investigation." While the caveat is present, this claim is not supported by any feature attribution, saliency map, or ablation analysis — the band-power analysis is independent of the trained CNN.
+4. **Segment length (10 s) is stated but not justified or ablated**. The paper cites Li et al. (2016) for using 10-second segments, but a brief sensitivity analysis would strengthen the claim that this length is appropriate for the single-channel setting.
 
 ### Trivial
 
-9. **Parameter count "9, 39, 265" is ambiguous** (line 133). Given the architecture (filters 64, 128, 256 with kernel 21), the actual parameter count is unclear; this appears to be a formatting/typographical issue.
-
-10. **Threshold expressed as "0.6" without consistently linking to 60%** (line 110). The text uses "x%" throughout Section 2.5 but then reports "0.6" in the results without clarifying the correspondence.
-
----
+- The threshold tuning range is stated as "10–100%" while the enumerated set is "10% to 90%" — the upper endpoint is inconsistent (Section 2.5, line 76 vs. line 78).
 
 ## Nice-to-Haves
 
-- Add a classical ML baseline (e.g., SVM with spectral features) on the same channels and LOSO split to contextualize the deep learning result.
-- Report per-fold LOSO accuracies or bootstrap confidence intervals for the primary result.
-- Include sensitivity, specificity, and AUC to enable clinical assessment of the model.
-- Add layer-wise relevance propagation, saliency maps, or ablation to link the CNN's decisions to specific frequency bands.
-- Analyze subject-level misclassification patterns correlated with demographic/clinical variables.
-
----
+- Report per-fold accuracy distribution (e.g., histogram of LOSO test accuracies for the best channel) to show whether the model occasionally fails catastrophically on certain subjects.
+- Report a confusion matrix or ROC curve for the best channels, with AUC, to enable a more thorough clinical assessment.
+- Clarify and justify why 10 epochs were used, and ideally report training/validation loss curves to demonstrate convergence.
+- If computational resources permit, include a simple baseline (e.g., logistic regression on band-power features) to contextualize the CNN's performance.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- *"The URL is truncated and ethics committee name is blank"* — The reviewer acknowledges this is a parser artifact. Removed per rule: parser artifacts are not author errors.
-- *"No baseline comparison — the paper's contribution is a case study rather than a demonstrated advance"* — The paper's stated aim is to "investigate the applicability of single channel EEG data for MDD classification using deep learning," not to prove superiority over classical ML. The contribution is feasibility demonstration with channel comparison, which is a legitimate contribution. Demoting this from the harsh critic's "Critical Issues" to a Minor weakness (it would strengthen the paper but is not required to support the core claim).
-- *"The LOSO results are untrustworthy as an unbiased estimate"* — This overstates the problem. LOSO still provides an unbiased estimate of generalization given the selected hyperparameters. The issue is about hyperparameter optimality, not validity of the evaluation. Demoted from "fatal" to "major."
-- *"Does not test whether the difference with Rafiei et al. is statistically significant"* — With only a point estimate from each study and no variance, significance testing is not standard for benchmark comparisons. This is a wishlist item, not a weakness.
-- *"Overparameterization concern"* — While valid, without a classical baseline to compare against or evidence of actual overfitting (e.g., train-test gap), this remains speculative. Kept in spirit via weakness #2 (missing regularization details).
-
----
+- **Strength Finder point #1 ("Systematic hyperparameter optimization validates the model configuration")**: Removed because it conflicts with the verified weakness that the tuning procedure is ambiguous and potentially uses segment-wise splits causing data leakage. A strength that conflicts with a verified weakness must be dropped.
+- **"Small sample size" as phrased by the reviewer**: Not removed but reframed. The issue is not the sample size per se (58 is reasonable for a clinical EEG study) but the **lack of uncertainty quantification** around the point estimate — see Major weakness #4.
+- **Criticism about disconnected band power analysis being purely negative**: The paper partially addresses this by stating "this requires further investigation," so the criticism is softened to Minor rather than Major.
 
 ## Novel Insights
 
-The reviews surface a tension not fully explored in the paper itself: the segment-level hyperparameter validation problem is a known pitfall in EEG deep learning, yet many published papers inadvertently commit it. The fact that this paper's LOSO results (88%) are comparable to Rafiei et al.'s 10-channel results (87.5%) despite potentially suboptimal hyperparameters is interesting — it either suggests the hyperparameter choice is robust to the validation protocol, or that accuracy is not sharply peaked around the optimum. An ablation re-running hyperparameter selection with subject-wise validation would resolve this ambiguity and strengthen the paper considerably more than adding another baseline method.
-
----
+None beyond the paper's own contributions. The reviews identify methodological gaps but do not surface a synthetic insight that goes beyond what the paper itself claims or that an area chair would not already see from reading the paper and reviews.
 
 ## Suggestions
 
-1. **Fix the hyperparameter selection protocol.** Re-run kernel size and pooling layer selection using a subject-wise hold-out (e.g., leave-5-subjects-out validation) and report whether the same hyperparameters (kernel 21, 3 pooling) are still optimal. If they change, report the LOSO accuracy under the new hyperparameters.
-
-2. **Document all training details.** Add optimizer (including hyperparameters), learning rate, batch size, number of epochs, and any regularization used. The current paper is missing these basic reproducibility essentials.
-
-3. **Report per-fold results and additional metrics.** Add per-subject LOSO accuracies (or a summary with standard deviation) and report sensitivity, specificity, and AUC for the best channel(s).
-
-4. **Clarify the normalization procedure.** State explicitly whether raw signal amplitudes are z-normalized per channel/segment or whether some feature extraction precedes normalization.
-
-5. **Consider classical ML baselines in a revision.** Even a simple SVM with spectral power features on the same single channels would significantly strengthen the paper by contextualizing the deep learning approach.
-
----
+1. **Clarify the hyperparameter tuning split definitively**: State explicitly whether the 80:20 split for kernel size and pooling layers was segment-wise or subject-wise. If segment-wise, re-run the tuning with proper subject-wise separation and report whether the optimal hyperparameters change.
+2. **Add basic training details**: Report optimizer, learning rate, batch size, and either show convergence curves or justify why 10 epochs is sufficient (e.g., empirically show validation loss plateauing).
+3. **Report additional metrics**: At minimum, provide sensitivity, specificity, and F1-score (or a confusion matrix) for the three best channels, along with confidence intervals for all reported accuracy figures.
+4. **Add a simple baseline**: Compare against a standard classifier (e.g., logistic regression or SVM) on band-power features from the same single channels. This would strengthen the claim that deep learning provides added value.
 
 ## Score and Decision
 
-The paper addresses a well-motivated problem and makes a genuine contribution as the first deep learning study focused on single-channel EEG for MDD detection, with a systematic channel comparison that provides practical guidance for wearable deployment. The 88% accuracy on three different channels is a reasonable result.
+The paper addresses a practical and well-motivated question — single-channel EEG MDD classification for wearable deployment — and contributes a targeted channel-comparison analysis that is uncommon in the literature. The strengths (LOSO validation, region-wise comparison, competitive accuracy against multi-channel results) are genuine. However, the evidence is substantially undermined by four major weaknesses: (1) ambiguous hyperparameter tuning that may involve data leakage; (2) critically incomplete training details impeding reproducibility; (3) reporting only accuracy for a clinical task with no error-profile characterization; and (4) no uncertainty quantification for the reported estimates. These issues are addressable in revision, but in their current form they prevent the paper's claims from being convincingly supported. 
 
-However, the paper has two substantial problems: (1) the hyperparameter tuning protocol uses a segment-level rather than subject-wise split, which is methodologically unsound and could affect the optimality (though not the validity) of the reported results; (2) critical training details (optimizer, learning rate, batch size, regularization) are entirely missing, preventing reproducibility. Together with the absence of variance reporting and additional metrics, these issues mean the paper in its current form does not meet the evidential bar for acceptance at a competitive venue.
-
-The paper is salvageable with major revision addressing the hyperparameter tuning protocol, adding training details, and reporting per-fold results with uncertainty. As presented, it is a preliminary study with a promising direction but incomplete execution.
+**Originality**: Moderate — the channel-comparison angle and single-channel focus add novelty to a well-studied problem.  
+**Importance of question**: High — wearable MDD screening is a practical and timely goal.  
+**Soundness of experiments**: Low-to-Moderate — LOSO is appropriate, but the tuning ambiguity, missing training details, and lack of uncertainty quantification significantly weaken the evidence.  
+**Clarity of writing**: Moderate — generally clear but with some ambiguous methodological descriptions.  
+**Value to community**: Moderate — the channel-comparison results would be useful if properly validated, but the current presentation does not provide a reliable basis for practitioners to select channels.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

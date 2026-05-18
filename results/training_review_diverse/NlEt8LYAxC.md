@@ -1,70 +1,77 @@
-Now I have a thorough understanding of the paper and can cross-check all reviewer claims against the actual text. Let me synthesize the final review.
+Now I have a thorough understanding of the paper and the reviewer inputs. Let me compose the final consolidated review.
+
+---
 
 ## Summary
 
-This paper is the first to study **fast (1-step) adversarial training against \(l_0\)-bounded sparse perturbations**. It identifies that catastrophic overfitting (CO) in the \(l_0\) setting arises from sub-optimal perturbation **locations** (not magnitudes, as in \(l_\infty, l_2, l_1\)). It provides theoretical (Lemmas 3.2, 3.4) and empirical (Hessian eigenvalue analysis, loss landscape visualizations) evidence that the \(l_0\) adversarial loss landscape is more craggy than other norms. To address this, the paper proposes **Fast-LS-\(l_0\)**, which combines soft labels (via self-adaptive training / TRADES) and a trade-off loss to provably smooth the loss landscape. Experiments on CIFAR-10, CIFAR-100, ImageNet-100, and GTSRB achieve 63.0% robust accuracy under Sparse-AutoAttack (only 2.5% below 20-step sTRADES) at less than 1/6 the training time.
+This paper studies fast (1-step) adversarial training against $l_0$-bounded (sparse) perturbations. It identifies that catastrophic overfitting (CO) in this setting arises from sub-optimal perturbation *locations* (unlike $l_\infty$, $l_2$, $l_1$ settings where CO stems from sub-optimal magnitudes), and provides theoretical and empirical evidence that the $l_0$ adversarial loss landscape is fundamentally craggier. To address this, the paper proposes Fast-LS-$l_0$, combining soft labels (via SAT/TRADES) and a trade-off loss with N-FGSM, which smooths the loss landscape and achieves state-of-the-art fast $l_0$ adversarial training — closing the gap with 20-step training to within 2.5% while requiring under 1/6 of the training time.
 
 ## Strengths
 
-1. **First systematic study of fast adversarial training for \(l_0\) perturbations.** The paper explicitly positions itself as "the first to investigate fast adversarial training in the context of \(l_0\) bounded perturbations" and backs this with experimental evidence (Table 1) that naively reducing steps in prior methods (sAT, sTRADES) causes severe performance degradation.
+1. **First investigation of fast adversarial training for $l_0$ perturbations with diagnosis of a distinct CO mechanism.** The paper shows through interpolation experiments (Table 2) that CO in $l_0$ arises from sub-optimal perturbation locations rather than magnitudes (the known cause in $l_\infty$, $l_2$, $l_1$ settings), and confirms that standard magnitude-based CO mitigations (GradAlign, ATTA, adaptive step size) are ineffective in the $l_0$ case. This diagnosis is a genuine contribution.
 
-2. **Identifies a unique cause of CO in the \(l_0\) setting: sub-optimal perturbation locations rather than magnitudes.** The interpolation experiment (Table 2) shows that models trained with 1-step sAT are not vulnerable to simple magnitude-based interpolations, directly demonstrating that CO stems from *where* the attack perturbs, not *how much*. This is a genuinely novel diagnostic finding.
+2. **Strong empirical characterization of the $l_0$ loss landscape.** Figure 2 provides compelling evidence that Hessian eigenvalues in $l_0$ training (even at $\epsilon=1$, i.e., a single pixel) are orders of magnitude larger than in $l_\infty$, $l_2$, and $l_1$ settings, supported by loss landscape visualizations showing abrupt changes. Figure 3 further links gradient norms and CO, showing that even 20-step sAT without early stopping suffers due to a craggy landscape. These empirical findings are the paper's strongest evidence.
 
-3. **Theoretical proof that soft labels and trade-off loss smooth the adversarial loss landscape.** Theorem 4.1 shows soft labels reduce the first-order Lipschitz constant; Theorem 4.2 shows the trade-off loss improves second-order smoothness (reduces gradient discontinuity). These provide a principled foundation for the proposed method.
+3. **Fast-LS-$l_0$ achieves SOTA fast $l_0$ adversarial training.** Table 4 shows Fast-LS-$l_0$ reaches 63.0% robust accuracy under Sparse-AutoAttack on CIFAR-10, only 2.5% below the much slower 20-step sTRADES (65.5%), while reducing training time by over 6×. Results on ImageNet-100, CIFAR-100, and GTSRB (Tables 4, 7, 8) across multiple attack types (sAA, CornerSearch, Sparse-RS, SAIF, sPGD variants) demonstrate generalizability.
 
-4. **Strong empirical evidence of increased cragginess in the \(l_0\) landscape.** Figure 2 shows that top Hessian eigenvalues are substantially larger for \(l_0\) (even at \(\epsilon=1\), a single perturbed pixel) than for \(l_\infty, l_2, l_1\), and the loss landscape visualizations reveal sharper changes. Figure 3 links gradient norms to CO occurrence, providing an independent empirical channel supporting the core claim.
+4. **Principled theoretical analysis of loss smoothing.** Theorem 4.1 proves that soft labels reduce the first-order Lipschitz constant $A_\theta$, and Theorem 4.2 proves that the trade-off loss reduces the second-order discontinuity term $B_{\theta\delta}$. These results provide a principled rationale for why the proposed combination works, independently of the informal "cragginess" comparison.
 
-5. **State-of-the-art performance with significant efficiency gains.** Table 4 shows Fast-LS-\(l_0\) achieves 63.0% robust accuracy under sAA on CIFAR-10 (vs. 65.5% for 20-step sTRADES) at less than 1/6 the training time. Results generalize across CIFAR-100, ImageNet-100, and GTSRB, and are evaluated against multiple attack types (sAA, CornerSearch, Sparse-RS, SAIF, sPGD).
-
-6. **Clean ablation disentangling the roles of soft labels vs. trade-off loss.** Table 3 shows soft labels alone eliminate CO while the trade-off loss alone still suffers from CO, clarifying the mechanism — soft labels are the primary stabilizer, and the trade-off loss provides additional gains when combined.
+5. **Comprehensive ablation study.** Table 3 systematically compares sAT, Tradeoff, sTRADES (two modes), SAT, N-FGSM, and all combinations, showing that soft labels are more critical than the trade-off loss for eliminating CO in $l_0$, and isolating each component's contribution.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None. The paper's core claims are supported, and no identified weakness invalidates the contribution.
+
+None.
 
 ### Minor
-1. **The claim that existing CO mitigation methods (GradAlign, ATTA, adaptive step size) are ineffective for \(l_0\) is asserted without explicit experimental evidence.** The paper (Section 3.1, line 76) states these methods "turn out ineffective or insufficient for \(l_0\) scenarios" based on the logical argument that CO in \(l_0\) is location-based rather than magnitude-based. While this reasoning is plausible, the paper would be substantially strengthened by including a small table or figure demonstrating that these methods fail (e.g., robust accuracy collapse, training divergence) under the \(l_0\) 1-step setting. Without this, the claim reads as an assertion rather than a verified finding.
 
-2. **The theoretical comparison of \(\|\delta_1-\delta_2\|\) bounds across norms in Section 3.2 relies on specific numerical \(\epsilon\) values without a parameter-free argument.** The paper states "the upper bound of \(\|\delta_1-\delta_2\|\) in the \(l_0\) case is *always* significantly larger than other cases" but justifies this only by citing specific \(\epsilon\) values from the literature. A more general argument (e.g., based on the diameter of the feasible set under the norm used in the Lipschitz assumptions) would better support this strong claim. That said, the empirical evidence (Figure 2) independently supports the conclusion, so this does not threaten the paper's contribution.
+1. **The causal claim about CO being due to sub-optimal perturbation locations is supported primarily by negative evidence.** Table 2 shows that interpolating between clean and 1-step adversarial examples does not yield successful attacks, which rules out the magnitude-based explanation known from $l_\infty$/$l_2$/$l_1$ settings. The paper then infers that location sub-optimality is the cause. This is a reasonable inference (elimination of an alternative), but the paper does not provide direct positive evidence — e.g., tracking the spatial location of perturbed pixels during training, or showing that multi-step attacks with better locations mitigate CO even with similar magnitudes. The evidence supports the *contrast* with other norms, but the positive attribution to location quality is circumstantial.
 
-3. **The 1-step sPGD algorithm is underspecified for reproducibility.** The paper repeatedly uses "1-step sPGD" but does not describe how a single gradient step is taken under the non-convex, non-differentiable \(l_0\) constraint — e.g., how the set of perturbed pixels is selected after one gradient step, what initialization is used (the paper notes random initialization is used but does not detail the step), and whether the step size is normalized per pixel. Since sPGD is an iterative algorithm, truncating it to 1 step requires additional design choices that should be specified.
+2. **The theoretical comparison of $\|\delta_1-\delta_2\|$ bounds across norms is informal.** While the paper correctly acknowledges (lines 120-122) that the Lipschitz assumptions use proper $l_p$ norms not including $l_0$, and while the empirical evidence in Figure 2 independently confirms the craggier landscape, the theoretical argument that "the upper bound of $\|\delta_1-\delta_2\|$ in the $l_0$ case is always significantly larger" would benefit from a more precise treatment — specifying which $l_p$ norm is used for the comparison and showing the bound calculations explicitly. As presented, this argument is heuristic rather than rigorous. The paper would be strengthened by framing this as motivation informed by the theory, with the empirical results serving as the primary evidence.
 
-4. **No statistical significance or variance reported.** The results in Tables 3 and 4 are presented as single numbers without standard deviations or multiple seed runs. Given the fluctuations observed in Figure 1, reporting mean and standard deviation over at least 3 runs would increase confidence that the reported gains are reliable.
+3. **The marginal contribution of SAT is small when N-FGSM is already present.** From Table 3: sTRADES (T) + N-FGSM achieves 62.7% and adding SAT brings 63.0% (+0.3%). The paper positions Fast-LS-$l_0$ as sTRADES (T) + SAT + N-FGSM, but the core contribution would be essentially unchanged if SAT were omitted. This does not invalidate the method, but the paper could be clearer about which components are essential versus optional refinements.
+
+4. **Limited discussion of when the approach might fail.** The paper does not discuss regimes where Fast-LS-$l_0$ may underperform — e.g., at very high sparsity levels, on datasets with many classes where soft-label techniques may degrade, or under distribution shift. Including such discussion would improve scientific completeness.
 
 ### Trivial
-None beyond those captured above.
+
+- The term "craggy" is used descriptively throughout but is never formally defined; the paper defines it implicitly through Lipschitz constants, Hessian eigenvalues, and gradient norms, which is sufficient but could be stated more explicitly.
 
 ## Nice-to-Haves
-- A sensitivity analysis over the trade-off factor \(\alpha\) (which controls the balance between clean and adversarial loss) would help understand the smoothness-robustness trade-off.
-- The running time comparison in Table 4 could be complemented by a brief breakdown of per-epoch overhead for each component (sPGD generation, TRADES loss computation, SAT soft-label update).
+
+- A per-component computational overhead breakdown (not just total running time) would help practitioners understand trade-offs (e.g., N-FGSM is essentially free; sTRADES (T) adds ~25% overhead; SAT adds some overhead from tracking moving averages).
+- The multi-$\epsilon$ training strategy (different $\epsilon$ for training vs. testing) is mentioned briefly and cited to prior work; a brief self-contained explanation would improve readability.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+- **Criticism about the theoretical analysis not applying to $l_0$:** This point claimed that the Lipschitz assumptions (using proper $l_p$ norms) preclude the analysis from applying to $l_0$ settings. This is factually incorrect — the Lipschitz assumptions are about the model's outputs $f_i$, not about the perturbation budget. The perturbation $\delta$ is $l_0$-constrained but is still a vector in $\mathbb{R}^d$ whose differences can be measured under any proper $l_p$ norm. The paper correctly notes this design choice and the bound comparison is valid. The critic's central argument that "the entire derivation does not apply" misunderstands the structure of the analysis. Removed per: "REMOVE criticisms that are factually wrong or misunderstand the paper."
 
-- **Criticism about the garbled \(\epsilon\) value "\(\bar{3}6\bar{0}^{1}\)" being inconsistent.** This is a PDF parser artifact — the original submission has proper LaTeX rendering. The underlying concern about the theoretical comparison is kept as Minor Weakness #2 above, but the specific numerical garbling is not an author error. **Reason:** Parser artifact (Hard Rule).
-- **Criticism that the proof sketch for Theorem 4.1 is missing.** The paper references a footnote (marker "3") at line 155, indicating the proof is in the appendix, which is stripped by the parser. **Reason:** Appendix content stripped by parser (Hard Rule).
-- **Criticism about undisclosed hyperparameters (learning rate, epochs, batch size).** These are standard implementation details typically placed in the appendix, which is stripped. **Reason:** Trivial reproducibility nitpick (Hard Rule).
-- **Strength Finder's Supporting Strength #1 ("Shows that standard CO-mitigation techniques fail")** — this overstates what the paper provides. The paper *states* this claim based on reasoning about location vs. magnitude, but does not experimentally *show* it (a verified weakness). **Reason:** Strength conflicts with verified weakness (weakness wins).
+- **Criticism about missing footnote 3 results (existing CO methods being ineffective):** The critic claimed the paper makes this claim without showing results. The parser strips footnotes and appendix sections; these results exist in the original submission. Removed per: "REMOVE weaknesses about missing appendix" and "REMOVE any criticism that questions the existence...of any reference cited in the paper."
+
+- **Criticism about "craggy" not being formally defined:** The paper defines the concept through Lipschitz constants (Lemma 3.2, 3.4), Hessian eigenvalues (Figure 2a-b), gradient norms (Figure 3), and loss landscape visualizations (Figure 2c-f). This is sufficiently precise for the paper's purposes.
+
+- **Generic strength about "addressing an important problem":** Removed per instructions (generic, lacks specific content anchored to the paper).
 
 ## Novel Insights
 
-The reviews surface a genuinely interesting tension not fully resolved by the paper itself: the paper argues that soft labels (SAT, TRADES) are the primary mechanism for stabilizing fast \(l_0\) training because they reduce the first-order Lipschitz constant (Theorem 4.1). But the ablation in Table 3 shows that using soft labels alone — *without* the trade-off loss — already eliminates CO. This raises the question of whether the second-order smoothness (targeted by the trade-off loss) is even necessary for stability, or whether it primarily boosts clean accuracy. The paper's combined method works, but the relative importance of the two theoretical mechanisms is not cleanly disentangled in the experiments, since the trade-off loss is always used together with soft labels in the best configuration. A reviewer insight worth pursuing: design an ablation where the trade-off loss is added without any soft-label component to isolate the second-order smoothing effect.
+The synthesis of the reviews reveals that the paper's most valuable contribution is not the method itself (which combines known techniques) but the diagnosis: CO in $l_0$ fast adversarial training is structurally different from other norms because the non-convex $l_0$ budget forces 1-step attacks to find sub-optimal pixel *locations* rather than sub-optimal perturbation *magnitudes*. This means the standard toolkit for fast adversarial training ($l_\infty$/$l_2$ methods like GradAlign) fundamentally cannot transfer. The smoothness analysis (theoretical + empirical) provides a principled justification for why soft-label regularization and trade-off losses — techniques that smooth the loss landscape — are the right remedy. The paper's story is coherent: problem diagnosis → landscape analysis → principled solution → empirical validation.
 
 ## Suggestions
 
-1. **Add a small experiment (table or figure) showing that GradAlign, ATTA, and adaptive step size fail under 1-step \(l_0\) training.** This would directly validate the paper's claim that these methods are ineffective and strengthen the motivation for the proposed approach.
-2. **Provide a brief algorithmic description of 1-step sPGD** — specify the initialization scheme, how the gradient step is projected onto the \(l_0\) ball, and how the set of perturbed pixels is determined after a single step.
-3. **Either add a parameter-free argument for the norm comparison** (e.g., based on the diameter of the feasible set in the \(l_p\) metric used by the Lipschitz assumptions) or soften the "always significantly larger" language to reflect dependence on specific settings.
-4. **Report results over multiple seeds** (at least 3) with standard deviations for the main tables, given the observed training fluctuations.
+1. Strengthen the CO cause claim by adding a more direct experiment: e.g., use a multi-step attack to provide high-quality perturbation locations but restrict to 1-step magnitudes, and check whether CO still occurs. Or visualize where the 1-step attack's chosen pixels differ from the multi-step attack's chosen pixels over the course of training.
+
+2. Recast the $\|\delta_1-\delta_2\|$ cross-norm comparison as a heuristic motivation (which it is) rather than a rigorous theoretical result, and let the empirical evidence (Figure 2) carry the weight of the "craggier landscape" claim. The paper already states the limitation; it just needs to follow through on the framing.
+
+3. Consider presenting sTRADES (T) + N-FGSM as the core method and SAT as an optional refinement, given the small marginal gain when N-FGSM is present. This would cleanly separate essential components from secondary improvements.
 
 ## Score and Decision
 
-The paper addresses a genuinely open problem (fast \(l_0\) adversarial training), makes a non-obvious diagnostic finding (CO from sub-optimal locations, not magnitudes), provides both theoretical and empirical support, and achieves SOTA results with substantial efficiency gains. The weaknesses are fixable and none threaten the core claims. The paper is a solid contribution.
+This paper makes a solid contribution by being the first to study fast $l_0$ adversarial training, identifying a structurally distinct form of catastrophic overfitting, and providing a principled solution. The empirical evaluation is thorough across datasets and attacks. The weaknesses are minor and addressable — none threaten the paper's core claims or conclusions. The paper is clearly written and the analysis is well-structured.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

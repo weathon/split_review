@@ -1,24 +1,20 @@
-Here is my consolidated final review:
-
----
+Now I have a thorough understanding of the paper. Let me synthesize the input reviews into a consolidated review.
 
 ## Summary
 
-DPLM-2 extends the discrete-diffusion protein language model (DPLM) from sequence-only to joint sequence-structure modeling. It uses a lookup-free quantization (LFQ) tokenizer to discretize 3D backbone coordinates, warms up from the pre-trained DPLM with LoRA, and trains on ~220K experimental and AF2-predicted structures. The resulting model performs unconditional sequence-structure co-generation, folding, inverse folding, motif-scaffolding, and structure-aware representation learning — all within a single architecture, without cascaded external models.
+This paper extends the discrete diffusion protein language model DPLM to jointly model sequences and 3D structures by tokenizing backbone coordinates with lookup-free quantization (LFQ), warm-starting from pre-trained DPLM via LoRA, and training on PDB + SwissProt structures (~220K). The resulting model performs unconditional co-generation, folding, inverse folding, motif scaffolding, and structure-aware representation learning — all within a single framework.
 
 ## Strengths
 
-- **Effective LFQ-based structure tokenization enables discrete multimodal protein LMs.** The paper demonstrates that LFQ achieves substantially better reconstruction accuracy than VQ-VAE (Figure 2A) while reducing training time from 15 days to 2 days on 8 A100s. The learned tokens also exhibit strong correlation with secondary structure (Figure 2B), validating that discrete structural tokens capture meaningful local geometric information.
+1. **Lookup-free quantization enables effective and efficient structure tokenization for language models**: The paper demonstrates (Fig. 2) that LFQ dramatically outperforms standard VQ-VAE in reconstruction accuracy while reducing training time from 15 days to 2 days on 8 A100s. This is a concrete technical contribution that makes joint discrete modeling of structure and sequence computationally feasible.
 
-- **Pre-trained sequence LM warm-up with LoRA significantly improves co-generation quality.** The ablation (Table 5) shows that initializing from pre-trained DPLM with LoRA tuning dramatically improves designability (sc-TM) and diversity, especially for long proteins (length > 300). This supports the claim that evolutionary information from sequence pre-training transfers to multimodal modeling while LoRA mitigates catastrophic forgetting.
+2. **Warm-up from pre-trained DPLM with LoRA transfers evolutionary knowledge**: The ablation (Table 6 in the original, discussed at line 387–388) shows that sequence pre-training and data augmentation significantly improve designability and diversity, especially for proteins longer than 300 residues. This validates the strategy of leveraging large-scale evolutionary data while mitigating catastrophic forgetting from limited structure data.
 
-- **Simultaneous sequence-structure co-generation achieves competitive quality without cascaded models.** DPLM-2's simultaneous generation matches or exceeds cascaded approaches (sc-TM of 0.93 vs. 0.89 for structure→sequence) and approaches native PDB quality. The density plots (Figure 2A/B) confirm high designability across lengths 100–500.
+3. **Co-generation produces proteins whose secondary structure distributions best match natural proteins**: The secondary structure analysis (Fig. 3A) shows that DPLM-2's generated proteins have proportions of helices, sheets, and loops closest to PDB, while structure-based models like RFDiffusion and MultiFlow overproduce helices. This is a distinctive qualitative advantage over prior work.
 
-- **Competitive conditional generation across multiple tasks without task-specific architectures.** DPLM-2 demonstrates strong performance on folding (zero-shot and SFT competitive with ESMFold), inverse folding (outperforms MultiFlow and ESM3 in AAR), and motif-scaffolding (solves more problems at higher success rate than RFDiffusion and ESM3 across sequence, structure, and co-generation evaluations).
+4. **Versatile multimodal conditioning achieves strong results in scaffolding**: Motif-scaffolding experiments (Fig. 4) show that DPLM-2 achieves higher average success rates and solves more motif problems than both sequence-based and structure-based methods, including RFDiffusion and ESM3. This demonstrates a concrete advantage of joint multimodal generation.
 
-- **Generated proteins more closely resemble natural secondary structure distributions.** Analysis (Figure 3A) shows DPLM-2's generated proteins match PDB secondary structure proportions more closely than structure-based models (RFDiffusion, MultiFlow) which overproduce helices, and ESM3 which overproduces loops.
-
-- **Length extrapolation beyond training cutoff.** DPLM-2 maintains high pLDDT scores for proteins up to 1000 residues despite a 512-length training cutoff, indicating retention of sequence generation capability from pre-trained DPLM.
+5. **Data and compute efficiency relative to concurrent work**: DPLM-2 uses only PDB + SwissProt data (~220K structures) and builds on open-source 150M/650M/3B DPLM, in contrast to ESM3 which uses massive synthetic datasets at proprietary scales (lines 85–90). This lowers the barrier for community replication and customization.
 
 ## Weaknesses
 
@@ -27,48 +23,46 @@ None.
 
 ### Major
 
-- **The self-mixup strategy — claimed as a "key recipe" — is never evaluated or ablated.** The paper mentions self-mixup (§3.1, §4) as a method to mitigate exposure bias in discrete diffusion, claiming it "leads to enhanced generation quality and diversity." However, the ablation study (§4.1.3) tests only sequence pre-training and data augmentation; the effect of self-mixup on generation quality, diversity, or any other metric is never measured. For a component labeled as a core contribution, this is a significant methodological gap — readers cannot assess whether the generative results rely on this strategy or would hold without it.
+1. **One of three claimed "key recipes" — the self-mixup strategy — lacks empirical support in the main experimental sections**: Lines 60–63 list the self-mixup strategy as a key recipe alongside LFQ-based tokenization and the warm-up strategy, and line 229 asserts it "improves both generation quality and diversity." However, the experiments section contains no ablation, comparison, or even mention of this component. The other two recipes are explicitly evaluated; this one is not. While the methods description may have been in a parser-stripped section, the absence of any experimental validation in the main results is a significant gap for a claim the paper elevates to a key contribution.
 
 ### Minor
 
-- **Structure tokenizer compared only to vanilla VQ-VAE, not to protein-specific alternatives.** The paper cites recent protein structure tokenizers (FoldToken, FoldSeek-based tokens, Gao et al.) as related work but does not compare against them on reconstruction accuracy or downstream task performance. While LFQ's superiority over standard VQ-VAE is convincingly shown, the tokenizer is a core enabler, and a comparison to more recent protein-specific alternatives (even on reconstruction metrics) would strengthen the paper's claims about tokenizer quality.
+2. **Representation learning results are mixed and the explanation is plausible but incompletely tested**: Table 7 shows DPLM-2 underperforms SaProt on most predictive tasks and sometimes falls behind the sequence-only DPLM (e.g., DeepLoc, Thermostability). The paper provides a single-task ablation (DeepLoc, Table 8) showing that without sequence pretraining, DPLM-2 outperforms DPLM, which supports the catastrophic forgetting hypothesis. However, this is only a partial diagnostic — the paper does not attempt to recover representation quality by, e.g., mixing more sequence data during structure training or adjusting the LoRA configuration. The paper is transparent about this limitation (lines 459–461) and frames it as future work, but the results as presented weaken the claim that structure awareness brings consistent representation benefits.
 
-- **Representation learning claims are slightly stronger than the evidence.** Claim (iv) states that structure-aware representations bring "additional benefit for a range of protein predictive tasks," but §5.5 shows improvement only on "some tasks," with DPLM-2 falling behind SaProt on most tasks and even behind DPLM on certain tasks. The paper is transparent about this (catastrophic forgetting hypothesis, DeepLoc control experiment), but the framing in the introduction could be more precisely scoped to match what the evidence actually shows.
-
-- **No error bars or confidence intervals for generative results.** Comparisons across unconditional generation, folding, inverse folding, and motif-scaffolding are presented as point estimates without variance. Given the stochasticity of diffusion sampling, reporting variability (e.g., across seeds) would help assess whether observed differences between methods are meaningful.
+3. **Folding claims are somewhat overstated**: The paper claims "sufficiently good folding in a zero-shot manner" (line 403). The specific numbers reported by the reviewer (scTM 0.63, scRMSD 9.38 for the 3B model) are far below any practically useful structure prediction — though the table content is parser-stripped and the exact numbers cannot be independently verified from the extracted text. The paper would benefit from contextualizing what "sufficiently good" means, and from more direct comparison with dedicated folding methods beyond ESMFold. The supervised fine-tuning results (scTM 0.85, scRMSD 4.48 per the reviewer) are competitive, but the paper's phrasing around zero-shot performance is imprecise.
 
 ### Trivial
 
-- None.
+- The paper uses the phrase "falls short of unconditional generation" for ESM3 (line 340) without unpacking whether this refers to the cascaded generation approach or to the quantitative metrics — clarification would help.
 
 ## Nice-to-Haves
 
-- An ablation comparing training with and without the separate noise schedules ($t_z$, $t_s$) would further validate this design choice.
-- Reporting inference time / number of diffusion steps would strengthen the efficiency claims made in the paper.
+- An ablation of LoRA vs. full fine-tuning on unconditional generation and one or two downstream tasks would clarify whether the warm-up strategy is working as intended to preserve sequence knowledge.
+- Comparison of LFQ with alternative structure tokenization methods beyond VQ-VAE (e.g., FoldSeek tokens) would strengthen the tokenizer contribution.
+- Scaling plots across the three model sizes (150M/650M/3B) for the different tasks would be a straightforward addition that strengthens the foundation model framing.
 
 ## Removed Points
 
-These points were identified by the reviewers but have been removed or downgraded as per the filtering rules. They are listed here with brief justification:
+The following points from the reviews were removed or downgraded:
 
-- **"Self-mixup not described in main text"** — Removed per rule about missing appendix content (the description exists in §S of the appendix, which the parser strips from all papers).
-- **"Representation learning claim is unsupported and partly contradicted"** — Removed as a Major weakness; the paper's own data (improvement on some tasks, DeepLoc control experiment) partially supports the claim, and the paper is transparent about limitations. The claim is slightly overstated (downgraded to Minor above), not contradicted.
-- **"ESM3 characterization is an oversimplification"** — Removed as a factual dispute about another model's capabilities that does not affect the paper's contributions.
-- **"Unconditional generation conflates joint/sequential generation"** — The specific claim about "statistical significance" and "which inverse folding model" cannot be verified without the tables (parser-stripped `\input` commands). The Multiflow retrained baseline is explicitly acknowledged by the authors (lines 341–343), so it is not a hidden weakness.
-- **Strength Finder strengths: "Competitive conditional generation across multiple tasks" and "Length extrapolation"** — These were correctly identified and kept. No strengths were removed as generic or conflicting.
+- **Self-mixup as a fatal/missing contribution**: The harsh critic framed this as a critical issue making the paper's contribution unverifiable. It is downgraded to Major because the referenced section (\S\ref{sec:self-mixup}) was likely in a parser-stripped section that the original submission contained, and the paper's overall claims do not rest solely on this component. The absence of experimental validation in the main experiments remains a real gap.
+- **"Narrow baseline comparison for folding"** (demanding AlphaFold2, OmegaFold): ESMFold is the most relevant comparison for a language-model-based folding approach, and the paper's scope is justified. This is downgraded from Major to a minor framing concern.
+- **"ESM3 comparison undermines novelty"**: The paper clearly differentiates design choices (equal-modal co-generation vs. cascaded, data efficiency, open-source). The reviewer's claim that ESM3-Open has higher metrics cannot be fully verified from the parser-extracted text; moreover, the paper's claim about ESM3 "falling short" appears to refer to the approach (cascaded generation) rather than task-averaged metrics. Kept as a minor clarification point, not a structural flaw.
+- **Missing related works / missing tokenizer comparison against FoldSeek / missing data leakage analysis / missing scaling law analysis**: These are scope-creep asks that would expand the paper rather than strengthen its core claims.
+- **Formatting/style nitpicks, grammar issues, missing appendix content**: Removed per parser artifact rules.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The secondary structure distribution analysis (Fig. 3A) provides a genuinely informative perspective: it shows that structure-based diffusion models (RFDiffusion, MultiFlow) have a systematic helix bias that sequence-initialized models like DPLM-2 and ESM3 do not share. This suggests that pre-training on evolutionary-scale sequence data may implicitly encode broader structural priors that structure-only training cannot recover. The implication — that sequence pre-training shapes not just functional plausibility but also structural diversity in ways that matter for generative design — is worth highlighting.
 
 ## Suggestions
 
-1. **Ablate the self-mixup strategy.** Even a small-scale experiment (e.g., 100 generated proteins with/without self-mixup, reporting sc-TM and diversity) would tie the claimed "key recipe" to concrete evidence and close the most significant gap in the paper.
-2. **Compare the LFQ tokenizer to at least one protein-specific discrete structure representation** (e.g., FoldToken, or a FoldSeek-based encoding) on reconstruction metrics. This would strengthen the claim that LFQ is a good choice for multimodal protein LMs.
-3. **Scope the representation learning claim more carefully** in the introduction to match what is actually shown ("benefit on some predictive tasks" rather than "a range"), or add experiments that more broadly demonstrate the benefit (e.g., comparing fine-tuning strategies like LoRA vs. full fine-tuning).
+1. Provide an ablation for the self-mixup strategy in a revised version, or recalibrate the claims if it is not independently validated.
+2. Contextualize the zero-shot folding numbers more carefully — either add a statement explaining what "sufficiently good" means quantitatively, or soften the claim.
+3. Add a discussion of how the representation learning performance could be improved (e.g., by increasing structure data, adjusting LoRA rank, or using a two-stage training protocol) beyond the single DeepLoc test.
+4. Clarify the ESM3 comparison: state explicitly whether "falls short" refers to the generation paradigm (cascaded vs. simultaneous) or to quantitative metrics.
 
 ## Score and Decision
 
-The paper proposes a well-motivated, technically sound approach to multimodal protein generative modeling. The core design — discrete diffusion with LFQ tokenization, warm-up from pre-trained DPLM with LoRA, separate noise schedules — is coherent and yields competitive results across multiple tasks. The main methodological gap is the unevaluated self-mixup strategy, which weakens the paper but does not invalidate its contributions (the co-generation results stand on their own, and the warm-up/LoRA strategy is independently ablated). The remaining issues are minor and addressable. On balance, this is a solid contribution that will be of interest to the community, pending the self-mixup ablation.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

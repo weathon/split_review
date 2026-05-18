@@ -1,75 +1,80 @@
-I have thoroughly verified the paper against all reviewer claims. Here is my consolidated review.
-
----
+Now I have all the information needed. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper proposes the first feed-forward pipeline for clothing-disentangled 3D character generation from a single image. The method uses a two-stage approach: first, a multi-part diffusion model with a novel multi-part attention mechanism disentangles body and clothing in 2D image space; then, a multi-view diffusion model with a combination attention module generates multi-view images of each part, which are fed into an off-the-shelf feed-forward 3D reconstruction method (LGM). The paper also contributes a dataset of >10k clothing-disentangled anime characters with 11 clothing combinations each. Ablations show the proposed attention mechanisms improve disentanglement quality over baselines.
+This paper proposes the first feed-forward method for generating clothing-disentangled 3D characters from a single image. The approach operates in two stages: (1) a multi-part diffusion model with a novel multi-part attention mechanism disentangles the input image into separate body and clothing part images in 2D, and (2) a multi-view diffusion model with a combination attention mechanism generates multi-view images for each part, which are then fed into an off-the-shelf feed-forward reconstructor (LGM) for 3D Gaussian models. The paper also contributes a large VRoid-based anime character dataset with over 10k models and 11 clothing combinations each. Ablations demonstrate that both the multi-part attention and the special condition image for combination improve over simpler alternatives.
 
 ## Strengths
 
-1. **First feed-forward method for clothing-disentangled 3D generation from a single image.** The paper correctly identifies that existing approaches (GALA, Feng et al., ClothNeRF) rely on per-scene optimization taking hours, while this work proposes a feed-forward alternative. This is a genuine practical advance, and the literature review accurately characterizes the gap (Sec. 1, Sec. 2).
+- **First feed-forward pipeline for clothing-disentangled character generation, with clean two-stage design.** The paper identifies a genuine gap — existing methods rely on per-scene optimization (hours per character) — and proposes a learned alternative. The two-stage decomposition (2D disentanglement first, then multi-view generation) is well-motivated: separating disentanglement from multi-view consistency simplifies each subproblem. The multi-part attention mechanism that allows cross-part information flow during 2D disentanglement is shown to improve PSNR by ~1.5–2.3 dB per part over independent generation (Table 2, Figure 4).
 
-2. **Novel two-stage disentanglement pipeline with technically grounded attention mechanisms.** The design choice to separate 2D part disentanglement from multi-view generation simplifies each subtask. The multi-part attention (Eq. 2, allowing cross-part information flow) and the combination attention module (Sec. 3.2, using a special condition image) are well-motivated architectural contributions, and the ablations (Table 2, Fig. 4, Fig. 5) quantitatively confirm that each component improves over simpler alternatives.
+- **Novel combination attention with special condition image.** Integrating part composition into the multi-view diffusion model (rather than adding a separate external network) is a clean design choice. The ablation in Table 1 shows this outperforms direct feature fusion without the special condition image, providing evidence that the design contributes.
 
-3. **Large-scale clothing-disentangled dataset as a community resource.** At >10k characters with 11 clothing combinations per character (>110k unique models), this dataset is substantially larger than existing alternatives (<1,000 subjects). The controlled-visibility rendering pipeline is a rigorous contribution that enables training and evaluation of this class of methods.
+- **Large disentangled character dataset.** The dataset of >10k VRoid anime characters with 11 clothing combinations each (totaling >110k distinct clothed models) is a substantial resource. Prior datasets in this area are much smaller (<1,000 subjects), and this dataset enables training the feed-forward pipeline and will be useful for future research.
 
-4. **Intrinsic support for clothing editing and transfer.** The disentangled representation naturally enables virtual try-on (Fig. 6) and animation (Fig. 7) without additional networks, which is a clean byproduct of the architecture design.
+- **Quantitative improvement over adapted baseline.** The method consistently outperforms an adapted Wonder3D baseline on PSNR, SSIM, and LPIPS across all part categories (body, upper clothing, lower clothing, shoes) in Table 1, and the qualitative results in Figure 3 show cleaner decomposition.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **No quantitative evaluation of the final 3D output.** Despite the paper's title and core claim being about 3D character generation, all quantitative metrics (PSNR, SSIM, LPIPS in Tables 1 and 2) evaluate only the intermediate 2D multi-view images. The 3D models are shown only in qualitative figures (Figs. 5–7). Since the authors have ground-truth 3D models in their dataset, computing 3D metrics (e.g., per-part Chamfer distance, volumetric IoU, F-score) is straightforward. The paper uses an off-the-shelf 3D reconstruction method (LGM), so the quality of the final 3D output depends on both the generated multi-view images and the reconstruction step; without 3D metrics, the reader cannot assess the end-to-end quality. This is a significant evidential gap for a paper whose central contribution is 3D generation.
+- **The final 3D output is never quantitatively evaluated, leaving a gap between the paper's claims and its evidence.** The paper's title, abstract, and contribution list all emphasize "3D character generation," yet every quantitative metric (PSNR, SSIM, LPIPS in Tables 1 and 2) measures only 2D multi-view image quality. No 3D geometry metrics (Chamfer distance, normal consistency, F-score) are reported for the reconstructed Gaussian models. No evaluation of whether the body and clothing layers are correctly separated in 3D space — e.g., inter-penetration rates, surface alignment quality — is provided. The 3D composition optimization (Eq. 3) is evaluated only qualitatively (Figure 5, right). While the 3D reconstruction uses an off-the-shelf method (LGM), the paper nevertheless frames the contribution as 3D generation, and the reader cannot assess whether the pipeline actually produces usable, correctly layered 3D models. This is the single most important missing evaluation.
 
-2. **No runtime or efficiency numbers reported.** The introduction and abstract repeatedly claim the method reduces generation "from several hours to mere seconds," and the contributions list states "high-quality results in a few seconds." Yet no actual inference time is reported anywhere in the experiments. The only time-related number is the LGM reconstruction time (1 second), which covers only one sub-step of the pipeline. This directly undermines the primary claimed advantage over optimization-based methods. This weakness is trivially fixable but currently absent.
+- **The paper claims dramatic speed improvements ("hours to seconds") without reporting any runtime numbers.** The efficiency argument is central to the paper's motivation: optimization-based methods are "time-consuming and not scalable," while the proposed method runs in "seconds." Yet no wall-clock times are reported for any stage of the pipeline or for the full end-to-end process. No runtime comparison against any baseline is provided. The claim that LGM runs "in 1 second" is cited, but this covers only one module. Without measured runtime data, the paper's core value proposition — feed-forward efficiency — is unsubstantiated.
 
-3. **No direct comparison with optimization-based clothing-disentanglement methods.** The paper positions itself against prior work like GALA, ClothNeRF, and Feng et al., but the only experimental baseline is an adapted Wonder3D evaluated on multi-view image quality. While this adapted baseline is reasonable for the image-generation subtask, the paper does not compare end-to-end 3D quality against any prior clothing-disentanglement method, even on a small subset. This makes it difficult to assess whether the feed-forward approach achieves competitive quality, which is important since the paper claims both speed *and* quality advantages.
+- **The "special condition image" used for the combination module is never defined or specified, making the approach irreproducible as described.** Section 3.2 states: "we propose to introduce a special condition image specifically for part combination" and describes its role in allowing the network to learn combination separately from multi-view generation, but never explains what this image contains, how it is constructed, or how it is derived from the input. This is not a minor implementation detail — it is a core design element of the combination attention mechanism. Without this specification, the method cannot be reproduced.
 
 ### Minor
 
-1. **Cross-part consistency is not explicitly evaluated.** The method generates multi-view images for each part independently (with information exchange only through the multi-part attention in the 2D stage). The optional 3D optimization (Eq. 3) only adjusts rigid transformations. The paper does not evaluate whether parts are well-aligned (e.g., measuring interpenetration volume, gaps between part meshes, or rendering consistency at part boundaries). This does not threaten the core contribution but would strengthen the claims of seamless composition.
+- **The method is evaluated exclusively on anime characters, and the paper does not discuss whether the approach generalizes to realistic humans.** The dataset (Section 4.1) is explicitly VRoid anime, and the limitations section (4.6) discusses dataset size but not domain specificity. The multi-part attention, multi-view diffusion, and LGM reconstruction components may not transfer to photorealistic humans with different clothing topologies, body shapes, or material properties. The paper should either acknowledge this limitation honestly or provide evidence of cross-domain applicability.
 
-2. **No analysis of failure cases or typical failure modes.** The paper presents only successful results. Discussing common failure cases (e.g., complex overlapping garments, unusual clothing combinations, occluded body regions) would help readers understand the method's practical limitations. The Limitations section (Sec. 4.6) only discusses dataset size and static clothing.
-
-3. **Some implementation details are underspecified.** The "special condition image" for the combination attention module (Sec. 3.2) is described only as being introduced for part combination, but its specific form (blank canvas? masked composite? learned embedding?) is not clearly stated. The integration of the part-type one-hot encoding with positional encoding "concatenated with the time embedding" is stated but not visualized or detailed sufficiently for easy reproduction. These do not invalidate the method but hinder reproducibility.
+- **The optional 3D part composition optimization (Eq. 3) is shown only qualitatively; no quantitative alignment improvement is reported.** Figure 5 (right) shows a visual comparison, but metrics such as mean surface distance between body and clothing parts before/after optimization, intersection volume, or rendering alignment error are missing.
 
 ### Trivial
+
 None.
 
 ## Nice-to-Haves
-- A small user study comparing subjective quality against the adapted Wonder3D baseline or ground-truth renders would strengthen the qualitative claims about anime character appearance.
-- Ablation results on the 3D part model composition (Fig. 5, right) are currently qualitative only; reporting rendering PSNR against ground-truth composed 3D models would add rigor.
+
+- A failure analysis reporting the fraction of test cases where part decomposition fails (e.g., body leaking into clothing or vice versa) would help establish robustness.
+- Renderings of the 3D models from viewpoints beyond the four training views would help demonstrate that the reconstruction is genuinely correct, not merely interpolating.
+- A runtime breakdown (2D disentanglement, multi-view generation per part, LGM reconstruction per part, 3D optimization) would be informative even without a baseline comparison.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+Several criticisms from the reviewer inputs were removed or downgraded:
 
-- **"No evaluation on real-world images"** — The paper explicitly scopes to anime characters from rendered data. Criticizing the absence of real-world generalization is scope creep for a method that trains and evaluates on a rendered anime dataset.
-- **"No user study"** — A user study is a nice-to-have, not a required weakness for a technical 3D generation paper.
-- **"Hyperparameter sensitivity not studied"** — The paper reports batch sizes, training steps, and hardware setup. Full hyperparameter sensitivity studies are beyond the standard scope for this class of paper.
-- **Criticisms about missing appendix content** — The parser strips those sections; they exist in the original submission.
+- **Optimization-based comparison (GALA, Cloth2Tex, Feng et al.):** The reviewer faults the paper for not comparing against GALA (takes a clothed 3D mesh input), Cloth2Tex (takes text descriptions), and Feng et al. (takes monocular video). These methods have fundamentally different input modalities and solve different tasks. Comparing against them would require adapting them to a different setting, not running them on the same benchmark. Removed as evaluating against the wrong class of expectations.
+
+- **Ablation fairness concern:** The reviewer questions whether the "w/o special condition image" ablation is fair because the baseline "may have been trained without a combination condition at all." This is precisely what an ablation tests — the presence of a specific design element. The comparison is standard and the concern reflects a misunderstanding of ablation methodology. Removed.
+
+- **"Optional" 3D optimization criticism:** The reviewer suggests the 3D composition optimization should not be called optional. The paper clearly describes it as optional (Section 3.3: "we propose an optional 3D part model optimization algorithm") and acknowledges it is used to improve alignment. The classification is not a weakness. Removed.
+
+- **Missing appendix / missing proofs:** Not applicable; the parser strips these sections from all papers. Any such criticism would be a parser artifact, not an author error.
 
 ## Novel Insights
 
-The reviews reveal a clear pattern: this paper has genuine architectural novelty (first feed-forward pipeline, well-designed attention mechanisms) and a strong dataset contribution, but the evaluation design does not match the scope of the claims. The central tension is that the paper's title, abstract, and contributions emphasize *3D* generation, yet the quantitative evidence stops at the 2D image level. This is not because the paper is poorly executed — the ablations convincingly show that the attention mechanisms work — but because the authors appear to have stopped short of running the straightforward evaluation that their own dataset enables. The missing runtime numbers compound this: a paper whose main differentiator is speed cannot simply assert "seconds" without measurement. This is a paper whose contribution is real but whose evidence is incomplete in ways that are fixable without changing the method.
+None beyond the paper's own contributions. The reviews do not surface any unexamined implications, connections to broader trends, or methodological insights that the paper itself does not already articulate.
 
 ## Suggestions
 
-1. **Report 3D reconstruction metrics** on the held-out 500 characters using ground-truth 3D models. Compute per-part Chamfer distance, F-score, and volumetric IoU for the combined 3D model. This directly addresses the largest gap in the evaluation.
-2. **Report inference time** for the full pipeline (2D disentanglement + multi-view generation for each part + 3D reconstruction + optional optimization) and compare to the time a representative optimization-based method would require on the same input.
-3. **Add a small-scale comparison** against at least one optimization-based clothing-disentanglement method (e.g., run GALA on a few examples, or cite runtime figures from prior work as a reference point) to contextualize the quality–speed trade-off.
-4. **Clarify the "special condition image"** — state explicitly whether it is a blank image, a masked composite of part images, or a learned embedding.
-5. **Include a failure case figure** showing 2–3 typical failure modes to help readers calibrate expectations.
+1. **Report 3D evaluation metrics.** At minimum, compute Chamfer distance and normal consistency between the reconstructed 3D Gaussians and the ground-truth 3D models from the test set, for each part individually and for the composed character. Also report inter-penetration rates between body and clothing layers. If rendering is used for evaluation, render multi-view images of the reconstructed 3D models and compare to ground-truth renders using PSNR/SSIM/LPIPS.
+
+2. **Report end-to-end runtime** in seconds, broken down by pipeline stage, and compare against at least one optimization-based method on a common subset.
+
+3. **Define the "special condition image" explicitly.** State what it contains (e.g., a specific composition template, a blank canvas, a learned embedding visualized as an image), how it is constructed, and how it is fed into the model. This is essential for reproducibility.
+
+4. **Acknowledge the anime-domain limitation** in the limitations section and discuss prospects or barriers for extending to realistic humans.
+
+5. **Provide quantitative results for the 3D composition optimization** (Eq. 3): report surface alignment error or rendering consistency before and after optimization.
 
 ## Score and Decision
 
-The paper presents a novel and well-motivated feed-forward pipeline for clothing-disentangled 3D character generation, supported by a substantial dataset contribution and informative ablations. However, the evaluation has three significant gaps: (1) no quantitative metrics on the final 3D output, (2) no runtime measurements to support the central speed claim, and (3) no direct comparison with prior clothing-disentanglement methods. These gaps mean the evidence does not fully match the claimed contributions. The issues are fixable with additional experiments, but they require non-trivial additional work.
+The paper presents a novel and well-motivated contribution — the first feed-forward pipeline for clothing-disentangled character generation — with clean ablations validating its key design choices and a substantial dataset contribution. However, the evaluation has two significant gaps: the final 3D output is never quantitatively assessed (despite "3D generation" being the headline claim), and the efficiency argument ("seconds vs. hours") is made without a single runtime measurement. The special condition image, a core design element, is underspecified to the point of non-reproducibility. These gaps are addressable but non-trivial. The core technical contribution is solid, and with proper evaluation the paper would be a strong submission.
 
-**Originality**: Good — first feed-forward approach, novel attention designs. **Importance**: Good — clothing-disentangled 3D generation is practically relevant. **Claims vs. support**: Weak — core claims about 3D quality and speed are not quantitatively supported. **Soundness**: Adequate methodologically, but incomplete evaluation. **Clarity**: Good — well-structured and generally clear. **Value to community**: Moderate — dataset and approach could be valuable, but evaluation gaps limit current impact.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

@@ -1,80 +1,76 @@
-Now I have a thorough understanding of the paper and all the claims. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper. Let me write the consolidated review.
 
 ## Summary
 
-This empirical study investigates the relationship between three objects in diffusion models: the initial Gaussian noise (xᵀ), the generated sample (x⁰), and the latent encoding obtained by inverting the sample back through DDIM (x̂ᵀ). The paper makes three main findings: (1) DDIM inversion latents are not Gaussian and lie spatially along the trajectory between noise and sample, (2) the L2 distance between noise and sample can correctly identify which noise generated a given image (>99% accuracy for high T), and (3) these relations emerge at the very beginning of training and do not materially improve with prolonged training. Experiments are conducted on DDPMs (CIFAR10, ImageNet) and an LDM (CelebA).
+This paper empirically studies the relationship between three objects in diffusion models: initial Gaussian noise (x^T), generated samples (x^0), and latents obtained via DDIM inversion (hat{x}^T). It makes three main findings: (1) DDIM latents retain spatial structure from the original image and are not standard Gaussian noise; (2) these latents lie on or near the generation trajectory between noise and sample, and this geometric relationship stabilizes early in training; (3) the noise-to-image mapping can be recovered via simple L2 distance and this mapping emerges at the very beginning of training. The paper evaluates these claims on three models (DDPM on CIFAR-10 and ImageNet, LDM on CelebA).
 
 ## Strengths
 
-- **Empirically demonstrates a non-trivial noise-to-image mapping via L2 distance:** Table 2 shows >99% accuracy in assigning a generated image to its original noise using only Euclidean distance (for high T). Since chance is 0.1% in a 1000-way classification, this is a genuine and striking finding that reveals an implicit structure in diffusion generation that is not obvious from theory alone.
+- **Discovery that noise-to-sample mapping emerges early and is recoverable via L2 distance.** Table 2 reports >99% accuracy in matching generated images to their initial noises using simple Euclidean distance (for sufficient diffusion steps). Figure 5 shows this accuracy is present from the earliest training steps, and Figure 6 reveals that high-level image features (CKA, DINO, SVCCA) stabilize rapidly. This is the paper's most compelling and novel finding — it quantifies a concrete property of diffusion models that was previously unknown.
 
-- **Reveals that the noise–sample mapping stabilizes at the very beginning of training:** Figures 5 and 6 document that the L2-based assignment accuracy and feature-level similarity (CKA, DINO, SSIM, SVCCA) converge within the first few epochs and remain stable through prolonged training. This is a nontrivial empirical observation about where the generative mapping is actually "learned."
+- **Empirical demonstration that DDIM latents deviate from Gaussian noise.** Visual evidence (Figure 1) and pixel correlation analysis (Table 1) show that inverted latents retain spatial structure from the original image, especially for smaller models. This directly exposes a gap between the theoretical promise of DDIM inversion and its practical behavior.
 
-- **Shows that prolonged training does not improve DDIM inversion accuracy:** Figure 4 tracks the triangle geometry across training checkpoints and shows it stabilizes early. This directly supports the claim that the reverse DDIM approximation error is not reduced by more training.
+- **Evidence that the noise-sample-latent geometric relationship stabilizes early in training.** Figure 4 shows that the triangle angles and distances among noise, sample, and latent converge very early and remain constant through the rest of training. This is a non-trivial observation about the training dynamics of diffusion models.
 
-- **Consistent evidence across multiple model architectures and datasets:** The three main findings replicate across pixel-space DDPMs (CIFAR10, ImageNet) and a latent-space LDM (CelebA), strengthening the generality of the conclusions.
+- **Consistency across diverse architectures and datasets.** The main findings hold across unconditional DDPMs on CIFAR-10 and ImageNet (pixel-space) and an LDM on CelebA (latent-space), strengthening the generality of the conclusions.
 
-- **Multifaceted evaluation using diverse metrics:** The paper uses angles, L2 distances, Pearson correlations, CKA, DINO, SSIM, and SVCCA to triangulate its claims, providing more evidential support than any single metric would.
+- **Multi-metric analysis.** The paper employs angles, distances, Pearson correlations, assignment accuracy, CKA, DINO, SSIM, and SVCCA (Figures 4–6). Using diverse metrics strengthens confidence in the robustness of the reported phenomena.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **No variance or error bars on any quantitative result.** The paper states it averages over 1K samples from 3 random seeds (Section 4.1), providing the raw data to compute standard errors or confidence intervals, yet every figure (2, 3, 4, 5, 6) and table (1, 2) reports only point estimates. For an empirical paper whose claims are quantitative (angles, distances, accuracies, correlations), the reader cannot assess whether reported differences between models (e.g., LDM vs. DDPM) or across timesteps are reliable or within noise. This is the single most impactful weakness and should be addressed by adding error bars or confidence bands to all figures and tables.
-
-- **The angle analysis (Section 4.3) is underspecified and its geometric interpretation is incomplete.** The paper reports "we calculate the angles between noises, samples, and latents" without specifying the operational details: Are vectors flattened to 1D? Are they mean-centered? Is the angle computed as cos⁻¹ of the normalized dot product? More importantly, an obtuse angle at the latent vertex only tells us the noise–image side is the longest; it does not guarantee the latent lies *on* the noise–image trajectory. The distance analysis in Figure 3 provides more direct evidence for the geometric claim, but the paper never reconciles the two approaches or quantifies what fraction of the trajectory's points are actually close to the noise–latent interpolation line.
+- **Angle computation methodology is underspecified.** The paper's central geometric claim — that latents lie on the trajectory between noise and sample, supported by acute/obtuse angle patterns (Figure 2) — rests on angle calculations that are never defined. The paper states it "calculate[s] the angles between noises, samples, and latents" (Section 4.3) but does not specify: (a) the vector space (flattened pixel space? latent space?), (b) whether vectors are centered or normalized, (c) whether any dimensionality reduction is applied before computing angles, or (d) how "plot[ting] the triangles in 2D space" is performed. In high-dimensional pixel spaces, angles between random vectors have well-known concentration properties, so the reader cannot assess whether the reported acute/obtuse pattern is meaningful or an artifact of the chosen representation. This is not a minor omission: Section 4.3 is titled "WHAT IS THE LOCATION OF THE LATENT VARIABLE?" and the angle analysis is the primary evidence for its answer. The paper does provide supplementary distance-based evidence (Figure 3) that partially supports the same conclusion, but the angle analysis itself is not reproducible as written. *Fixable with a clear methodological specification.*
 
 ### Minor
 
-- **The Pearson correlation computation (Table 1) is underspecified.** The paper reports "top-10 Pearson correlation coefficients measured between individual pixels" without clarifying which pairs of pixels are being correlated (spatial neighbors within a single image? random pairs? all pairs across the image?). The interpretation changes fundamentally depending on the pairing, and reporting only the top-10 values (rather than the full distribution or mean absolute correlation) is non-standard. The qualitative conclusion (latents have structure) is likely correct, but the methodology must be clarified for the result to be properly evaluated.
+- **The claim that "improving generative capabilities does not improve accuracy of reverse DDIM" uses proxy metrics rather than direct reconstruction error.** The paper tracks triangle angles and distances (Figure 4) and concludes that inversion accuracy does not benefit from longer training. However, these are geometric proxies, not direct measures of inversion quality. The paper does not report any reconstruction metric (e.g., LPIPS, PSNR, or MSE between the original sample and the image reconstructed from the inverted latent). The paper itself notes that later training adds high-frequency detail (Figure 6), so it is possible that reconstruction error continues to improve even as the triangle geometry stabilizes. The geometric finding about early stabilization is valid and interesting on its own, but the paper's claim about "accuracy" goes beyond what is directly measured. The paper should either reframe the claim in terms of the geometry it actually measures, or add direct reconstruction metrics.
 
-- **Some explanations for observed asymmetries are speculative and lack quantitative support.** The asymmetric accuracy between x⁰→xᵀ (high) and xᵀ→x⁰ (low) is attributed to "large plain areas of low pixel variance," and the LDM's symmetric accuracy is attributed to "KL-divergence applied to the latent space of the LDM's autoencoder." Both explanations are plausible but untested — no ablation quantifies whether high-variance images are indeed more likely to be correctly assigned, or whether the KL regularization is indeed the causal factor for LDM symmetry.
+- **Assignment experiments would benefit from control analyses.** The paper reports near-100% accuracy in matching images to their noises via L2 distance (Table 2). While striking, this result would be strengthened by showing that the correct pair is an outlier relative to the background distribution of distances (e.g., distribution of L2 distances between a given image and all other noises), and by confirming the result after subtracting per-image means or normalizing by norms. The paper does provide a plausible explanation for why reverse assignment (noise→image) fails with many steps (low-variance plain regions being close to many noises), which partially addresses the concern, but a direct control analysis would make the positive result more robust.
 
-- **The claim that "the initial part of the diffusion model's training is responsible for building the relation" is correlational, not causal.** The paper shows metrics stabilize early, which is consistent with the claim but does not demonstrate that early training is *responsible* — the same pattern could emerge if early training establishes features that are later refined, or if the metrics simply saturate regardless of when the relation is formed. The wording in the Conclusions overstates what the evidence supports.
+- **No error bars or variance estimates on quantitative results.** The paper states that metrics are averaged over 1K samples from 3 seeds, but never reports variance, standard deviations, or confidence regions on any of the quantitative results (angles, distances, assignment accuracies, correlations). Without this, it is impossible to judge whether the reported patterns are statistically significant or whether the acute/obtuse angle pattern is consistent across individual samples. Adding error bars to Figures 2–5 and shaded regions would substantively strengthen the paper.
+
+- **Correlation analysis in Table 1 lacks statistical significance testing.** The reported top-10 Pearson correlations for latents are small. Without hypothesis tests or comparison to the sampling distribution under independence, it is unclear whether these values reflect meaningful structure or finite-sample noise. The visual evidence in Figure 1 is more compelling than the table.
 
 ### Trivial
 
-None that survive filtering (parser artifacts removed).
+- **"Most probable relation" (Figure 2 caption) implies a probabilistic model that is never defined.** No uncertainty quantification or confidence regions accompany this phrasing.
+
+- **No discussion of limitations.** The paper does not acknowledge that its findings are based on specific models (DDPM on CIFAR-10/ImageNet, LDM on CelebA) and a specific inversion method (DDIM). A brief limitations paragraph would improve the paper.
 
 ## Nice-to-Haves
 
-- Test whether the L2-based noise assignment holds for other distance metrics (cosine similarity, L1) and whether accuracy degrades gracefully as the candidate pool grows beyond 1000.
-- Include a single experiment with an improved inversion method (e.g., Renoise) on one dataset to clarify whether the observed latent geometry is specific to DDIM's approximation or a more general property of diffusion inversion.
-- A quantitative summary for Figure 3: the fraction of timesteps t for which the closest point on the noise–latent interpolation is the latent endpoint, and the mean residual distance at that minimizer.
+- **Checking whether improved inversion methods (Renoise, Null-text inversion, predictor-corrector) change the observed geometry.** The paper restricts study to original DDIM inversion, which is a valid choice. But checking whether better inversion methods produce latents that more closely resemble true Gaussian noise (and whether this changes the geometry) would increase the practical impact of the findings.
+
+- **Direct reconstruction error measurements (LPIPS, PSNR) across training steps**, as noted in the Minor weaknesses above.
 
 ## Removed Points
 
-These points were flagged for removal; treat them with caution:
-
-- **"Paper never engages with DDIM inversion being inaccurate"** — Removed: The paper's entire premise is studying this approximation error; it explicitly discusses it in the Introduction (lines 12, 49–55) and Related Work (Section 3).
-- **"Should test with Renoise or other inversion methods"** — Removed: Scope creep. The paper studies standard DDIM inversion and explicitly delimits this scope.
-- **"No discussion of text-conditional models"** — Removed: The paper explicitly trains unconditional models and scopes its findings accordingly.
-- **"The claim about latents not being Gaussian is already known"** — Removed: The paper cites prior work making this observation (Garibi et al., Parmar et al., Section 4.2) and does not claim it as a novel discovery. The contribution is quantifying it across models and showing dataset-size dependence.
-- **"Missing hyperparameters (learning rate, batch size)"** — Removed: The paper states it follows Nichol & Dhariwal (2021), which is standard practice for reproducibility in this subfield.
-- **"Figures are too small / lack scales"** — Removed: Formatting artifacts from PDF extraction; not author errors.
-- **"Should include an ablation of candidate set size"** — Moved to Nice-to-Haves (not a core weakness).
+- "The paper does not compare its findings with more recent inversion techniques" — Moved to Nice-to-Haves. The paper's choice to study DDIM inversion is defensible for a paper scoped to understanding the basic DDIM procedure. Demanding coverage of multiple inversion methods is scope creep.
+- "The interpretation that DDIM inversion does not properly turn the image into noise is already well known" — This understates the paper's contribution, which is about the *nature* of the failure (geometric positioning, early stabilization, L2-based mapping), not merely the fact that inversion is imperfect.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews collectively highlight an important tension: the paper reports genuinely surprising empirical phenomena (L2 distance suffices for noise retrieval, the mapping stabilizes within the first few epochs), yet the presentation lacks the statistical rigor expected for quantitative claims. This gap between interesting findings and imperfect exposition is the paper's central tension. A more structural insight is that the strength of the L2 assignment result (>99% accuracy, 1000-way classification) is so far above chance that it is likely robust even without error bars, making the absence of variance reporting a presentation flaw rather than a threat to the core finding. The more serious concern is the geometric claim about latent location, which genuinely needs stronger quantitative support than the current angle analysis provides.
+The reviewer analyses converge on a key observation that the paper itself does not fully articulate: the triangle geometry finding (latent lies on the trajectory) and the early-stabilization finding (Figure 4) together imply that DDIM inversion has a systematic, stable geometric bias that is baked in by the first few training steps and does not change thereafter. This means that the inversion error is not a correctable residual that shrinks with better generative modeling — it is a structural property of the DDIM approximation that is determined almost instantly. Combined with the L2-assignment result (Table 2), this suggests that the noise-to-image mapping is essentially a nearest-neighbor assignment in pixel space, fixed at initialization and refined only in high-frequency detail. This paints a picture of diffusion models where the generative manifold is largely determined by the early training dynamics, with later training adding surface detail without altering the underlying correspondence between noise and semantic content.
 
 ## Suggestions
 
-1. **Add error bars / confidence bands to all figures and tables.** With 3 seeds and 1K samples per seed, compute standard deviations or bootstrap CIs for Table 1, Table 2, and Figures 2–6. This single change would substantially raise the paper's credibility.
+1. **Specify the angle computation in full detail**: state the vector space (flattened pixel coordinates? latent space?), whether centering/normalization is applied, and how the 2D triangle visualization is derived from high-dimensional vectors. Provide bootstrap confidence intervals for mean angles at each vertex.
 
-2. **Clarify the angle computation methodology explicitly.** State whether vectors are flattened, whether they are normalized, and provide the exact formula for the angle. Replace or augment Figure 2 with a more direct geometric quantity (e.g., the projection distance of the latent onto the noise–sample line, and the residual distance off that line).
+2. **Add direct DDIM reconstruction error measurements** (LPIPS or MSE between original sample and image reconstructed after inversion+regeneration) across training checkpoints. This would directly test whether the stabilization of triangle geometry coincides with stabilization of actual inversion quality.
 
-3. **Specify the pixel pairing for the Pearson correlation analysis.** Clarify whether these are spatial correlations within a single image, cross-sample correlations, or some other pairing. Consider reporting the full distribution or mean absolute correlation rather than only top-10 values.
+3. **Add controls for the L2 assignment experiment**: report the distribution of distances to incorrect matches, verify the correct pair is an outlier, and test after per-image mean subtraction.
 
-4. **Tone down causal language in the Conclusions.** Replace "the initial part of the diffusion model's training is responsible for building the relation" with language that reflects correlational evidence (e.g., "the relation stabilizes during the initial part of training").
+4. **Add error bars or standard deviations** to all quantitative figures (Figures 2–5, Table 2).
+
+5. **Add a brief limitations paragraph** acknowledging the scope (specific models, DDIM inversion only).
 
 ## Score and Decision
 
-Based on the above assessment: the paper documents genuinely interesting and non-obvious empirical phenomena about DDIM inversion and noise–image mappings. The L2 assignment result and the early-training stabilization are valuable observations that deserve dissemination. The weaknesses are real but addressable — the lack of error bars and underspecified methodology are presentation issues rather than fatal flaws, and the core findings are likely robust given their magnitude and consistency across three model architectures. I recommend acceptance with the expectation that the authors address the major weaknesses (particularly adding error bars and clarifying the angle/correlation methodology) before final publication.
+The paper presents genuinely interesting and useful empirical observations about the geometry and training dynamics of DDIM inversion. The L2-based noise-to-image matching result (Section 4.4) and the early stabilization finding are novel and well-supported. However, the central geometric evidence (angle analysis in Section 4.3) is methodologically underspecified to the point where its validity cannot be assessed, and several claims rest on proxy metrics without direct validation. These weaknesses are fixable with clarifications and additional experiments, but in their current form they leave the paper's strongest claims incompletely supported. I recommend **minor revision**.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

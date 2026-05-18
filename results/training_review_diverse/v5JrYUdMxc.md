@@ -1,24 +1,18 @@
-Now I have a thorough understanding of the paper and can verify each claim. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and the criticisms. Let me write the consolidated review.
 
 ## Summary
 
-The paper proposes **hy-FSD** (hybrid Fourier Score Distillation), a novel training objective for optimization-based image-to-3D generation. The key insight is to use a 2D diffusion model (Stable Diffusion) in the **frequency domain** (amplitude component only) to provide texture details, while using a novel-view diffusion model (Zero123) in the **spatial domain** to enforce geometric consistency. This hybrid avoids content distortion and the Janus problem that arise when combining both models in the spatial domain. Built on this loss, the **Fourier123** pipeline generates a 3D Gaussian splatting asset from a single image in roughly one minute.
-
----
+This paper proposes **hy-FSD** (hybrid Fourier Score Distillation), a novel score distillation approach for image-to-3D generation that uses Stable Diffusion (SD) in the frequency domain (amplitude component) for texture enrichment and Zero123 in the spatial domain for geometric consistency. The authors present **Fourier123**, a pipeline built on hy-FSD with 3D Gaussian Splatting and LGM initialization that generates 3D assets in ~52 seconds. The method achieves strong results across CLIP similarity, user studies, and PSNR/SSIM/LPIPS metrics, and is shown to improve existing methods (DreamFusion, DreamGaussian) when plugged in.
 
 ## Strengths
 
-- **Novel and well-motivated frequency-domain supervision.** The paper identifies a real conflict between SD (detailed but geometrically unreliable) and Zero123 (consistent but over-smooth), and proposes a principled resolution: use SD only for its amplitude spectrum (texture detail) while relying on Zero123's spatial predictions for geometry. The frequency analysis in Fig. 1 motivates this separation concretely, and the ablation in Fig. 3 shows the hybrid setting clearly outperforms alternatives that mix the two models in the same domain.
+1. **Novel and well-motivated frequency-domain separation of 2D and 3D priors.** The paper identifies a key tension in hybrid 2D-3D distillation (SD provides detail but distorts geometry; Zero123 provides consistency but is over-smooth) and proposes a clean decomposition: use SD only for its amplitude spectrum (texture) in the frequency domain, and Zero123 in the spatial domain for structure. This insight is grounded in the visual and quantitative frequency analysis of Fig. 1. The ablation in Table 1 and Fig. 4/Fig. 3 confirms that the specific choice (2D-FSD & 3D-SDS) outperforms all other combinations including the standard dual-spatial approach (2D-SDS & 3D-SDS) used by Magic123.
 
-- **Plug-and-play generality across 3D representations (Tab. 1).** hy-FSD replaces the standard SDS loss in both NeRF-based (DreamFusion) and 3DGS-based (DreamGaussian) pipelines, all using **sphere initialization**, and yields consistent CLIP-Sim gains (DreamFusion: 0.6950 → 0.7416; DreamGaussian: 0.6386 → 0.7546). This controlled experiment directly validates the core algorithmic contribution.
+2. **Strong and consistent quantitative results across multiple metrics and settings.** Fourier123 achieves the highest CLIP-similarity (0.8010), User-Consistency (4.5251), and User-Quality (3.8333) among all compared methods, including both inference-only (LGM, CRM, InstantMesh) and optimization-based approaches (Table 2). The ablation study (Table 1) shows that plugging hy-FSD into DreamFusion raises CLIP-similarity from 0.6950 to 0.7416, and into DreamGaussian from 0.6386 to 0.7546 — demonstrating that the benefit is not pipeline-specific but arises from the score function design itself.
 
-- **Systematic five-way ablation (Tab. 1, Fig. 3).** The paper compares all four combinations of (spatial/frequency) × (SD/Zero123) plus single-model baselines, providing clear evidence that only the proposed "2D-FSD & 3D-SDS" combination avoids both geometric distortion and texture over-smoothing.
+3. **Plug-and-play generality across 3D representations.** The method is validated on both NeRF-based (DreamFusion) and 3DGS-based (DreamGaussian) pipelines, and with both sphere and LGM initialization (Sec. 4.2, 5.2), showing it is not tied to a specific architecture. This is a practical strength that increases the work's impact.
 
-- **Competitive speed.** Fourier123 completes in 52 seconds on a single 4090 GPU, substantially faster than optimization-based alternatives (DreamGaussian: 147s; Magic123: ~3000s). Even accounting for initialization, the per-iteration cost is low (400 iterations).
-
-- **Robustness to prompt quality.** Using only a universal prompt ("A high-quality image") without ChatGPT-generated prompts, Fourier123 still achieves top results. This is a practical advantage noted and demonstrated in the evaluation.
-
----
+4. **Fast optimization-based generation.** Fourier123 completes generation in 52 seconds on a single 4090 GPU, the fastest among optimization-based methods by a wide margin (DreamGaussian: 147s, Magic123: ~3000s, Zero123-NeRF: ~2000s). The 400-iteration schedule with 3DGS makes the approach practical.
 
 ## Weaknesses
 
@@ -27,66 +21,62 @@ None.
 
 ### Major
 
-1. **Confounded initialization in the main comparison (Tab. 2, Tab. 3).** The paper's headline quantitative results compare the full Fourier123 pipeline (which uses LGM initialization by default, as stated in Sec. 4.2) against baselines that start from a random sphere (DreamGaussian, Magic123) or are feed-forward (LGM, CRM, InstantMesh). The ablation study (Tab. 1) provides controlled evidence for hy-FSD's benefit *using sphere initialization*, but it only reports CLIP-Sim, not the full suite of metrics (PSNR, SSIM, LPIPS, user scores) used in the main tables. The reader therefore cannot determine how much of the gap in Tab. 2–3 is due to hy-FSD vs. the stronger starting point. The paper claims "our method is not initialization-sensitive" and points to the ablation, but the controlled evidence on all metrics is missing. A "Fourier123 (sphere init)" condition in Tab. 2–3, or LGM-initialized baselines, would resolve this.
+1. **The conceptual link between image-level frequency analysis and latent-noise-level FSD is undersupported.** The paper's motivation (Fig. 1) compares amplitude spectra of *images* generated by SD vs. Zero123. However, the actual FSD gradient (Eq. 7) computes the amplitude difference of *noise predictions in latent space*: A(ε_θ(z_t)) - A(ε). The paper does not provide analysis showing that (a) the amplitude spectrum of latent noise predictions correlates meaningfully with image texture quality, or (b) driving A(ε_θ) toward A(ε) (the amplitude of random Gaussian noise) preferentially enriches high-frequency content in the rendered image. The claim that "amplitude = texture" is valid for image pixels but the connection to latent noise tensors is asserted without justification. While the empirical results are strong and the method clearly works, this conceptual gap makes it unclear whether the formulation is principled or a heuristic that happens to work on the tested cases. A diagnostic (e.g., visualizing gradient directions or isolating the effect of the amplitude loss on a simple 2D optimization) would substantially strengthen the paper.
 
-2. **Loss weights λ₂ᴅ and λ₃ᴅ not reported.** Equation (8) defines hy-FSD as a weighted combination of 2D-FSD and 3D-SDS, but the paper never states the values of these weights. These are critical for reproducibility, especially since the two loss terms operate on fundamentally different signals (frequency amplitude vs. spatial RGB).
-
-3. **No variance or significance measures.** None of the quantitative results (CLIP-Sim, PSNR, SSIM, LPIPS, user scores) report standard deviations, confidence intervals, or significance tests. Given that the GSO evaluation uses 100 objects and the main dataset uses 51, the lack of variance estimates makes it impossible to assess whether the reported advantages are statistically reliable.
+2. **The GSO evaluation protocol (Table 3) is insufficiently specified, and the results are suspiciously strong.** The paper reports PSNR=21.50 vs. the next best (LGM) at 17.22 — a >4 dB improvement that is unusually large for single-view 3D reconstruction. The paper states "lateral Ground Truth" but does not specify: (a) how ground-truth renderings are generated (renderer, lighting, background), (b) how camera poses are selected and whether they match across methods, (c) whether the evaluation covers the input view, held-out views, or both, and (d) whether Fourier123's LGM initialization creates a distribution advantage on these particular objects. Such a large gap demands a clear protocol description before the results can be fully trusted. The fact that DreamGaussian (also an optimization method) achieves only 16.49 PSNR while Fourier123 achieves 21.50 further underscores the need for clarification — especially since both use Zero123 and 3DGS.
 
 ### Minor
 
-- **Camera view distribution during optimization is underspecified.** The paper describes the fixed camera parameters for the reference view (FOV 49.1°, distance 1.5m, azimuth 0°, polar 90°) but does not describe how views are sampled during optimization (e.g., azimuth range, elevation range, random vs. fixed schedule). This matters because the 3D-SDS term from Zero123 is view-conditioned, and the view sampling strategy affects geometry quality.
+1. **CFG values are not explicitly stated for each ablation setting in Table 1.** The implementation details (Sec. 5.1) state CFG=7.5 for SD and CFG=5 for Zero123 in the main pipeline, but the ablation (Sec. 5.2) does not restate whether these values are held constant across all five settings. DreamFusion's original 2D-SDS uses CFG=100, so if the ablation uses CFG=7.5 for that setting, the comparison is not against the published optimal configuration. This is a reporting gap that should be closed — even if the relative comparison between (c) and (e) remains informative.
 
-- **User study methodology is underspecified.** The paper reports collecting scores from 40 volunteers for "User-Consistency" and "User-Quality" but does not describe whether the study was blind, how images were presented (side-by-side or sequential), or what instructions were given. This limits the weight these subjective scores can carry.
+2. **The phrase "lateral Ground Truth" in Table 3 is undefined.** This appears only in the caption and is not explained in the main text or evaluation section. The paper should define what "lateral" means (e.g., specific azimuth/polar ranges, or all non-frontal views) and how many views are used per object.
 
-- **Theoretical claim about amplitude/phase separation is somewhat oversimplified.** The paper states that "phase component is related to the content structure of the image and amplitude component means texture features" as an absolute claim. While this is a standard property of Fourier representations, in natural images low-frequency amplitude components also carry global structure, and the separation is not perfectly clean. The ablation (Fig. 3) validates the empirical effectiveness of amplitude-only supervision, so this does not undermine the method, but the paper's framing could be more cautious.
-
-- **GSO subset justification is weak.** The paper asserts "we believe the subset we used is sufficient" by citing that Wonder3D and CRM used 30 cases. The choice of 100 is reasonable, but the reasoning argument by analogy to other papers adds little.
+3. **Prompt sensitivity is acknowledged but not quantified.** The paper notes that ChatGPT-generated prompts yield better results than the universal prompt "A high-quality image" (Sec. 3.2, Sec. 4.3), and the main results use the universal prompt. This is conservative, which is fine, but the degree of sensitivity — how much better ChatGPT prompts are — is only mentioned qualitatively with no quantitative comparison. Given that the method uses a text-to-image model, this is worth reporting.
 
 ### Trivial
-
-- None beyond minor presentation artifacts attributable to the parsing process.
-
----
+- The paper has several incomplete references in the text (e.g., "we conduct such experiments in Sec." on line 161 and line 259 without section numbers), likely artifacts from cross-referencing that were not filled in.
+- The last two rows of Table 2 show "3 × 10³" and "2 × 10³" — standard notation but could be formatted as "~3000" and "~2000" for readability.
 
 ## Nice-to-Haves
-
-- **Ablation within the 2D-FSD term:** A comparison of amplitude-only vs. full complex spectrum vs. phase-only for the SD branch would further validate the claim that amplitude is the right component to use. The current ablation compares different *models and domains* (SD vs. Zero123, spatial vs. frequency) but does not ablate within the frequency-domain supervision itself.
-- **Failure analysis:** The paper does not discuss failure cases (e.g., extreme poses, textureless objects, poor LGM initialization). A limitations section would strengthen the paper.
-- **DDIM step count and timestep schedule** for the SD denoising process would aid reproducibility. The paper mentions DDIM schedule but does not specify the number of steps.
-
----
+- A diagnostic experiment on a simple 2D case (e.g., optimizing a textured 2D image) comparing the gradient fields of standard 2D SDS vs. 2D-FSD to visually demonstrate that FSD preferentially adds high-frequency content.
+- Reporting CLIP-similarity for both the universal prompt and ChatGPT prompt on the same test set to quantify prompt sensitivity.
+- Reporting CFG values explicitly for each row in Table 1.
 
 ## Removed Points
 
-These points are flagged to be removed — treat them with caution:
+- **"The Fourier score formulation is conceptually unsupported" (framed as fatal):** Kept in Major but downgraded. The concern about the latent-space gap is real and legitimate. However, the reviewer's framing as a fatal flaw is disproportionate — the paper provides strong empirical validation through controlled ablations (Table 1) that the 2D-FSD & 3D-SDS combination consistently outperforms alternatives. Many effective techniques in 3D generation are empirically motivated. The criticism is retained as a Major weakness (missing justification) but not Fatal (the method works and is validated).
 
-- **"The frequency analysis in Fig. 1 is purely qualitative."** While quantifying the energy ratio in frequency bands would be a nice addition, the qualitative observation is sufficient to motivate the approach, and the ablation provides the empirical validation that matters. Moved here as a minor presentation preference, not a real weakness.
-- **"CLIP-Sim limitations (preference for stylized content, insensitivity to geometry)."** The paper already supplements CLIP-Sim with user studies, PSNR, SSIM, and LPIPS, so this criticism is addressed by the existing evaluation suite.
-- **"DreamGaussian runtime comparison is confounded by initialization."** The runtime advantage of Fourier123 (52s vs. 147s) is a property of the *full pipeline*, not just the loss. The paper is transparent about using LGM init in the main pipeline. The runtime comparison is valid as a pipeline-level claim, though isolating the source of speedup would strengthen the analysis.
-- **"The GSO subset justification is too weak."** This is a minor presentation issue; 100 objects is a reasonable evaluation size, and the criticism is overly pedantic.
+- **"Runtime comparison is misleading":** Removed. The paper states "SOTA speed among optimization-based methods" (line 263), which is factually correct. The abstract says "within one minute," which is also correct. Table 2 clearly shows all runtimes including feedforward methods (LGM: 5s; InstantMesh: 11s). There is no deception.
 
----
+- **"Role of text prompt is under-explored":** Removed as a weakness. The paper acknowledges this and uses the weaker universal prompt for the main comparison, which is conservative and strengthens rather than weakens the results. This is at most a nice-to-have.
+
+- **"Missing appendix / missing proofs in appendix" and similar:** Removed per instructions — the parser strips these sections; they exist in the original submission.
+
+- **Weakness that paper "does not specify how renderings are aligned with ground-truth views":** Retained in modified form in Major weakness #2 (the GSO evaluation issue). The core concern (insufficient specification) is valid. But the framing as "suspiciously large gap suggesting methodological artifact" is speculation — kept as a request for clarification, not an accusation.
+
+- **Strength Finder's generic claims:** Filtered generic statements like "this paper addressed an important problem." Only the concrete, citation-backed strengths are retained.
 
 ## Novel Insights
 
-The reviewer insights converge on a single salient point that goes beyond the paper's own contributions: the paper's evaluation strategy creates an attribution problem. The *algorithmic* contribution (hy-FSD) is fairly evaluated in the ablation with sphere initialization, but the *system* contribution (Fourier123) is evaluated with a different initialization than the baselines, making it impossible to disentangle the effects. This is a common issue in systems papers that combine multiple components — the paper would benefit from explicitly separating the contribution of the loss function from the contribution of the initialization, even if only via a single additional column in Table 2. None of the reviewers identified a deeper flaw beyond this evaluation gap.
-
----
+The most interesting observation emerging from the review is that the paper's core contribution — separating 2D and 3D priors by domain (spatial vs. frequency) rather than by model identity — represents a genuinely new design space for score distillation. Prior work (Magic123) combined 2D SDS and 3D SDS both in the spatial domain and suffered from content conflicts. The paper's decomposition functionally disentangles "what to generate" (structure from Zero123, spatial) from "how detailed to make it" (texture from SD, frequency). This principle could generalize beyond the specific models used here. The main open question is whether the frequency-domain supervision specifically needs to operate on noise-prediction amplitudes, or whether a simpler mechanism (e.g., a perceptual loss on image frequencies) would achieve similar results — the theoretical gap noted in Weakness #1 prevents us from knowing.
 
 ## Suggestions
 
-1. **Add a "Fourier123 (sphere init)" row to Tab. 2 and Tab. 3** (or add a column) with the full metric suite. This is the single most impactful fix.
-2. **Report λ₂ᴅ and λ₃ᴅ values** used in Eq. (8).
-3. **Include standard deviations** or confidence intervals for all quantitative metrics.
-4. **Describe the view sampling strategy** during optimization (azimuth range, elevation range, sampling schedule).
-5. **Provide user study details** (blinding, presentation format, instructions to raters).
+1. **Clarify the GSO evaluation protocol in detail.** Specify: renderer used, lighting/background, camera pose selection, number of views per object, and whether the same poses are used for all methods. Report whether PSNR is computed on the input view, held-out views, or both. Provide a per-object breakdown or scatter plot to demonstrate the improvement is systematic rather than driven by outliers.
 
----
+2. **Provide a diagnostic for the FSD gradient signal.** Even a simple 2D experiment — optimizing a learnable image with 2D-FSD vs. 2D-SDS and showing the resulting amplitude spectra — would address the core theoretical concern without requiring extensive additional computation.
+
+3. **Report CFG values for each row of Table 1** and clarify whether they match the published optimal values for each baseline or are held constant. If they are held constant at the same value used by hy-FSD, state this explicitly.
+
+4. **Define "lateral Ground Truth"** in the main text, not just the table caption. Specify the range of camera poses used.
+
+5. **Quantify prompt sensitivity** by reporting CLIP-similarity (or PSNR if available) for the universal prompt vs. ChatGPT prompt on the same test set, to give readers a sense of how much headroom exists.
 
 ## Score and Decision
 
-The paper presents a genuinely novel and well-motivated idea (hybrid Fourier/spatial score distillation) and provides clean controlled evidence (Tab. 1) that it improves existing methods. The ablation is systematic and the visual results are convincing. However, the main comparison tables are weakened by the initialization confound, missing hyperparameters, and the absence of variance estimates. These are addressable issues — the contribution is real — but in the current form the evaluation does not fully support the strength of the claimed state-of-the-art results.
+The paper presents a genuinely novel idea, is well-motivated, and provides extensive empirical validation including controlled ablations across two 3D representations. The main weaknesses are (a) an under-justified conceptual link between the motivating frequency analysis and the actual loss formulation, and (b) an underspecified GSO evaluation with surprisingly large numbers. Both are addressable in revision — the former with diagnostic experiments, the latter with protocol clarification. The paper's core claims (that frequency-domain SD supervision outperforms spatial-domain SD supervision when combined with Zero123) are supported by the controlled ablation in Table 1, which does not depend on the GSO evaluation. The contribution is solid and the results are practically significant.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+I recommend acceptance with a request to address the major concerns in the final version.
+
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

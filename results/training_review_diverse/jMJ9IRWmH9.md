@@ -1,85 +1,73 @@
-Now I have all the evidence I need. Let me write the final consolidated review.
+Now I have verified all claims against the paper. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes P³EFT, a two-party protocol for privacy-preserving fine-tuning of large language models over APIs. It targets label privacy in a split-learning setting where the server hosts the model and the client owns labeled data. The method has two components: (1) gradient obfuscation via secret sharing (exploiting the linearity of backpropagation), and (2) a mixture-of-adapters approach combined with adversarial regularization to obfuscate activations. Experiments on DeBERTa-v2-XXLarge and Flan-T5-Large on SST-2 and MRPC show accuracy comparable to non-private fine-tuning while resisting several label-leakage attacks.
+This paper addresses label privacy during API-based fine-tuning of large language models. It proposes P³EFT, a two-party split learning protocol that combines (1) a privacy-preserving backpropagation that exploits the linearity of backprop in output gradients to split the true gradient across multiple servers, and (2) an adversarial mixture of multiple adapter sets whose outputs are combined with randomized mixing weights to prevent label leakage from activations. Experiments on DeBERTa-v2-XXLarge and Flan-T5-Large with LoRA adapters on SST-2 and MRPC show that P³EFT achieves accuracy close to non-private fine-tuning while resisting several label-inference attacks.
 
 ## Strengths
 
-- **Clear diagnosis of label leakage in standard PEFT fine-tuning (Section 3.1, Figure 1):** The paper provides visual evidence that both gradients and activations from LoRA fine-tuning cluster by label under PCA, establishing the concrete privacy threat the method addresses. This grounded motivation is valuable.
+1. **Principled gradient privacy via linearity of backprop (Section 3.2).** The observation that backprop is linear in output gradients for fixed inputs and parameters is correctly derived. This allows the client to decompose the true gradient into noise vectors sent to different servers and recover the exact gradient — not a noisy approximation — by recombination. This is a genuine advance over prior gradient-noise defenses that degrade accuracy.
 
-- **Novel gradient obfuscation via linear decomposition (Section 3.2, Algorithm 1):** Exploiting the conditional linearity of backpropagation is a clever insight. The secret-sharing construction decomposes the true gradient into noise vectors sent to separate servers, and the client recovers the exact gradient by recombining — meaning training dynamics are mathematically unchanged. The XGBoost attack achieving ~50.4% accuracy (chance-level) on the obfuscated gradients provides empirical validation.
+2. **Leveraging PEFT compactness for multi-adapter mixing (Section 3.3).** Using the fact that LoRA adapters are compact enough to maintain multiple sets, the paper mixes adapter outputs with randomized weights whose gradients w.r.t. individual adapters are obfuscated, while the combined model retains utility. This is a clever use of PEFT's properties that would be prohibitive for full parameter training.
 
-- **Mixture-of-adapters for activation obfuscation (Section 3.3):** Using multiple adapter sets with randomized mixing weights is a principled way to prevent individual adapter outputs from leaking labels while preserving the combined model's predictive accuracy. This is a distinctive contribution tailored to PEFT's parameter efficiency.
+3. **Systematic attack surface analysis (Section 3.1, Figure 1).** The paper identifies that both gradients w.r.t. activations *and* trained activations leak labels via simple k-means clustering, and correctly notes that protecting only one source is insufficient. This motivates the two-pronged defense and is more thorough than prior split-learning studies that focus on gradients alone.
 
-- **Practical evaluation on large, realistic models:** Experiments on DeBERTa-v2-XXLarge (~1.5B parameters) and Flan-T5-Large on GLUE tasks demonstrate that the method scales to the types of models and tasks where this privacy concern is most relevant.
-
-- **Accuracy-privacy trade-off analysis (Figure 5):** The sensitivity charts comparing P³EFT against the Distance Correlation baseline across varying regularizer coefficients give a more nuanced picture than a single operating point would.
+4. **Empirical validation on large modern models.** The paper evaluates on DeBERTa-v2-XXLarge (1.5B) and Flan-T5-Large with LoRA, which is larger-scale than prior split-learning work tested on smaller models (e.g., CIFAR-10). The results show P³EFT outperforms the Distance Correlation baseline at matched privacy levels.
 
 ## Weaknesses
 
-### Fatal
-None. The core approach is conceptually valid and the experiments, while incomplete, do not contain errors that invalidate the central claims.
-
 ### Major
 
-1. **Adversarial regularization is critically under-specified (Section 3.3, lines 163–169).** The paper states that linear "heads" are fit to predict labels from individual adapter activations, then the adapters are updated adversarially — but provides no explicit update rule, no optimization details (number of steps, optimizer, whether this is a min-max formulation or a gradient reversal layer), and no hyperparameters. This component is essential for the activation privacy claim (one of the two identified attack vectors in Figure 1), yet the description is too vague to reproduce. The claim that this step takes "negligible time" is unsubstantiated. Without specifying or ablating this mechanism, the method's privacy guarantees for activations cannot be independently verified.
+1. **Server non-collusion assumption mismatched with motivating use cases.** The gradient privacy protocol (Section 3.2) requires multiple independent, non-colluding servers — if two servers share information, the true gradient is recovered by summing components. The paper acknowledges this in passing (line 119–128) and suggests decentralized systems (Petals) or TEEs, but its primary motivation (Section 1) explicitly cites commercial APIs like OpenAI, Hugging Face AutoTrain, and OctoAI — none of which offer multiple independent servers to a single client. The paper does not provide a credible path for deploying the protocol under the commercial-API scenario that motivates it. This is not fatal (the protocol is valid for decentralized systems, and TEEs are mentioned as an alternative), but it is a significant gap between problem framing and solution that limits practical applicability.
 
-2. **"Provably obfuscate" is claimed without a formal privacy definition or proof (line 32).** The abstract and contributions assert that P³EFT can "provably obfuscate the gradients," but no formal definition of privacy (e.g., cryptographic indistinguishability, information-theoretic leakage bound, or differential privacy) is given. The security analysis is entirely empirical and attack-specific (ROC AUC against three attacks). While the secret-sharing construction has intuitive security properties, the paper does not formalize what "obfuscation" means or under what assumptions it holds, making the "provably" claim rhetorical rather than substantive.
-
-3. **Protocol security depends on infrastructure assumptions that are neither validated nor experimentally evaluated.** The protocol requires either (a) multiple non-colluding servers or (b) trusted execution environments (TEEs) to prevent a single server from recovering the gradient by combining multiple noise vectors or inverting consecutive parameter updates (Section 3.2). The paper acknowledges these requirements but provides no experiments, overhead measurements, or evidence that either condition is practically achievable for today's fine-tuning APIs. The alternative ("add noise to parameters") is itself described as "risky" and is not evaluated.
+2. **Overclaimed guarantee for adversarial activation regularization.** Section 3.3 states that the adversarial regularizer "ensures that it is impossible to predict labels from individual adapters" — this is too strong. The adversarial update (fitting linear heads, then updating adapters to prevent prediction) is a heuristic inspired by gradient reversal (Ganin & Lempitsky 2015); it provides no formal bound on information leakage. The empirical attack AUCs only show that *simple* classifiers fail under *specific* experimental conditions. An adaptive attacker with a more powerful model or combining information across time steps may still recover labels. The paper would benefit from tempering this language ("reduces leakage against the attacks considered") or providing a formal analysis.
 
 ### Minor
 
-1. **Experimental results lack statistical rigor.** Bar charts (Figures 4, 5) are presented without error bars, confidence intervals, or standard deviations. Given training variance in deep learning, the claim that P³EFT achieves "nearly the same accuracy" as the non-private baseline cannot be properly assessed. Multi-seed runs with reported variance are needed.
+3. **Input privacy scoped out but not adequately addressed.** The paper correctly identifies that it focuses on label privacy (Section 1, line 25), noting inputs "can often be anonymized or obfuscated by other means (see Section 2.1)." However, Section 2.1 is a general background on federated/split learning and does not actually discuss input obfuscation methods. For many sensitive domains (medical records, proprietary text), the raw input itself is private and cannot be shared with an untrusted server. This limitation deserves a clearer statement; as it stands, the scope is narrower than the phrase "client data privacy" may imply.
 
-2. **The `obfuscate` function in Algorithm 1 is not defined.** The paper does not specify the noise distribution, how the scalars α_j are chosen, or how the decomposition Σ α_j · ĝ_h^j = g_h is constructed for m > 2. The experiment uses noise variance 1000 (line 187), but the distribution family is not stated. Without this, the gradient obfuscation component is not fully reproducible.
+4. **Missing computational overhead analysis.** The paper claims the adversarial update takes "negligible time" (line 169) but provides no runtime or communication cost measurements. Given that the protocol requires \( m \times n \) forward/backward calls per step (for \( m \) gradient splits and \( n \) adapter sets), understanding the practical overhead is essential for a method positioned as practical.
 
-3. **No ablation studies on key hyperparameters.** The paper fixes n=2 adapters, m=2 noise passes, and noise variance=1000 but provides no ablation analyzing sensitivity to these choices. How accuracy and privacy vary with the number of adapters or passes is unknown.
-
-4. **No computational overhead analysis.** Private backprop multiplies API calls by m; multiple adapters multiply forward passes by n. The paper reports no wall-clock time, cost increase, or communication overhead — critical information for practitioners evaluating whether the method is practical.
-
-5. **DC baseline tuning is vaguely described.** The Distance Correlation baseline is tuned "to maximize accuracy with a constraint that DC has same or comparable privacy as our algorithm" (line 199), but how "comparable privacy" is measured or enforced is not specified, making the comparison difficult to interpret.
-
-6. **Limited attack evaluation.** The XGBoost attack achieving chance-level accuracy (Section 4.1) is encouraging, but stronger attacks are not tested — e.g., adversaries who know the noise distribution, combine multiple time steps, or exploit the mixing weights structure. The privacy evaluation remains attack-specific rather than providing worst-case bounds.
+5. **No adaptive attack evaluation.** The privacy metrics rely on three attack methods (spectral attack, norm attack, logistic regression) applied to the obfuscated data as-is. These are not adaptive attacks that account for the defense mechanism. A stronger evaluation would include attackers who know the defense and train more expressive models on the obfuscated activations/gradients.
 
 ### Trivial
 
-- Notation inconsistency: "n=2 with noise variance set to 1000" in Section 4.1 (line 187) uses n to refer to noise passes, whereas n denotes the number of adapters in Section 3.3.
+- Line 207: "P³FT" appears to be a typo for "P³EFT".
 
 ## Nice-to-Haves
 
-- Comparison with simpler baselines (e.g., adding Gaussian noise to gradients/activations without the mixing scheme) would clarify whether the secret-sharing and adapter mixing are both necessary or whether the method is over-engineered.
-- A single-server scenario (TEE-based) with measured overhead would substantially strengthen the practical claims.
+- A comparison to a calibrated-noise baseline (e.g., adding Gaussian noise to gradients before sending, with privacy level matched via the same attack metrics) would help justify the complexity of P³EFT's gradient splitting over simpler noise-based approaches.
+- Evaluating on a generative task (e.g., summarization with Flan-T5) would broaden the contribution, though this is scope expansion beyond the paper's current focus.
+- A sensitivity analysis showing how privacy degrades when the adversarial regularizer is weakened or omitted would be informative.
 
 ## Removed Points
 
-These points were flagged by reviewers but are removed or downgraded per the instructions:
+The following reviewer criticisms were removed per the review guidelines:
 
-1. **"Differential privacy dismissal is too quick"** — Removed. The paper correctly distinguishes its label-privacy setting from DP's membership-privacy setting. The non-label party knows which examples participate, so DP's standard protection is not the relevant guarantee. This is a reasonable scope decision, not a flaw.
-2. **"'Training w/o LoRA adapters' baseline provides little insight"** — Removed. The paper presents this as a lower-bound baseline, which is a standard and useful reference point.
-3. **"Missing citation for Ganin & Lempitsky (2015)"** — Removed. The paper does cite it (line 163); any garbling is a parser artifact.
-4. **"Missing appendix, missing proofs in appendix"** — Removed. The parser strips appendix sections from all papers; these exist in the original submission.
-5. **"Gradients for each adapter depend on W — is it guaranteed that noise does not cancel the mixing effect?"** — Removed. The paper explains that adapters receive different gradients and diverge naturally (line 161), and the adversarial regularization prevents them from converging back to a leaky state.
-6. **General formatting/typo nitpicks** — Removed per instructions (parser artifacts, not author errors).
+- *"Algorithm 2 is referenced but not fully presented in the main text"* — The parser strips appendices; Algorithm 2 exists in the original submission.
+- *"Comparison to DP baselines"* — The paper already explains why DP is not applicable in this setting (line 53); the critic acknowledges this but asks for "more thorough discussion."
+- *Request for evaluation on generative tasks* — Scope expansion beyond the paper's stated focus on classification.
+- *"The 'Training w/o LoRA adapters' baseline is expected to have very low accuracy"* — This baseline serves as a lower-bound (max privacy, minimal accuracy), which is a standard and informative baseline choice.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surfaced an important structural tension: the gradient obfuscation component (Section 3.2) is elegant and mathematically lossless, while the activation obfuscation component (Section 3.3) is heuristic and under-specified. This asymmetry risks making the paper's overall privacy claim only as strong as the weaker link. A useful insight is that the secret-sharing gradient protocol could be cleanly separated and formally proven (it is, at heart, a standard additive secret sharing scheme), potentially allowing the paper to claim a well-defined privacy guarantee for the gradient path even if the activation path remains heuristic. This hybrid approach — formal for gradients, empirical for activations — might be a more honest and still useful framing than the current monolithic "provably obfuscate" claim.
+None beyond the paper's own contributions. The reviewers' analyses largely corroborate the paper's stated claims and limitations without surfacing new cross-cutting patterns.
 
 ## Suggestions
 
-1. Formally define the security guarantee for the gradient obfuscation component. Since it reduces to additive secret sharing, an information-theoretic argument (each server's view is independent of g_h) is within reach and would substantiate the "provably" claim.
-2. Provide the full specification of the adversarial regularization: update rule, optimizer, number of steps per training iteration, and learning rate. Alternatively, release the code with these details.
-3. Add error bars (mean ± std over at least 3 seeds) to all experimental results.
-4. Include an ablation study showing privacy degradation when the adversarial regularizer is removed, to verify this component is necessary.
-5. Report the number of API calls and wall-clock time overhead introduced by the protocol.
+1. **Address the server-assumption gap head-on.** Either propose a concrete mechanism (e.g., using cryptographic commitments, auditable TEEs, or horizontal client-side splitting) to make the protocol work with single-entity API providers, or pivot the motivation toward decentralized systems where the assumption holds naturally. A clear limitations paragraph acknowledging this gap would substantially improve the paper's honesty.
+
+2. **Temper the activation privacy claims.** Replace "ensures that it is impossible to predict labels" with a more measured statement like "reduces label leakage against the considered attacks" and discuss what stronger adaptive attacks might look like.
+
+3. **Report runtime and communication cost.** Even a single table showing wall-clock time per step and total communication volume for the tested configurations would help readers assess the practical tradeoffs.
+
+4. **Clarify the input privacy limitation.** Either add a brief discussion of what "obfuscation by other means" entails concretely, or explicitly scope the paper to label privacy under the assumption that inputs are not sensitive.
 
 ## Score and Decision
 
-The paper identifies a real and timely problem and contributes two clever ideas — gradient secret-sharing and mixture-of-adapters activation obfuscation — that are genuinely novel and leverage PEFT's structure in a non-trivial way. The experimental setting (large models, GLUE tasks) is appropriately ambitious.
-
-However, the paper has significant rigor gaps: the adversarial regularization (critical for activation privacy) is under-specified to the point of non-reproducibility; the "provably" claim is unsupported by any formal definition; the infrastructure assumptions are untested; and the experiments lack basic statistical rigor (no error bars, no ablations, no overhead measurements). These are not fatal — the core approach is valid — but they prevent the paper from making a convincing case in its current form. A major revision addressing the adversarial regularization specification, adding formal grounding for the gradient claim, and tightening the experimental methodology could yield a strong paper.
+**Overall assessment:** The paper identifies a real problem and proposes a clever combination of techniques that is well-aligned with PEFT's properties. The gradient-splitting protocol is principled, and the multi-adapter mixing is an interesting idea. However, the core gradient privacy mechanism requires a server non-collusion assumption that does not match the commercial API scenarios motivating the work, and the activation privacy claims are overstated. The paper has genuine contributions but needs substantial revision — particularly to address the server-assumption gap and temper claims — before it is ready for acceptance. The experimental evaluation is a reasonable start but limited in scope.
 
 MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

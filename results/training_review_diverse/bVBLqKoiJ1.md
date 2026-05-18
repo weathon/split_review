@@ -1,20 +1,20 @@
+Now I have all the information needed. Let me produce the consolidated review.
+
 ## Summary
 
-This paper introduces "Paint by Inpaint," a framework that constructs a large-scale, high-quality dataset (PIPE) for text-guided object addition by inverting the object-removal process. The key insight is that removing objects (via inpainting) is easier than adding them, so the paper creates training pairs where real images serve as targets and their inpainted (object-removed) versions serve as sources, then trains a diffusion model to reverse the process. The resulting model achieves strong quantitative and qualitative results across multiple benchmarks and is preferred by human evaluators 72.5% over InstructPix2Pix.
+This paper introduces Paint by Inpaint, a framework that inverts the object-removal process to create PIPE, a large-scale dataset (~1M image pairs) for instruction-guided object addition. Using segmentation datasets (COCO, OpenImages) and a Stable Diffusion inpainting model, the pipeline removes objects to create source images, then pairs them with the original (target) images — guaranteeing consistency since only the masked region differs. Diverse natural-language instructions are generated via class templates, a VLM+LLM pipeline, and reference datasets. A diffusion model trained on PIPE achieves state-of-the-art results on object-addition benchmarks (PIPE test set, MagicBrush object-addition subset, OPA) and is preferred by human evaluators ~72.5% over InstructPix2Pix. Combining PIPE with general editing data also improves overall editing performance on the full MagicBrush test set.
 
 ## Strengths
 
-- **Clever and well-motivated inversion insight.** The observation that object addition is the inverse of object removal, and that this inversion allows leveraging abundant segmentation data to create training pairs with *real* target images (rather than synthetic ones), is genuinely novel and clearly articulated (Abstract, lines 7–11, Section 3).
+- **Novel inversion insight for dataset creation.** The core idea — that adding objects is the inverse of removing them, and removal is easier because segmentation masks and inpainting models are readily available — is clearly articulated (Section 1, Section 3) and directly operationalized. This is a clever and practical way to circumvent the fundamental difficulty of producing paired natural-image editing data.
 
-- **Large-scale, high-quality dataset with real targets.** PIPE contains ~1M image pairs, ~1.88M instructions, and >1,400 classes. As Table 1 shows, it is the only dataset offering both real target images and general classes, with consistency between source and target enforced by construction.
+- **Real target images with guaranteed consistency.** Unlike InstructPix2Pix (synthetic source and target) and MagicBrush (synthetic with manual curation), PIPE uses real natural images as targets, and consistency between source and target is enforced by construction (only the masked region differs, with α-blending for smooth transitions). Table 1 and Section 3.1 document this advantage clearly.
 
-- **Consistently strong empirical performance.** The trained model outperforms IP2P, Hive, SDEdit, and VQGAN-CLIP across L1, L2, CLIP-I, and DINO on the PIPE test set, MagicBrush (both zero-shot and fine-tuned), and OPA (Tables 2–4). The human evaluation (72.5% overall preference over IP2P, Table 5) provides strong complementary evidence.
+- **Strong and consistent quantitative results.** The model outperforms baselines (IP2P, Hive, VQGAN-CLIP, SDEdit) across three benchmarks — PIPE test set (Tables 2), MagicBrush object-addition subset (Table 3), and OPA (Table 4) — with particularly large margins on consistency metrics (CLIP-I: 0.962 vs. 0.899; DINO: 0.875 vs. 0.715 on the PIPE test set). Human evaluation confirms a 72–73.6% preference rate over IP2P (Table 6).
 
-- **Careful data curation pipeline.** The multi-stage filtering (pre-removal CLIP filtering, CLIP consensus, multimodal CLIP filtering, consistency enforcement, importance filtering) is thorough and well-reasoned (Section 3.1, Figure 3).
+- **Scalable and diverse instruction generation.** Three complementary strategies (class templates, VLM+LLM, reference datasets) produce 1.88M diverse instructions from 889K image pairs (Section 3.2). The use of CogVLM with masked inputs and Mistral-7B with in-context learning generates attribute-rich instructions beyond simple class labels.
 
-- **Diverse instruction generation.** Using VLM-LLM (CogVLM + Mistral) and manual references (RefCOCO/RefCOCO+/RefCOCOg) produces varied, natural-language instructions beyond simple class names (Section 3.2).
-
-- **General editing enhancement.** Combining PIPE with the IP2P dataset and fine-tuning on MagicBrush yields improved general editing performance (Table 6), demonstrating utility beyond object addition.
+- **General editing improvement via dataset combination.** Merging PIPE with the IP2P dataset and fine-tuning on MagicBrush yields new SOTA on the full MagicBrush test set (Table 8), demonstrating that PIPE's value extends beyond object addition to boost overall instruction-following editing.
 
 ## Weaknesses
 
@@ -24,60 +24,66 @@ None.
 
 ### Major
 
-None.  
-
-The paper's core contributions (the inversion insight, the dataset, the trained model) are sound and well-supported. The concerns below are substantive but do not threaten acceptance.
+None. The paper's core claims are supported by the evidence presented. The weaknesses below are addressable in revision or desirable for strengthening but do not undermine the fundamental contribution.
 
 ### Minor
 
-- **Training–inference mismatch in source-image structure.** During training, every source image has the object region pre-filled with plausible background (via inpainting). At inference, the user provides a natural image with arbitrary content where the object should go. The paper provides strong evidence that the model generalizes (OPA uses natural source images; MagicBrush is fully out-of-distribution), but it does not analyze *how* the model decides where to place objects or whether it relies on cues from the inpainted region (e.g., interpolation artifacts) that are absent at test time. This does not invalidate the contribution—the empirical results speak for themselves—but it leaves an important question unexamined. The authors should add localization analysis (e.g., attention maps, comparison to ground-truth positions on OPA) or at minimum acknowledge and discuss this discrepancy explicitly. The existing generalization evidence partially addresses the concern, but the lack of analysis is a genuine gap.
+- **The final dataset yield after all filtering stages is not clearly reported.** Line 205 reports "889,230 unique images" as the raw input from COCO+OpenImages, and the abstract/introduction claim "approximately 1 million image pairs" and "1,879,919 instructions" (Table 1). However, the multi-stage filtering pipeline (pre-removal: mask size/location/CLIP similarity; post-removal: CLIP consensus, multimodal CLIP, importance filtering) necessarily removes some fraction of examples. The paper never explicitly states the number of source-target-instruction triplets that survive *all* filtering stages. Since the pipeline's stringency directly affects dataset quality, knowing the yield is important for assessing the trade-off between scale and filtering rigor. This is an omission of a useful reporting detail, not a fatal flaw — even a conservative yield estimate from 889K images would still constitute a large dataset.
 
-- **Narrow baseline comparison for the general editing claim (Section 6).** The paper states that combining PIPE with IP2P data yields "new state-of-the-art scores for the general editing task" (line 508). The comparison is limited to IP2P (original and fine-tuned on MagicBrush). The harsh critic's claim that "no comparison is made with MagicBrush's own trained model" is **incorrect**—IP2P FT *is* the MagicBrush-trained model, since the MagicBrush paper (Zhang et al.) fine-tuned IP2P on MagicBrush data and established it as the prior SOTA on that benchmark. However, the broader point stands: only IP2P variants are compared. Adding at least one more contemporary baseline (e.g., Hive, which is compared in the object-addition experiments but not in the general editing experiment) would substantially strengthen the SOTA claim. The claim is defensible as written (beating the previous best model on this benchmark), but the framing overreaches given the narrow comparison set.
+- **Filtering thresholds are described qualitatively, not quantitatively.** The CLIP consensus threshold (line 239: "manually adjusted") and importance filtering threshold (line 251: "manually set threshold") are reported without numerical values or a reproducible decision rule. Without these, other researchers cannot replicate the filtering pipeline exactly. The supplementary materials may contain additional details (the paper references them), but the main text should at minimum report the actual threshold values or describe how they were determined (e.g., percentile-based on a validation set).
 
-- **No confidence intervals or error bars on quantitative metrics.** For the MagicBrush object-addition subset (144 edits) and OPA, variance could be non-negligible. While the improvements are large enough to likely be significant, reporting standard deviations or bootstrap confidence intervals would improve rigor, especially given that the paper notes reproducibility difficulties with the IP2P MagicBrush fine-tuning baseline (line 505).
+- **No ablation study isolating the contributions of dataset components.** The PIPE pipeline combines three instruction sources (class-based, VLM-LLM, reference-based) and multiple filtering stages (CLIP consensus, multimodal CLIP, importance filtering). The paper does not include experiments that ablate individual components — e.g., training without VLM-LLM instructions, without the CLIP-consensus filter, or with a relaxed filtering threshold. Such ablations would directly demonstrate which design choices drive the reported performance gains versus treating the pipeline as a monolith.
 
-- **Fine-tuning reproducibility gap.** The paper honestly reports being unable to reproduce IP2P's MagicBrush fine-tuning results (line 505). Reporting the exact configuration used for fine-tuning IP2P (learning rate, steps, scheduler, seed) would help future comparisons and mitigate this concern.
+- **The central "inversion" insight (removal is easier than addition) is asserted but not directly validated.** The paper argues that object removal is simpler and therefore a suitable proxy for generating addition training data. This claim is intuitive but could be supported by measuring the success rate of the removal pipeline (what fraction of images pass all filters?) versus a hypothetical direct-addition pipeline. Without such evidence, the insight remains plausible but untested — though the downstream experimental validation does support the overall approach.
+
+- **The PIPE test set inherits the same pipeline biases as the training set.** The 750-image test set from COCO validation (Section 5.1) is constructed using the same inpainting model and filtering pipeline as the training data. This makes performance on this test set a measure of in-distribution effectiveness. However, this concern is partially mitigated by evaluation on two external benchmarks (MagicBrush and OPA) that use independently constructed data.
 
 ### Trivial
 
-None that survive filtering.
+- None.
 
 ## Nice-to-Haves
 
-- **Statistics on filtering stages.** Reporting how many examples are removed at each pre-removal and post-removal stage would help readers understand the quality–diversity trade-off. This is particularly relevant for the pre-removal CLIP-object similarity filter, which the paper itself notes removes "abnormal object views" and "occluded objects" (line 216)—quantifying the fraction removed would contextualize potential class bias.
-
-- **Ablation comparing PIPE to a synthetic object-addition dataset.** Training the same model on a synthetically generated object-addition dataset (matched in scale to PIPE) would cleanly demonstrate that real target images are the key advantage. This is a natural follow-up experiment, not a weakness of the current paper.
+- A survival/sankey diagram showing how many image-mask pairs pass each filtering stage would make the "approximately 1 million" claim precise and illustrate the quality–scale trade-off.
+- Reporting the distribution of instruction types (what fraction of the 1.88M instructions come from each of the three sources) would help readers understand the dataset's composition.
+- A brief failure-case analysis showing what the model produces on instructions that require physical plausibility (e.g., floating objects, unusual scales) would give useful context for the method's limitations.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+The following criticisms from the Harsh Critic were evaluated against the paper text and removed:
 
-- *"No comparison is made with...MagicBrush's own trained model"* — Factually incorrect. IP2P FT (line 491, Table 6) **is** the MagicBrush-trained model, as the MagicBrush paper fine-tunes IP2P on the MagicBrush dataset. The comparison is therefore present.
-- *Alpha-blending boundary artifacts (Consistency Enforcement)* — Purely speculative concern with no evidence that such artifacts exist or that the model exploits them. The paper states the blending ensures "a smooth, natural transition between the regions" (line 248), which is standard practice.
-- *Pre-removal CLIP filtering biases toward easy objects* — This is inherent to any quality filtering and is acknowledged by the paper's design (filtering "abnormal object views...occluded objects," line 216). The concern is valid in principle but is a design choice, not a flaw. Moved to Nice-to-Haves.
+1. **"Evaluation on general editing (Section 6) lacks reproducibility and raises fairness concerns"** — The paper transparently states it could not reproduce the original MagicBrush numbers (line 505) and *then* runs all models (its own and the IP2P FT baseline) with the same seed and the official evaluation script. The comparison in Table 8 is between the authors' own IP2P FT and Ours+IP2P FT, both evaluated under identical conditions. This is a fair and properly documented comparison, not an unfair one anchored to an unreproduced number. The criticism misreads the experimental design.
+
+2. **"Human evaluation protocol conflation may inflate preference"** — The paper explicitly asks annotators to provide "reasonable image addition instructions" (line 443), meaning the evaluation is scoped to object addition by design. Comparing an object-addition model against IP2P (which was also trained on object-addition instructions) on object-addition instructions is the correct evaluation paradigm, not a bias. The paper's model is appropriately evaluated on its claimed strength.
+
+3. **Criticisms questioning reproducibility of filtering pipeline due to "manually adjusted" thresholds** — Kept in Minor above but reduced in severity. The threshold values are indeed missing, but the filtering pipeline is described with enough specificity (CLIP consensus = standard deviation of three inpainted CLIP embeddings, multimodal CLIP = similarity between inpainted region and class name) that the approach is reproducible in principle even without the exact numbers — the authors just need to report them.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a perspective that the authors have missed or that recontextualizes their contribution in a surprising way.
+None beyond the paper's own contributions. The reviews largely converge with the paper's stated claims; the insights from the Harsh Critic are standard reviewer concerns about reporting completeness rather than novel observations about the work.
 
 ## Suggestions
 
-1. **Add a discussion and analysis of the training–inference mismatch.** Even a short paragraph acknowledging the discrepancy and providing evidence that the model does not rely on inpainted-region cues (e.g., showing attention maps, comparing output locations to ground-truth positions on OPA) would significantly strengthen the paper.
-
-2. **Broaden the baseline set in Section 6 (general editing) or temper the SOTA claim.** Adding Hive and/or the original MagicBrush model to Table 6 would either confirm the SOTA claim or reveal its limits. If adding baselines is impractical, replace "sets new state-of-the-art" with "improves over the previous best method (fine-tuned IP2P) on this benchmark."
-
-3. **Report standard deviations or confidence intervals** for the quantitative results, especially on the smaller test sets (MagicBrush: 144 edits; OPA).
-
-4. **Include the exact fine-tuning configuration** used for the IP2P baseline that the authors could not reproduce, to aid reproducibility.
+- Report the final number of training triplets after all filtering stages, ideally as a per-stage survival table or figure.
+- Provide numerical values for the CLIP consensus threshold, multimodal CLIP filtering threshold, and importance filtering similarity threshold, or describe the rule used to set them (e.g., percentile-based on a held-out set).
+- Add an ablation experiment training the model on a subset of PIPE (e.g., class-based instructions only, or without the CLIP-consensus filter) to demonstrate which pipeline components drive performance.
+- Move the MagicBrush reproduction note (line 505) to a separate limitation paragraph, and consider including the authors' own IP2P FT numbers alongside the original MagicBrush reported numbers for full transparency.
 
 ## Score and Decision
 
-**Originality:** High — the inversion insight is genuinely clever.  
-**Importance of question:** High — mask-free object addition is a practically relevant and challenging task.  
-**Claims support:** Good, with minor overclaiming in Section 6.  
-**Soundness:** Solid — experiments are well-designed, the dataset pipeline is thorough, and the human evaluation is rigorous.  
-**Clarity:** Good — the paper is well-structured and the core idea is clearly communicated.  
-**Value to community:** High — the dataset, model, and framework are likely to be widely used.
+**Originality:** 4/5 — The inversion insight is genuinely novel and practically useful, though the overall training recipe (diffusion model + instruction conditioning) builds on established methods.
+
+**Importance of research question:** 4/5 — High-quality object addition is a well-motivated problem with practical applications, and the lack of large-scale natural-image training data was a genuine bottleneck.
+
+**Claims support:** 3.5/5 — The core claims are well supported by quantitative and human evaluation, but the missing filtering yield and threshold details slightly weaken the dataset contribution's verifiability.
+
+**Soundness of experiments:** 4/5 — Solid experimental design with multiple benchmarks, baselines, and human evaluation. The general editing experiment is fairly designed. Minor gaps (no ablations) are common for dataset papers of this scale.
+
+**Clarity of writing:** 4/5 — Well-structured and readable. The pipeline is clearly described, and the figures are informative.
+
+**Value to community:** 4/5 — The PIPE dataset and trained models, if released as promised, would be useful resources for the community working on instruction-based image editing.
+
+The paper makes a solid contribution: a clever and scalable dataset generation method, thorough experimental validation, and a model that demonstrably advances object-addition performance. The weaknesses are all addressable reporting gaps rather than structural flaws. The paper is above the acceptance threshold for a major venue.
 
 MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

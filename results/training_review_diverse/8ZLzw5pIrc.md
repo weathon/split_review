@@ -1,70 +1,78 @@
-Now I have a thorough understanding of the paper and the reviewer claims. Let me assemble the final review.
+Now I have all the information needed. Let me compose the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces Order-Aware Interactive Segmentation (OIS), which incorporates relative depth information (via "order maps" computed from monocular depth estimation) and foreground-background separated attention into interactive segmentation. The method uses a frozen DepthAnythingV2 encoder, proposes order-aware masked cross-attention guided by depth-based order maps, object-aware attention that separates positive/negative click embeddings, and a hybrid dense+sparse prompt integration. Experiments on HQSeg44K and DAVIS show substantial improvements over SegNext and SAM baselines.
+This paper proposes OIS (Order-aware Interactive Segmentation), a method that incorporates relative depth (order) information into interactive segmentation. OIS introduces three components: (1) order-aware attention, which uses depth-derived order maps computed relative to the user's click location to attend to regions at the same depth, (2) object-aware attention, which separates foreground and background prompt embeddings to attend to their respective regions (adapted from Cutie), and (3) a hybrid dense+sparse prompt fusion strategy that balances spatial alignment with computational efficiency. Experiments on HQSeg44K and DAVIS show SOTA results, with a 7.61 mIoU improvement after one click on HQSeg44K over SegNext and faster inference.
 
 ## Strengths
 
-- **Novel depth-guided attention mechanism with clear quantitative validation.** The order-aware attention forces sparse embeddings to attend only to image regions whose depth is close to the prompt's depth. This is effectively validated: removing order-aware attention (Table 4, row 2) increases NoC90 by 1.04 and drops 5-mIoU by 1.15 on DAVIS. Qualitative results (Figures 4, 5) show cases where only OIS correctly segments objects (e.g., bike vs. window, rhinoceros occluded by tree) that confuse SegNext and HQ-SAM.
+- **Order-aware attention provides a novel mechanism for integrating relative depth with user clicks.** Unlike prior interactive segmentation methods that either ignore depth entirely or incorporate it via a separate encoder (e.g., MM-SAM), OIS computes per-prompt order maps (Eq. 1–2) that encode the relative depth between the clicked location and every pixel. The masked cross-attention (Eq. 3) suppresses regions far from the prompt's depth, which directly addresses false positives from overlapping objects at different depths. The ablation in Table 4 confirms that removing this module increases NoC90 by 1.04 and reduces 5-mIoU by 1.15.
 
-- **First application of explicit foreground-background separated cross-attention to interactive segmentation.** Object-aware attention forces positive-click embeddings to attend only to the foreground (previous mask) and negative-click embeddings only to the background. The ablation (Table 4, row 3) shows removing this hurts performance (NoC90 +0.75, 5-mIoU −0.63), confirming its independent contribution. The paper correctly distinguishes this from SAM, where all prompt embeddings attend to all regions.
+- **Object-aware attention introduces explicit foreground/background separation into interactive segmentation.** This component, adapted from Cutie (Cheng et al., 2024), is the first application of foreground-background separated masked cross-attention for click-based interactive segmentation. Positive embeddings attend only to foreground regions and negative embeddings only to background regions (Eq. 4–5), which the ablation shows is critical for distinguishing objects with similar depth (removing it increases NoC90 by 0.71 and reduces 5-mIoU by 1.03 in Table 4).
 
-- **Strong state-of-the-art results with large margins.** On HQSeg44K (Table 1), OIS achieves 1-mIoU of 89.40 vs. SegNext's 81.79 (+7.61). On DAVIS (Table 2), NoC95 drops from 10.73 (SegNext) to 8.59 (>2 click reduction). These are not incremental gains.
+- **Hybrid dense+sparse prompt fusion achieves a practical accuracy-efficiency trade-off.** Dense embeddings (added to image features) maintain spatial alignment without the heavy self-attention used in prior dense methods like SegNext, while sparse embeddings enable lightweight cross-attention and support the attention modules. Table 3 shows OIS has 14ms SPC vs. SegNext's 24ms (~1.7× faster) and 0.51s SAT latency vs. 0.89s, while also achieving better accuracy.
 
-- **Efficiency gains through hybrid dense+sparse design.** The design replaces the heavy self-attention over spatial features (used by SegNext) with cross-attention between sparse query embeddings and spatial features, yielding measured 2× speedup over SegNext (Table 3) while maintaining higher accuracy.
+- **Thorough evaluation on two standard benchmarks (HQSeg44K and DAVIS) with multiple metrics (NoC90/95, mIoU, NoF, SPC, SAT latency).** The consistent SOTA results across all metrics provide strong evidence of generalization.
+
+- **Ablation study (Table 4) systematically isolates the contribution of each module.** Removing order-aware attention, object-aware attention, sparse embeddings, or dense embeddings each causes a clear performance drop, confirming all components contribute to the final result.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Missing quantitative comparison to MM-SAM, the only prior depth-based interactive segmentation method.** The paper identifies MM-SAM as "the only related work" incorporating depth into interactive segmentation (Section 2, line 31), describes it as performing poorly, and even shows a qualitative example of its failure (Section 4.3, line 143). Yet MM-SAM does not appear in any of the main quantitative tables (Tables 1, 2, or 3). Since the paper's central claim is that its order-map formulation is superior to simply feeding depth as an extra modality, the absence of a direct numerical comparison to MM-SAM is a significant gap. Without this, the reader cannot assess whether the proposed approach is genuinely better than the existing depth-augmented baseline or merely an alternative with different trade-offs.
-
-2. **Potential abstract number inconsistency on DAVIS.** The abstract (line 4) and contributions list (line 25) claim "improving mIoU after one click by ... 1.32 on the DAVIS dataset." The paper text provides specific 1-mIoU values for HQSeg44K (89.40 vs. 81.79, confirming the claimed 7.61 improvement) but does **not** provide the corresponding DAVIS 1-mIoU values in the text. This makes the 1.32 figure unverifiable from the text alone. The critic claims the actual difference in Table 2 is ~7.19 (OIS 79.0 vs. SegNext 71.81), which is radically different from 1.32. Since the table is an image and I cannot read its exact values, I cannot independently verify either number, but the discrepancy between the paper's silence on DAVIS 1-mIoU in the prose and the modest 1.32 in the abstract warrants clarification. The authors must explicitly state the DAVIS 1-mIoU values for OIS and SegNext and correct the abstract if it is wrong.
+- **The central claim — that the *order formulation* (relative depth from the prompt), not depth information in general, drives the improvement — is insufficiently isolated.** The ablation in Table 4 shows that removing order-aware attention hurts performance, confirming the module contributes. However, both conditions (with and without order-aware attention) use DepthAnythingV2 as the image encoder, so depth features from the encoder are available in both. What the paper does not test is whether a simpler depth integration — e.g., concatenating the raw depth map as an extra input channel, using absolute depth values as an attention bias without the relative-ordering mask, or injecting depth features via cross-attention without the order formulation — would achieve comparable gains. The comparison with MM-SAM (which integrates depth via a separate encoder) helps but does not answer this question, since MM-SAM's integration strategy is itself weak and uses a different depth source. A controlled experiment that holds the depth source constant and varies only whether depth is used *as order maps* versus used *as-is* is needed to substantiate the headline claim that the *order* formulation is the key innovation rather than simply the availability of accurate depth features. The paper would be significantly stronger with this ablation.
 
 ### Minor
 
-3. **Backbone difference confounds method vs. baseline attribution.** OIS uses a frozen ViT-B encoder from DepthAnythingV2 (a strong depth estimation backbone pretrained on large-scale data), while SegNext uses a different ViT architecture. The 7+ point mIoU gains on both datasets could partially stem from a stronger pretrained encoder rather than from order-aware or object-aware attention. The ablations in Table 4 isolate the contribution of each module *within the OIS architecture*, but they do not control for the backbone. A cleaner control would be: same DepthAnythingV2 encoder with standard cross-attention (no order/object modules) but otherwise identical integration. The "w/o sparse embeddings" row in Table 4 is not a clean control because it also removes all sparse integration, not just the proposed attention modules.
+- **No analysis of depth estimator failure modes or their impact on segmentation.** The method relies on a dense depth map from DepthAnythingV2 at inference time. Real-world images with transparent/reflective surfaces, heavy blur, or unusual artistic content can produce inaccurate depth estimates. The order map is computed as an *absolute difference* from the prompt's depth value, so a single erroneous depth value at the click location can distort the entire mask. The paper presents no robustness analysis (e.g., adding synthetic noise to depth, showing failure cases where depth fails) and no discussion of when the method might degrade. Given that the DAVIS improvement after one click is a modest 1.32 mIoU, it is plausible that depth errors limit gains on many cases. A brief limitations section or a qualitative failure analysis would improve rigor.
 
-4. **Ablations conducted only on DAVIS, not on the primary dataset (HQSeg44K).** The largest claimed improvements are on HQSeg44K (Table 1), yet all ablation experiments (Table 4) are on DAVIS. Running ablations on HQSeg44K would strengthen the evidence that the proposed modules drive the large gains reported there.
+- **The "2× faster" claim overstates the measured speedup.** The paper states OIS is "2 times faster than the current best method, SegNext" (Abstract, Section 1). From Table 3: SPC is 14ms (OIS) vs 24ms (SegNext), a ratio of ~1.71×; SAT latency is 0.51s vs 0.89s, a ratio of ~1.75×. Neither reaches 2×. This is a minor but unnecessary overstatement; "~1.7× faster" would be accurate.
 
-5. **No ablation comparing raw depth concatenation vs. the proposed order map.** The paper argues that order maps are more effective than directly feeding depth as an extra channel, but does not test this directly (e.g., a baseline that concatenates the depth map to image features without the order-mask attention). This would be a straightforward ablation to confirm the value of the order-map formulation specifically.
-
-6. **No failure analysis or discussion of depth estimation limitations.** The depth map quality is entirely determined by DepthAnythingV2's pretraining, and the paper does not discuss failure modes (e.g., thin structures, transparent objects, scenes with narrow depth range, objects spanning a wide depth range where averaging depth across all positive clicks could misrepresent parts of the object). The learnable scale parameter σ in Eq. (1) receives no initialization or sensitivity analysis.
+- **Inconsistency in NoF definition.** The text (Section 4.1) defines NoF as "the number of cases that require more than 20 clicks to reach 90% mIoU." However, the tables (Table 1, 2, 4) label the column "NoF95↓," and Section 4.1 also mentions computing "NoF95 scores." It is unclear whether the reported NoF values use a 90% or 95% mIoU threshold. This should be clarified.
 
 ### Trivial
-- Line 25 has a duplicated phrase ("one click one click") from parser artifact — not an author error, but the raw text has it.
-- The paper cites MM-SAM as both (Wang et al., 2022) and (Xiao et al., 2024) in different places — minor citation inconsistency.
+
+- None beyond the minor items above. The paper is generally well-written and clearly organized.
 
 ## Nice-to-Haves
-- Adding MM-SAM to the quantitative tables would directly address the most significant gap.
-- A backbone-controlled ablation (DepthAnythingV2 encoder with standard cross-attention replacing the proposed modules) would cleanly separate backbone effects from methodological novelty.
-- A brief failure analysis section discussing conditions where depth maps are inaccurate or order maps break down would improve the paper's rigor.
-- Testing generalization to other domains (medical, satellite) would strengthen the contribution but is not required for the paper's stated scope.
+
+- **A controlled depth baseline ablation:** Compare OIS against a variant that replaces the order map with a raw depth map (or depth-based attention bias without the relative-ordering mask), holding the depth encoder fixed. If order maps still outperform, the central claim is strongly supported. If not, the narrative should be reframed around "incorporating depth" rather than "incorporating order."
+
+- **Time breakdown:** Report the inference time split between depth estimation and segmentation to help readers assess the overhead of the depth model, since the current SAT latency bundles everything together.
+
+- **A brief limitations section:** A paragraph acknowledging when depth may be unreliable and potential mitigations (e.g., falling back to image-only features) would improve the paper's completeness.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-- **"The first click receives neither object-aware attention nor full depth-guided separation"** — The paper explicitly states (line 101) that object-aware attention falls back to standard cross-attention in the first round. This is already documented and reasonable. Moved from Weaknesses because it's already addressed.
-- **"The paper claims that object-aware attention is novel... but SAM already uses separate positive/negative embeddings"** — The paper correctly identifies that SAM lets all embeddings attend to all regions, whereas OIS separates foreground/background attention. The novelty claim is precise and accurate. Removed as a misunderstanding.
-- **"No sensitivity analysis on the number of attention blocks, the scale parameter σ"** — These are generic wishlist items that don't threaten the core claims. Moved to beyond-scope.
-- **"Figure 6 visualization cannot be verified"** — The figure is present as an embedded image; the description is coherent. Removed as unsubstantiated.
-- **Criticisms about missing appendix, missing proofs, or absent references** — These are parser artifacts; the original submission has these sections.
+
+These points are flagged to be removed; treat them with caution.
+
+- **"Object-aware attention is borrowed from Cutie... it is not a major novelty."** — The paper explicitly acknowledges Cutie and states the adaptation to interactive segmentation (Section 3.3). This is an accurate attribution, not a weakness. The Strength Finder (#2) correctly identifies this as a strength (first application to interactive segmentation). The harsh reviewer's characterization conflates acknowledgment of prior work with a novelty deficit, which is a judgment call rather than a factual weakness.
+
+- **Criticism about missing related works.** — No specific missing work was identified that could be verified.
+
+- **"The paper should also cover Y / domain Z."** — No such criticisms were made.
 
 ## Novel Insights
-None beyond the paper's own contributions.
+
+The debate between the harsh reviewer and the strengths reveals an interesting tension: the paper's core claim about "order" (relative depth from the prompt) is intuitively compelling, but the reviewers correctly identify that the evidence does not cleanly separate the "order formulation" from the "depth availability" confound. This is a common pattern in papers that introduce a new information source (depth in this case) — the contribution is partly the mechanism and partly the source itself. The paper would benefit from explicitly acknowledging this and designing the ablation to disentangle them. Notably, the object-aware attention (foreground/background separation) has weaker version-of-the-claim problems since it is clearly about spatial attention structure rather than an additional signal. The ablations do show that both modules contribute independently, which partially mitigates the concern about depth-is-all-you-need.
 
 ## Suggestions
-1. **Correct the abstract or provide explicit DAVIS 1-mIoU values in the text.** If 1.32 is correct, show the numbers. If it's wrong (e.g., it should be 7.19), correct it immediately — this is the headline quantitative claim.
-2. **Add MM-SAM to Tables 1 and 2.** This is the most relevant depth-based competitor and its absence undermines the claim that order maps are superior to depth as an extra modality.
-3. **Add a backbone-controlled ablation:** implement a baseline with the same DepthAnythingV2 encoder and standard cross-attention (no order/object modules) but identical dense+sparse integration. This cleanly separates backbone effects from methodological novelty.
-4. **Run ablations on HQSeg44K** (or at least report the key ones there) and add a raw-depth vs. order-map comparison to Table 4.
+
+1. **Add a controlled depth ablation** comparing the order map against a raw depth map or depth-value attention bias, holding the encoder fixed. This is the single most impactful improvement.
+2. **Correct the "2× faster" claim** to "~1.7× faster" to align with Table 3 data.
+3. **Resolve the NoF definition inconsistency** — clarify whether NoF uses a 90% or 95% mIoU threshold and ensure the text and tables agree.
+4. **Add a brief limitations paragraph** discussing cases where depth estimation may be unreliable and potential mitigations.
+5. **Include at least a qualitative failure case analysis** showing examples where depth errors affect segmentation quality, to improve rigor.
 
 ## Score and Decision
 
-This paper makes a solid technical contribution — the integration of relative depth cues via order maps and foreground-background separated attention is novel for interactive segmentation, and the empirical results are strong. The main issues are: (a) a potentially incorrect quantitative claim in the abstract that needs correction, (b) a missing comparison to the only directly relevant depth-based competitor, and (c) a confounded backbone comparison that weakens attribution of gains. None of these are fatal — they are addressable in revision. With corrections to the abstract and the addition of MM-SAM to the tables, this would be a strong paper.
+The paper makes a clear empirical contribution with SOTA results on two benchmarks, introduces novel architectural components (order-aware attention, hybrid fusion), and is generally well-executed. The main concern — that the central claim about the "order formulation" is not cleanly isolated from the simple availability of depth — is a non-trivial gap but not fatal, as the ablation does confirm the module's contribution and the comparison with MM-SAM (the only prior depth-based interactive segmentation method) shows clear improvement. With the missing ablation addressed, the paper would be strong. In its current form, the paper is solidly above the acceptance threshold but would benefit from addressing the main concern.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

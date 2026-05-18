@@ -1,76 +1,80 @@
-Now I have a thorough understanding of the paper and can verify each claim. Let me write the final consolidated review.
+Now I have thoroughly cross-checked all reviewer claims against the paper. Let me compose the final review.
 
 ## Summary
 
-This paper presents an empirical study applying topological data analysis (persistent homology and Betti curve similarity) to analyze the functional graphs of convolutional neural networks. Four CNN architectures (extended LeNet, AlexNet, VGG-16, ResNet-18) are trained on 30 disjoint 10-class subsets of ImageNet; their neuron activations are reduced via k-means++, converted to Vietoris–Rips complexes, and compared using Betti curve similarity (BCS) across models, datasets, and training epochs. The claim is that BCS can distinguish models and detect representational differences that accuracy alone does not reveal.
+This paper proposes using Betti curve similarity (derived from persistent homology, a tool from topological data analysis) to compare the global functional graphs of deep neural networks. The authors train four CNN architectures (extended LeNet, AlexNet, VGG-16, ResNet-18) on 30 disjoint 10-class subsets of ImageNet, extract neuron activations, reduce them via k-means++, compute persistent homology, and compare Betti curves across models, epochs, and data subsets. The central empirical findings are that Betti curve similarity increases during training (indicating convergence of functional structure) and varies meaningfully across different model architectures and data subsets in ways not captured by accuracy alone.
 
 ## Strengths
 
-1. **Evidence that BCS distinguishes different CNN models and captures dataset-specific differences.** The paper shows that for subset 11, ResNet-18 and VGG-16 have "very low" BCS (Figure 6), and this low similarity correlates with ResNet-18 outperforming VGG-16 by ~5% on test accuracy (Figure 7). For subset 27, BCS reveals high similarity among ResNet-18, VGG-16, and AlexNet, while all differ from extended LeNet — a pattern not visible from accuracy alone (Figures 8–9). This supports the claim that BCS provides information complementary to standard metrics.
+1. **First application of Betti curve similarity to compare DNN functional graphs across datasets and epochs.** As stated in the paper (Section 2.5), this is the first time Betti curve similarity has been used in this setting. The empirical results (Figures 4–9) concretely demonstrate that the metric distinguishes models, tracks training dynamics, and detects diverging internal representations.
 
-2. **Evidence that BCS captures training dynamics.** For ResNet-18 compared with itself across epochs, temporal similarity is low at initialization and increases over training (Figure 4), with the largest shift occurring between epochs 0 and 10 where accuracy rises fastest. Across-model similarity at the same epoch also increases over training (Figure 5), hinting at convergence of functional graph structure.
+2. **Thorough and reproducible methodology.** The paper specifies all key design choices: 30 disjoint 10-class subsets (seed 1234), four CNN architectures, training hyperparameters (Adam, lr=0.001, weight decay 0.0005, 60 epochs), k-means++ reduction to 1000 clusters, and the Giotto-tda Vietoris–Rips implementation. Computational resource details and average runtime (66 minutes per experiment) are reported, enabling replication.
 
-3. **Systematic experimental design.** Training four distinct CNN architectures on 30 disjoint 10-class subsets of ImageNet provides a reasonably broad basis for comparing functional graphs across models and datasets.
+3. **Empirical evidence that Betti curve similarity captures convergence of functional structure during training.** Figure 4 shows that similarity between ResNet-18 at epoch 0 and later epochs increases over training, with the largest jump from epoch 0 to 10 coinciding with the steepest accuracy gain (Figure 2). The convergence of adjacent-epoch similarity supports the claim that the method reveals the evolution of global functional graphs.
+
+4. **Cross-validation with accuracy reveals information not available from accuracy alone.** For subset 11, Figure 6 shows low Betti curve similarity between ResNet-18 and VGG-16 despite both achieving reasonable accuracy, while Figure 7 shows only a 5% accuracy gap. For subset 27, Figure 8 shows high similarity among ResNet-18, VGG-16, and AlexNet but low similarity with LeNet, while Figure 9 shows distinct accuracies for all four models. These examples demonstrate that the topological metric captures representational differences that accuracy alone does not.
+
+5. **Systematic experimental design with 4 architectures × 30 subsets × 7 epochs.** The use of 30 statistically sampled disjoint subsets provides a reasonably broad experimental canvas, and the four architectures span sufficiently different topological properties (e.g., residual connections in ResNet-18) to enable comparative analysis.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **The k-means++ dimensionality reduction (to 1000 points) is not empirically validated, undermining confidence in the topological analysis.** The paper acknowledges that silhouette scores show the clusters are "poorly separated" and that neuron activation means are "not well-separated." However, no sensitivity analysis is performed on the choice of k (500, 1000, 2000), and no comparison is made between PH on the reduced set and PH on the original full activation space (even for a single small network/layer where the original might be tractable). The justification that local structure is "more representative of overfitting" is cited from prior work (Corneanu et al., 2019) rather than demonstrated in this setting. Since every subsequent BCS result depends on this reduction, the absence of validation is a significant gap. The paper would be substantially stronger with even one direct validation experiment.
+1. **No comparison against baseline or existing representational similarity measures.** The paper's central value proposition is that Betti curve similarity provides a useful tool for comparing DNN representations. Yet the study never compares this TDA-based similarity against any existing representational similarity measure (e.g., CKA, SVCCA, PWCCA, RSAD) or even a simple non-topological baseline (e.g., average pairwise Spearman distance in the reduced space, or the infinity norm of the raw distance matrix difference). Without this comparison, the reader cannot determine whether the *topological* summary adds value over simpler approaches. The observations (similarity increases during training, varies across subsets) might also hold for non-topological correlation-based distances. This is the single most critical gap: for a method-application paper, the value of the method must be demonstrated relative to existing alternatives, not merely asserted.
 
-2. **No baseline comparisons to simpler similarity measures.** BCS is introduced as a tool for comparing DNNs, but it is never benchmarked against alternatives: the ℓ∞/Frobenius distance between the raw Spearman correlation matrices, Wasserstein distance between activation distributions, or even clustering based on accuracy. Figures 4–8 show that BCS varies across models, epochs, and subsets, but without a baseline it is impossible to tell whether these variations add information or simply reproduce patterns already captured by simpler metrics. The central claim that BCS provides a "more nuanced understanding" is unsupported without such comparisons.
-
-3. **Insufficient statistical reporting.** The study uses 30 subsets, yet all averaged results (Figures 4–6, 8) are presented without error bars, standard deviations, confidence intervals, or any indication of variance across subsets. Given that the paper notes "for certain models and subsets, the similarity was quite low," it is unclear whether the reported trends are robust or driven by a few outliers. Standard deviations or per-subset scatter plots are needed to assess reliability.
+2. **k-means++ reduction is not validated for stability and introduces uncontrolled distortion.** The paper itself acknowledges (Section 2.3) that silhouette scores show poor cluster separation. The argument that "local structure is not as important as global structure" is plausible but unsupported. No sensitivity analysis is performed — no variation of the number of clusters (k), no comparison with other reduction methods (random sampling, PCA), no check that Betti curves are stable under different k-means random initializations. Since the entire TDA pipeline depends on this reduction, the observed patterns could be artifacts of the stochastic approximation rather than properties of the true functional graph.
 
 ### Minor
 
-1. **The distance function d_ρ = √(1 − |ρ|) is stated to satisfy "all properties of a metric except for positivity," but the triangle inequality is not guaranteed for this form using Spearman correlation.** The Vietoris–Rips complex can be defined for non-metric distance matrices, but the paper should clarify whether the Giotto-tda implementation has any metric requirement. This does not invalidate the results but is a technical inaccuracy.
+3. **No error bars, confidence intervals, or statistical significance tests.** Figures 4–6 and 8 show only curves (apparently averages across 30 subsets) without any measure of variance. The paper claims 30 subsets provide a "statistically significant sample size" (Section 2.1) but never computes standard deviations, confidence intervals, or performs hypothesis tests. Without this, the reader cannot assess whether observed differences between models or epochs are reliable or could arise from noise. The paper also does not test the null hypothesis that Betti curves are indistinguishable across models.
 
-2. **Using identical hyperparameters (learning rate, batch size, weight decay) across four very different architectures** (from extended LeNet to ResNet-18) raises the question of whether observed functional differences partly reflect suboptimal training for some models rather than architectural differences alone. The paper notes this is "reasonable for comparability" but does not discuss the trade-off.
+4. **Infinity norm choice for Betti curve similarity is not justified.** The similarity is defined as the infinity norm of the difference between two Betti curves (Section 2.5). The infinity norm is sensitive only to the single largest vertical gap; an L1 or Wasserstein distance would capture the overall difference in shape across all thresholds. This choice may mask relevant patterns or amplify irrelevant ones. No discussion or justification is provided.
 
-3. **The conclusion states BCS "could be utilized in ablation studies and hyperparameter tuning," but no demonstration or sketch of how this would work is provided.** This overstates what the evidence supports and should be tempered or accompanied by a concrete example.
+5. **New contributions relative to Corneanu et al. (2019) are not itemized.** The paper states it "modifies and adds upon" this prior work (Section 1) and later notes that this is the first application of Betti curve similarity to DNN comparison across datasets and epochs (Section 2.5). However, the exact novel elements are never explicitly listed. The key innovations (Betti curve similarity rather than raw persistence diagrams, cross-dataset comparison, systematic multi-architecture comparison) should be clearly delineated.
 
-4. **Averaging BCS across all epochs for cross-model comparisons (Figures 5, 8)** may obscure temporal dynamics that the paper itself highlights as important (Figure 4). Presenting per-epoch similarity for these cross-model comparisons would be more informative.
+6. **Only anecdotal evidence that Betti curve similarity provides information beyond accuracy.** The subset 11 and 27 examples are suggestive but the paper does not systematically analyze whether Betti curve similarity correlates with accuracy or provides orthogonal information. A simple correlation analysis across all 30 subsets or a test of whether Betti curve similarity predicts something about transferability/generalization would substantially strengthen the claims. Without this, the "information beyond accuracy" claim rests on two isolated examples.
+
+7. **No discussion of whether higher homology dimensions (2, 3) are meaningful for 1000 points.** With only 1000 points in the reduced space, higher-dimensional holes (dimension 2 or 3) are unlikely to be statistically meaningful, yet the paper presents results for dimensions 0–3 without acknowledging this limitation or justifying their inclusion.
 
 ### Trivial
 
-- The random seed for k-means initialization is not specified (only the data subset seed is given as 1234), introducing a minor reproducibility gap.
-- No discussion of the sensitivity of PH/Betti curves to the choice of filtration parameter range [0,1] or the computational cost scaling to larger networks.
+None. (Typographical and formatting artifacts are parser-related, not author errors.)
 
 ## Nice-to-Haves
 
-- A sensitivity analysis on the number of k-means clusters (e.g., k=500, 1000, 2000) to show qualitative stability of BCS patterns.
-- A comparison between BCS and a simple baseline such as the ℓ∞ distance between raw Spearman correlation matrices for the same model pairs — this would directly test whether PH adds value.
-- Correlation of BCS patterns with an established representation similarity measure (e.g., CKA) to anchor the results in the broader literature.
-- A brief limitations paragraph discussing the sensitivity of PH to parameter choices and the interpretability of Betti numbers in terms of network behavior.
+- A comparison of Spearman vs. Pearson correlation for constructing the distance metric, to assess sensitivity of the topological features to this choice.
+- A discussion situating the approach in the context of existing representational similarity literature (CKA, SVCCA, etc.), even if only briefly.
+- Systematic analysis correlating Betti curve similarity with accuracy differences across all 30 subsets.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were flagged during review but are removed or downgraded per the review guidelines:
 
-- *Criticism about using the nearest neuron to centroid rather than the centroid itself*: A minor implementation choice; using a real activation point is arguably more principled than a synthetic centroid.
-- *Criticism that the paper should discuss whether local structure preservation matters*: The paper already addresses this by citing Corneanu et al. (2019) and arguing global structure is the focus.
-- *Criticism about Section 3 averaging "across epochs" being uniformly problematic*: Figure 4 explicitly shows temporal dynamics, so the paper does not wholly obscure them; Figures 5 and 8 average across epochs for cross-model comparison, which is a different use case (minor weakness, moved above).
+- **"Paper does not distinguish models better than accuracy itself"** — Kept but downgraded to Minor (#6 above). The paper does provide partial evidence (subset 11 and 27 examples), but the claim is not systematically examined.
+- **"Missing related work section"** — Removed per hard rule (DO NOT mention missing related works).
+- **"Missing hypothesis tests"** — Merged into Minor weakness #3 (no error bars / statistical inference).
+- **"Modifications from Corneanu et al. not clearly stated"** — Kept as Minor weakness #5; the paper does partially state the novelty but does not itemize it.
+- **"Spearman vs Pearson not compared"** — Moved to Nice-to-Haves; this is a design exploration rather than a core flaw.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The reviews converge on the observation that this is a well-executed empirical demonstration of a plausible idea, but the paper systematically avoids the hard validation question: does the topology actually add value? The harsh reviewer correctly identifies that the paper's central gap is the absence of baselines, while the strength finder correctly notes that the observations are novel and the methodology is reproducible. The tension between these perspectives reveals that the paper is caught in a middle ground — it has done enough to be interesting but not enough to be convincing as a research contribution. The most actionable insight is that the paper's own evidence (subset 11 and 27) actually undermines the "accuracy alone" framing: if the goal is to show that Betti curve similarity provides information beyond accuracy, the authors should test this systematically rather than anecdotally. The paper would also benefit from asking itself the harder question: "What can you do with Betti curve similarity that you cannot do with a simpler non-topological method?"
 
 ## Suggestions
 
-1. Add a validation experiment for the k-means reduction: compute PH on the full (unreduced) activation set from at least one small network/layer and compare the resulting Betti curves to those obtained after reduction. Even a single-case comparison would significantly strengthen the evidence.
-2. Add error bars (e.g., ±1 standard deviation across the 30 subsets) to all averaged plots, or provide per-subset scatter plots.
-3. Add at least one baseline comparison: compute the ℓ∞ distance between the raw Spearman correlation matrices (before PH) for the same model pairs and compare it to BCS. If the two are highly correlated, the added value of PH is questionable; if they diverge, that divergence is the novel contribution and should be highlighted.
-4. Temper the conclusion's claim about "ablation studies and hyperparameter tuning" unless a concrete sketch of how BCS would guide these is provided.
+1. **Add a baseline comparison.** Compute a simple non-topological similarity measure (e.g., the infinity norm of the difference between the raw Spearman distance matrices) and show that Betti curve similarity provides information not present in this baseline. If it does, explain what topological structure the homology dimensions capture. This single experiment would address the paper's largest weakness.
+
+2. **Validate k-means++ stability.** Run the full pipeline with different k-means random seeds for a few representative models/subsets and show that resulting Betti curves and similarities have low variance. Also vary k (e.g., 500, 1000, 2000) to assess sensitivity. Without this, the reader cannot trust that the patterns reflect the networks rather than the reduction.
+
+3. **Add error bars to all averaged figures.** With 30 subsets, standard deviations can be computed and shown as shading or ribbons. This is standard practice for empirical studies and would immediately strengthen credibility.
+
+4. **Run a systematic correlation analysis.** Across all 30 subsets, compute the correlation between Betti curve similarity and accuracy difference to determine whether the topological metric provides orthogonal information.
+
+5. **Justify the infinity norm choice** or provide results with alternative distance metrics (L1, Wasserstein) for comparison.
 
 ## Score and Decision
 
-The paper tackles an interesting question — whether topological summaries of activation patterns can reveal structure in DNN representations. The experimental design is reasonably systematic (4 models × 30 subsets × 7 epochs). However, the three major weaknesses — unvalidated dimensionality reduction, no baseline comparisons, and insufficient statistical reporting — are not fatal, but they collectively prevent the paper from making a convincing case. The core idea is worth pursuing, but the evidence as presented does not yet support the claim that BCS provides meaningful insight beyond what simpler approaches would capture.
+This paper presents a plausible application of TDA to DNN analysis with a thoughtfully designed experimental setup. The core observations (functional convergence during training, model distinguishability, subset-specific patterns) are interesting and potentially useful. However, the paper's central contribution is not adequately validated: the Betti curve similarity is never compared against any baseline or existing representational similarity measure, leaving the reader unable to assess whether the topological summary adds value over simpler approaches. The k-means++ reduction is not validated for stability despite acknowledged poor clustering. Combined with the absence of error bars and statistical inference, these gaps mean the paper, in its current form, does not meet the standard for acceptance as a research contribution. Substantial additional validation experiments would be needed to establish the method's value.
 
-A major revision addressing the validation of the reduction and adding baselines could turn this into a solid empirical contribution.
-
-MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

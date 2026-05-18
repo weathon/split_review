@@ -1,81 +1,76 @@
-Now I have a thorough understanding of the paper and can verify the reviewer claims directly. Let me write the consolidated review.
+Now I have verified the key claims against the paper. Let me compose the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes Sapling, which compresses LLMs by successively dropping layers during domain-specific fine-tuning. The method is motivated by an empirically observed "knowledge localization" phenomenon — that different decoder layers contribute unequally to domain-specific knowledge. Sapling identifies unimportant layers via a performance scan (or activation-norm as a tie-breaker) and drops them one at a time after each epoch, optionally using a sparse update scheme that only trains likely-to-be-kept layers. The paper evaluates on LLaMA-7B across medical, legal, financial, and commonsense QA, reporting competitive accuracy with the full fine-tuned model and 1.2–8.5× inference speedup compared to quantization methods.
+This paper introduces Sapling, a method that compresses LLMs by gradually dropping entire decoder layers *during* fine-tuning on a target domain, rather than applying quantization or pruning as a post-training step. The approach is motivated by the authors' empirically observed "layer-wise knowledge localization" phenomenon — that different layers contribute unequally to different knowledge domains. Sapling uses calibration-scanning and activation-norm-based importance scores to decide which layer to drop after each epoch, combined with a sparse update scheme that only trains layers likely to be retained. Experiments on LLaMA-7B across five QA benchmarks spanning commonsense, medical, legal, and financial domains show that Sapling can remove 40–60% of layers while maintaining ~90%+ of full fine-tuning accuracy, achieving measured 1.2–8.5× inference speedup over quantization baselines on V100 GPUs without requiring specialized kernels.
 
 ## Strengths
 
-- **Novel integration of layer dropping with fine-tuning.** The core idea — successively dropping layers during fine-tuning rather than before or after — is well-motivated and differs meaningfully from prior work (e.g., Sajjad et al., 2023; Zhang & He, 2020). Figure 1b provides direct evidence that successive dropping outperforms batched dropping, supporting the premise of the method.
+1. **Measured wall-clock inference speedup without kernel/hardware support.** Unlike quantization methods (LLM.int8(), GPTQ) that can *slow down* inference without efficient kernel implementations, Sapling achieves unambiguous measured speedup (Table 1: inference times of 0.34–0.64× the dense model vs. 0.73–3.79× for quantization baselines). The speedup comes from reduced model depth, which is hardware-agnostic.
 
-- **Empirical verification of layer-wise knowledge localization.** The paper demonstrates that different numbers/patterns of layers can be dropped for different domains (Figure 3), and that domain-specialized models lose performance on other domains (Table 4). This provides useful confirmatory evidence for the knowledge localization hypothesis in LLMs and grounds the method empirically.
+2. **Empirical evidence for layer-wise knowledge localization on a contemporary LLM.** The paper systematically shows that different layers of LLaMA-7B matter differently for different domains. Figure 3 reveals distinct layer-dropping patterns across SciQ, MedMCQA, and LexGLUE, and Table 4 shows that a model specialized on one domain (e.g., medical) suffers significant performance degradation on another (e.g., legal). This supports the paper's central motivation.
 
-- **Hardware-agnostic speedup without special kernels.** Sapling reduces model depth, yielding measured wall-clock speedup on standard hardware (V100 GPU) without requiring quantization kernels or sparse-matrix hardware support (Table 1). This is a genuine practical advantage over quantization/pruning methods that often cannot realize theoretical speedups without efficient kernel implementations.
+3. **Flexible continuum of operating points.** Quantization offers only discrete bit-widths (e.g., 8-bit, 4-bit); pruning's sparsity ratios are hard to translate directly into memory savings. Sapling's iterative single-layer dropping produces a dense spectrum of model sizes (Figure 2), allowing practitioners to fine-tune the trade-off between accuracy and resource usage at a fine granularity.
 
-- **Flexible compression continuum.** Unlike quantization methods that offer discrete operating points (e.g., 4-bit, 8-bit), Sapling provides a dense set of memory–performance trade-offs (Figure 2), allowing finer-grained fitting to hardware constraints.
+4. **Orthogonality to other compression techniques.** Because Sapling reduces model depth rather than precision or weight sparsity, it does not compete with quantization or pruning along the same axis. The paper correctly notes that Sapling can be combined with these methods for further compression — a genuine practical advantage.
 
-- **Sparse update regularization.** The finding that updating only a fraction of layers (r=1/4) yields better compression than updating all layers (Table 3) is a non-obvious and practically useful result.
+5. **Sparse update scheme is empirically validated.** Table 3 shows that updating all layers (r=1) yields *worse* compression than updating only a subset (r=1/4), supporting the paper's claim that fine-tuning unimportant layers that will later be dropped is counterproductive. This ablation is clean and informative.
+
+6. **Broad domain coverage in evaluation.** Testing on five benchmarks across commonsense (SciQ, PIQA), medical (MedMCQA), legal (LexGLUE-casehold), and financial (FinanceQA) domains strengthens the generality claims.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-1. **Unfair accuracy comparison with quantization baselines (Tables 1–2).** The quantization baselines (LLM.int8(), GPTQ, AWQ) appear to be applied to the *base* LLaMA-7B without domain-specific fine-tuning, while Sapling includes domain adaptation in its compression process. The large accuracy gaps in Table 2 (e.g., MedMCQA: Sapling 47.2 vs. AWQ 35.8) are therefore largely attributable to domain adaptation, not to the superiority of layer-dropping as a compression method. The paper's own related-work section (line 36) states the standard workflow is to "first fine-tune…before applying any model compression technique," yet does not follow this protocol for its baselines. This inflates Sapling's relative accuracy and undermines the headline claims. The speed comparison in Table 1 is less affected (inference speed does not depend on whether the model was fine-tuned), but the accuracy comparison in Table 2 is misleading without domain-adapted quantization baselines.
+1. **Headline claim about "consumer-level hardware" is unsupported by the experiments.** The abstract states "1.2 to 8.5× inference speedup on consumer-level hardware," yet all experiments in Section 4 are conducted on "NVIDIA V100 32GB servers" (line 122). The V100 is a data-center GPU, not consumer-level hardware. While the relative speedup comparison against quantization methods on the *same* GPU is valid and informative, claiming it generalizes to consumer hardware (RTX 3090/4090, laptop GPUs, etc.) is an extrapolation without evidence. This directly undermines a headline selling point of the paper. *The core results remain valuable, but this claim must either be supported with experiments on actual consumer hardware or removed/qualified appropriately.*
 
-2. **Unsupported claim about importance-score correlation for sparse update.** The paper claims (line 115) that "the initial distribution is highly correlated with the latter ones" of layer importance scores, citing Section 4.3. However, Section 4.3 (the ablation studies) contains no correlation analysis, no scatter plot, no quantitative evidence whatsoever supporting this claim. The sparse update scheme (§3.4) — which freezes most layers based on initial importance — therefore rests on an empirical claim that is asserted but never demonstrated. This is a methodological gap: if the correlation does not hold, the sparse update scheme could be dropping important layers early or retaining unimportant ones.
+2. **Missing random layer-dropping baseline.** The paper attributes Sapling's success in part to its *importance-guided* selection of which layers to drop (calibration scan + activation-norm tiebreaker). However, no experiment compares against a control where the same number of layers are dropped *randomly* one per epoch with the same schedule. The comparison in Table 3 is between three non-random scoring methods ("scan" vs. "norm" vs. "both"), all of which are variants of the proposed approach. Without a random control, it is unclear whether the observed performance retention is due to the importance scoring or simply to the gradual, iterative nature of the dropping process itself. If random selection performed nearly as well, the contribution of the scoring methods would be negligible, and the paper should refocus on the schedule rather than the selection mechanism.
 
 ### Minor
 
-1. **Single base model (LLaMA-7B) with no statistical rigor.** All experiments use a single architecture at one scale. No confidence intervals, variance estimates, or multiple-seed runs are reported for any accuracy or latency measurement. For a paper making claims about speedup ratios (1.2–8.5×) and accuracy retention (≈95%), the absence of any error quantification weakens the evidence.
+3. **Importance score formulas lack full justification and ablation against simpler alternatives.** Equation 3 ($s_{i,\text{scan}} = \frac{100 - a_i}{(1+\delta^2)+(1+\delta)a_i}$) introduces a non-obvious denominator that is not clearly motivated — why not use the simpler $100 - a_i$ or the post-drop accuracy directly? The role of $\delta$ is explained only in terms of normalizing the maximum score, which feels engineered rather than principled. Equation 4 ($s_{i,\text{norm}}$) uses Frobenius norm as a proxy for "high-rank representations with sparse domain-specific knowledge," but this connection is asserted rather than demonstrated. More importantly, neither scoring function is compared against simpler baselines (e.g., $1-a_i$ for scanning, random for norm). While the "both" combination empirically outperforms "scan" or "norm" alone (Table 3), we cannot tell whether the specific functional forms matter.
 
-2. **Activation-norm importance metric used but not validated independently.** The activation-norm method (Frobenius norm as a proxy for undesirable high-rank representations) is used only as a tie-breaker in the best configuration (line 138). The paper provides no ablation showing that activation-norm alone outperforms random dropping, or that it captures the claimed property. While the method is not central to the results, the paper's theoretical justification for it (§3.3) is speculative and unsupported.
+4. **Training-time overhead is acknowledged but never quantified.** The paper states that time complexity increases "from O(1) to O(N)" (line 77), which undersells the cost: each epoch requires evaluating all remaining layers on a calibration set. For LLaMA-7B with 32 layers dropping 15, this is roughly 240 extra forward passes over the course of fine-tuning. The paper's defense ("users can exchange longer development for better deployment," line 79) is reasonable in principle, but without concrete wall-clock numbers for training overhead (extra GPU-hours vs. standard fine-tuning), the reader cannot judge the practical trade-off. This is especially important since the paper compares against quantization methods that add zero training overhead.
 
-3. **Performance scan cost not quantified.** The paper acknowledges that fine-tuning complexity increases from O(1) to O(N) (line 77) but never reports actual wall-clock training times or the overhead of performing O(N) forward passes per epoch. Since the method trades training time for inference efficiency, understanding this trade-off is important for practitioners.
+5. **Evaluation is limited to a single model architecture (LLaMA-7B).** While this is a defensible choice for a conference paper, the claim of "knowledge localization on contemporary LLMs" and the generality of the Sapling pipeline would be significantly strengthened by validation on at least one other model family (e.g., a different 7B-class model or a larger variant). Without this, it is unclear whether the observed layer-wise specialization patterns are specific to LLaMA or reflect a general property of LLMs.
 
-4. **No comparison to simpler baselines.** The paper does not compare Sapling to (a) dropping layers first, then fine-tuning the shallower model (which tests whether the successive process adds value beyond the final architecture), or (b) quantization applied to the fine-tuned model (which would be the fair accuracy comparison).
+6. **Proposition 1 (line 75) is not a formal proposition.** It is a qualitative statement about the desirability of gradual change in model parameterization. Labeling it as a "Proposition" is misleading and should be corrected to an "Observation" or "Design Principle."
 
 ### Trivial
-
-- "Sampling" typo on line 157 ("specialized model acquired from Sampling") instead of "Sapling."
+- The activation-norm importance score (Equation 4) gives *low* importance to high-Frobenius-norm layers, meaning high-norm layers get dropped. The paper's reasoning that "high-norm activations have sparse domain-specific knowledge" is conceptually weak but does not affect the empirical results — the method works regardless of the philosophical justification.
 
 ## Nice-to-Haves
-
-- A plot or correlation coefficient showing the relationship between initial and final layer importance scores would validate the sparse update scheme.
-- Reporting inference latency with multiple runs (e.g., mean ± std over 5 trials) would improve credibility.
-- The stopping criterion ("performance degrades to <90% of Full-FT baseline on average," Table 3 caption) should clarify whether this threshold is applied per task or averaged across tasks, and how it is operationalized.
+- A single latency experiment on actual consumer hardware (e.g., RTX 3090/4090) would transform the unsupported headline claim into a verified result.
+- Testing on at least one additional model architecture would strengthen generality claims.
+- The scoring formulas could be simplified: if $1-a_i$ performs as well as Equation 3, the paper should adopt the simpler version.
 
 ## Removed Points
 
-- **Criticism about knowledge localization not being "formally defined" or "operationalized" (§3.1):** This is more of a presentation preference than a substantive weakness. The paper states the hypothesis in plain language (lines 14, 23, 48) and provides empirical support (Figure 1a, Figure 3). Formal definition is not required for an empirical methods paper at this venue.
-
-- **Criticism about "no discussion of specific risks of domain-specialized compressed models" in ethics statement:** The ethics statement (lines 190-193) discusses reduced accuracy across domains and risks of malicious use. The critic's request for domain-specific hallucination risks is scope creep — ethics statements of this length are standard at the venue and this concern does not affect the technical contribution.
-
-- **Criticism about "no comparison to LoRA":** LoRA does not reduce model depth and serves a different purpose (parameter-efficient fine-tuning, not compression for inference speedup). The omission is defensible given the paper's stated scope.
-
-- **Criticism about missing variance being an "evidential issue" that makes conclusions "too thin to be convincing":** The reviewer overstates severity. Lack of variance reporting is common in LLM compression papers of this era and is a minor weakness, not an evidential crisis. Moved to Minor.
-
-- **Strength Finder's claim about "single most important piece of evidence" being the 1.2-8.5× speedup:** This strength is somewhat diminished by the unfair comparison issue. However, the speed comparison is less affected by the unfairness than the accuracy comparison. Retained as a qualified strength.
-
-- **Strength Finder's generic statements (e.g., "thorough cross-domain validation"):** This is sufficiently specific (tested on 3 domains + commonsense) to keep.
+- **"Table 1 is extremely difficult to parse due to PDF extraction artifacts"** — Removed per rule: formatting artifacts are parser issues, not author errors.
+- **"The paper should also cover Y / domain Z / additional tasks" demands that turn the paper into a broader survey** — Removed per rule against scope-creep demands. The domain coverage (5 benchmarks, 4 domains) is already adequate for a method paper.
+- **Criticism that quantitative comparison "conflates compression step with fine-tuning step"** — Removed because the comparison is fair: the paper compares deployment-time performance of different compression methods applied to the same base model. The decomposition into training vs. compression time is a separate concern that does not invalidate the deployment comparison.
 
 ## Novel Insights
 
-The reviews reveal that the paper's most interesting contribution may not be the headline "speedup over quantization" claim (which is muddied by the unfair comparison), but rather two more nuanced findings: (1) that successive layer dropping *during* fine-tuning significantly outperforms dropping before fine-tuning (Figure 1b), and (2) that a sparse update scheme (updating only the most important layers) yields better compression than updating all layers (Table 3). Both findings are non-obvious and suggest a genuine interaction between layer-dropping dynamics and the fine-tuning process. These aspects are worth emphasizing and separating from the less careful comparison to quantization.
+The harsh reviewer's observation that the method's two components (gradual schedule vs. importance scoring) are not disentangled is genuinely insightful. If the paper were to add a random-dropping baseline and find it competitive, the contribution would shift from "importance-guided compression" to "gradual-during-fine-tuning compression" — a meaningful but different contribution. Conversely, if importance scoring clearly outperforms random, the paper's current claims would be fully validated. This ambiguity is the single most important gap to resolve.
 
 ## Suggestions
 
-1. **Add domain-adapted quantization baselines.** Fine-tune LLaMA-7B on each domain dataset, then apply quantization. This is the standard workflow the paper itself describes and would make the comparison fair.
-2. **Show empirical evidence for the importance-score correlation claim** that motivates the sparse update scheme — a simple scatter plot or Spearman correlation would suffice.
-3. **Report latency with error bars** (at least 3 trials) and consider adding one additional model scale (e.g., LLaMA-13B) or architecture to demonstrate generalizability.
-4. **Separate the speed claim from the accuracy claim more clearly** in the abstract and conclusion, qualifying that the reported accuracy comparisons are on domain-adapted models vs. zero-shot quantization.
+1. **Add a random layer-dropping baseline** with the same schedule (one layer per epoch after each epoch). This is the single most important missing experiment to validate whether the importance scoring adds value beyond the gradual schedule itself.
+2. **Either test on consumer hardware or remove the "consumer-level hardware" claim** from the abstract and introduction. The V100 results stand on their own as evidence of speedup without specialized kernels.
+3. **Report wall-clock training overhead** (extra GPU-hours for calibration passes) for a representative run to make the development-deployment trade-off concrete.
+4. **Ablate the scan importance formula** by comparing $s_{i,\text{scan}}$ against the simpler $100 - a_i$ (or $1 - a_i$). If performance is equivalent, adopt the simpler version.
+5. **Rename "Proposition 1"** to "Design Principle" or "Observation."
+6. **Discuss whether the sparse update scheme pattern holds across different model families** as a limitation worth addressing in future work.
 
 ## Score and Decision
 
-The paper has a genuinely interesting core idea and supporting empirical observations. However, the major weakness identified (unfair accuracy comparison with quantization baselines) inflates the paper's claimed advantages and needs to be addressed. The unsubstantiated correlation claim for the sparse update scheme is the second significant gap. These issues are addressable in a major revision but affect the paper's current reliability. The paper is below the acceptance threshold in its current form.
+The paper proposes a practical and well-motivated approach to LLM compression with clear advantages (no kernel dependence, actual speedup, fine-grained control) and provides reasonable evidence that it works on LLaMA-7B across multiple domains. The core idea is solid. However, two gaps are significant enough to warrant attention before acceptance: the unsupported consumer-hardware claim (which can be fixed by removing/qualifying it) and the missing random baseline (which would validate whether the importance scoring is the source of gains). These are fixable without restructuring the paper, and the underlying contribution is real. I recommend acceptance with the expectation that these issues are addressed in a revision.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

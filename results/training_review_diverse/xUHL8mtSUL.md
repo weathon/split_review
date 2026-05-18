@@ -1,18 +1,18 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and can verify the reviewer's claims. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes HS-SVD, a scalable Gaussian process framework that leverages the known Mercer decomposition of a compact Matérn kernel to obtain a "free" low-rank decomposition of the kernel matrix. The method achieves O(nm²) time and O(nm) space complexity with no need for explicit low-rank computation. The authors prove the smoothness of the compact Matérn kernel and establish its connection to the standard Matérn via the modified Helmholtz operator. Experiments on synthetic datasets up to n=2,000,000 compare against nine SOTA methods.
+This paper proposes a scalable Gaussian process regression method based on the Hilbert-Schmidt Singular Value Decomposition (HS-SVD). By using the compact Matérn kernel — whose eigenfunctions (sine bases) and eigenvalues are known analytically and independent of kernel parameters — the method achieves a low-rank approximation of the kernel matrix with O(n m²) time and O(n m) space complexity without explicitly computing an expensive low-rank decomposition. The paper provides theoretical grounding by connecting the compact Matérn kernel to the modified Helmholtz operator, proves a smoothness theorem, and evaluates the method against nine baselines on simulated large-scale datasets.
 
 ## Strengths
 
-- **Novel theoretical framework connecting compact Matérn to standard Matérn**: Proposition 3.5 proves that both kernels arise from the same differential operator (modified Helmholtz) with different boundary conditions, and Theorem 3.3 establishes the smoothness of the compact Matérn. This provides a principled basis for fair comparisons (e.g., C¹ compact Matérn vs. standard ν=3/2 Matérn), which the experiments follow.
+- **Clean algorithmic approach with clear complexity advantages.** The method's key insight — leveraging known Mercer eigenfunctions that are independent of kernel parameters — is elegant. Because Φ and ΦᵀΦ are precomputed once and reused across MLE iterations, the method avoids recomputing the kernel matrix or its decomposition during optimization. This is a genuine practical advantage over methods that require recomputation at each gradient step.
 
-- **Simultaneous reduction of time and space complexity**: The paper explicitly addresses the often-neglected O(n²) space bottleneck for datasets with millions of samples (Section 1), reducing it to O(nm). Combined with the O(nm²) time complexity via the Sherman–Morrison–Woodbury formula, this is a concrete advantage over methods that focus only on time.
+- **Theoretical connection to the standard Matérn kernel via the modified Helmholtz operator (Proposition 3.5).** This provides a principled justification for using the compact Matérn as a drop-in replacement for the standard Matérn on bounded domains, and ensures that comparisons against methods using standard Matérn kernels are on equal footing in terms of smoothness.
 
-- **Parameter-independent eigenfunctions for efficient MLE**: Section 3.3 shows that for compact Matérn, the eigenfunctions φⱼ(x) do not depend on kernel parameters θ, so Φₘ does not need recomputation during MLE iterations. Per-iteration cost is reduced to operations on m×m matrices, which is a meaningful practical advantage.
+- **CPU-only efficiency demonstrated against GPU-accelerated methods.** Figure 1 and the simulation results (though tables are not visible in the extracted text) indicate that HS-SVD on a single CPU core can outperform GPU-accelerated SKI and LOVE in runtime on datasets up to 2 million points. If these results hold, this is practically valuable for users without GPU access.
 
-- **Wide benchmark against nine methods**: The paper compares HS-SVD against NNGP, SVGP, SVGP-CIQ, VNN, NGD, DKL, SGPR, SKI, and LOVE — a diverse and representative set of scalable GP methods. The smoothness matching (β=3/4 for HS-SVD, ν=3/2 for Matérn baselines) is a thoughtful fairness control.
+- **Smoothness theorem (Theorem 3.3) provides explicit control over kernel regularity**, analogous to the ν parameter in the standard Matérn family.
 
 ## Weaknesses
 
@@ -21,65 +21,52 @@ None.
 
 ### Major
 
-- **Cross-platform comparison confounds runtime and memory claims.** HS-SVD runs on a single CPU core; most competitors (SVGP, SVGP-CIQ, VNN, NGD, DKL, SGPR, SKI, LOVE) use GPUs via GPyTorch, and NNGP uses 16 CPU threads. The runtime comparison in Figure 1 and claims of being "more efficient than SKI and LOVE using GPUs" conflate algorithmic advantage with implementation differences, software stack overhead, and hardware asymmetry. Memory comparisons are similarly muddied: GPU methods' VRAM consumption depends on minibatch size, which is not reported. While the paper caveats that "RAM usages should be judged in a relative manner," this does not resolve the confound. Without equalizing hardware or carefully modeling overhead, the central efficiency claims are only weakly supported.
+- **The zero boundary condition of the compact Matérn kernel is acknowledged but its practical implications are not discussed or investigated.** The sine eigenfunctions φ_l(x) = √2 sin(lπx) vanish at the boundaries of [0,1]^r, meaning the GP prior forces predictions toward zero at the domain edges. Proposition 3.5 explicitly states this arises from the modified Helmholtz operator "with zero boundary condition." The paper then dismisses this by stating the domain can be replaced "with any closed interval or bounded region without loss of generality" — but the boundary condition remains zero regardless of which bounded region is chosen, because the eigenfunctions are tied to the Laplacian with Dirichlet boundary conditions. If the target function does not tend to zero at the boundaries, the prior will introduce bias near the edges that does not vanish asymptotically. The paper provides no experiments investigating boundary effects, no discussion of when this matters in practice, and no proposed remedy (e.g., centering the data, adding a parametric mean function, or using a basis with different boundary conditions). This is a first-order concern for practitioners evaluating whether the method suits their problem.
 
-- **Synthetic-data-only evaluation limits support for practical claims.** The paper tests exclusively on simulated data with unspecified generating functions ("highly nonlinear functions"), while motivating the method with real-world domains (geospatial, forestry, climate, single-cell RNA). Real data introduce non-stationarity, irregular sampling, noise structures, and boundary effects that synthetic data cannot replicate. The claim that HS-SVD "significantly reduces computational time and memory requirements while achieving the best or near-best prediction MSE" cannot be properly assessed without at least one real-world benchmark.
+- **The simulation study is insufficiently specified for reproducibility or rigorous assessment.** The paper states that ∼100,000 samples are generated from "highly nonlinear functions" but does not specify the exact functions, the noise variance, the criterion for choosing m, or the hyperparameter ranges. The results (MSE, runtime, memory) are reported in tables that are not visible in the extracted text, and no individual simulation results are described in prose. While the authors state code is available, the paper alone does not provide enough detail to evaluate whether the method is tested under realistic challenges (e.g., non-zero boundary functions, non-stationary behavior). The paper also omits comparisons against random Fourier features and Nyström approximations — the most natural spectral low-rank baselines — while including nine other methods. This makes it difficult to attribute the method's advantage to the HS-SVD approach specifically versus the kernel choice or implementation.
 
-- **Dimensionality scaling is not experimentally demonstrated.** The paper acknowledges in the Discussion that truncation length m grows exponentially with dimension r, yet experiments are limited to r ≤ 2. The paper does not state the dimensionality for each of Simulations 1–4 explicitly, and no experiment explores r ≥ 3. Competitors like SVGP, DKL, or NNGP handle moderate-dimensional inputs (r~10) naturally; whether HS-SVD remains practical at those dimensions is unknown. This structural limitation should be a first-order experimental consideration given the paper's own admission of the issue.
+- **No experiments on real-world data.** All empirical validation is on simulated data. For a methods paper presenting a practical GP approximation, evaluation on at least one real dataset (e.g., from a spatial statistics repository or UCI benchmark) is expected to demonstrate that the method works outside synthetic sine-construction-compatible settings, particularly given the boundary condition concern above.
 
 ### Minor
 
-- **Choice of truncation parameter m is not reported.** The paper never states what values of m were used in any simulation, nor how m was selected (cross-validation? fixed heuristic?). Since m is the only tunable parameter that directly controls the accuracy-cost trade-off, this omission impairs reproducibility and makes it impossible to assess whether the chosen m values were reasonable.
+- **The claim of "no preprocessing overhead" / "for free" is overstated.** Constructing the n×m matrix Φ of sine evaluations and computing ΦᵀΦ is an O(n m²) operation. While far cheaper than O(n³) or O(n²), and while the paper correctly states the overall O(n m²) complexity, the framing of "no preprocessing overhead" implies zero cost. This is misleading: the method still requires evaluating m sine functions at n points, which is a one-time precomputation cost. The O(n m) memory for storing Φ is also not negligible for large n and moderate m (e.g., 8 GB for 10⁶×10³ in double precision).
 
-- **Generating functions for simulations are not described.** The data are said to come from "highly nonlinear functions" with no further detail. The smoothness, correlation length, and spatial structure of these functions could systematically bias comparisons. This, combined with unspecified m values, means the empirical evaluation cannot be independently reproduced or fully evaluated.
-
-- **Hyperparameter optimization details are omitted.** The MLE optimization setup (initialization, number of iterations, convergence criteria, bounds on α, ρ, β, σ²) is not provided. For a method whose parameter estimation relies on a low-rank approximation that changes with θ (through Λₘ(θ)), it is important to know whether optimization was stable across settings.
-
-- **The "no preprocessing overhead" claim is slightly overstated.** Eigenfunctions must be evaluated at all n points once, incurring an O(nm) upfront cost. While this is minor compared to competitors' preprocessing and is a one-time cost amortized over MLE iterations, the paper should frame this more precisely rather than claiming zero overhead.
-
-- **The connection between β in compact Matérn and ν in standard Matérn is not formally derived.** The paper states that "β=3 in 1-D corresponds to ν=3/2" but does not provide the derivation. Theorem 3.3 establishes β−r−1 differentiability, but the mapping to the standard Matérn smoothness parameter is not made explicit.
+- **No guidance is provided for choosing m in practice.** The paper describes m as "easy-to-tune" but offers no heuristic, no analysis of approximation error as a function of m, β, and r, and no discussion of how to select m in a data-driven way. The curse of dimensionality is mentioned in the Discussion (m grows exponentially with r), but this limitation should be part of the method's core description, not deferred to the final section.
 
 ### Trivial
-- The algorithm pseudocode (Section 3.4) contains garbled notation that should be cleaned (e.g., inconsistent variable names, undefined symbols). While likely due in part to parsing artifacts, the presentation should be self-contained.
+
+- **Theorem 3.3 states the compact Matérn kernel is β−r−1 times differentiable**, but for β ≤ r this expression becomes ≤ −1, which is not meaningful for differentiability order. The proof is in the appendix (stripped), but the main-text statement should include the relevant constraint on β relative to r (or state the differentiability as max(0, β−r−1)).
 
 ## Nice-to-Haves
-- A sensitivity analysis for m (e.g., MSE vs. m for one dataset) would be informative, as m is the key tuning parameter.
-- An eigenvalue decay analysis for the compact Matérn kernel on the actual data points would help justify why low-rank truncation works well.
-- A small-scale comparison to the exact GP (n ≤ 5,000) would verify that the HS-SVD approximation error is negligible relative to other approximations.
+
+- A breakdown of wall-clock time (Φ construction vs. likelihood optimization vs. prediction) would help users understand where the method's time is spent.
+- An analysis of the approximation error ‖K_XX − Φ_m Λ_m Φ_mᵀ‖ as a function of m, β, and r would strengthen the method's theoretical characterization.
+- Discussion of how to handle non-gridded data with repeating coordinates, and the required preprocessing to rescale inputs to [0,1]^r.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points were raised by reviewers but are excluded from the main assessment for the following reasons:
 
-- **Missing tables (Critic #4d):** The critic notes that tables are absent from the provided text. Per parser instructions, tables are stripped by the parsing process and exist in the original submission. This is not a paper flaw.
-
-- **Garbled pseudocode as reproducibility impairment (Critic #5):** The criticism about garbled text in the algorithm ("H←σ12 Y −ΦCΦ⊤Y") is largely a parser artifact. The original submission does not have these issues per the parsing guidelines. The substantive concern about undefined variables is addressed in Minor weaknesses above.
-
-- **"Infinite matrices notation is never used" (Section-by-Section note):** This is a stylistic observation rather than a substantive weakness. The paper truncates the infinite expansion for computation, which is standard practice.
-
-- **"Calling it HS-SVD is a label, not a computational shortcut":** This is a subjective opinion about naming, not a substantive weakness.
-
-- **"Proof not in main text" (Theorem 3.3):** Per instructions, missing proofs in the appendix are stripped by the parser and exist in the original submission.
-
-- **"No justification for which methods appear in which figures/tables":** This is a minor presentational concern that does not affect the validity of the results, and is largely about information that was likely in the tables that were stripped.
+- **"The algorithm contains an undefined variable C in 'H ← 1/σ (Y − ΦCΦᵀY)'."** The text shows a LaTeX rendering with C and a plain-text version with G concatenated — this is a parser artifact. Minor notation issues of this kind carry no weight in the evaluation.
+- **"Truncating small eigenvalues for numerical stability is a general property, not specific to this method."** The paper is entitled to list this as a benefit of its approach; claiming it as a contribution would be overreach, but the paper presents it as a consequence, not a novelty.
+- **"The paper does not report wall-clock times for the full pipeline in a table, only a single figure."** Figure 1 explicitly reports runtime. The tables (stripped) also contain timing information. This criticism is not supported by the paper.
+- **"The theoretical contribution is thin — the core idea is a direct application of known results."** The paper is an algorithmic/empirical methods paper, not a theoretical paper. Its contribution is in the combination and application, not in new mathematical theory. Evaluating it against theoretical novelty expectations is a category error.
+- **"The paper does not discuss how to handle discrete or non-gridded data with repeating coordinates."** The eigenfunctions are defined on [0,1]^r, which requires rescaling — a common preprocessing step for any method working on compact domains. This is a nice-to-have, not a core weakness.
 
 ## Novel Insights
 
-The reviews surface a genuine tension in the paper: the method's principal strength — obtaining a "free" low-rank decomposition via analytically known eigenfunctions — is also the source of its principal weakness — dependence on a known Mercer decomposition and exponential scaling of m with dimension r. This means the paper's contribution is most naturally evaluated as a specialized tool for low-dimensional (r ≤ 2) large-n settings, where it could offer genuine advantages over methods that require GPUs or costly preprocessing. However, the paper's rhetoric frames it as a general-purpose competitor to SOTA methods, and the cross-platform comparison inflates the apparent advantage. A more measured framing, matched to the actual experimental scope, would better serve the contribution.
+The most interesting tension exposed across the reviews is between the method's mathematical elegance and its practical blind spots. The HS-SVD approach is genuinely clean: the compact Matérn's eigenfunctions are parameter-independent, which means Φ and ΦᵀΦ are computed once and reused throughout MLE — a structural advantage over methods that must recompute or re-factor during optimization. Yet the paper's evaluation strategy (simulated functions of unspecified form, no real data, no investigation of boundary effects) leaves the reader unable to assess whether this elegance translates to robust performance in practice. The boundary condition issue is particularly subtle: the standard Matérn on ℝʳ imposes no boundary behavior, so moving to [0,1]ʳ with Dirichlet conditions is not "without loss of generality" — it is a genuine modeling assumption that will matter whenever the response does not naturally return to zero at the domain edges. The paper would benefit from openly characterizing this trade-off rather than glossing over it.
 
 ## Suggestions
 
-1. **Add at least one real-world dataset** from the motivating domains (e.g., a large geospatial dataset with 1–2 spatial coordinates). This is the single highest-leverage improvement.
-2. **Control for hardware in runtime/memory comparisons** — either run all methods on CPU (or all on GPU), or explicitly discuss how the asymmetry affects the conclusions.
-3. **Report m values** used in all simulations and describe how they were selected.
-4. **Describe the generating functions** for the simulated data.
-5. **Experimentally demonstrate dimensionality scaling** with a small study at r=3 or r=4 to honestly calibrate expectations.
-6. **Provide the MLE optimization setup** (initialization, bounds, convergence criteria).
-7. **Tone down the "no preprocessing" claim** to acknowledge the O(nm) cost of evaluating eigenfunctions.
+1. **Confront the boundary condition issue head-on.** Add an experiment where the true function has non-zero endpoints (e.g., a linear trend) and measure prediction error near boundaries. Discuss practical mitigations: centering the data, adding a parametric mean function, or extending to Neumann/Robin boundary conditions.
+2. **Specify the exact simulation setup** (the true functions, noise variance, criterion for choosing m, hyperparameter ranges) in the paper text, not just in the supplementary code.
+3. **Include comparisons against random Fourier features and Nyström approximations** as the most directly comparable spectral low-rank baselines.
+4. **Replace "no preprocessing overhead"** with an honest accounting of the O(n m²) one-time cost and O(n m) memory for Φ.
+5. **Add at least one real-world dataset** (e.g., from spatial statistics, UCI, or a GP benchmark repository).
+6. **Provide practical guidance for choosing m**, both as a heuristic and via an error analysis showing how approximation quality varies with m, β, and r.
 
 ## Score and Decision
 
-The paper presents a genuinely novel idea — using analytically known eigenfunctions of a compact Matérn kernel to obtain a free low-rank decomposition — and the theoretical groundwork (smoothness theorem, connection to standard Matérn) is solid. However, the empirical evaluation has significant gaps: synthetic-data-only results, a confounded cross-platform comparison, unreported m values and generating functions, and unexplored dimensionality scaling. These issues undermine the strongest practical claims. The core contribution is salvageable but requires substantial empirical strengthening. Without stronger evidence, the paper does not meet the bar for acceptance.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

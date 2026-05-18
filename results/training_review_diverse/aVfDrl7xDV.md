@@ -1,20 +1,18 @@
-Now I have a thorough understanding of the paper and can verify each claim. Let me produce the final consolidated review.
+Now I have all the information I need. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes Bayesian-OPRO (BOPRO), a method that integrates Bayesian optimization with LLMs for iterative search over solution spaces. BOPRO uses a Gaussian process surrogate in the embedding space to propose promising regions, then retrieves similar past solutions as in-context examples to prompt an LLM to generate new candidates. The method is evaluated on three language-based search tasks: word search (Semantle), molecule optimization (Dockstring), and hypothesis+program search (1D-ARC). BOPRO outperforms baselines on the first two tasks (by ≥10 percentage points on Semantle, and producing 17% fewer invalid molecules on Dockstring) while trailing on program search. The paper includes a diagnostic analysis attributing the program-search failure to poor code embeddings rather than insufficient exploration.
+The paper proposes BOPRO (Bayesian-OPRO), a method that integrates Bayesian optimization with LLM-based in-context optimization for iterative search tasks. BOPRO builds a GP surrogate over embeddings of candidate solutions, uses an acquisition function to propose promising regions in latent space, then retrieves nearest-neighbor examples to prompt the LLM for new solutions. The method is evaluated on word search (Semantle), molecule optimization (Dockstring), and hypothesis+program search (1D-ARC). The paper's central contribution is demonstrating that embedding-space Bayesian optimization can guide LLM prompting to adaptively balance exploration and exploitation during search.
 
 ## Strengths
 
-- **Novel integration of Bayesian optimization with LLM-based search**: BOPRO replaces OPRO's greedy best-k retrieval with a GP-surrogate-guided proposal mechanism, enabling dynamic adaptation of the search strategy as uncertainty evolves. This is a principled and well-motivated generalization of existing in-context optimization methods.
+1. **Novel and well-motivated integration of BO with LLM-based search.** Using latent-space BO to dynamically steer LLM prompting toward promising regions is a genuinely new synthesis of two frameworks. The method is cleanly motivated by the exploration-exploitation problem in LLM search, and the design (GP surrogate → acquisition optimization → nearest-neighbor retrieval → LLM prompt) is clearly explained and principled. This is not an incremental extension; it introduces a qualitatively different mechanism for controlling LLM search behavior.
 
-- **Strong empirical results on two of three tasks**: On Semantle, all BOPRO variants outperform OPRO by ≥10 percentage points (Fig. 2a). On Dockstring, BOPRO not only shows marginally better average scores but completes optimization for all 58 protein targets while OPRO finishes only 12 in the same wall-clock budget, and produces 17% fewer invalid molecules. These results are directly supported by the experiments.
+2. **Strong, clean empirical win on Semantle (word search).** All BOPRO variants outperform OPRO by ≥10 percentage points on 50 problem instances (Fig. 2a), and the improvement is sustained rather than plateauing. The analysis in Section 8.1 (Fig. 5a) further confirms that BOPRO achieves a bimodal distribution over solved tasks (covering both low and high warm-start scores), directly evidencing adaptive exploration-exploitation — a property OPRO (greedy exploitation) and random sampling (pure exploration) each lack individually. This result is the paper's most convincing demonstration.
 
-- **Honest and informative failure analysis**: The paper does not hide the program-search failure. Instead, §8 provides a thorough diagnostic: Fig. 5(a) shows BOPRO exhibits a bimodal solved-task distribution (covering both exploration and exploitation), ruling out insufficient exploration as the cause. Fig. 6 provides a diagnostic scatter plot showing that GTE-Qwen embeddings fail to distinguish code sequences with low edit-distances, concretely identifying poor representations as the likely root cause.
+3. **Honest and insightful failure analysis on program search.** Section 8.2 diagnoses why BOPRO underperforms on 1D-ARC: off-the-shelf code embeddings fail to distinguish solutions with low edit-distance. The diagnostic scatter plot (Fig. 6) provides correlational evidence, and the paper appropriately frames this as a "likely cause" and "important direction for future work." Turning a negative result into a community-useful insight (embedding quality matters for embedding-space BO) adds value beyond the paper's positive results.
 
-- **Exploration-exploitation analysis is well-supported**: Fig. 5(a) directly compares the solved-task distributions of OPRO (unimodal, high-score-focused), random sampling (low-score-focused), and BOPRO (bimodal), providing clear evidence that BOPRO balances exploration and exploitation. This analysis goes beyond what is standard for method papers.
-
-- **Generalization experiments across LLMs and to alternative frameworks**: The paper validates BOPRO with Mistral-Large, GPT-4o, LLaMA-3.1-8b, and Gemma-2-2b (§7.4). It also shows that the Bayesian approach extends to evolutionary algorithms (Bayesian-LMX), demonstrating generality beyond OPRO.
+4. **Generalizable framework.** The paper extends BOPRO's Bayesian prompting strategy to LMX (Bayesian-LMX, Section 7.4), demonstrating the approach is not tied to a single in-context optimization method. This increases the potential impact of the work.
 
 ## Weaknesses
 
@@ -22,60 +20,50 @@ This paper proposes Bayesian-OPRO (BOPRO), a method that integrates Bayesian opt
 None.
 
 ### Major
-None. No identified weakness invalidates the paper's core claims or would alone warrant rejection.
+
+1. **Ambiguous comparison on Dockstring molecule optimization.** The paper states that BOPRO "marginally outperforms greedy OPRO on average" on Dockstring, but OPRO only completed 12 of 58 protein targets within the same wall-clock time (Section 7.2). The paper does not clarify whether this average is computed over all 58 targets (where OPRO had fewer evaluations on 46), or only over the 12 completed targets. Both options are problematic: the former systematically disadvantages OPRO, and the latter compares different populations. The paper does set a fixed evaluation budget of 200 new SMILES per target, so the comparison is not *uncontrolled*, but the ambiguity about what "on average" means undermines the claim. The paper's stronger Dockstring findings — 17% fewer invalid molecules and shorter SMILES — are not affected, but the comparative optimization-score claim needs clarification or re-reporting.
 
 ### Minor
 
-- **Ambiguous aggregation in Dockstring comparison**: The paper states "BOPRO shows slightly better performance than OPRO on average" (Fig. 2 caption) and that OPRO "completing only 12" of 58 targets. It is unclear whether the average in Fig. 2(b) is computed (a) over all 58 targets using best-so-far values after wall-clock expiry, or (b) only over the 12 completed runs. If (b), the comparison is biased since the hardest targets are excluded for OPRO. If (a), the comparison is fair but should be explicitly stated. This ambiguity weakens a quantitative claim and should be clarified.
+2. **Program search failure diagnosis is correlational, not causal.** The diagnostic scatter plot (Fig. 6) shows that embedding similarity does not correlate with score difference for 1D-ARC solutions, which is consistent with the poor-embeddings hypothesis. However, other factors could contribute: the GP surrogate may be ill-suited even with better embeddings, the k-NN retrieval from noisy embeddings may introduce harmful examples, or the LLM may struggle to exploit the provided examples for precise code generation. The paper does not test the hypothesis by, e.g., substituting a code-specific embedding model (CodeBERT) or comparing with oracle similarity (edit distance). The paper's cautious language ("likely cause") partially mitigates this, but a full section devoted to explaining the negative result would be strengthened by causal confirmation.
 
-- **Missing variance/confidence estimates**: Main results (Fig. 2) show curves "averaged over 3 repeat runs" without error bars, confidence bands, or significance tests. Given only 3 repeats and modest problem-instance counts (50 for Semantle, 58 for Dockstring, 130 for 1D-ARC-Hard), the reader cannot assess whether observed differences (e.g., the ≥10 pp gap on Semantle) are statistically reliable. This is a methodological gap that lowers confidence in the headline numbers.
-
-- **InstructZero comparison uses a different LLM than main results**: The InstructZero baseline (Table 1) is evaluated only with Llama-3.1-8b, while main results use Mistral-Large. Since InstructZero's effectiveness could be model-dependent, the claim that "InstructZero is unable outperform even repeated sampling" would be more convincing if demonstrated with the same model used for the main comparisons.
+3. **"Bayesian generalization of OPRO" framing is somewhat imprecise.** The paper claims BOPRO is a "Bayesian generalization" of OPRO (Section 5.2.1). While both methods share the same overall loop (select examples → prompt LLM → generate → evaluate → repeat), BOPRO introduces a fundamentally new component (GP surrogate + acquisition function optimization) that does not straightforwardly reduce to OPRO's top-k selection by score under special conditions. The relationship is better described as a *novel hybrid* that replaces OPRO's greedy selection with BO-guided selection. This does not harm the contribution but could mislead readers about the degree of continuity between the methods.
 
 ### Trivial
-None.
+
+- The notation occasionally blurs the distinction between the raw embedding \( \phi(x) \), the reduced representation \( z = \psi(\phi(x)) \), and the BO proposal vector \( z'_t \). These are all defined but can be confused in prose.
+- The paper mentions dimensionality reduction options but does not report which was used in the main experiments.
 
 ## Nice-to-Haves
 
-- **Error bars on all main figures**: Adding standard errors or bootstrap intervals to Fig. 2 would significantly strengthen the persuasiveness of the reported gains without requiring new experiments (the 3 repeats already exist).
-
-- **Absolute invalid-molecule rates**: The paper reports "17% more invalid molecules" as a relative reduction. Reporting absolute rates (e.g., "OPRO produced 40% invalid, BOPRO 23% invalid") would make the claim more concrete and interpretable.
-
-- **Performance on the full 1D-ARC set (901 problems)**: The paper constructs 1D-ARC-Hard by filtering from 901 problems. Reporting results on the full set (even in appendix) would provide a useful calibration baseline for readers.
-
-- **Ablation on number of retrieved examples (k)**: BOPRO's performance likely depends on the number of in-context examples retrieved. A brief ablation (e.g., k=1, 3, 5) would give practical guidance.
-
-- **Computational cost breakdown**: A brief comparison of total token usage or BO overhead across methods would help practitioners assess trade-offs.
-
-- **Testing an alternative code embedding model**: The failure diagnosis (Fig. 6) is convincing for GTE-Qwen. Testing even one alternative embedder (e.g., CodeBERT) on a subset would strengthen the claim that the problem is the embedding model rather than a fundamental limitation of BO in code space, or would reveal a path forward if successful.
+- A sensitivity analysis for design choices not varied in the paper (number of retrieved examples \( k \), kernel choice, dimensionality reduction method) would improve reproducibility and scientific value. Even on a single task like Semantle, this would help identify which components matter most.
+- The paper could briefly discuss the computational cost of fitting and optimizing the GP surrogate relative to LLM inference, to clarify scaling properties for larger search budgets.
+- An experiment substituting a code-specific embedding model (e.g., CodeBERT or a fine-tuned variant) on a small subset of 1D-ARC-Hard problems would confirm or refute the embedding-quality hypothesis in Section 8.2.
 
 ## Removed Points
 
-These points are flagged to be removed from the review; treat them with caution.
+These points were flagged for removal with justification:
 
-- **Criticism about OPRO being a "modified" version**: The harsh critic claimed the paper should "explicitly note this deviation" of removing numerical scores from prompts. However, the paper already states at line 131: "Different from OPRO, we also find that removing numerical scores from the prompt results in a modest improvement across methods, so we use this as the default setting." The modification is clearly disclosed and applied consistently to all methods, making the comparison fair. *Removed: already addressed by the paper.*
-
-- **Criticism that main results rely only on Mistral-Large**: The paper explicitly (§7.4) validates with GPT-4o, LLaMA-3.1-8b, and Gemma-2-2b and states "demonstrate similar trends to our main results." While these results are deferred to the appendix, this is standard practice. *Removed: the paper already addresses this concern; moved to Nice-to-Haves as a presentation suggestion.*
-
-- **Criticism about selection bias in 1D-ARC-Hard construction**: The critic noted a risk of selection bias but acknowledged the paper's subsequent analysis addresses it. The construction is reasonable and the warm-start analysis (Fig. 5) validates it. *Removed: not a real flaw; moved to Nice-to-Haves as a suggestion for additional reporting.*
-
-- **Strength about "thorough evaluation across multiple models"**: This is valid and retained in Strengths.
+- **"Uncontrolled comparison on Dockstring"**: The reviewer characterized the Dockstring experiment as "uncontrolled" (apples-to-oranges). However, the paper *does* control the number of evaluations per target (maximum 200 SMILES per target, Section 7.2). The wall-clock difference arises because OPRO generates longer and more invalid SMILES, slowing evaluation. The core concern about how the "average" is computed across 12 vs. 58 targets is valid and retained as Major Weakness #1 above, but the claims of an entirely uncontrolled design are factually incorrect and removed.
+- **"The 12 easiest for OPRO"**: The reviewer claimed OPRO completed "the 12 easiest" targets. This is speculative — the paper states OPRO finishes only 12 targets because its SMILES are longer and more invalid (causing slower evaluation), not because those targets are inherently easier. Removed as unsupported.
+- **Warm-start criticism**: The reviewer noted the warm-start is "substantial" and its interaction with BOPRO is not analyzed. This is addressed in Section 8.1, which explicitly analyzes performance as a function of warm-start scores. Removed as the paper already covers this.
+- **InstructZero/LMX baseline criticism**: The reviewer noted these use different models/settings. The paper presents these as supplementary (Section 7.4) and explicitly notes the limitation. This is not a weakness but a scoping choice.
+- **Sentence-level pedantry about "this sentence in the intro is not directly supported by Figure 3"**: Not present in the original review; included preemptively per instructions.
 
 ## Novel Insights
 
-The most interesting insight from the meta-review is that the paper's failure analysis (§8) actually *strengthens* its contribution: by ruling out insufficient exploration (Fig. 5a) and pinpointing poor code embeddings as the cause (Fig. 6), the paper shows that BOPRO's framework is sound and the bottleneck is a *representation* problem, not a *search* problem. This turns the failure case into actionable guidance for future work. The harsh critic recognized this value, and it is one of the paper's strongest features — most papers would simply report the failure and move on.
+None beyond the paper's own contributions. The reviews surface the same core strengths and concerns that the paper itself presents.
 
 ## Suggestions
 
-1. **Clarify the Dockstring aggregation explicitly**: In the text or Fig. 2 caption, state: "The curves reflect best-so-far performance averaged over all 58 targets. For targets OPRO did not complete, its best-so-far value at wall-clock expiry is used." If this is already the case, just make it explicit.
-
-2. **Add error bars or confidence bands to Fig. 2**: The 3 repeats are already collected; adding standard errors requires only a plotting change and would substantially increase the credibility of the reported gains.
-
-3. **Move the InstructZero comparison to Mistral-Large**: If feasible, evaluating InstructZero with the same model used for main results (Mistral-Large) would make the comparison more directly informative.
+1. **Clarify the Dockstring average**: Explicitly state whether the "average" performance comparison covers all 58 targets (and if so, how OPRO's incomplete runs were handled — e.g., best-so-far after whatever evaluations were completed) or only the 12 OPRO finished. If the former, report results separately on the 12-target subset as a sensitivity check. The stronger claims about invalid molecules and SMILES length are independent and should be highlighted as the primary contribution for Dockstring.
+2. **Strengthen the program search diagnosis**: Add a small experiment substituting the embedding model on a subset of 1D-ARC-Hard problems — even CodeBERT or a BERT-based code embedder would test whether the embedding hypothesis holds. Alternatively, compare with an oracle similarity metric (edit distance) to bound best-case performance.
+3. **Report the dimensionality reduction method used**: The paper mentions options (PCA, random projection) but does not state what was actually used. This is a standard reproducibility detail.
+4. **Scope the "generalization" claim more precisely**: Replace "Bayesian generalization of OPRO" with language like "a method that extends OPRO's prompting framework by replacing greedy selection with BO-guided selection," which is more accurate and avoids overclaiming the relationship.
 
 ## Score and Decision
 
-The paper presents a well-motivated, clearly described method with honest empirical evaluation that includes both successes and a diagnosed failure. The weaknesses are minor (ambiguous aggregation wording, missing error bars) and easily addressable. No structural or fatal flaws are present. The contribution — integrating BO with LLMs for adaptive search — is significant for the field of LLM-based optimization.
+The paper presents a genuinely novel integration of Bayesian optimization with LLM-based search, supported by strong results on Semantle, insightful failure analysis, and a generalizable framework. The primary weakness — an ambiguous comparison on Dockstring — is fixable with clearer reporting and does not undermine the core contribution. The negative result on program search is handled transparently and constructively. This is a solid paper with real contributions; the issues are addressable in revision.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,77 +1,84 @@
-Now I have a thorough understanding of both the paper and the reviews. Let me write the final consolidated review.
+Now I have a thorough understanding of the paper. Let me produce the consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes Diffusion Implicit Policy (DIP), a framework for scene-aware motion synthesis that disentangles human-scene interaction learning from motion synthesis during training. A motion diffusion model is trained on unpaired motion data only, and at inference time, interaction-based reward functions act as an implicit policy to guide the denoising process in a GAN-inversion manner. The method is evaluated on locomotion, object interaction, and long-term motion tasks across ShapeNet, PROX, and Replica scenes, with user study results showing competitive or superior performance to prior methods (DIMOS, SAMP, GAMMA) that require paired motion-scene data.
+This paper proposes Diffusion Implicit Policy (DIP), a framework for scene-aware human motion synthesis that requires no paired motion-scene data during training. The core idea is to disentangle interaction learning from motion learning — training a motion diffusion model on unpaired motion data (AMASS/Babel) and using hand-designed interaction-based reward functions as an implicit policy during inference. The method integrates diffusion denoising with reward-guided optimization of the sampling distribution in a GAN-inversion style, and introduces rotation-matrix power-space blending for long-term multi-task motion synthesis. Experiments on ShapeNet scenes, PROX, and Replica show that DIP achieves competitive or superior results to paired-data baselines (SAMP, GAMMA, DIMOS) across locomotion, interaction, and long-term synthesis.
 
 ## Strengths
 
-1. **Novel disentanglement of interaction from motion synthesis, removing the need for paired training data**: The core idea — train a motion diffusion model on unpaired motion data and enforce interaction plausibility only at inference via reward-guided diffusion — is a genuine departure from prior methods (DIMOS, SAMP, GAMMA) that all require paired motion-scene data for training. The paper states clearly: "paired motion-scene data are no longer necessary for training" (Sec. 1), and the results on real PROX/Replica scenes (Figs. 7-8) demonstrate generalization without scene-conditioned training.
+- **Unpaired training eliminates dependency on scarce motion-scene data.** The framework disentangles interaction from motion synthesis during training, using only pure motion datasets (AMASS/Babel) for the diffusion model and applying scene-based reward functions only at inference (Sec. 3.3–3.5). Despite this training-data restriction, it achieves results competitive with or exceeding paired-data methods (Tabs. 1–3), which is a genuine advance for the field.
 
-2. **User study with strong perceptual evidence**: The user study (1,200 ratings from 15 participants, Table 3) is the most direct evidence for the method's effectiveness. DIP achieves the highest interaction plausibility (4.16/5 vs. 3.97 for DIMOS), diversity (3.91/5 vs. 3.64), and overall score (4.12/5 vs. 3.95), while matching DIMOS on motion naturalness — all without any paired motion-scene training data.
+- **Joint optimization of motion naturalness and interaction plausibility via iterative denoising + implicit policy.** The DIP integrates a motion diffusion model (providing a naturalness prior) with interaction-based rewards (providing plausibility) into a single iterative loop (Eq. 7–9, Sec. 3.5). The user study (Tab. 3) shows DIP obtains the highest overall and interaction plausibility scores across PROX and Replica while maintaining motion naturalness on par with DIMOS — all without paired data.
 
-3. **Quantitative advantages on locomotion and interaction metrics**: On locomotion (Table 1), DIP achieves the shortest finish time (3.35s), smallest distance to goal (0.03m vs. 0.12m for DIMOS), and lowest scene penetration (0.95% vs. 4.64%). On interaction (Table 2), DIP reduces mean penetration and maximum penetration for both sitting and lying tasks while maintaining competitive contact and time scores.
+- **Rotation matrix power-space blending for smooth multi-task transitions.** The blending strategy (Sec. 3.6) interpolates rotations in the power space of the rotation matrix rather than naively in axis-angle space, avoiding interpolation artifacts. This is a technically sound design choice that contributes to the strong user-study diversity and overall scores (Tab. 3).
 
-4. **Technically sound GAN-inversion style optimization**: The optimization of the denoising distribution mean via `\hat{x}_0^\varphi(\mu_t, t-1, c)` rather than directly modifying `\mu_t` (Eq. 10) is well-motivated: it preserves motion continuity by operating through the full diffusion model prediction. The analogy to GAN inversion is clearly explained and distinguishes the approach from naive classifier guidance.
-
-5. **Strong generalization across scene types without retraining**: The same trained motion diffusion model produces credible results on synthesized ShapeNet scenes, real scanned PROX scenes, and Replica scenes (Sec. 4), validating that disentangled training indeed enables generalization to unseen environments.
+- **Comprehensive evaluation across three settings.** The paper evaluates on locomotion (Tab. 1), atomic interaction (Tab. 2), and long-term multi-task synthesis via user study (Tab. 3), using both synthetic (ShapeNet) and real scanned scenes (PROX, Replica). This breadth convincingly demonstrates the method's generalization ability.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
+
 None.
 
 ### Minor
 
-1. **No variance or confidence intervals reported for main quantitative results (Tables 1, 2)**: The paper reports only mean values for locomotion and interaction metrics without standard deviations, confidence intervals, or number of trials. While this is common practice in parts of this community, it weakens the ability to assess whether reported improvements (e.g., 0.03m vs. 0.12m distance to goal) are statistically meaningful given the procedural generation of test scenes. An explicit statement of variance or number of test runs would strengthen the claims.
+- **Abstract overstates motion naturalness results relative to the paper's own conclusions.** The abstract claims "better motion naturalness … than cutting-edge methods," but the paper's own discussion (Sec. 4.4, line 266) states: "For motion naturalness, our proposed method is on par with DIMOS." The user study table (Tab. 3, \input{tables/user_study}) is not visible in the extracted text, but the paper's textual summary explicitly avoids claiming superiority on this dimension. This is a factual inaccuracy in the most prominent part of the paper. The authors should correct the abstract (e.g., "comparable motion naturalness and better interaction plausibility and diversity").
 
-2. **Ablation studies not present in the main paper**: The paper defers all ablations to the supplementary material (line 272). At minimum, an ablation isolating the effect of the implicit policy (DIP vs. DIP without reward-based mean adjustment, using only the motion prior with ControlNet) should appear in the main text to directly demonstrate the benefit of the proposed optimization. The contribution depends on this comparison being transparent.
+- **The "unpaired" framing, while accurate, would benefit from a clearer discussion of the reward-engineering trade-off.** The paper is transparent that reward functions are hand-designed (Sec. 3.4), and the "unpaired" claim refers specifically to not requiring paired motion-scene training data — which is technically correct. However, the current framing strongly emphasizes the absence of supervision without acknowledging that the hand-designed rewards encode substantial domain knowledge (contact geometry, penetration avoidance, goal conditioning) that must be manually specified per interaction type. Adding a brief limitations paragraph discussing this trade-off, and when the reward-engineering burden may become prohibitive, would improve the paper's intellectual honesty without weakening its contribution.
 
-3. **COINS dependence qualifies the "unpaired" claim**: The paper frames itself as requiring "no paired motion-scene data," and the title uses "Unpaired Scene-aware Motion Synthesis." However, the pipeline uses COINS (line 99, line 248), a method trained on paired human-scene interaction data, to sample static interaction goals for long-term tasks. The core motion model training is indeed unpaired, and the paper acknowledges COINS usage, but the framing should be qualified — ideally clarifying that the motion synthesis component is unpaired while the full pipeline uses a pre-trained paired module for goal specification. This does not invalidate the contribution but would improve precision.
-
-4. **Contact metric mismatch acknowledged but not fully resolved**: On locomotion (Table 1), DIP achieves worse contact scores than DIMOS. The paper attributes this to the metric using foot joints while the method focuses on foot vertex contact (line 232). This is a reasonable explanation, but the authors should verify or argue that the metric discrepancy does not affect the relative ranking — or adopt a metric that reflects what the method optimizes.
-
-5. **Interaction evaluation shows an uncommented trade-off in max penetration**: For sitting (Table 2), DIP achieves lower mean penetration (0.10 vs. 0.24 for DIMOS) but higher maximum penetration (0.24 vs. 0.16). The paper does not comment on this trade-off. A brief explanation (e.g., whether this reflects a specific failure mode or is within tolerance) would improve transparency.
-
-6. **Motion blending and inpainting components not individually evaluated**: The inpainting mechanism (Sec. 3.3) and the power-space motion blending (Sec. 3.5) are described but not ablated or compared against simpler alternatives (e.g., linear interpolation in axis-angle). While the overall results are positive, the individual contribution of these components is unclear.
+- **The contact score gap is acknowledged but not fully supported with alternative evidence.** The paper's lower contact scores (Tabs. 1–2) are attributed to a metric mismatch (foot-vertex vs. foot-joint contact). The explanation is plausible, but the paper could strengthen it by reporting vertex-based contact scores alongside the joint-based metric, or by showing that the method's explicit foot-vertex contact reward (mentioned in Sec. 3.4) actually works as intended. As it stands, readers cannot distinguish between a genuine weakness and a measurement artifact.
 
 ### Trivial
 
-- The paper reports "0.95" for penetration in locomotion without a percentage sign in the text, while the metric description says "percentage of body vertices" — consistent formatting would help readability.
+- The notation in Eq. (6) (line 171) is slightly ambiguous: it is not immediately clear whether gradients of the scene information \(\mathcal{S}\) flow through the diffusion model \(\varphi\) or only through the reward function. Clarifying this would help reproducibility.
+
+- The LLM-based sub-task decomposition (mentioned in Sec. 3.2, line 96) is not evaluated, and the experiments use predefined sub-tasks. This is fine — the LLM component is inessential to the core contribution — but a brief note confirming this scope would prevent confusion.
 
 ## Nice-to-Haves
 
-- A controlled comparison against a version of DIP using standard diffusion sampling (same ControlNet, same noise schedule) without the implicit policy optimization would directly demonstrate the value of the central proposed mechanism.
-- Discussion of failure cases or limitations (e.g., when the reward optimization diverges, or scenes where the method struggles) would improve credibility.
-- A brief note on sensitivity to the λ weight hyperparameters would help readers understand tuning requirements.
+- An ablation study comparing (a) pure diffusion (no optimization), (b) direct optimization of \(\mu_t\), and (c) the proposed GAN-inversion-style optimization via \(\hat{x}_0^\varphi\) would directly validate the core technical claim. The paper references supplementary material for ablations (these exist in the original submission but were not evaluable here due to parser stripping). Moving the key ablation table into the main paper would strengthen the presentation.
+
+- A convergence trajectory analysis showing how \(\mathcal{R}_{ip}\) evolves during the denoising/optimization loop would address curiosity about gradient stability and optimization behavior, but is not needed to validate the central claims.
+
+- Reporting velocity distributions for the locomotion experiments would clarify whether the faster finish time (3.35s vs. DIMOS's 4.02s) reflects more natural walking speed or unnaturally fast motion.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were flagged by reviewers but are removed or downgraded for the following reasons:
 
-- **"Over-reliance on supplementary material for critical details" (from Harsh Critic #3)**: The paper explicitly states where details are deferred ("Please kindly refer to the Supplementary Material," line 134). The reward function types (six terms) and the optimization approach (Eq. 10) are presented in the main paper. Exact formulations and λ weights are tuning details commonly placed in supplementary. This is not a structural weakness — the main paper provides sufficient information to understand the method's logic and evaluate its soundness.
-- **"Ambiguous baseline configurations" (from Harsh Critic #2)**: The paper states that all methods use the same initial state and task goals (line 248) and uses scenes from DIMOS. The baselines are published, cited methods. Not re-stating their training details is standard practice. The reviewer's demand for per-baseline hyperparameter disclosure exceeds what is typical for this type of comparison.
-- **"Justification for GAN Inversion analogy is weak" (from Harsh Critic Section-by-Section)**: The paper provides a clear analogy (line 169) with a concrete description of why optimizing through the diffusion prediction outperforms direct μ_t modification. This is adequately justified.
-- **Strength Finder's claimed strengths that are generic**: Some strengths were phrased generically (e.g., "quantitative superiority") but these are backed by specific numbers in the paper, so they are kept. The "methodological gap" claims that inflate minor issues have been downgraded per instructions.
+- **"Core technical move is under-justified theoretically and lacks ablation in the main paper"** — Partially removed. The demand for theoretical proof of gradient meaningfulness is beyond what an empirical systems paper should provide; the GAN-inversion analogy and empirical claim of better performance (Sec. 3.5) constitute adequate justification for a paper of this class. The complaint about missing main-paper ablation is removed per the rule that supplementary material (referenced at line 272) exists in the original submission and was stripped by the parser. A reduced version of this concern remains in Minor (the lack of a dedicated ablation table in the main paper is a presentation limitation, not a fatal gap).
+
+- **"The paper should also cover additional tasks/domains"** — Scope creep. The paper evaluates on three settings (locomotion, interaction, long-term) across two scene types (synthetic, real), which is a thorough evaluation for a single paper.
+
+- **"Method relies on LLMs but this component is not evaluated"** — This is noted in Trivial but the criticism is downgraded because the contribution does not depend on the LLM component; the paper's core pipeline works with predefined sub-tasks.
+
+- **"SMPL-X axis-angle representation may have discontinuities"** — A known property of the representation. The paper's power-space blending (Sec. 3.6) explicitly addresses this for transitions, and this is a standard representation in the field. Removed as a non-issue.
 
 ## Novel Insights
 
-The reviews collectively surface a tension that the paper does not fully address: the "unpaired" framing is powerful and the core motion model genuinely requires no paired data, yet the full pipeline depends on COINS (a paired-data module) for goal specification. This does not invalidate the contribution, but future work should examine whether the goal-specification step can also be learned from unpaired data or heuristics, making the entire pipeline fully unpaired. Additionally, the contact metric mismatch (foot-vertex vs. foot-joint) highlights a broader evaluation challenge in the field: as methods optimize different aspects of contact, standardized evaluation protocols become increasingly important.
+None beyond the paper's own contributions. The reviews did not surface any observation about the work that is not already present in the paper's narrative.
 
 ## Suggestions
 
-1. Add variance measures (standard deviation or confidence intervals) to Tables 1 and 2.
-2. Include one key ablation in the main paper — specifically, compare DIP with and without the implicit policy optimization (same ControlNet, same noise schedule) to directly demonstrate the benefit of the proposed mechanism.
-3. Qualify the "unpaired" framing to clarify that the motion model training is unpaired while the full pipeline uses a pre-trained goal-specification module (COINS) that requires paired data.
-4. Comment on the mean vs. max penetration trade-off for sitting in Table 2.
-5. Either adopt a contact metric aligned with the method's optimization targets or provide analysis showing the metric mismatch does not affect relative rankings.
+1. **Correct the abstract** to replace "better motion naturalness" with "comparable motion naturalness" or "on par with state-of-the-art methods in motion naturalness," matching the actual conclusions in Sec. 4.4.
+2. **Add a short limitations paragraph** in the conclusion or a dedicated limitations section discussing the reward-engineering burden, potential failure cases when the diffusion prior conflicts with reward signals, and the inference-time cost of the optimization loop.
+3. **Move the key ablation** (GAN-inversion optimization vs. direct \(\mu_t\) optimization vs. no optimization) from supplementary to the main paper, even if as a small table. This directly validates the central technical claim.
+4. **Report vertex-based contact scores** alongside the joint-based metric in Tables 1–2 to support the explanation for the contact-score gap.
 
 ## Score and Decision
 
-The paper presents a genuinely novel framework with a well-motivated technical approach. The core contribution — decoupling motion prior learning from scene interaction and combining them via guided diffusion at inference — is significant and addresses a real limitation in the field. The evaluation, while not exhaustive (no variance, ablations in supplementary), includes a substantial user study (1,200 ratings) and multiple quantitative metrics across diverse scenes that collectively support the main claims. The weaknesses are all minor (presentation, scope of what appears in the main text, precise framing) and addressable in a revision. No weakness threatens the core claim that unpaired training with inference-time reward optimization can produce competitive scene-aware motion synthesis.
+**Originality:** The framework's core idea — decoupling motion prior from interaction knowledge via unpaired diffusion training + inference-time reward optimization — is genuinely novel and moves beyond the paired-data paradigm that dominates the field.  
+**Quality:** The method is technically coherent with reasonable design choices. The evaluation is solid but would benefit from a main-paper ablation of the key technical move.  
+**Clarity:** The paper is generally well-written and the method is clearly explained. The abstract contains a factual inaccuracy that should be corrected.  
+**Significance:** The contribution is valuable: demonstrating that competitive scene-aware motion synthesis is possible without paired training data opens up practical applications where such data is scarce. This is likely to be influential.
+
+The paper presents a solid, novel contribution with no fatal flaws. The identified issues are all addressable without re-running experiments. The most impactful change would be correcting the abstract's inaccurate claim about motion naturalness, which is a simple textual fix.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

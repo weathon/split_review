@@ -1,20 +1,24 @@
-Now I have a thorough understanding of the paper and can construct the final consolidated review. Let me synthesize everything.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper studies whether an attacker who can access (and compute gradients on) a single agent in a multi-agent LLM system can craft an adversarial suffix that manipulates the entire system's collective decision. The authors propose M-Spoiler, which simulates a multi-turn debate between a normal agent and a "stubborn" adversary during training, weighing gradients across turns with exponential decay to produce adversarial suffixes via GCG-style optimization. Experiments across six models, three tasks, and three attack backbones show that M-Spoiler consistently outperforms the single-agent GCG baseline.
+This paper studies whether an attacker who gains white-box access to a single agent in a multi-agent LLM system can manipulate the system's collective decision. The authors propose M-Spoiler, which optimizes adversarial suffixes by simulating a multi-turn debate between a "normal" agent and a stubborn adversary, using an exponential decay to weight gradients across turns. Experiments on AdvBench, SST-2, and CoLA across 6 models, varying agent counts (2–15), and multiple attack backbones (GCG, I-GCG, AutoDAN) show that M-Spoiler consistently outperforms the baseline in attack success rate. Two defenses (introspection, self-perplexity filtering) are tested and found inadequate.
+
+---
 
 ## Strengths
 
-- **Timely and well-motivated research question.** The paper identifies a realistic vulnerability scenario — an attacker with gray-box access to one agent in a multi-agent system — that is distinct from prior black-box/white-box characterizations. This gap is real and the problem is practically important as multi-agent LLM systems gain adoption.
+1. **Novel and timely research question.** The paper asks whether a single compromised agent can sway a multi-agent system's collective decision. This vulnerability (analogous to Byzantine faults) is practically important as multi-agent LLM systems gain deployment, and prior work had not systematically addressed it under gray-box access.
 
-- **Consistent empirical outperformance across diverse settings.** M-Spoiler achieves higher ASR than the single-agent GCG baseline in nearly every reported condition: targeted/untargeted attacks (Table 1), six different model pairs (Table 2, all 8 comparisons), three tasks (Table 3, all 9 comparisons), varying agent counts (Table 4), and different suffix lengths (Table 6, 5/6 comparisons). The margins are often substantial (e.g., 64.2% vs. 41.7% targeted attack, Table 1).
+2. **Consistent and strong empirical results.** M-Spoiler achieves high Attack Success Rates across 6 models, 3 tasks (AdvBench, SST-2, CoLA), and multi-agent systems with 2–15 agents. It outperforms the backbone baseline in nearly every setting (Tables 1–4, 6–8), including near-perfect ASR on several two-agent systems. The advantage is robust across target model architectures and attack backbones (GCG, I-GCG, AutoDAN).
 
-- **Broad evaluation scope.** The paper tests six models (Llama2/3, Vicuna, Guanaco, Mistral, Qwen2), three datasets (AdvBench, SST-2, CoLA), three attack backbones (GCG, I-GCG, AutoDAN), and agent counts ranging from 2 to 15. This breadth strengthens generalizability claims.
+3. **Comprehensive ablation study.** The paper examines the effect of the number of chat rounds (Table 5, Fig. 3), initial suffix lengths (Table 6), varying information levels (zero/incomplete/full, Table 7), and different backbone algorithms (§4.7). These ablations give useful insight into the method's behavior and trade-offs.
 
-- **Ablation on chat rounds and suffix length provides practical insight.** The analysis in Section 4.6 shows that more rounds improve ASR but slow convergence (Figure 3), and longer suffix lengths generally boost performance — useful guidance for practitioners.
+4. **Defense evaluation (limited but informative).** The paper tests introspection and self-perplexity filtering and shows that M-Spoiler remains more potent than the baseline under both defenses (Table 8). The finding that self-perplexity filtering fails when the backbone is AutoDAN is a practically relevant observation.
+
+---
 
 ## Weaknesses
 
@@ -23,56 +27,72 @@ None.
 
 ### Major
 
-1. **Multi-turn gradient computation is under-specified (reproducibility gap).** The paper states that gradients are "obtained from the Normal Agent" at each turn, weighted, and used for GCG-style token replacement. However, GCG was designed for single forward passes. Extending it to multi-turn conversations where the suffix influences hidden states at each turn, and later turns depend on *generated* tokens from earlier turns, raises non-trivial questions: Are gradients back-propagated through the entire unrolled conversation (requiring a full computational graph across generated tokens)? Is teacher forcing used? Are gradients truncated/detached at generated token boundaries? The paper does not address any of these. Without this specification, the core training procedure cannot be reproduced or verified. (Lines 73–79 describe the weighting but not the gradient computation mechanics.)
+1. **Game-theoretic framing is claimed but not operationalized.** The paper repeatedly says the problem is "formulated as a game with incomplete information" (abstract, §1, contributions, conclusion) and uses terms like "zero information," "incomplete information," and "full information" (§4.8). However, no formal game-theoretic apparatus appears anywhere: there is no definition of players, strategy sets, payoff functions, information sets, or equilibrium concept, and no game-theoretic analysis informs the method. The actual method is a heuristic weighted-gradient procedure over simulated debate turns — a reasonable engineering choice, but not a game-theoretic formulation. Because this framing is listed as a core contribution (contribution #2), the mismatch between claimed contribution and actual content is significant. The paper would be stronger if it dropped the game-theoretic language and described what it actually does: an adversarial optimization with simulated multi-round debate.
 
-2. **Core design choice (stubborn adversary) is not isolated by ablation.** The paper claims the key contribution is simulating a "stubborn adversary" during training, but the only experimental comparison is against a baseline that trains on a *single agent with no multi-turn simulation at all*. This comparison conflates two factors: (a) the multi-turn simulation itself, and (b) the specific choice of a stubborn adversary. A control condition that replaces the stubborn agent with a second normal agent (same model, same flexibility) is needed to determine whether the benefit stems from multi-turn training or from the adversary's fixed opinion. The paper's ablations on chat rounds and suffix length do not address this.
+2. **Gap between motivation and evaluation tasks.** The paper motivates multi-agent systems with claims about complex reasoning (citing Du et al. 2023 on math problems, multi-hop QA, etc.), yet all experiments use binary classification (harmful/harmless, positive/negative, acceptable/unacceptable). While these are standard benchmarks for adversarial attacks (AdvBench in particular), the paper never demonstrates the attack in the settings where multi-agent collaboration is actually most valuable. This leaves an open question: would the attack transfer to multi-agent reasoning tasks (e.g., math, multi-hop QA, code generation) where the collaborative benefit is largest? The paper's central claim about a "critical vulnerability in coordinated multi-agent systems" would be substantially stronger if demonstrated in such settings.
 
 ### Minor
 
-3. **No statistical uncertainty reported.** All ASR results appear to come from a single run per condition. No confidence intervals, standard deviations, or multiple seeds are provided. For a metric that can vary with random initialization, sampling, and optimization stochasticity, this makes it impossible to assess whether observed differences between methods are meaningful.
+1. **No systematic analysis of attack dynamics.** The paper reports only aggregate Attack Success Rates and one anecdotal example (Fig. 2). There is no analysis of conversation logs to understand *how* the compromised agent influences the system: does it persuade other agents, or simply outvote them in larger systems? Does the system ever deadlock? For targeted attacks, do agents converge to a wrong but non-target output? Without this analysis, the paper's insight into the attack mechanism is shallow, and it is hard to distinguish "the compromised agent persuades others" from "ASR increases mechanically with more agents."
 
-4. **No-attack baseline issue on CoLA is not properly addressed.** In Table 3, the "No Attack" condition shows non-negligible ASR on CoLA (e.g., 27.50% for Mistral, 7.50% for combined system). This means the un-attacked multi-agent system itself is unreliable on this task, and the reported ASR for attacks may conflate attack success with the system's inherent error rate. The paper acknowledges the issue briefly ("in some cases, no attack performs best") but does not adjust the metric (e.g., measuring improvement over the no-attack baseline) or discuss why the system is error-prone on this task.
+2. **"No Attack" condition is referenced but its results are never shown.** Table 1 lists "No Attack" as a condition, but the actual ASR values are never stated in the text or tables. The paper should explicitly report these numbers.
 
-5. **The decay constant α is not reported.** The exponential decay function is defined as $f(\lambda) = \alpha^{\lambda/t}$ with $t=1$, but the value of $\alpha$ is never specified. This is a hyperparameter that affects the relative importance of early vs. late turns and is needed for reproducibility. (Line 73.)
+3. **Baseline is not explicitly defined.** While it is inferable from context (the backbone algorithm without M-Spoiler's multi-round simulation), the paper never states "Baseline = GCG applied to a single agent without simulated debate." A clear definition would help readers.
 
-6. **Untargeted attack definition conflates two distinct failure modes.** The paper defines untargeted attack success as "the final output is incorrect or agents fail to reach an agreement." This merges two qualitatively different outcomes: (a) agents unanimously converging on a wrong answer vs. (b) agents failing to converge at all. Reporting a single ASR masks which mechanism drives the result.
+4. **Limited scope of the claim about defense inadequacy.** The paper concludes that "existing defense mechanisms are inadequate" based on only two defenses (introspection and self-perplexity filtering). The self-perplexity filter discussion (§4.9) is qualitative — "it is almost ineffective when the backbone is changed to AutoDAN" — with no numbers reported. This overgeneralizes from thin evidence.
 
-7. **Interpretation of "infectious" propagation with more agents is premature.** The paper observes that ASR increases with more agents (2 → 3 → 15, Table 4) and attributes this to "infectious" propagation. However, with more agents, the likelihood that a single compromised agent is in the majority increases mechanically, even without propagation. The experiment does not control for this confound.
-
-8. **Defense analysis is thin for the strength of the claim it supports.** The paper concludes that "existing defense mechanisms are inadequate against these attacks" based on testing only two defenses (introspection, self-perplexity filtering), with the latter tested only on a subset of systems. The introspection defense shows a non-trivial ASR reduction, and the self-perplexity filter is tested only against GCG and AutoDAN backbones. This is insufficient to support a blanket conclusion about the inadequacy of all existing defenses.
+5. **Missing discussion of limitations.** The paper does not discuss when the attack would fail, the strong assumptions (white-box access to one agent's gradients and logits, fixed system prompts, known tokenizer/architecture), or boundary conditions. A limitations section would improve the paper's scientific rigor.
 
 ### Trivial
+- The "No Attack" row in Table 1 appears without any reported ASR values.
+- The paper does not define what "Baseline" is in a single, clear sentence.
+- The conclusion says "extensive experiments across various tasks" — three binary classification tasks is limited for that phrasing.
 
-- The game-theoretic framing ("game with incomplete information") is used to motivate the problem but is never formalized — no equilibrium, strategy, or game-theoretic analysis is derived. This is not a flaw in the method, but it over-promises slightly.
-- The Byzantine Fault analogy is mentioned but not developed beyond the initial analogy.
+---
 
 ## Nice-to-Haves
 
-- Running the main experiments with 3–5 random seeds and reporting mean/variance would substantially increase confidence in the results.
-- A discussion of computational overhead (wall-clock time per iteration compared to baseline GCG) would help practitioners assess practical feasibility.
-- For the CoLA task where no-attack ASR is high, reporting the *increase* over the no-attack baseline would provide a cleaner measure of attack effectiveness.
+- **Test on complex multi-agent reasoning tasks** (e.g., GSM8K math problems, HotpotQA multi-hop QA) to demonstrate the attack in the settings that motivated the paper.
+- **Add a conversation-log analysis** showing how the compromised agent's outputs evolve across rounds and how other agents respond, for at least a few representative cases.
+- **Test robustness to system prompt variations** — the paper uses fixed system prompts during training and testing.
+- **Report failure modes** (e.g., how often the system deadlocks or converges to a non-target wrong output).
+
+---
 
 ## Removed Points
 
-- Concern about the GCG candidate sampling hyperparameters (top-k, batch size) being unreported: These are standard GCG implementation details that a practitioner would supply from the original paper.
-- Question about why the initial suffix is "!" repeated 20 times: This is standard practice in GCG-based attacks and does not warrant a weakness.
-- Criticism that the Related Work does not clearly state why existing work does not cover the scenario: The paper explicitly distinguishes the gray-box scenario from prior black-box/white-box treatments. While this could be expanded, it is not absent.
-- Concern about the paper not specifying exact prompts controlling the stubborn agent: The paper describes the stubborn agent's behavior in sufficient functional detail (lines 71–72).
+These points were flagged by reviewers but are removed with justification:
+
+- **"The baseline is not clearly defined"** (as a major weakness) — The paper does not give an explicit one-sentence definition, but it is clear from context that "Baseline" refers to the backbone algorithm (GCG, I-GCG, or AutoDAN) applied without M-Spoiler's multi-round simulation. Moved to Minor as a clarity issue.
+- **"The attack may not transfer if system prompt changes"** — This is a valid follow-up experiment but framed as a fatal gap; moved to Nice-to-Haves as it tests robustness beyond the paper's demonstrated scope.
+- **"The Attack Success Rate increase with more agents could simply be due to majority voting"** — The paper acknowledges this mechanism by defining success as majority agreement. The claim about "infection" is somewhat colloquial and the paper does not make a strong causal claim about cross-agent persuasion. This is an interpretation question, not a factual error.
+- **"Self-perplexity filter defense discussion lacks numbers"** — Kept as Minor (weakness #4) rather than removing entirely, since it is a real oversight.
+
+---
 
 ## Novel Insights
 
-The reviews surface one genuinely novel perspective beyond the paper's own contributions: the insight that the paper cannot distinguish whether its gains come from multi-turn simulation or from the stubborn-adversary design. This is not just a missing ablation but a structural ambiguity about what the method *is* contributing. If the benefit comes entirely from multi-turn simulation, then the "stubborn" framing is decorative; if it comes specifically from the fixed opinion, the paper should say so explicitly and explain the mechanism. Either way, this point reframes what the paper needs to establish.
+The reviews reveal that the paper's most interesting contribution — the finding that a single compromised agent with a carefully optimized suffix can swing multi-agent decisions — is partially obscured by its own framing. The weakness about game-theoretic overclaim is not just a presentation nitpick: it points to a deeper issue, which is that the paper does not actually model the *strategic interaction* between the attacker and the other agents. The method simulates a stubborn adversary within a single model during training, but at test time the compromised agent simply repeats its learned behavior. Understanding whether this is genuinely "manipulation" (active persuasion) or merely "dominance" (the compromised agent's output is fixed and the system converges to it) would require the very dynamics analysis the paper omits. This distinction matters for defense: persuasion-based attacks require different countermeasures than dominance-based ones.
+
+---
 
 ## Suggestions
 
-1. Provide a precise algorithmic description (pseudocode or explicit text) of how gradients are computed across turns in the multi-turn debate — specifically addressing whether generated tokens are treated as fixed or part of the computational graph.
-2. Add an ablation comparing M-Spoiler against a variant where both agents are normal (no stubborn adversary) to isolate the effect of the stubborn design.
-3. Report main results with multiple seeds (e.g., 5 runs) and include confidence intervals or standard deviations.
-4. For tasks where the no-attack ASR is high, report the attack's marginal improvement over the no-attack baseline, and discuss why the un-attacked system is unreliable on that task.
+1. **Remove or genuinely adopt the game-theoretic framing.** Either provide a formal game model (players, strategies, payoffs, information sets) and connect it to the weighted-gradient procedure, or simply describe M-Spoiler as an adversarial suffix optimization that simulates a multi-turn debate. The current state weakens credibility.
+2. **Add at least one complex reasoning task** (e.g., GSM8K-based debate) to demonstrate the attack in settings where multi-agent collaboration is genuinely beneficial.
+3. **Include a systematic analysis of conversation logs** showing how the compromised agent's outputs evolve and whether other agents are persuaded or simply outvoted.
+4. **Explicitly define the baseline** in one sentence early in §4.
+5. **Add a limitations paragraph** discussing assumptions (white-box access to one agent, fixed system prompts, known architecture/tokenizer) and boundary conditions.
+
+---
 
 ## Score and Decision
 
-The paper addresses a timely and practically important problem, proposes a reasonable approach, and provides broad empirical evaluation. The core result — that a gray-box attack on a single agent can manipulate multi-agent collective decisions — is convincingly demonstrated in its broad strokes. However, two significant issues prevent acceptance in the current form: (1) the multi-turn gradient computation is under-specified enough to harm reproducibility, and (2) the central design claim (stubborn adversary) is not isolated by a proper ablation, leaving ambiguity about what drives the improvement. These are addressable in revision but are non-trivial gaps. The statistical reporting and the CoLA no-attack issue are also concerns, though less severe.
+This paper addresses an important and timely question — the vulnerability of multi-agent LLM systems to single-agent compromise — and provides a concrete method (M-Spoiler) with consistently strong empirical results across multiple models, tasks, and backbones. The ablations are thorough, and the core finding (that a single compromised agent can sway collective decisions) is convincingly demonstrated within the chosen evaluation setup.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+However, the paper has two significant weaknesses. First, the game-theoretic framing is claimed as a core contribution but is never formalized — the actual method is a heuristic optimization with no game-theoretic analysis, which overstates the contribution. Second, the evaluation is limited to binary classification tasks, creating a gap between the paper's motivation (complex multi-agent reasoning) and what is actually tested. These issues do not invalidate the technical contribution but limit the paper's impact and credibility in its current form.
+
+With revisions — particularly fixing the framing and adding at least one complex-task experiment — the paper would be a solid contribution. In its current form, it is a borderline paper: the technical core is sound, but the presentation overclaims and the evaluation scope is narrower than the claims warrant.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

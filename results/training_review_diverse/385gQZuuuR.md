@@ -1,16 +1,20 @@
-Now I have a thorough understanding of the paper and can verify the reviewer claims. Let me write the consolidated review.
+Now I have all the information needed. Let me write the final consolidated review.
 
 ## Summary
-
-This paper proposes the Consistency Diffusion Model (CDM) for single-image 3D point cloud reconstruction. It introduces two innovations: (1) a 3D prior constraint that renders multi-view depth images of the noisy point cloud and computes MSE against clean depth renderings as a regularization term, and (2) 2D priors extracted from the input image using DINOV2 (depth/contour features) that are concatenated with ViT image features and projected onto the point cloud as conditioning. Experiments on ShapeNet and Co3D show consistent improvements over PC² and BDM baselines.
+The paper proposes a Consistency Diffusion Model (CDM) for single-image 3D point cloud reconstruction that introduces two forms of regularization: (1) a 3D prior constraint that computes multi-view depth-image consistency between the noisy point cloud \(x_t\) and the ground-truth \(x_0\) during training, and (2) 2D priors (depth/contour information extracted via a DINOv2 model) concatenated with ViT image features to provide richer conditioning. Experiments on ShapeNet and Co3D show consistent improvements over PC² and BDM baselines.
 
 ## Strengths
+- **Empirically effective 3D prior regularization**: The core idea of projecting the noisy point cloud \(x_t\) from multiple viewpoints and enforcing consistency with the ground-truth \(x_0\) in depth-image space is novel and well-motivated. Table 4 confirms that the 3D prior alone improves Chamfer Distance and F1 over the baseline on Co3D.
 
-- **Consistent empirical improvements over strong baselines**: On the five-category ShapeNet benchmark (Table 2), CDM achieves substantial gains over PC² (CD: 4.79→3.95, F1: 0.546→0.659) and BDM (CD: 4.33→3.95, F1: 0.593→0.659). On the challenging real-world Co3D dataset (Table 3), CDM outperforms PC² across all three categories in both CD and F1. These gains are obtained under the same train/test splits and settings as prior work.
+- **2D prior fusion yields clear gains**: Concatenating depth/contour features (derived from DINOv2) with ViT image features before pixel-to-point projection provides additional conditioning that consistently improves results (Tables 4 and 7). The ablation in Table 7 validates that depth and contour priors each contribute positively.
 
-- **Thorough ablation studies validating design choices**: Tables 4–7 systematically ablate the contribution of each prior (2D alone, 3D alone, combined), number of 3D prior frames (4 vs. 8), point rendering size (0.02 vs. 0.04), global vs. local features, and 2D prior incorporation strategies. The ablations clearly demonstrate additive benefits from both priors and justify the main design decisions. Table 4 is the strongest single piece of evidence for the core claim.
+- **Consistent quantitative improvements**: Tables 1–3 show that CDM outperforms PC² on 13 ShapeNet categories (especially on F1) and PC²/BDM on the 5-category comparison. The Co3D results (Table 3) are the most convincing, with meaningful F1 gains (e.g., teddybear: 0.307 → 0.361).
 
-- **Novel use of multi-view depth consistency as a 3D regularizer for point cloud diffusion**: The idea of projecting the noisy point cloud from multiple viewpoints, rendering depth maps, and comparing them to clean depth maps as a training loss is a creative and practical approach to enforcing structural consistency. The ablation on point size (Table 5) shows the authors were aware of and attempted to mitigate projection artifacts.
+- **Comprehensive ablation studies**: The paper systematically ablates the number of prior frames \(H\), point rendering size (Table 5), types of 2D priors (Table 7), and global feature fusion strategies (Table 6). This provides good empirical support for the design choices.
+
+- **Well-motivated problem analysis**: The paper identifies a concrete limitation of PC² (55% of points have zero initial features) and BDM (class-level priors combined arbitrarily), directly motivating the object-level 3D and instance-aware 2D priors.
+
+- **Qualitative results support the main claim**: Figure 5 shows that CDM recovers shapes that align better with the input image from multiple viewpoints compared to baselines, directly illustrating improved reconstruction consistency.
 
 ## Weaknesses
 
@@ -18,59 +22,58 @@ This paper proposes the Consistency Diffusion Model (CDM) for single-image 3D po
 None.
 
 ### Major
+- **Incorrect and misleading theoretical framing of the 3D prior constraint (Section 3.2)**: The paper defines a modified reverse process \(\tilde{p}_\theta(x_{0:T}) = p(x_T) \prod_{t=1}^T p_\theta(x_{t-1}|x_t) e^{-\lambda\|x_t-x_0\|^2}\) and claims that adding the \(\lambda\|x_t-x_0\|^2\) term "increases the ELBO" (lines 14, 26, 96, 113, 210). This is backward: when the regularization term is added to the *negative* ELBO (the training loss), the actual ELBO (the lower bound on \(\log p(x)\)) becomes *looser* (i.e., smaller), not tighter. The derivation in Equation (4) conflates the loss function of a modified model with the ELBO of the original model. Moreover, the modified reverse process \(\tilde{p}_\theta\) is never used at inference — the 3D prior is a training-only regularizer, not a principled modification of the diffusion process. The actual method (multi-view depth consistency as a regularization loss) is sensible and stands on its own, but the ELBO justification is incorrect and should be dropped in favor of a straightforward regularization framing.
 
-- **The ELBO derivation is imprecise and the theoretical framing is overclaimed**: Section 3.2 defines a modified reverse process $\tilde{p}_\theta(x_{0:T}) := p(x_T)\prod_{t=1}^T p_\theta(x_{t-1}|x_t)e^{-\lambda\|x_t - x_0\|^2}$ and claims that optimizing its variational bound yields an extra term $\lambda\sum\|x_t - x_0\|^2$ that "increases the ELBO." However, inserting an arbitrary exponential weighting factor into each step's conditional does not produce a properly normalized distribution, and the standard ELBO derivation does not carry through without justification. In practice, this term functions as an empirical regularizer (pushing noisy depth projections toward clean ones), not a theoretically grounded bound on the log-likelihood. The paper frames this as a principled variational contribution ("Bayesian framework," "increases the ELBO"), but the actual mechanism is heuristic regularization. This is a structural overclaim that misrepresents the contribution.
-
-- **The 2D prior extraction pipeline is critically underspecified**: The paper states (Section 3.3): "Utilizing the DINOV2 model, we perform depth or contour estimation on $I$." DINOV2 is a general-purpose vision transformer that does not natively output depth maps or contours. No details are given about what specific depth estimator or contour detector was used (e.g., a DPT head on DINOV2 features, a separate off-the-shelf model like MiDaS, a linear probe, or some other method). The variable $F_{I^*}$ is said to represent "outputs of DINOV2" without clarifying whether these are raw patch features, depth predictions, or something else. This makes the 2D prior contribution effectively irreproducible. Given that the paper claims "without utilizing any auxiliary information" yet uses a pretrained DINOV2-based pipeline, this contradiction further compounds the issue.
+- **Factually inaccurate claim about "not using any auxiliary information"**: The paper states twice (lines 24, 30) that CDM operates "without utilizing any auxiliary information" and "relying on extracting 2D and 3D priors solely from the training data." This is contradicted by the use of a **pre-trained DINOv2 model** (trained on external ImageNet-scale data) to extract depth/contour features (Section 3.3). While using pre-trained feature extractors is standard practice, claiming the method uses no auxiliary information is a factual inaccuracy that overstates the minimality of the approach. This should be corrected to acknowledge the reliance on pre-trained backbones, which is entirely acceptable but should be stated honestly.
 
 ### Minor
+- **Lack of clarity on how DINOv2 produces depth/contour priors**: Section 3.3 states: "Utilizing the DINOV2 model, we perform depth or contour estimation on \(I\)." DINOv2 is a self-supervised ViT that outputs patch-level features — it is not a depth estimator by default. The paper never specifies whether a linear probe is trained, a separate depth decoder is attached, or DINOv2 features are directly interpreted as depth cues. The variable \(F_{I^*}\) is defined as "outputs of DINOV2" (line 133), but it is unclear how these patch features relate to pixel-aligned depth or contour maps. This makes the 2D prior pipeline non-reproducible.
 
-- **No variance estimates or statistical significance**: All quantitative results (Tables 1–7) report single-point estimates without error bars, confidence intervals, or multiple-run statistics. Diffusion models are inherently stochastic, and some reported gains are modest (e.g., ShapeNet "bench": PC² CD 0.81 vs. CDM 0.79 in Table 1). Without variance estimates, readers cannot assess whether the observed differences are reliable or within the noise floor. While this is common practice in the point cloud reconstruction literature, it carries more weight here because some gains are small and the evaluation involves stochastic rendering of depth projections.
+- **No uncertainty quantification for quantitative results**: Tables 1–3 report only point estimates of Chamfer Distance and F-Score without standard deviations or confidence intervals. Several improvements are small (e.g., CD of 0.038 vs 0.037 for car in Table 1), and without error bars it is not possible to assess statistical significance. While this is common in the point-cloud diffusion subfield, adding variance estimates would substantially strengthen the empirical case, particularly for the smaller gains.
 
-- **Some categories show worse Chamfer Distance with no explanation**: The paper acknowledges that on several ShapeNet categories, CD "differences are either minor or slightly favor PC²" but does not investigate or explain why. If specific categories (e.g., those with thin structures or high symmetry) systematically underperform, this could reveal meaningful limitations of the projection-based 3D prior that should be discussed.
+- **The value of \(H\) used in main experiments is not stated**: Table 5 studies the effect of the number of prior frames \(H\) (with results shown for H=1, 2, 4, 8), but the paper never specifies which value was used for the main results in Tables 1–3. Only the point size (0.04) is reported in the Implementation Details (line 144).
 
-- **The bound term computes MSE between depth images of $x_t$ (noisy) and $x_0$ (clean) — a potentially noisy signal**: The reviewer correctly notes that at large $t$, $x_t$ is a nearly random point cloud, and rendering depth images from scattered points may produce many unoccupied or spuriously populated pixels. While the paper ablates point size (finding 0.04 > 0.02), it does not analyze whether the gradient from this loss is actually informative at high noise levels, nor does it compare against simpler alternatives (e.g., direct Chamfer Distance between $x_t$ and $x_0$ in 3D). This leaves the core technique feeling heuristic rather than well-understood.
-
-- **"Model learning shifts" is invoked but never defined or empirically studied**: The abstract claims CDM "sidesteps potential model learning shifts that may arise from directly imposing additional constraints," and Section 3.2 mentions "model learning drift" as motivation for using soft constraints. However, the concept is never formally defined, measured, or ablated. This is a hand-wavy concept that weakens the paper's scientific precision.
+- **No training-time computational cost reported**: The 3D prior constraint requires rendering \(x_t\) from \(H\) viewpoints at each training step and backpropagating through the renderer. No training time or overhead relative to PC² is reported, making it hard to assess the practical cost of the method.
 
 ### Trivial
-
-- No dedicated limitations section. The paper would benefit from a candid discussion of limitations (e.g., dependence on ground-truth $x_0$ for computing the 3D prior loss during training, reliance on a separate pretrained model for 2D priors contradicting the "no auxiliary information" claim).
-- Computational cost (training time, parameter counts) is not reported; rendering depth images from $H=8$ viewpoints at every training step is non-trivial overhead versus PC².
+- The comparison with BDM is limited to 5 ShapeNet categories because BDM only tested on those. The paper already acknowledges this (line 140), so this is merely an observation about scope rather than a failing of the method.
 
 ## Nice-to-Haves
-
-- Variance estimates (mean ± std over 3–5 runs) for the key tables would substantially strengthen confidence in the results.
-- A comparison to a simpler 3D regularizer (e.g., Chamfer Distance between $x_t$ and $x_0$ directly in 3D space) would help isolate the benefit of the projection-based formulation.
-- Reporting training time comparison with PC² would help readers assess the practical trade-off of the additional rendering overhead.
+- Discuss how the method compares conceptually to non-diffusion single-image 3D reconstruction approaches (e.g., PixelNeRF) to better contextualize the contribution, though the paper's scope (diffusion-based point clouds) is a valid choice.
+- Add a sentence explicitly stating that the 3D prior constraint is only applied during training and not during inference.
 
 ## Removed Points
-
-These points are flagged to be removed, treat them with caution:
-
-- **Strength Finder's "handling of model learning shift"** (Point 5 in supporting strengths): The paper mentions this concept but never defines or empirically investigates it. This is not a supported strength — moved here because it conflicts with verified weaknesses (the concept is hand-wavy, see Minor weakness above).
-
-- **Strength Finder's "novel 3D-prior bound term to increase ELBO"** (Core strength 1 as originally phrased): The strength finder frames this as a principled variational contribution, but as the Major weakness above establishes, the derivation is imprecise and the claim is overstated. The practical idea (multi-view depth consistency regularization) remains novel and useful, but it should be reframed as an empirical regularizer, not a variational bound. The softened version of this strength is captured in Strengths section above (third bullet).
-
-- **Any claim of "SOTA" based on Table 1 numbers that cannot be verified from the text*: The table images are not machine-readable; numerical claims about specific categories made by either reviewer should be treated with caution unless verifiable from the rendered images.
+- **Title OCR typo** ("Singel-Image"): This is a parser artifact, not an author error. Removed.
+- **ELBO as a strength**: The Strength Finder claimed the ELBO increase as a principled innovation, but this conflicts with the verified weakness that the ELBO argument is incorrect. Removed per instructions (when a strength and weakness disagree, the weakness wins).
+- **"Comparison with BDM is not exhaustive" (harsh critic's observation)**: The paper already acknowledges BDM only tested on 5 categories (line 140). Already addressed by authors.
+- **Generic strength "this paper addressed an important problem"**: Removed as generic.
 
 ## Novel Insights
-
-The most interesting observation from the reviews is the disconnect between how the paper frames its 3D prior contribution (as a principled increase to the ELBO within a Bayesian framework) versus what it actually does (add a regularization term that projects noisy point clouds to depth maps and penalizes deviation from clean projections). The empirical results suggest this regularization is genuinely helpful, and the ablation studies are well-designed. The unresolved question — whether this depth-projection MSE remains informative at high noise levels — points to a deeper open problem: how to design structural regularizers for point cloud diffusion that are both theoretically grounded and practically effective. The 2D prior contribution is also notable for its negative results (OpenCLIP, Zero123 didn't work) which are honestly reported, but the positive result (DINOV2-based depth/contour) remains a black box.
+The review reveals a pattern that goes beyond the paper's own claims: the most convincing experimental results come from the real-world Co3D dataset (F1 gains of 0.05–0.07), where the baselines degrade due to domain shift and real-image variation, while the synthetic ShapeNet results show smaller improvements (CD differences of ~0.001). This suggests that the multi-view depth consistency regularizer acts as a strong domain-robustness mechanism — it anchors the noisy intermediate states to ground-truth geometry in a multi-view consistent way, which matters more when the input image is noisy or less idealized. The paper could lean into this interpretation rather than pursuing the problematic ELBO framing.
 
 ## Suggestions
-
-1. **Reframe the theoretical contribution honestly**: Drop the unsupported claim that the bound term "increases the ELBO" in a principled variational sense. Acknowledge that the 3D prior constraint is an empirical regularizer that encourages multi-view depth consistency. This will not diminish the empirical merit of the paper — the ablation study is the real evidence anyway.
-
-2. **Fully specify the 2D prior extraction pipeline**: Provide the exact DINOV2 checkpoint used, the specific method for obtaining depth or contour estimates (was it DPT? a linear probe? a separate network?), whether depth and contour are used individually or together, and how $F_{I^*}$ is exactly computed and concatenated with ViT features. Without this, the 2D prior contribution cannot be reproduced or built upon.
-
-3. **Add a candid limitations section**: Acknowledge that (a) the 3D prior loss requires ground-truth $x_0$ during training and cannot be applied at inference time, (b) the 2D priors rely on a pretrained model, contradicting the "no auxiliary information" framing, and (c) some ShapeNet categories see degraded CD performance, which should be analyzed and explained.
-
-4. **Provide at least selected variance estimates**: Running the main experiments (Table 2, Table 3) with 3 different random seeds and reporting mean ± std for CD and F1 would address the most common concern about stochasticity in diffusion models.
+1. **Drop the ELBO argument** and reframe the 3D prior constraint as a simple but effective training regularization term. A sentence like "this encourages the model to maintain structural consistency throughout the diffusion process by penalizing deviation from the ground-truth geometry in multi-view depth space" is accurate and sufficient.
+2. **Correct the "no auxiliary information" claim** to acknowledge that a pre-trained DINOv2 model is used, which is standard practice.
+3. **Specify exactly how DINOv2 is used** for depth/contour estimation — e.g., whether a lightweight decoder is fine-tuned, or DINOv2 features are projected. Give the precise operation.
+4. **Add standard deviations** to all main quantitative results (Tables 1–3) by running at least 3 seeds or reporting per-sample variance.
+5. **State the value of \(H\)** used in main experiments explicitly in the Implementation Details.
+6. **Report training-time overhead** relative to the PC² baseline.
 
 ## Score and Decision
 
-The paper presents a practical approach with consistent empirical gains and well-designed ablations. However, it has two major weaknesses that affect believability: (1) the theoretical framing of the 3D prior loss as a variational bound is overstated and unsupported, and (2) the 2D prior extraction pipeline is described so vaguely that the contribution cannot be reproduced. These are fixable issues, but in the current form they are structural weaknesses rather than mere presentation gaps. The empirical evidence is suggestive but the modest margin of some gains combined with the lack of variance estimates further weakens the quantitative claims.
+Papers referencing models, tools, benchmarks, or datasets — including DINOv2 — are assumed to have access to released versions as of the current date. No criticisms about availability are included.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+**Originality**: The multi-view depth-image consistency regularizer for diffusion-based point cloud reconstruction is a novel combination. The 2D prior fusion strategy is a straightforward extension but shown to be effective.
+
+**Importance**: Single-image 3D reconstruction is a well-motivated problem, and improving diffusion-based point cloud methods is a relevant contribution.
+
+**Claims**: The core empirical claim (CDM improves over baselines) is supported, but the method overclaims via an incorrect ELBO justification and an inaccurate "no auxiliary information" statement.
+
+**Soundness**: The experimental design is reasonable with thorough ablations. The main weakness is the lack of error bars for the quantitative results, which is somewhat mitigated by consistent trends across multiple datasets and categories.
+
+**Clarity**: The method description is generally clear at the implementation level, but the theoretical Section 3.2 is confusing and mathematically inaccurate. The DINOv2 pipeline lacks sufficient detail for reproduction.
+
+**Value**: The empirical contributions (3D prior regularization + 2D prior fusion) are practically useful and yield consistent improvements. With corrections to the presentation issues, this would be a solid contribution to the 3D reconstruction community.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

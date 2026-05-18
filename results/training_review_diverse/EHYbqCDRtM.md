@@ -2,17 +2,15 @@ Now I have a thorough understanding of the paper. Let me write the final consoli
 
 ## Summary
 
-This paper proposes Verbalized Graph Representation Learning (VGRL), a framework that uses multiple frozen LLMs (Enhancer, Predictor, Optimizer, Summary) to perform node classification on text-attributed graphs. The key idea is to represent model "parameters" as natural language descriptions and iteratively refine them via an LLM-based optimizer, aiming for full interpretability throughout input, training, and decision-making while avoiding costly fine-tuning.
+This paper proposes Verbalized Graph Representation Learning (VGRL), a framework for node classification on text-attributed graphs that replaces traditional numerical model parameters with natural language text descriptions. VGRL uses multiple frozen LLMs (Enhancer, Predictor, Optimizer, Summary) in an iterative prompt-refinement pipeline to produce textual category descriptions and explanations at every stage, with the goal of achieving interpretability across input, training, and decision-making while avoiding the cost of fine-tuning LLMs.
 
 ## Strengths
 
-- **Novel parameterization as interpretable text**: The paper introduces the genuinely novel idea of representing model parameters as natural-language text sequences (Section 4.2, $\theta_t \in \Theta_{\mathrm{language}}$) rather than continuous vectors. This creates a conceptual framework where every step — input features, training updates, and predictions — could in principle be human-readable, going beyond existing interpretable GNN methods (GNNExplainer, XGNN, SE-SGformer) that only explain one part of the pipeline.
+1. **Novel verbalized parameterization for graph learning**: VGRL replaces continuous numerical parameters with natural language category descriptions (Section 4.2), a conceptually novel departure from standard GNNs and hybrid LLM+GNN methods. This design choice has the interesting effect of making the "learned parameters" human-readable at each iteration.
 
-- **Iterative prompt optimization avoids fine-tuning**: Instead of costly parameter fine-tuning, VGRL uses an LLM-as-Optimizer to refine category descriptions via text prompts (Section 4.4). The use of the open-source Llama3.1 8B model (Table 2) makes the approach reproducible and cost-effective relative to fine-tuned LLM alternatives.
+2. **LLM optimization without fine-tuning**: VGRL avoids costly LLM fine-tuning by using an optimizer LLM to refine category descriptions iteratively through prompting (Section 4.4). All LLMs are frozen (Llama3.1 8B), and the optimization signal is conveyed linguistically rather than through gradients — an underexplored paradigm for graph tasks.
 
-- **Ablation study demonstrates component interdependence**: Table 4 systematically removes the Optimizer and Summary LLM components. The ablation confirms these components contribute to the framework's functioning (though see weaknesses regarding the scope of this evidence).
-
-- **Case study illustrates a concrete advantage of label-feature matching**: Figure 4 shows a node whose one-hop neighbors all have a different label ("Genetic Algorithms") than the true label ("Reinforcement Learning"). VGRL correctly classifies it by matching node features to category descriptions, demonstrating a scenario where label-feature matching is more robust than message-passing aggregation in heterogeneous neighborhoods.
+3. **Label-feature matching mechanism for heterogeneous neighborhoods**: The case study (Section 5.4) demonstrates a concrete scenario where a node's one-hop neighbors all belong to a different class than the node itself — a setting where standard message-passing aggregation would corrupt the representation — yet VGRL correctly classifies the node by relying on intrinsic node features and category matching. This illustrates a genuine advantage of the approach over vanilla GNNs in heterogeneous neighborhoods.
 
 ## Weaknesses
 
@@ -21,53 +19,56 @@ None.
 
 ### Major
 
-- **Evaluation on only one dataset, and a subset with undefined properties**: The experiments are conducted on a single dataset — a "subset" of Cora (line 182) — with no details about its size, class distribution, or sampling strategy. No results are reported on Citeseer, PubMed, OGBN-ARXIV, or any other benchmark. Claiming effectiveness for "graph representation learning" broadly based on one dataset is insufficient.
+1. **Experimental evaluation is far too weak to substantiate the core claims.** Only one dataset (Cora) is used, and only a subset of it (subset size and selection criteria are not reported, line 182). The baselines are trivial — "Node only" (just the target node) and "Summary" (neighbor summary via LLM) — with no comparison to any standard GNN (GCN, GAT) or any existing LLM+GNN method (TAPE, LLM-as-Predictor with graph structure, etc.). Results are reported without error bars, confidence intervals, or multiple random seeds. The ablation study (Table 4) shows accuracy drops when components are removed, but the numbers are not statistically characterized. For a paper claiming a new framework for graph representation learning that "addresses limitations of GNNs," the absence of any GNN baseline is a critical gap.
 
-- **No comparison to any standard GNN or GNN+LLM method**: Baselines are limited to two internal LLM-only variants ("Node only" and "Summary"). There is no comparison to GCN, GAT, GNNExplainer, TAPE, LLM-as-Predictor methods, or even a simple bag-of-words classifier. Without competitive baselines, the paper cannot establish whether VGRL is useful relative to existing approaches.
+2. **The claim of "full interpretability" is asserted but never validated.** The paper defines interpretability implicitly through the three-stage taxonomy (input, training, decision-making) and argues that because all stages produce human-readable text, the model is fully interpretable. However, no operational definition of interpretability is given, no user studies are conducted, no explanation faithfulness or comprehensiveness metrics are reported, and there is no comparison to existing post-hoc or inherently interpretable GNN methods. The internal reasoning process of the optimizer LLM that generates the "explanations" remains opaque — the paper conflates *text output* with *interpretability* without demonstrating that the text actually helps humans understand or trust the model's decisions. This is an overclaim relative to the evidence provided.
 
-- **Central claim of "full interpretability" is never measured**: The paper's primary contribution is that VGRL is "fully interpretable throughout the entire process." Yet no interpretability metric, user study, faithfulness evaluation, or comparison to existing interpretability methods (GNNExplainer, XGNN, etc.) is provided. The only evidence is a single anecdotal case study (Figure 4) showing text outputs. The paper asserts that because parameters are text, they are intrinsically interpretable — but the accuracy, faithfulness, and utility of those textual explanations are never assessed. This is a structural gap: the framework is designed around interpretability, but no evidence supports that this interpretability is meaningful or correct.
-
-- **Missing experimental details that compromise reproducibility**: The "subset" of Cora is not described in terms of size or composition. The initial parameters $\theta_0$ are "manually constructed prior knowledge" with no details about what that prior knowledge was or how it was chosen. The Predictor LLM's prompt template is not shown in the text (only the Summary LLM prompt is given in Table 1; the paper references Figure 2 for prompt templates, which is an image). No variance or statistical significance is reported — all results appear to be single runs, which is problematic given the stochasticity of LLM outputs.
-
-- **Theoretical analysis is too thin to support the framework**: Section 6 presents a single conditional entropy inequality with assumptions (fidelity, non-redundancy) that are themselves unverified and stated without justification ($\epsilon' > \epsilon$ is asserted rather than derived). The theorem is not connected to the experiments and does not provide a testable bound or property. It adds no meaningful support.
+3. **No comparison to standard GNNs or LLM+GNN methods despite the paper's framing.** The paper positions VGRL against the limitations of GNNs (line 12) and hybrid LLM+GNN methods (line 17) but evaluates it only against two simple LLM-as-predictor baselines. Without benchmarks against GCN, GAT, TAPE, or any prior work, there is no way to assess whether VGRL is competitive, let alone whether it improves over existing approaches. This undermines both the "effectiveness" and "interpretability" claims.
 
 ### Minor
 
-- **No cost or runtime comparison**: The method uses four LLM calls per node per iteration. The paper claims "significantly reduced costs" (line 27) compared to fine-tuning, but provides no runtime measurements, GPU hours, or API cost comparisons to support this. The equipment details (Table 2) describe the hardware but do not quantify actual usage.
+4. **The optimization process is not well-characterized.** The iterative prompt-refinement procedure (Section 4.4) is described at a high level, but the number of steps/iterations, the stopping criterion, and the sensitivity to prompt phrasing, LLM temperature, or sampling randomness are not discussed. The ablation study removes the optimizer LLM (w/o optimizer, Table 4), which shows a performance drop, but the dynamics of the optimization (does it always improve? plateau? oscillate?) are not analyzed beyond a single accuracy-vs-step curve (Figure 3).
 
-- **The iterative optimization process is under-analyzed**: The number of iterations, convergence criteria, and the effect of batch size ($|\beta| = 8$) are not analyzed. Figure 3 shows a noisy accuracy curve over steps with no visible plateau — it is unclear whether the process converges.
+5. **Dataset details are insufficient for reproducibility.** The paper reports using "a subset of nodes from the Cora dataset" without specifying the subset size, class distribution, or train/validation/test split. The number of total iterations/steps is not stated. Without these details, the results cannot be reproduced or compared against.
 
-- **No discussion of failure cases or limitations**: The case study shows a correct prediction but the paper does not examine where the method fails or analyze systematic errors. A "worst-case" analysis or qualitative examination of misclassifications would strengthen the paper.
+6. **The theoretical analysis (Section 6) is too thin to support the framework.** The theorem shows that if category descriptions are faithful and non-redundant, they help prediction (i.e., reduce conditional entropy). This is essentially tautological — it restates the desired properties rather than proving that VGRL's iterative process achieves them. The conditions (fidelity, non-redundancy) are never verified empirically for the actual pipeline.
 
 ### Trivial
-None.
+- "Blurred the concept of epochs and treated each batch as a single step" (line 182) is informal phrasing that obscures the experimental protocol.
 
 ## Nice-to-Haves
-- Adding 2–3 additional datasets (Citeseer, PubMed, or a subset of OGBN-ARXIV) would substantially strengthen the empirical claims.
-- An interpretability evaluation (e.g., human judgment of explanation quality, faithfulness tests, or comparison to GNNExplainer) would directly support the paper's core thesis.
-- Providing the Predictor prompt template in full, details of the Cora subset, and the initial prior knowledge $\theta_0$ would improve reproducibility.
-- Reporting variance over multiple runs (at least 3 seeds) given the stochasticity of LLM outputs.
+- A computational cost comparison (inference cost of VGRL's multiple LLM calls per batch vs. fine-tuning a single LLM) would strengthen the efficiency claim.
+- The approach could benefit from evaluation on at least 2–3 additional TAG datasets (e.g., Citeseer, PubMed, OGBN-Arxiv) with standard splits.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-
-- **"Experimental results contradict the paper's central claim that VGRL improves performance" (Harsh Critic, Critical Issue 1)**: The tables (Table 3, Table 4) are rendered as images and the specific numerical values cannot be independently verified from the text. The paper's own narrative claims "better performance" (line 195), and different configurations (zero-shot vs. one-shot, with/without prior) likely yield different comparisons. The Strength Finder reads the same tables as showing improvement. Without being able to read the image-based tables, this criticism cannot be confirmed or refuted and is removed from the main assessment. However, the underlying concern about insufficient evidential scope is covered substantively in the Major weaknesses above.
-
-- **Several of the Strength Finder's claimed strengths**: "Use of an open-source LLM ensures reproducibility and low cost" and "Integration of prior knowledge through initial prompts" are generic and do not rise to the level of distinct strengths that warrant separate listing — they are implicit in the method description.
+- *Criticism that exact prompts for predictor/optimizer LLMs are not given.* Figure 2 in the original submission provides the prompt templates; the text extraction tool cannot render images. This is a parser artifact, not a paper deficiency.
+- *Criticism that "no theoretical justification" exists.* Section 6 provides a theorem on the utility of category descriptions, though it is simple. The criticism is too strong — removed as factually inaccurate (the justification exists; the issue is that it is thin, which is captured in Weakness 6 above).
+- *Criticism about formatting/style.* No pure formatting or style gripes remain; any such comments were parser artifacts.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews do not reveal a perspective on VGRL that the paper itself does not articulate.
+
+The most striking observation across the reviews is that the paper's two central claims — "full interpretability" and "effective graph learning" — pull in opposite directions for validation. Demonstrating interpretability requires human studies or faithfulness metrics that the current experiments lack, while demonstrating effectiveness requires standard GNN baselines that are absent. The paper has neither line of evidence fully worked out. This tension suggests that the VGRL framework is best viewed as an early-stage proposal or vision paper for a new paradigm of verbalized neural computation, rather than a fully validated method. Its real novelty — text-based parameter optimization via LLM-as-optimizer — is orthogonal to the interpretability framing and could be investigated as a standalone contribution with stronger empirical grounding.
 
 ## Suggestions
-1. **Expand the evaluation** to at least 2–3 datasets (Citeseer, PubMed) and include standard GNN baselines (GCN, GAT) and at least one GNN+LLM method. This is essential to establish whether VGRL offers practical value.
-2. **Evaluate interpretability directly**: conduct either a human evaluation of explanation quality or a quantitative faithfulness test (e.g., deletion/insertion of described features). Without this, the core claim remains unsupported.
-3. **Clarify the experimental setup**: specify the Cora subset size and sampling strategy, provide the initial $\theta_0$ prior knowledge, show the Predictor prompt template, and report variance over multiple runs.
-4. **Either substantially deepen the theoretical analysis** (testable bounds, verifiable assumptions) or remove it, as the current version is too thin to be meaningful.
-5. **Report runtime/cost comparisons** to support the efficiency claims.
+
+1. **Scale the experiments**: Add at least 2–3 standard TAG datasets (Citeseer, PubMed, OGBN-Arxiv) with standard splits. Include GCN, GAT, and at least one LLM+GNN method (e.g., TAPE or LLM-as-Predictor with graph structure) as baselines. Report results over 3–5 random seeds with means and standard deviations.
+
+2. **Validate interpretability separately**: Either conduct a human evaluation comparing VGRL's explanations against post-hoc methods (e.g., GNNExplainer), or use automated faithfulness metrics. If this is infeasible, tone down the "full interpretability" claim to "text-based transparency across stages" and be explicit about what is and is not being claimed.
+
+3. **Characterize the optimization dynamics**: Report the number of iterations, show convergence behavior across multiple runs, and analyze sensitivity to prompt design, temperature, and sampling strategy.
+
+4. **Provide full experimental details**: Specify the subset size, class distribution, train/validation/test split, number of steps, and stopping criterion for the Cora experiments.
 
 ## Score and Decision
 
-The paper proposes a genuinely novel framework with an interesting conceptual contribution. The idea of verbalized parameters optimized via LLM feedback is novel and could influence future work. However, the experimental evaluation is far too limited to support the paper's claims. The core claims — improved performance and full interpretability — are either unmeasured (interpretability) or tested on one underspecified dataset against weak baselines (performance). The paper needs substantially more evidence before its contributions can be assessed.
+**Originality**: High — the verbalized parameterization and LLM-as-optimizer for graphs is genuinely novel.  
+**Importance of question**: Moderate to high — interpretability in graph learning is an important problem.  
+**Claims supported**: Low — the central claims are not adequately supported by the current evidence.  
+**Soundness of experiments**: Low — single dataset, trivial baselines, no statistical rigor.  
+**Clarity**: Adequate — the structure is clear, though some operational details are missing.  
+**Value to community**: Moderate potential — the idea could spark further work, but the paper in its current form does not provide sufficient validation to be a reliable reference.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
+The paper introduces a genuinely novel idea but the experimental validation is far too weak to support the claimed contributions. The most critical gaps are: (1) no comparison to standard GNNs or existing LLM+GNN methods, (2) the "full interpretability" claim is not measured or validated, and (3) evaluation on a single dataset with an unspecified subset. A major expansion of the experimental section would be required to bring the evidence in line with the claims.
+
+MY FINAL SCORE: <pineapple>4.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

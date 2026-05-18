@@ -1,20 +1,24 @@
-Now I have thoroughly read the paper and verified each reviewer claim. Let me compile the final review.
+I've already read the full paper content. Let me now compile the final review based on my thorough analysis.
+
+---
 
 ## Summary
 
-This paper investigates whether transformer LMs decode relational knowledge (e.g., "Miles Davis plays the trumpet") via approximately linear transformations. The authors show that for roughly half the tested relations, a Linear Relational Embedding (LRE) extracted from the LM's Jacobian — a first-order Taylor approximation — faithfully recovers the model's predictions and can be inverted to causally edit the model's output. The paper also introduces an "attribute lens" application that reveals latent knowledge even when the LM outputs a wrong token. Crucially, the paper identifies relations where the LM makes accurate predictions but no LRE can be found, demonstrating that linear decoding is heterogeneously deployed.
+This paper investigates whether relational knowledge in transformer LMs is decoded via a linear transformation on subject representations. The authors propose a method to estimate **Linear Relational Embeddings (LREs)** by computing a first-order Taylor approximation (Jacobian) of the LM on a few prompt examples. Across 47 relations spanning factual, commonsense, bias, and linguistic categories, they find that roughly half exhibit faithful linear decodability, while others do not — a nuanced negative result. They further provide causal evidence via representation editing, and introduce an **attribute lens** tool that visualizes relation-specific knowledge in hidden states, even when the model outputs a wrong answer.
 
 ## Strengths
 
-1. **Jacobian-based LRE extraction avoids probe training.** The method derives LREs directly from the LM's Jacobian via a first-order Taylor expansion (Section 3.1, Eqs. 1–2), avoiding the need to train a separate probing classifier. This ties the approximation directly to the LM's own computation and circumvents known probing pitfalls (overfitting, task-specific classifier learning), directly supporting the claim that relation decoding is approximately linear for a subset of relations.
+1. **Linear approximation validated across many relations.** Figure 2 shows that for nearly half of the 47 tested relations, the LRE achieves over 60% faithfulness (top-1 token match between LRE output and full model output). This directly supports the claim that a substantial subset of relational knowledge is linearly decodable from subject representations.
 
-2. **Causal validation via editing experiments.** The paper shows that inverting the LRE to edit subject representations changes the LM's predicted object (Section 4.2, Eqs. 5–6), with success rates matching an oracle substitution baseline and clearly outperforming naive embedding baselines (Figures 5–6, referenced in Appendix A.3). This provides causal, not merely correlational, evidence that the linear approximation captures the LM's actual decoding mechanism.
+2. **LRE outperforms multiple baselines in faithfulness.** Figure 3 compares LRE to Identity, Translation, linear regression, and LRE applied to early embeddings; LRE achieves the highest faithfulness across all relation types. This shows that the specific affine form (Jacobian-based weight + bias) is necessary and that simpler alternatives fail, strengthening the paper's central hypothesis.
 
-3. **Discovery of heterogeneous encoding.** The paper identifies relations (e.g., "Company CEO") where the LM accurately predicts objects but no method — including LRE — achieves above 6% faithfulness (Section 4.1, Figure 3). This is a key insight: the LM uses different representational strategies for different relations, directly supporting the conclusion that linear encoding is "heterogeneously deployed" (abstract, conclusion).
+3. **Causal evidence that LREs capture the model's decoding mechanism.** Using the inverse LRE to edit subject representations changes the model's prediction to a different object with success rates near the oracle (direct substitution). This goes beyond correlation and shows that LREs model a causal pathway in the LM.
 
-4. **Systematic baseline comparison demonstrating necessity of both projection and bias.** LRE is compared against Identity (Logit Lens), Translation, linear regression, and LRE-on-initial-embedding baselines (Section 4.1, Figure 4). LRE outperforms all of them, and the poor performance of Translation and Identity baselines demonstrates that both the **βW** and **b** terms in the affine transformation are necessary — the mapping is not a simple shift.
+4. **Identification of relations that are *not* linearly decodable.** The paper shows that some relations (e.g., Company CEO) have <6% faithfulness despite the model predicting correctly (Section 4.1). This heterogeneity supports the claim that linearity is not universal — a key nuance that prevents overclaiming.
 
-5. **Attribute lens reveals latent knowledge under adversarial distraction.** The paper applies LREs to create a visualization tool (Section 5) and shows that on "distracted" prompts (11,891 cases), the attribute lens recovers the true object within the top 3 predictions even when the LM's output is wrong (Table 1 referenced). This provides an independent, practical validation that the LRE captures genuine relational knowledge.
+5. **Attribute lens provides a novel probing tool.** Section 5 demonstrates that LREs can be applied to decode hidden states into object-token distributions, revealing correct knowledge even when the LM is fooled by repetitive or instruction-based distractions (Table 1). This shows practical utility beyond pure interpretation.
+
+6. **Layer-wise analysis reveals a "mode switch" phenomenon.** Figure 6 shows that for some relations, faithfulness drops sharply after a certain layer, and this drop is mitigated when relation-specific context is removed. This provides evidence about *where* linear decoding operates in the network.
 
 ## Weaknesses
 
@@ -26,52 +30,47 @@ None.
 
 ### Minor
 
-1. **Faithfulness metric (top-1 token match) is coarse.** The faithfulness metric (Eq. 3) only checks whether the LRE and LM agree on the argmax token. Two distributions sharing the same top prediction can be arbitrarily different. The paper would be significantly stronger by reporting additional distributional metrics — e.g., rank of the true object in the LRE-decoded output, or the correlation / KL divergence between the LM's and LRE's logit distributions. Without these, it is unclear whether the LRE is a genuinely accurate approximation or a lucky linear classifier that gets the top token right by chance. The paper acknowledges this limitation (Section 4, first-token-only), but additional metrics would substantially strengthen the core claim of linearity.
+1. **First-token-only faithfulness metric is narrow.** The faithfulness and causality metrics only check whether the top-1 first token matches. Many objects are multi-token (e.g., *New York City*, *plays the guitar*), so the metric conflates cases where the LRE gets the right first token but the model would produce a different multi-token completion, and vice versa. The paper acknowledges this limitation (referencing an appendix section), but the main evaluation would be strengthened by including top-5 token accuracy or exact match on the full object after decoding.
 
-2. **Mode-switch analysis is speculative and thin.** The hypothesis that the LM switches to a "next-token representation mode" at later layers (Section 4.3) is supported by only one example in the main text (Figure 8). While the appendix ("app:sweep-figure") is referenced for more examples, the main text's evidence is insufficient to support the claim. The hypothesis is presented as speculation ("might indicate," "one hypothesis"), which is appropriate, but the analysis remains shallow.
+2. **Hyperparameter selection per relation (layer, rank) is underspecified in the main text.** The paper selects $\layer_\rel$ and $\rank_\rel$ via grid search for each relation individually, reporting averages over 24 random draws of the 8 training examples. The main text does not state whether the grid search uses a held-out validation split or the same data used for evaluation, making it difficult to assess potential optimism in the reported scores. The details are deferred to the appendix, but this is an important methodological detail that should be explicit in the main text.
 
-3. **Rank of the pseudoinverse is a free parameter tuned per relation.** In the causality experiments, the rank of the low-rank pseudoinverse is selected via grid search per relation (Section 4, Implementation Details). While the motivation (ill-conditioned matrix, Section 3.2) is sound, the rank is a tunable parameter whose choice can inflate causality scores. The paper should report sensitivity to rank or justify a principled selection (e.g., using the effective rank of W_r).
+3. **The $\beta$ scalar is an engineering fix without principled derivation.** The paper notes that layer normalization causes the Jacobian-based approximation to underestimate the magnitude of change, and multiplies by a scalar $\beta > 1$ to compensate. While the intuition is plausible and $\beta$ is fixed once per model (not per relation, mitigating overfitting), the method would be cleaner with a theoretically grounded derivation of $\beta$ rather than an empirically tuned scalar. The paper references appendix measurements but does not provide a principled account.
 
-4. **Choice of n=8 is not justified.** The method averages Jacobians over n=8 examples (Section 4, Implementation Details). The paper provides no ablation or bootstrap analysis showing that the estimates are stable at this sample size. A plot showing faithfulness as a function of n would help establish that the results are not a small-sample artifact.
-
-5. **The scalar β is fixed per model but its constancy is not justified.** The paper fixes β once per LM (Section 4, Implementation Details) but does not report sensitivity to β or show that the results are robust to its choice. If the degree of underestimation varies by relation, a single β might hurt some relations.
+4. **Edit side effects are not systematically evaluated.** The causality experiment only checks whether the LM's top prediction becomes the target object after editing. The paper states that "a qualitative analysis of the post-edit generations reveals that the edits are nontrivial and preserve the LM's fluency" (referencing an appendix table), but no quantitative measure (e.g., perplexity on continuation, accuracy on unrelated probes) is reported. While edit quality is not the paper's primary focus, the causal claim is stronger with systematic evidence that edits do not disrupt other model capabilities.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
 
-- **Finer-grained linearity assessment.** Beyond top-1 match, reporting rank of the true object, KL divergence, or logit correlation between LM and LRE would strengthen the core claim.
-- **Hyperparameter selection protocol clarification.** If not already in the appendix, explicitly state whether grid search for l_r and rank_r uses a held-out validation split within each of the 24 trials, or is performed globally.
-- **Statistical significance / error bars.** The paper reports averages over 24 trials but does not show error bars or confidence intervals in most figures.
-- **Deeper analysis of *why* some relations are linear and others are not.** The paper speculates about object set size but does not test this. A simple correlation between faithfulness and properties like object vocabulary size, embedding similarity, or relation frequency would add value.
-- **Validation of linearity claim with higher-order terms.** Comparing the first-order LRE to a quadratic approximation for a subset of relations would directly test whether the linearity claim is genuine or an artifact of the first-order truncation.
+- **Scaling analysis for $n$ (number of training examples).** The paper fixes $n=8$ without justification. A sweep over $n$ (e.g., 1, 4, 8, 16, all subjects) would clarify when the approximation breaks down and whether more examples improve or degrade the estimate.
+- **Formal test of linearity.** The paper could verify linearity more directly by checking whether $F(\alpha \subjrep_1 + (1-\alpha)\subjrep_2) \approx \alpha F(\subjrep_1) + (1-\alpha)F(\subjrep_2)$ for random subject pairs, providing a stronger foundation for the core claim.
+- **Deeper characterization of linear vs. non-linear relations.** The paper notes that relations with large output spaces (person names) tend to be non-linear. A systematic investigation of what structural properties predict linearity (cardinality, object embedding norm, layer of decoding) would increase impact.
+- **Baseline with more training data for linear regression.** The linear regression baseline uses the same 8 examples as the LRE; a version trained on all subjects for each relation would clarify whether the Jacobian-based estimate is uniquely informative or merely an efficient few-shot estimator.
 
 ## Removed Points
 
-These points (from various reviewer inputs) are flagged to be removed; treat them with caution:
-
-- **"48% figure is underspecified"** — The paper states LREs "faithfully recover subject-object mappings for a majority of the subjects." Faithfulness is defined (Eq. 3) as top-1 match success rate; "majority of subjects" means faithfulness > 50% for a given relation. The operational definition is clear from context. The threshold is implicit but unambiguous.
-- **"Attribute lens table not shown"** — The table is referenced via `\input{Figures/AttributeLens/attribute-lens-table}` which is a rendering artifact of the text extraction, not a missing element in the original paper.
-- **"Oracle baseline may be imperfect"** — The oracle (directly substituting another subject's representation) is conceptually sound as an upper bound; any imperfection would only make the LRE's matching performance more impressive, not less. This does not constitute a weakness.
-- **Complaint about "missing appendix" / "missing proofs in appendix"** — The parser strips appendix sections from all papers; they exist in the original submission.
-- **Formatting/style nitpicks** — Parser artifacts, not author errors.
+- **"Hyperparameter selection risks overfitting — chosen on same data as evaluation."** The paper reports averages over 24 random draws with distinct training sets and defers details to an appendix that exists in the original submission. The criticism is reasonable in asking for clarification but is framed as a fatal flaw when the appendix likely addresses it. Kept as a minor weakness with softened severity.
+- **"$\beta$ chosen per relation to maximize faithfulness."** The paper explicitly says $\beta$ is fixed once per LM (not per relation), so the reviewer's specific concern about per-relation tuning is factually inaccurate. The broader point about $\beta$ lacking principled justification is retained as minor.
+- **"Comparison to linear regression is unfair (uses same n=8)."** Both methods use the same $n=8$ training examples, so the comparison is fair. The suggestion to add a baseline with more data is moved to Nice-to-Haves.
+- **"No analysis of edit side effects at all."** The paper does include qualitative analysis in the appendix (referenced in text). The criticism is retained in weakened form (no *systematic* evaluation) as a minor weakness.
+- **Missing related works.** Removed per instructions — cannot verify existence of unmentioned works.
+- **Formatting/typo nitpicks.** Removed per instructions — parser artifacts, not author errors.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the most revealing finding synthesized from the evidence is the *asymmetry* between faithfulness and causality: the paper shows that LREs can be causally effective even when they are not maximally faithful (Figure 7). This suggests that a linear approximation that captures only the *dominant direction* of the LM's computation can be sufficient to steer model output, even if it misses fine-grained distributional detail. This insight has implications for mechanistic interpretability work: it implies that engineering-level interventions (edits) may succeed with coarser approximations than those needed for scientific-level understanding (faithful reconstruction). The paper's heterogeneous encoding finding also adds nuance to the ongoing debate about linear representation in LMs — it shows that claims of linearity are relation-dependent and should not be assumed to hold globally.
+The reviews raise a thoughtful tension: the paper's core claim — that some relations are linearly decodable — is well-supported, but the evaluation infrastructure (first-token-only metric, per-relation hyperparameter tuning, ad-hoc $\beta$ correction) introduces degrees of freedom that blunt the precision of the quantitative claims. This is a case where the paper's *qualitative* findings (some relations linear, some not; attribute lens works) are likely robust, but the exact *numbers* (e.g., "48% of relations achieve >60% faithfulness") should be interpreted with caution. The heterogeneity finding — that superficially similar relations differ in linearity — is perhaps the most robust and interesting result, and it is refreshingly honest.
 
 ## Suggestions
 
-1. Add distributional faithfulness metrics (rank of true object, KL divergence between LM and LRE logit distributions) to validate that the linear approximation captures more than just the argmax.
-2. Clarify the validation scheme used for hyperparameter selection in the main text (or ensure the appendix description is prominent).
-3. Include error bars or confidence intervals for the 24-trial averages in all figures.
-4. Add sensitivity analyses for n (number of examples), β (scaling factor), and pseudoinverse rank.
-5. Strengthen the mode-switch analysis by showing additional examples in the main text and correlating faithfulness drops with attention patterns.
+- State explicitly in Section 3.2 whether the grid search for $\layer_\rel$ and $\rank_\rel$ uses a held-out validation split; this clarifies the independence of evaluation.
+- Add a small quantitative evaluation of edit quality (e.g., perplexity) — even on a subset of relations — to strengthen the causal claim.
+- Provide a brief theoretical or empirical justification for the choice $n=8$ (or show a sensitivity analysis).
+- Report faithfulness using top-5 token accuracy alongside the existing top-1 metric for multi-token objects.
 
 ## Score and Decision
 
-This is a solid interpretability paper with a clean method, strong causal validation, and an honest assessment of limitations. The core finding — that a subset of relations are decoded approximately linearly — is well-supported by both faithfulness and causality evidence. The weaknesses are real but incremental (coarser metric, speculative mode-switch analysis, some under-justified hyperparameters) and can be addressed in revision. The paper makes a meaningful contribution to understanding how LMs represent and retrieve relational knowledge.
+This is solid, honest work that makes a real contribution. The paper identifies a genuine phenomenon (linear decodability of some relations) with a clean method, acknowledges negative results, and demonstrates a useful application (attribute lens). The weaknesses are minor and addressable — none threaten the core claims. The paper is clearly written and well-scoped. I recommend acceptance.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

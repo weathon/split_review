@@ -1,77 +1,69 @@
-Thank you for the thorough paper and reviews. I have carefully verified each claim against the actual paper content. Let me construct the consolidated review.
+Now I have a complete picture. Let me produce the final consolidated review.
 
 ---
 
 ## Summary
 
-TreeX proposes a post-hoc explainability method for MPGNNs that extracts **global graphical subgraph concepts** (i.e., dataset-level motifs) by mining over the full *L*-hop subtrees produced during message passing — avoiding costly subgraph enumeration. The method clusters node embeddings from the last GNN layer, identifies local concepts via overlapping subtree edges, aggregates these into global concepts, and learns per-class weights. It is one of the first methods to produce explicit subgraph motifs as global explanations while also supporting instance-level explanation. Experiments on synthetic (BA-2Motifs, BAMultiShapes) and real-world (Mutagenicity, NCI1) datasets show faithful motif extraction and competitive local fidelity.
+TreeX proposes a framework for generating global, graphical (subgraph-level) explanations of Message-Passing GNNs. The key insight is to mine over *subtrees* induced by the message-passing process rather than enumerating all possible subgraphs, reducing the search space per graph from $O(N!)$ to $O(N)$. Theorem 4.2 establishes that for a maximally powerful MPGNN with injective AGG and UPDATE functions, the $L$-th layer root node embedding is a Perfect Rooted Tree Representation of the full $L$-hop subtree, enabling reuse of existing embeddings without additional subgraph encoding. Global concepts are extracted by clustering these subtree embeddings and then fitting class-specific weights to produce graphical explanations (e.g., "–NO₂" on Mutagenicity) that can also be applied to individual instances for local explanation.
 
 ## Strengths
 
-- **Novel problem framing and approach.** The idea of generating global-level *graphical* subgraph concepts (rather than latent prototypes or text rules) by mining over message-passing subtrees is a genuinely underexplored and practically important direction. The paper correctly identifies that existing global explainers either produce non-graphical outputs or cannot apply them to individual instances.
+- **Formal search-space reduction from exponential to linear.** The paper establishes that each $N$-node graph has exactly $N$ full $L$-hop subtrees (vs. up to $N!$ possible subgraphs), making global subgraph concept mining tractable. This is a concrete algorithmic innovation substantiated in Section 4.2.
 
-- **Theoretical grounding via Perfect Rooted Tree Representation.** Theorem 4.2 proves that for maximally powerful MPGNNs with injective AGG/UPDATE and countable inputs, the *l*-th layer root node embedding is a lossless representation of the full *l*-hop subtree. This provides a principled justification for the method's key design choice — using precomputed node embeddings as subtree representations — bypassing the need for expensive subgraph encoding.
+- **Theoretical grounding via Theorem 4.2.** The proof that a maximally powerful MPGNN's last-layer node embedding is a Perfect Rooted Tree Representation of its corresponding full $L$-hop subtree is clean and directly supports the method's efficiency (no separate subgraph encoding needed). This distinguishes TreeX from prior work that requires auxiliary subgraph-feature computation.
 
-- **Qualitative evidence of meaningful concept extraction.** On BA-2Motifs, TreeX correctly recovers the ground-truth five-node cycle and house motifs. On Mutagenicity, it extracts known mutagenic functional groups (-NO2, -NH2, -N2O) as class-0 patterns. These results directly demonstrate that the extracted subgraph concepts correspond to chemically and structurally meaningful motifs, which is the paper's central claim.
+- **Produces intuitive graphical global explanations.** Unlike GLGExplainer (which outputs latent prototype embeddings) or GCNeuron (human-defined language rules), TreeX directly outputs recognizable subgraph motifs (e.g., five-node cycles, "house" motifs, "–NO₂"/"–NH₂" chemical groups on Mutagenicity). This visual clarity is a genuine advantage for interpretability (Figure 3).
 
-- **Efficiency advantage.** TreeX reduces the search space from *O*(*n*!) (subgraph enumeration) to *O*(*n*) (subtree extraction) per graph. Table 4 shows it is orders of magnitude faster than SubgraphX and competitive with EiG-Search, while additionally producing global concepts those methods cannot provide.
+- **Class-specific reweighting enables diagnosis of incorrect predictions.** Table 3 shows that for most misclassified instances, reweighting the global concepts can predict the true class, providing actionable debugging insights not offered by existing global explainers.
+
+- **Efficiency competitive with local explainers while producing global concepts.** Table 4 shows per-instance time (0.01–0.26s) comparable to EiG-Search and orders of magnitude faster than SubgraphX, despite TreeX simultaneously producing dataset-level subgraph concepts.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The fidelity evaluation protocol for TreeX is under-specified, making the quantitative results difficult to interpret.** The paper does not define how the explanation subgraph *Gᵢ^𝒳* is constructed from the learned concept importances. Section 4.3 describes computing concept importance *Iₜ = K wₜ* for an instance, but never specifies how this importance vector translates to a concrete subgraph for the fidelity computation (AccFidelity/ProbFidelity). Without this specification, the numbers in Tables 1 and 2 cannot be independently verified or compared. This is not a minor omission — the reader cannot tell whether high fidelity reflects genuinely faithful explanations or simply the retention of most of the original graph.
+1. **Ambiguity about whether test data is used during concept extraction and rule generation (data leakage risk).** The method description (Section 4.1) says "across the entire dataset $\mathcal{D}$" for local concept mining and global concept extraction, and optimizes weights $\mathbf{w}_t$ (Phase 3) that are later used to compute fidelity on test instances. The paper never states that a train/test split is applied before these phases, nor clarifies whether $\mathcal{D}$ refers to the training set only. If test instances contributed to concept extraction or weight optimization, the reported fidelity numbers (Tables 1 and 2) would be invalid because the evaluation data leaked into the explanation construction. *Why this matters:* this is not a minor clarity issue — it directly affects the believability of the paper's main quantitative claims. The authors must confirm that only training data was used for all three phases of TreeX and describe how the learned concepts/rules are applied to held-out test instances.
 
-- **No control for explanation size or sparsity in the fidelity comparison.** The paper does not report the average number of edges (or sparsity) of explanations produced by TreeX versus any baseline. If TreeX's explanations are dense (retaining most edges of the original graph), near-perfect AccFidelity is trivial. Local baselines like SubgraphX deliberately produce sparse subgraphs, making the comparison potentially misleading. Reporting explanation size is standard practice in the explainability literature and its absence is a significant methodological gap.
-
-- **The incorrect-prediction analysis is overclaimed.** The paper states that TreeX can "discover the cause of incorrect predictions" and "uncover the reasons behind the incorrect predictions." However, Table 3 simply reports the rate at which a separately learned linear classifier (weighted concept counts) would predict the true class on misclassified instances. This shows the linear classifier disagrees with the original GNN, but it does *not* explain *why* the GNN made its error — it does not identify which concepts the GNN over-relied on or overlooked in its internal computation. The qualitative case study in Figure 4 partially alleviates this (showing a concrete example of concept analysis), but the paper's language throughout Section 4.3 and the framing of Table 3 substantially overstate what has been demonstrated. The claim should be tempered to "a method for analyzing which concepts differ between predicted and true classes" rather than "discovering causes."
+2. **Conversion of global-rule importance weights to explanation subgraphs for fidelity computation is underspecified.** To compute AccFidelity and ProbFidelity, one must feed a concrete *explanation subgraph* $G_i^{\mathcal{X}}$ into the GNN. Section 4.3 describes producing an importance vector $I_t = K\mathbf{w}_t$ but never explains how this vector is mapped to a specific subgraph that can be masked from the input. Is it the union of all global concepts with positive weight? Only the top-weighted concept? How are overlapping edges resolved? Without this specification, the fidelity numbers in Tables 1 and 2 cannot be independently reproduced, and the comparison with local baselines (which produce explicit subgraphs) is not on equal footing. *Why this matters:* this makes the central quantitative result uninterpretable as reported.
 
 ### Minor
 
-- **Key hyperparameters unreported.** The paper does not report the values of *k* (local clusters), *m* (initial global clusters), or *λ* (L2 penalty weight) for any dataset. These are critical for reproducibility and understanding the method's behavior. They may appear in the appendix (which the parser strips), but should be summarized in the main text.
+3. **Hyperparameter values $(k, m)$ and their selection are not reported.** The method depends on $k$ (local clusters per graph) and $m$ (initial global clusters before merging), yet the paper states neither the values used for each dataset nor how they were chosen. Clustering is central to the pipeline; its sensitivity to these parameters should be discussed or stability demonstrated. This is a standard reproducibility requirement.
 
-- **The edge-extraction heuristic lacks analysis.** Equations (3–4) define a local concept by taking edges that appear in the maximum number of subtrees within a cluster. This heuristic may produce disconnected subgraphs, and there is no discussion of whether the extracted subgraphs are connected or interpretable. The paper also does not analyze whether the mode-based edge selection is robust or whether alternative aggregation strategies (e.g., thresholding) would change results.
+4. **GNN architecture used in experiments is not specified.** The paper says it "focuses on explaining the maximally powerful MPGNNs" and cites GIN as an example (Eq. 2), but the experiments section never states whether GIN is actually used, how many layers, what hidden dimensions, what training procedure, or what data splits were used to train it. These details are needed to verify that the theoretical condition (injective AGG and UPDATE) is met and to enable reproduction.
 
-- **No ablation studies.** The paper does not ablate any of its design choices (clustering algorithm, number of clusters, edge-extraction heuristic, L2 penalty strength). Given that the method has several tunable components, the lack of sensitivity analysis makes it difficult to assess robustness.
-
-- **GNN architecture details are only implied.** The paper states it "focuses on explaining the maximally powerful MPGNNs" and gives GIN as an example, but does not explicitly state the exact architecture (number of layers, hidden dimensions, pooling method) used in experiments. This should be stated in the experimental setup.
+5. **L2 penalty does not align with stated sparsity intuition.** The paper writes that the L2 penalty encourages "critical concepts to occupy only a minor portion of the dataset embedding." L2 regularization shrinks weights toward zero but does not produce sparsity (weights are rarely driven to exactly zero). If the intention is to identify a compact set of critical concepts, L1 or elastic-net regularization would be more appropriate. This mismatch between intuition and the actual loss function should be clarified or corrected.
 
 ### Trivial
-None.
+
+- None that survive filtering — the remaining presentation issues are typical of a camera-ready revision and do not warrant listing.
 
 ## Nice-to-Haves
 
-- A controlled experiment on synthetic BA-2Motifs quantifying whether extracted concepts are *isomorphic* to ground-truth motifs (beyond visual similarity) and whether the extraction is stable across multiple runs.
-- Discussion of limitations — particularly the strong injectivity assumption for Theorem 4.2, the heuristic nature of the edge-extraction step, and how violations affect practical performance.
+- An ablation replacing subtree embeddings with direct subgraph encoding would strengthen the claim that the subtree reduction is both necessary and effective.
+- A stability analysis of the learned global concepts across random seeds (qualitatively, not just fidelity variance) would deepen trust in the extracted motifs.
+- Reporting the train vs. test fidelity for the learned global weights would help assess whether the weight optimization overfits, especially given the L2 penalty's limited sparsification.
 
 ## Removed Points
-*These points were flagged for removal per meta-review guidelines; treat them with caution.*
 
-- **"No analysis on synthetic data with known ground-truth motifs"** — The paper *does* evaluate on BA-2Motifs (which has known 5-node cycle and house motifs) and shows that TreeX extracts them correctly (Figure 3, Section 5.2). The reviewer's valid underlying concern is about *rigor* (quantitative isomorphism verification, stability), not absence of analysis.
-- **"No experiments on non-molecular datasets"** — Factually incorrect. BA-2Motifs and BAMultiShapes are synthetic non-molecular datasets (Barabási–Albert graphs with inserted motifs).
-- **"No public code or checkpoints"** — Per guidelines, questioning the existence/release status of artifacts cited in the paper is not a valid criticism.
-- **"Missing appendix results" / missing comparisons** — Parser-stripped content; the original submission contains these in the appendix.
-- **Missing related works** — Cannot be verified without external sources.
-- **Formatting/style nitpicks and typo claims** — Parser artifacts, not author errors.
+- *"Qualitative comparison with GLGExplainer and GCNeuron is thin"* — The paper states additional comparisons on BAMultiShapes and NCI1 are in the appendix (which is parser-stripped, not absent). The main text shows one representative figure, which is standard for space-limited submissions. Removed per rule about missing appendix content.
+- *"L2 penalty does not encourage sparsity"* as a standalone criticism — Kept but downgraded to Minor, since the core issue is a mismatch between the stated intuition and the actual regularization, not a factual error about L2's behavior.
+- *"The paper should also cover X / Y / Z additional tasks/datasets"* — Not present in the original reviews; no action needed.
+- *Generic requests for more runs / larger studies* — Not present in a way that violates feasibility rules.
 
 ## Novel Insights
 
-The reviews surface one genuinely novel insight that the paper itself does not emphasize enough: the pipeline from subtree extraction → clustering → edge-overlap extraction creates an inherent tension between the theoretical guarantee (Theorem 4.2: node embeddings perfectly represent subtrees) and the heuristic nature of the subsequent steps (k-means on those embeddings, mode-based edge selection). The theory guarantees that similar embeddings → isomorphic subtrees, but the step of aggregating edges via a mode across a cluster has no analogous guarantee. This gap between the theoretically grounded component and the heuristic downstream processing is where future work could provide the most impact — either by designing a principled aggregation step that preserves the theoretical guarantees or by empirically characterizing when the heuristic fails.
+The most interesting tension exposed by the reviews is between the paper's clean theoretical framing (subtree isomorphism via node embeddings, search-space reduction, class-specific reweighting) and the underspecified evaluation pipeline. TreeX's core innovation — exploiting the correspondence between MPGNN message-passing subtrees and subgraph concepts — is genuinely novel among existing GNN explainability work. However, the reviewers correctly identify that the bridge from this theoretical insight to verifiable empirical claims has gaps: the data used for concept extraction is not declared, the subgraph-construction rule for fidelity is not defined, and the clustering hyperparameters are not reported. These are solvable problems (clarification, not fundamental invalidation), but they are nontrivial: a reader cannot currently tell whether the reported fidelity numbers measure faithful explanations or leakage-inflated artifacts.
 
 ## Suggestions
 
-1. **Explicitly define how *Gᵢ^𝒳* is constructed** from the concept importance vector. Is it a thresholded subgraph (keep edges with importance > τ)? A union of top-weighted concepts? The fidelity results are uninterpretable without this.
-2. **Report explanation size** (average edge/node count) for all methods in the fidelity comparison, and show that TreeX achieves high fidelity even when explanations are comparably sparse.
-3. **Temper the claims about discovering "causes" of incorrect predictions.** Rephrase to "analyzing which concepts differ between the predicted and true classes" and provide more detailed case studies (e.g., concept importance breakdown per class for individual misclassified instances).
-4. **Add a controlled experiment on BA-2Motifs** verifying that extracted global concepts are isomorphic to the ground-truth motifs, with stability metrics across runs.
-5. **Report hyperparameters** *k*, *m*, *λ* in the main text and include a sensitivity ablation on at least one dataset.
+1. **Explicitly state in Section 4.1** that $\mathcal{D}$ refers to the *training set only* for all phases (local mining, global clustering, and weight optimization). Describe the exact split ratio and how the global rules are applied to test instances.
+2. **Add a paragraph or algorithmic step in Section 4.3** detailing how $I_t = K\mathbf{w}_t$ is converted to the explanation subgraph $G_i^{\mathcal{X}}$ for fidelity computation. E.g., "we take the union of all global concepts whose weight in $\mathbf{w}_t$ exceeds a threshold $>0$" or "we select the top-$r$ concepts by absolute weight."
+3. **Report the values of $k$ and $m$** used for each dataset in a table or appendix, along with a brief justification or a reference to a validation criterion.
+4. **Specify the GNN architecture** (GIN, number of layers $L$, hidden dimensions, optimizer, epochs) and the data splits used for training it, ideally in a reproducibility statement.
+5. **Clarify the L2 regularization motivation** — if sparsity is not actually required for the method to work, rephrase the intuition; if sparsity is desired, switch to L1 or elastic net.
 
 ## Score and Decision
 
-The paper tackles an important and genuinely underexplored problem, proposes a novel approach with a sound theoretical kernel, and provides encouraging qualitative results. However, the fidelity evaluation is under-specified to the point of being uninterpretable, the incorrect-prediction analysis claims more than it demonstrates, and missing controls (explanation size, hyperparameters, ablations) weaken the empirical contribution. These are significant but addressable issues — they do not invalidate the core idea, but they prevent the contribution from being firmly established in the current form.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

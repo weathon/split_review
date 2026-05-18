@@ -1,20 +1,22 @@
-Now I have a thorough understanding of the paper and the reviews. Let me produce the final consolidated review.
+Now I have all the information I need. Let me produce the consolidated final review.
+
+---
 
 ## Summary
 
-This paper tackles test-time adaptation (TTA) for regression, an underexplored setting where most existing TTA methods are classification-specific. The key insight is that regression features concentrate in a low-dimensional subspace, making naive full-dimensional feature alignment ineffective or harmful. The authors propose Significant-subspace Alignment (SAL), which uses PCA to detect the relevant subspace and weights dimensions by their impact on the scalar output. Experiments across four regression tasks (image-based and tabular) show SAL consistently outperforms baselines adapted from classification TTA.
+This paper addresses test-time adaptation (TTA) for regression, a setting where most existing TTA methods fail because they rely on classification-specific losses like entropy minimization. The authors observe that regression model features lie in a low-dimensional subspace (Table `subspace_dim`), making naive dimension-wise feature alignment unstable and ineffective. They propose **Significant-subspace Alignment (SAL)**, which (1) uses PCA to detect the feature subspace, (2) performs KL-divergence-based feature alignment within that subspace, and (3) applies dimension weighting to prioritize directions that affect the scalar output. Experiments on four datasets (SVHN→MNIST, UTKFace, Biwi Kinect, California Housing) show that SAL consistently outperforms adapted classification TTA baselines.
 
 ## Strengths
 
-- **Identifies a fundamental and novel failure mode:** The paper demonstrates empirically (Table subspace_dim) that regression model features occupy a small subspace (e.g., 40–60 dimensions out of 2048), and shows that aligning all feature dimensions indiscriminately—as classification TTA methods do—harms performance. This insight is well-supported and directly motivates the method.
+1. **First systematic treatment of TTA for regression.** The paper correctly identifies that existing TTA methods rely on classification-specific designs (entropy minimization, class prototypes) that are inapplicable when models output a single scalar. This gap is real, and the paper provides a tailored solution.
 
-- **Two well-motivated, regression-tailored components:** Subspace detection (PCA-based) focuses alignment on the relevant subspace, avoiding degenerate dimensions. Dimension weighting by $|\mathbf{w}^\top \mathbf{v}_d|$ prioritizes directions that affect the scalar output. Both components are explicitly designed for the regression setting and are not present in prior classification-oriented TTA methods.
+2. **Key empirical discovery—regression features are low-rank.** Table `subspace_dim` shows that the effective rank of feature covariance is far smaller than the feature dimension (e.g., 2048→32–40 for ResNet). This observation directly motivates why naive alignment fails and frames the problem clearly.
 
-- **Consistent outperformance across diverse tasks and shift types:** SAL achieves the highest R² scores on SVHN→MNIST, UTKFace (13 corruption types), Biwi Kinect (gender shift, 6 combinations), and California Housing, while most baselines from classification TTA often underperform Source. This demonstrates generalization across image and tabular data, synthetic and real shifts.
+3. **Well-motivated and simple method with consistent gains.** SAL (PCA projection + KL alignment in subspace + weight-based prioritization) achieves higher R² than all baselines across every dataset and setting. Many baselines degrade below the no-adaptation Source, while SAL consistently improves. The feature reconstruction analysis (Figure 2) provides mechanistic evidence that SAL preserves the source subspace while baselines destroy it.
 
-- **Ablations validate both components:** Without subspace detection, performance collapses to near or below Source (Table ablation). The ablation on K shows that $K=100$ works well across datasets without per-dataset tuning, and performance degrades predictably when K far exceeds the intrinsic subspace dimension.
+4. **Thorough ablations.** The paper separately ablates subspace detection and dimension weighting (Table `ablation_table`), showing that both contribute. It also analyzes sensitivity to the subspace dimension K (Table `ablation_table_k`), showing that performance peaks near the true subspace rank and degrades when K is too large. The analysis that projected features become approximately Gaussian (Figure 3, CLT argument in Eq. 10) justifies the use of KL divergence.
 
-- **Diagnostic analysis explains why SAL works:** Feature reconstruction error analysis (Figure 3) shows SAL preserves the source subspace structure during adaptation while baselines corrupt it. The histograms and central-limit-theorem argument (Eq. 12) show that subspace projection makes features more Gaussian, making the KL-divergence loss more appropriate and stable.
+5. **Generalizes across input modalities.** SAL is evaluated on image data (SVHN, UTKFace, Biwi Kinect) and tabular data (California Housing), demonstrating it is not input-modality-specific.
 
 ## Weaknesses
 
@@ -26,60 +28,50 @@ None.
 
 ### Minor
 
-- **No limitations or failure-case discussion:** The conclusion (Section 6) is only four sentences and does not acknowledge any limitations. The paper would benefit from a discussion of when SAL might struggle—e.g., when the domain shift changes the covariance structure so substantially that the source subspace is no longer a good basis for target features, or why the gain on California Housing is modest (0.444 vs. 0.364).
+1. **No error bars or statistical significance reported.** All results are single numbers without confidence intervals, standard deviations, or multiple runs. Given that some gains are modest (e.g., Biwi Kinect roll from 0.52→0.55), it is unclear whether the improvements are statistically significant. This is the most substantive weakness—the paper would be stronger with means and standard deviations over at least 3 runs.
 
-- **No complementary evaluation metrics:** The paper reports only R². For tasks like Biwi Kinect head-pose estimation where the target range is bounded, R² can be misleadingly low even when absolute error is small. Reporting MAE or RMSE alongside R² would strengthen the evaluation.
+2. **Only R² is reported; practical impact is not calibrated.** Adding RMSE or MAE would help contextualize the magnitude of improvement. For example, on UTKFace with Gaussian noise, Source achieves R²=0.20 and SAL achieves 0.47—a large relative gain but still low in absolute terms. Without task-specific accuracy thresholds or human performance, the practical significance of some improvements is unclear.
 
-- **Dimension weighting contribution is empirically marginal and insufficiently justified:** The ablation shows dimension weighting provides small gains (e.g., 0.698 vs. 0.692 on SVHN-MNIST). The paper acknowledges this is due to correlation between variance and weight, but does not construct a case where the weighting would be critical. A synthetic or controlled experiment demonstrating a scenario where a low-variance dimension has high output significance would justify keeping this component as more than a negligible add-on.
+3. **The baseline comparison, while reasonable, would benefit from one stronger regression-adapted baseline.** The paper acknowledges there are no off-the-shelf TTA methods for regression and adapts classification baselines. Several of these are expected to perform poorly (e.g., Prototype uses class prototypes). Including a simple but sensible regression-specific adaptation—such as Tent-style adaptation with a variance-based or energy-based surrogate loss in place of entropy—would set a higher bar and strengthen the empirical claims.
 
-- **KL divergence theoretical grounding is cited for classification UDA, not specifically regression:** The paper cites Nguyen (2022) who proved the KL divergence bounds target error in UDA for classification, but does not discuss whether this bound transfers to the regression setting. The experiments show the approach works, so this is not a fatal gap, but the theoretical framing is weaker than claimed.
+4. **Limited discussion of limitations and failure cases.** The paper has no explicit limitations section. It does not discuss when the subspace assumption might break (e.g., when source and target are very different), nor the restriction to models with a linear output layer. The linear regressor assumption is stated in Eqs. (1) and (6) but its implications for nonlinear output heads are not discussed. A brief limitations paragraph would strengthen the paper.
 
-- **Missing pre-adaptation reconstruction error control:** The reconstruction error analysis (Figure 3) measures error after adaptation. Showing the reconstruction error *before* adaptation (i.e., with the unadapted source model) would provide a baseline to quantify how much SAL preserves vs. the baselines corrupt the subspace. This would strengthen the diagnostic claim.
+5. **Dimension weighting contributes modestly and lacks a principled derivation.** The ablation shows that dimension weighting adds a small increment over subspace detection alone. The formula α_d = 1 + |w^T v_d^s| is intuitive but heuristic; the "+1" is not justified, and the paper acknowledges that variance and weight correlate anyway. This is not a fatal issue, but a more principled weighting scheme (or a clearer explanation of why the simple form is sufficient) would be welcome.
+
+6. **Adaptation dynamics and computational cost are not reported.** The paper does not report the number of gradient steps, convergence speed, or wall-clock time per batch. For a method intended for test-time use, computational efficiency matters.
 
 ### Trivial
-
-- **Computational cost of PCA is not discussed:** The method requires computing a PCA on the full source feature matrix (potentially large for datasets like ImageNet-scale). A brief note on memory/time cost and when it could be a bottleneck would be helpful. The paper's TTA update is lightweight (affine parameters only), but the source-side PCA is a one-time cost worth acknowledging.
-
-- **DANN comparison would benefit from clearer framing:** The paper separates DANN as a "method other than TTA" (line 214), which is correct and transparent. However, the abstract's phrasing "outperforms various baselines" is generic enough that a casual reader could include DANN in the comparison set. Explicitly stating in the abstract that DANN is compared only as a reference (not a TTA method) would prevent misinterpretation.
+- Code availability is not mentioned; releasing code would improve reproducibility.
 
 ## Nice-to-Haves
-
-- **Control: align all D dimensions using the naive KL divergence (Equation 2) in the ablation table.** The paper already explains that naive alignment fails (Section 3.1), but including it as a row in the formal ablation would directly quantify how much of the gain comes from simply avoiding degenerate dimensions vs. from the specific PCA-based subspace detection.
-
-- **Synthetic case to demonstrate dimension weighting's value.** The paper acknowledges correlation between variance and weight; a controlled experiment where a low-variance, high-importance dimension exists would show the weighting component's necessity.
-
-- **Pre-adaptation reconstruction error as a control baseline** in Figure 3.
-
-- **More explicit guidance on selecting K:** The paper says to compute the rank of the source covariance, but providing a rule of thumb (e.g., "set K = rank + small constant" or "K = rank × 1.5") would make the method more usable by practitioners.
+- A synthetic toy example demonstrating a case where a low-variance direction has high output weight, making the dimension weighting mechanism concretely visible.
+- Principled, automatic criterion for selecting K (e.g., eigenvalue threshold or explained-variance ratio) rather than defaulting to K=100 and relying on the subspace rank.
+- Ablation on which model parameters to update (affine only vs. full feature extractor) to test whether updating more parameters would break the subspace.
 
 ## Removed Points
+These points were raised by the harsh critic but are removed after verification against the paper:
 
-These points are flagged to be removed; treat them with caution.
-
-- **"SVHN-MNIST should not be used as a regression benchmark"**: The paper is transparent that these are digit datasets used for regression by training models to output scalar labels. Using them as a synthetic benchmark for domain shift is permissible. This is a scope-creep criticism. **(Removed: evaluates against the wrong class of expectations; the paper does not claim this is a realistic regression application.)**
-
-- **"Prototype degrades performance relative to Source but does not update the feature extractor"**: Figure 3's caption states Source and Prototype are the same *in terms of reconstruction error* because both use the same feature extractor. Prototype adjusts the classifier head (prototypes), so its R² scores can differ from Source's even with the same feature extractor. This is not a contradiction. **(Removed: reviewer conflated reconstruction error analysis with R² performance.)**
-
-- **"The paper does not discuss why Prototype degrades performance"**: Even if Prototype's R² scores differ from Source (which is not verified since tables are not visible), this is a very minor baseline-specific observation that does not affect the paper's contribution. **(Removed: does not affect the core claim.)**
-
-- **"Comparing naive feature alignment (all D dimensions) as a control"**: The paper already establishes that naive alignment fails in Section 3.1 and shows this empirically via the ablation without subspace detection. The suggested control is already conceptually present. **(Moved to Nice-to-Haves.)**
+- **"Novelty is incremental / the core contribution is just PCA + alignment"** — The paper's contribution is appropriately scoped. It is the first TTA method designed for regression, identifies a real problem (low-rank features breaking alignment), and proposes a clean solution. The fact that the solution combines existing components in a novel way does not make it "incremental" in a negative sense; this is standard engineering research. Removed because it mischaracterizes the contribution's novelty.
+- **"The phrase 'TTA does not train additional models nor access the target dataset for multiple epochs' overstates the difference from SFDA"** — This statement appears in the Related Work section describing the general TTA setting, not the paper's own method. Computing a covariance matrix from the source dataset at pre-training time is standard for feature-alignment TTA methods and does not constitute "training additional models" or "accessing the target dataset for multiple epochs." The reviewer's objection is based on a misreading. Removed.
+- **"The KL divergence bound from Nguyen et al. (2022) was developed for classification UDA; its applicability to regression is not established"** — The paper cites Nguyen et al. as inspiration for using KL divergence, not as a formal theoretical guarantee for regression. The bound is general (any hypothesis class). The paper does not claim to prove a new theoretical result. This is a nitpick that misreads the purpose of the citation. Removed.
+- **"Subspace detection is precomputed from source features and assumes the subspace does not change"** — The paper explicitly tests this via feature reconstruction analysis (Figure 2), which shows that SAL preserves the source subspace. The concern is already experimentally addressed. Removed.
+- **"The baselines are weak by design, which inflates the apparent gain"** — The paper includes RSD (a regression UDA method), DANN (a classic UDA method), TTT (test-time training), and Oracle. These go beyond trivial baselines. The claim that baselines are "weak" is overstated and ignores that no regression-specific TTA baselines exist in the literature. Partially kept in Minor #3 as a suggestion for strengthening rather than as a weakness.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one worthwhile observation: the paper's central claim about regression features occupying a low-dimensional subspace is convincingly supported, but the weakest link in the argument chain is the dimension weighting component—the reviews correctly note that if variance and weight are naturally correlated, the weighting may be a non-essential add-on that happens not to hurt rather than a critical design choice. Future work on regression TTA should either find regimes where the correlation breaks down or drop the weighting for simplicity.
+The reviews surface a useful tension that is not fully resolved in the paper: the subspace detection component does most of the work, and the dimension weighting contributes little because variance and weight are naturally correlated in the learned subspace. This suggests that the core insight is really about the *geometry* of regression features—their low effective rank—rather than the specifics of *weighting* by output sensitivity. A future direction implicitly suggested by this finding is to investigate whether any form of subspace-constrained alignment (not just PCA-based) suffices for regression TTA, and whether the low-rank property holds for other losses beyond MSE.
 
 ## Suggestions
 
-1. Add a limitations paragraph to the conclusion acknowledging settings where SAL may struggle (e.g., when target distribution shift alters the covariance structure substantially).
-2. Include MAE or RMSE alongside R², especially for bounded-range tasks like Biwi Kinect.
-3. Either (a) construct a synthetic/controlled experiment showing the value of dimension weighting when variance-weight correlation breaks down, or (b) simplify the method by removing the weighting component and noting that the main gain comes from subspace detection.
-4. Add pre-adaptation reconstruction error to Figure 3 as a baseline.
-5. Mention the one-time computational cost of source-side PCA for transparency.
-6. In the abstract, specify that the method outperforms TTA baselines (rather than "various baselines") to avoid ambiguity about the DANN comparison.
+1. **Add error bars/standard deviations** to all main results (at least 3 random seeds or bootstrapped estimates).
+2. **Include RMSE or MAE** alongside R² to calibrate the practical magnitude of improvements.
+3. **Add one stronger regression-adapted baseline** (e.g., Tent with a variance-based or negative-confidence surrogate loss) to raise the bar of comparison.
+4. **Add a brief limitations section** discussing: (a) the linear output head assumption, (b) what happens when the source subspace is a poor prior for the target, and (c) potential failure cases.
+5. **Report wall-clock time and convergence** (number of gradient steps per batch).
 
 ## Score and Decision
 
-The paper addresses a genuinely underexplored problem (TTA for regression) with a simple, well-motivated, and experimentally validated method. The weaknesses are all minor: none threaten the core contribution, and most are addressable in a revision (adding complementary metrics, limitations, failure analysis). The evidence is sound, the experiments are thorough for a first work in this area, and the diagnostic analyses convincingly explain why the method works.
+The paper is technically sound, addresses a genuine gap, and presents a well-engineered solution with thorough ablations. None of the weaknesses are fatal; the main issues (lack of error bars, single metric, limited limitations discussion) are addressable and standard for a good conference paper at this tier.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

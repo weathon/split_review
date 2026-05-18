@@ -1,16 +1,20 @@
+Now I have all the information needed. Let me synthesize the final review.
+
 ## Summary
 
-This paper proposes a checkability training method based on the Prover-Verifier Game (PVG) to improve the legibility of LLM chain-of-thought solutions for grade-school math problems. The approach iteratively trains: (1) a small verifier to predict solution correctness, (2) a "helpful" prover to produce correct solutions that the verifier accepts, and (3) a "sneaky" prover to produce incorrect solutions that fool the verifier. The paper shows that direct RL for correctness degrades human legibility, while the proposed checkability training (using an SRC reward) maintains legibility while improving accuracy. The key claim is that legibility to small verifiers transfers to time-constrained humans.
+This paper studies the problem of LLM output legibility—whether chain-of-thought solutions can be easily verified by humans or smaller models. The authors show that optimizing solely for answer correctness degrades legibility (a "legibility tax"), and propose an iterative checkability training algorithm, inspired by Prover-Verifier Games, that alternately trains (1) a verifier to judge solution correctness, (2) a helpful prover to produce correct solutions that the verifier accepts, and (3) a sneaky prover to produce incorrect solutions that fool the verifier. The key empirical finding is that training against a small verifier produces solutions that are both reasonably accurate and more legible to time-constrained human evaluators, suggesting that checkability to small models may transfer to human legibility.
 
 ## Strengths
 
-- **Identifies and empirically documents a "legibility tax" — a trade-off between accuracy and human legibility — and shows the proposed method partially resolves it.** Direct RL for correctness (Section 4.1, Fig. 3) yields high accuracy but causes human accuracy to drop and evaluation time to increase. The checkability training achieves intermediate accuracy while maintaining or improving human legibility (Fig. 1, Fig. 4). This provides a concrete, measurable tension that prior work on LLM legibility had not systematically characterized.
+1. **Clear demonstration of a legibility tax and its mitigation.** The headline result (Fig. 1) compellingly shows the tradeoff: correctness-only RL produces high-accuracy but illegible solutions, while the initialization is legible but inaccurate. The proposed checkability training achieves a better accuracy–legibility tradeoff, with the helpful prover's accuracy and human judges' accuracy both improving across rounds (Fig. 5). This is the paper's central empirical contribution and is well-supported by converging automated and human metrics.
 
-- **Systematic ablation studies across reward formulations (SRC, CGC, goodharting) and verifier sizes reveal algorithmic sensitivities.** The paper tests three reward variants and shows that SRC reward yields the best dynamics (Fig. 2), CGC reward leads to worse convergence (Fig. 7), and goodharting does not improve human legibility (Fig. 8). Varying verifier capability gaps ($10^{-4}$ to $10^0$ times prover compute) shows that checkability training is robust across a range but breaks down at extreme sizes. This analysis helps practitioners understand which design choices matter.
+2. **Systematic evaluation of verifier robustness across multiple attack types and model sizes.** The paper tests verifiers against SRC, CGC, and goodharting attacks (Fig. 6a), evaluates balanced best-of-n accuracy (Fig. 6b), and varies verifier compute across four orders of magnitude. The finding that larger verifiers are harder to exploit and that robustness increases across rounds is well-supported and provides insight into when checkability training works.
 
-- **Provides theoretical grounding connecting the Prover-Verifier Game to completeness and soundness via verifier-leading Stackelberg equilibrium (Theorem 1).** This formal link distinguishes the paper from purely empirical approaches and gives principled justification for the iterative training algorithm, even though the paper candidly acknowledges the gap between theoretical assumptions and neural network practice (lines 130–131).
+3. **Exploration of alternative reward formulations with clear failure analysis.** The comparison of SRC, CGC, and goodharting rewards (Section 5) is informative: CGC leads to worse training dynamics and goodharting does not transfer to human legibility, ablated against the main results. This strengthens the case for the SRC design choice.
 
-- **Demonstrates that verifier robustness increases across multiple attack types and that sneaky prover flaws become more subtle over rounds.** The paper evaluates verifiers against SRC, CGC, and goodharting adversaries (Fig. 6a), showing increasing steps-to-exploit across rounds. The GPT-4-based analysis of sneaky solutions (Fig. 5a) and human evaluation (Fig. 5b) both indicate increasingly subtle flaws, providing converging evidence for the training dynamics.
+4. **Principled theoretical framing.** Theorem 1 connects the verifier-leading Stackelberg equilibrium to completeness and soundness. While the paper is transparent that the empirical setting does not satisfy the theorem's assumptions, the theory provides useful intuition and situates the work within the PAC verification and interactive proofs literature.
+
+5. **Honest and thorough limitations section.** The paper explicitly discusses reliance on ground-truth labels, limited domain (GSM-only), the conflation of CoT with legibility, heterogeneous stopping criteria, and potential hyperparameter suboptimality (Section 6.1). This transparency is commendable and helps readers calibrate the claims.
 
 ## Weaknesses
 
@@ -20,58 +24,46 @@ None.
 
 ### Major
 
-- **Human evaluation lacks essential statistical reporting, undermining the paper's central claim that legibility transfers to humans.** The headline finding rests on human accuracy and timing data (Figs. 3b–d, 5b, 4b–c), yet the paper never reports: the number of contractors, how many solutions each evaluated, recruitment or screening procedures, whether the same contractors judged all conditions, or how the 45-second time limit was chosen. No error bars, confidence intervals, or significance tests accompany any human-judgment result. The differences across conditions appear visually modest (e.g., ~5–10 percentage points in Fig. 4b), and without variance estimates or significance tests the reader cannot assess whether these differences are reliable. The paper's otherwise thorough automated evaluations do not substitute for rigorous human-subject reporting when the claim is specifically about *transfer to humans*. This weakness is the most consequential and will require substantial additional reporting (and possibly additional data collection) to address.
+1. **Inadequate reporting of human evaluation methodology and statistics.** The paper's claim that legibility transfers to humans rests heavily on the human contractor studies in Sections 4.1, 4.3.2, and 4.3.3. The main text provides: (i) the time limit (45 s) and task (determine validity), (ii) mean accuracy values in figures, but **no sample sizes** (number of contractors, number of solutions per condition, whether solutions were judged by one or multiple raters), **no inter-rater agreement**, **no confidence intervals or standard errors**, and **no statistical tests** reported for the human accuracy comparisons across rounds. The figures displaying human accuracy (Fig. 1b–d, Fig. 4b, Fig. 5g–h) show only point estimates without error bars, making it impossible to assess whether the observed differences (e.g., human accuracy increasing from round 0 to round 4 for the helpful prover) are statistically reliable. This is not a trivial omission—it is the linchpin of the human legibility claim. The paper would benefit significantly from transparent reporting of what was already done, even without additional experiments.
 
 ### Minor
 
-- **The verifier's increasing robustness is measured with indirect metrics, and a direct accuracy evaluation is missing.** The paper uses step-to-exploit (which conflates attack difficulty with verifier robustness) and balanced best-of-n (which only uses helpful-prover solutions). A standard verifier accuracy metric (e.g., AUC or accuracy on a held-out balanced test set of correct vs. incorrect solutions from diverse prover sources) would provide a cleaner, more interpretable measure of soundness improvement.
+2. **Ambiguity about checkpoint selection for human evaluation.** The paper defines an early-stopping criterion ("when sneaky incorrect solutions become as convincing as helpful correct solutions," Fig. 2 caption) and states that human evaluations use the "last checkpoints of current-round helpful provers" (Section 4.2.1). However, the paper does not make explicit whether the same early-stopping rule was applied consistently across all human evaluations or whether a fixed number of steps was used. Given that the helpful prover's accuracy can decline at the end of each round (Fig. 2b), this ambiguity matters for interpreting the round-over-round human accuracy trends. The paper acknowledges using different stopping criteria for different experiments and notes "We do not observe qualitative different between early stopping and non early stopping rounds" (Section 6.1), which partially mitigates the concern, but a precise statement about the human evaluation checkpoints is needed.
 
-- **No controlled comparison between checkability and correctness-only at matched accuracy.** The correctness-only baseline is evaluated at high-accuracy checkpoints (3k, 7k steps) where legibility is poor, while the checkability-trained prover operates at lower accuracy. Without human evaluation at approximately matched accuracy, the claimed legibility gain could partially reflect that lower-accuracy provers solve easier problems whose correct solutions are inherently easier to check. The paper partially acknowledges this (lines 343–344) but does not provide the controlled comparison needed to resolve the concern.
-
-- **The ratio hyperparameter for mixing previous-round prover data into verifier training is reported as "tuned" but the value is not disclosed.** Lines 144–145 state the mixture "is tuned as a hyperparameter" and line 350 says it was tuned for one verifier size and reused for others, but the actual ratio is never given. This hinders reproducibility of a key algorithmic detail.
+3. **The "transfer" claim is supported by correlational evidence without causal isolation.** The paper observes that helpful solutions that are more convincing to the small verifier are also more accurately judged by humans, and that sneaky solutions harder for the verifier to reject are also harder for humans to spot. The comparison with the correctness-only baseline (which does not transfer) is valuable and shows that checkability training produces qualitatively different, more legible solutions. However, the mechanism of transfer is not isolated—the observed correlation could also arise from solutions shifting toward a more human-natural style as a side effect of training, rather than from the verifier signal specifically. The paper's phrasing is appropriately cautious ("seems to transfer"), but the abstract and introduction make somewhat stronger assertions. A within-round per-solution analysis correlating verifier confidence with human accuracy (controlling for solution correctness) would strengthen the argument.
 
 ### Trivial
 
-- The paper uses GPT-4 to evaluate step-by-step validity (Fig. 5a) without explicitly noting that GPT-4 may share failure modes with the prover/verifier (all are GPT-family). A brief caveat would strengthen the presentation.
+4. **The goodharting baseline's human evaluation mentions "no significant difference" without specifying the statistical test used** (Section 4.2.3). While this is a secondary negative result, standard reporting practice should include the test type and sample size.
+
+5. **The GPT-4 step-by-step validity metric** (Fig. 4a) is not validated against human judgments of per-step correctness. This is a reasonable automated proxy, but its alignment with human perception is unverified. Minor, since the paper also has direct human data on full-solution accuracy.
 
 ## Nice-to-Haves
 
-- A per-solution correlation analysis between verifier score and human judgment accuracy would directly test the transfer claim at the individual-solution level.
-- A qualitative rubric-based analysis of what makes checkability-trained solutions more legible (e.g., solution structure, step granularity) would deepen understanding of the mechanism.
-- Reporting the rationale for the 45-second time limit would help readers assess task difficulty.
+- Report the human evaluation with full transparency: number of contractors, number of judgments per condition, inter-rater agreement (e.g., Fleiss' κ), and standard errors or confidence intervals for all mean accuracies.
+- Provide a precise quantitative rule for the early-stopping criterion, and verify that human evaluation results are robust to small variations in the stopping threshold.
+- Compute per-solution correlations between verifier confidence and human accuracy within each round, controlling for solution correctness, to directly test the transfer mechanism.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- *"The three data points in Figure 1 are composites from different training runs (Section 4 and Section 4.3)."* — This is standard practice for a summary figure comparing different methods. The caption clearly describes what each point represents. No misrepresentation exists.
-
-- *"Missing related works."* — I cannot verify the existence of missing citations without external sources. The paper's related work coverage of debate, critique, scalable oversight, and CoT is thorough.
-
-- *"Theorem 1 does not provide algorithmic guidance."* — The theorem provides conceptual grounding; the paper explicitly acknowledges the gap between theory and practice (lines 130–131). Conceptual theorems are not expected to provide algorithmic recipes.
-
-- *"Formatting and style nitpicks"* (typos, grammar, capitalization artifacts) — These are parser artifacts from PDF extraction, not author errors.
-
-- *"Missing appendix content, proofs in appendix, or absent references."* — These sections exist in the original submission; the parser strips appendices.
-
-- *"The paper should also cover other domains / additional tasks."* — Scope creep beyond the paper's stated focus on grade-school math.
-
-- *"The paper should report inter-rater reliability."* — Not standard for time-limited binary correctness judgments; a nice-to-have at most.
+- The criticism about human evaluation methodology "not described in the appendix" is removed because the appendix is stripped by the parser and may contain these details in the original submission.
+- The criticism that Theorem 1 "plays no role" in experiments is removed as an overstatement—the paper is transparent about the gap between theory and practice, and the theorem serves as principled motivation, which is a standard and acceptable role for theory in empirical papers.
+- The generic "could benefit from a simple ablation" suggestions are moved here as they are suggestions, not verified weaknesses.
 
 ## Novel Insights
 
-The most notable insight from the review process is that the paper's strongest contribution may not be the human-transfer claim (which is under-supported) but rather the systematic characterization of the legibility tax itself and the demonstration that adversarial training against small verifiers produces qualitatively different solutions — more structured, more checkable — at moderate accuracy levels. The finding that SRC reward works better than CGC or goodharting rewards is practically valuable and suggests that the *relative* (not absolute) convincingness signal and the early penalty for unconvincing solutions are important design choices. The observation that the goodharting baseline does not improve human legibility (Sup. Fig.) is an important negative result that strengthens the case for the role-conditioned training approach.
+The harsh reviewer's most valuable observation is that the human evaluation reporting gap is the single weakest link in an otherwise well-executed paper. The key human legibility results (Figs. 1b–d, 4b, 5g–h) are presented without error bars or statistical tests, which is a meaningful omission for results at the center of the paper's claimed contribution. The reviewer's suggestion to compute within-round correlations between verifier confidence and human accuracy is a concretely actionable way to strengthen the transfer claim beyond what the current between-condition comparison provides.
 
 ## Suggestions
 
-1. **Report basic human evaluation statistics** — number of contractors, number of solutions per condition, and error bars (or individual data points) for all human accuracy plots. This is essential for the central claim of human transfer.
-2. **Add a direct verifier accuracy metric** — e.g., AUC or accuracy on a balanced held-out test set of correct/incorrect solutions from diverse prover sources, to complement the existing indirect robustness metrics.
-3. **Address the matched-accuracy concern** — either by evaluating an earlier, less-accurate checkpoint of the correctness-only baseline with humans, or by explicitly discussing why such a comparison is infeasible and how the current design controls for the concern.
-4. **Disclose the mixture ratio hyperparameter value** used for verifier training data, and briefly justify the 45-second time limit choice.
+- Add standard errors or confidence intervals to all human accuracy figures. Even bootstrapped 95% CIs would substantially increase confidence in the reported trends.
+- Report the number of contractors, number of judgments per condition, and inter-rater agreement in the main text.
+- If the early-stopping criterion was applied consistently across all human evaluations, state this explicitly; otherwise, clarify the selection rule.
+- Consider adding a per-solution analysis correlating verifier scores with human accuracy within each round to provide direct evidence for the transfer mechanism.
 
 ## Score and Decision
 
-The paper addresses a well-motivated and practically important problem. The automated experiments — training dynamics across rounds, verifier robustness against multiple attack types, and the comparison of reward variants — are thorough and provide reasonable evidence that checkability training works as designed. The legibility tax is a useful conceptual contribution, and the ablation studies are valuable for practitioners. However, the paper's central claim about human transfer is weakened by inadequate reporting of the human evaluation: no sample sizes, no error bars, no significance tests. This gap means the most important result is not yet convincingly established. The paper would be significantly strengthened by addressing this before publication. Given the strength of the automated results and the conceptual contributions, and the fact that the human evaluation weakness is addressable (not a fatal flaw in the method itself), the paper merits a borderline-to-accept score.
+The paper makes a genuine contribution: it identifies a concrete legibility tax from correctness-only optimization, proposes a practical training framework to mitigate it, and provides converging evidence from automated and human evaluations. The automated experiments are thorough and well-designed. The main weakness is the thin reporting of the human evaluation methodology, which is fixable (the authors likely have these records) and does not invalidate the core empirical findings—the automated metrics independently support the claim that checkability training improves legibility to verifiers, and the human data trends are consistent and monotonic. With transparent reporting of the human studies, the paper would be a strong contribution.
 
 MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,85 +1,74 @@
-Now I have all the information I need. Let me produce the final consolidated review.
-
----
+Now I have all the information I need. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper proposes a dual-stream architecture for micro-expression recognition (MER). The main stream uses a Continuous Vertical Attention (CVA) block to model motion differences between onset and apex frames with vertical-only attention maps passed across layers. The auxiliary stream uses a Facial Position Focalizer (FPF) built on Swin Transformer to encode spatial position information. Action Unit (AU) annotations from the datasets are incorporated as auxiliary features. The model achieves state-of-the-art accuracy (94.35% on CASME II, 86.76% on SAMM) and F1-scores on both benchmarks, with extensive ablations comparing vertical vs. horizontal attention, Swin vs. ViT encoders, and single vs. dual-frame inputs.
+This paper proposes a dual-stream network for micro-expression recognition (MER) that incorporates three components: (1) a Continuous Vertical Attention (CVA) module that focuses on vertical facial muscle movements, (2) a Facial Position Focalizer (FPF) module based on Swin Transformer for spatial localization, and (3) AU embeddings as auxiliary input. The authors report state-of-the-art results of 94.35% on CASME II and 86.76% on SAMM. The work is an incremental but reasonable extension of the MMNet architecture.
 
 ## Strengths
 
-- **Vertical attention design empirically validated.** Table 3 shows vertical-only attention outperforms both horizontal-only and both-direction attention by clear margins on both datasets, within the full architecture. This is the paper's most novel design choice and is backed by direct comparative evidence.
+- **Vertical attention is validated as beneficial**: The ablations in Tables 3-4 show that vertical-only attention outperforms horizontal-only and both-direction attention, and that continuous attention (using previous-layer maps) improves over independent attention. These comparisons control for other components, lending credibility to the CVA design choice.
 
-- **Swin Transformer-based FPF module outperforms ViT alternative.** Table 5 demonstrates that replacing ViT with Swin Transformer in the position encoding stream yields higher accuracy and F1-score on both datasets. The shifted-window mechanism is well-motivated for capturing long-range dependencies across facial regions.
+- **Swin Transformer over ViT is empirically justified**: Table 5 shows that replacing ViT with Swin Transformer in the position embedding stream yields 3–4% accuracy gains, directly supporting the paper's architectural motivation about long-range dependency modeling.
 
-- **Substantial SOTA improvements on two benchmarks.** The complete model achieves 94.35% accuracy on CASME II and 86.76% on SAMM. Against MMNet, it improves by 6% accuracy / 7.26% F1 on CASME II; against μ-BERT, it improves by 10.87% on CASME II and 1.98% on SAMM. These are non-trivial margins given the saturated nature of these benchmarks.
+- **AU embedding consistently improves performance**: Table 7 demonstrates that adding AU information raises accuracy and F1-score by 2–4% on both datasets, validating the design choice of using AU as auxiliary input.
 
-- **Continuous attention mechanism validated.** Table 4 shows that passing attention maps from previous layers (continuous) outperforms independent per-layer attention, justifying a core design choice of the CVA block.
-
-- **Dual-frame input shown superior to single-frame.** Table 6 demonstrates that encoding both onset and apex frames separately (rather than only the apex) improves performance, validating the dual-stream design.
+- **Comprehensive component-level ablation**: Beyond the overall architecture, the paper provides ablations isolating the attention direction (vertical vs. horizontal vs. both), the continuous-attention design, the choice of transformer backbone (Swin vs. ViT), single vs. dual-frame input, and AU embeddings. This gives a reasonably complete picture of each design decision's contribution.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **No statistical reliability measures.** The paper reports single accuracy and F1 numbers for all experiments without standard deviations, confidence intervals, or any multi-run analysis. On datasets with 255 and 159 videos, and given that LOSO cross-validation is deterministic for a fixed seed, the reported 6% improvement on CASME II over MMNet could fall within noise range if the model is sensitive to weight initialization or data augmentation order. The paper does not state whether a fixed seed was used or how results vary across runs. This is the single most significant weakness: without variance estimates, the central empirical claim is unverifiable. This is a structural evaluation gap, not a missing experiment.
+- **No uncertainty quantification on tiny datasets**: CASME II has 255 videos across 26 subjects; SAMM has 159 videos across 32 subjects. With leave-one-subject-out cross-validation, a single misclassification can swing accuracy by several points. The paper reports only point estimates with no confidence intervals, standard deviations, or per-subject performance breakdowns. The reported improvements (especially the 10.87% gap over μ‑BERT on CASME II) cannot be assessed for statistical significance. This is the most serious weakness: the reader cannot tell whether the claimed gains reflect genuine superiority or evaluation noise.
+
+- **Baseline comparisons use published numbers without protocol verification**: Table 1 compares against prior methods using their published results, but Section 4.1 confirms that both datasets have multiple labeling schemes (SAMM was originally labeled with 8 classes, CASME II with 5, etc.). The paper does not verify that the compared methods used the same 5-class mapping, the same LOSO splits, the same preprocessing pipeline, or the same evaluation metric computation. Given the small dataset sizes, even minor protocol differences can produce large accuracy swings. Without controlled re-implementation, the superiority claims over MMNet, μ‑BERT, and others are not substantiated.
+
+- **Architectural inconsistency in feature fusion**: The paper states that F_M has dimensions 512×14×14 (line 69) while the FPF output is reshaped to 196×14×14 (line 85), and that these are then combined (line 92: "after adding F_POS and F_M together"). The channel dimensions do not match (512 ≠ 196), making element-wise addition impossible as described. This is either a dimensional error in the paper or a critical architectural ambiguity that must be resolved.
+
+- **Implausible hyperparameter and missing training details**: The paper reports a weight decay of 0.6 for AdamW (line 137), which is roughly 10–60× larger than typical values (0.01–0.05 for AdamW). Additionally, the loss function is never stated, and the learning rate schedule ("exponentially decayed during the first 50 epochs") is under-specified. These issues make the reported numerical results impossible to trust or reproduce as-is. Even if 0.6 is a typo, the paper does not provide the intended value.
+
+- **Missing architectural details for reproducibility**: Several key specifications are absent: (1) Swin Transformer patch size, window size, and embedding dimension; (2) the MLP architecture and hidden dimensions for the AU fusion classifier; (3) the dimension of the flattened feature map before AU concatenation. Without these, a competent practitioner cannot implement the method.
 
 ### Minor
 
-- **Primary ablation (Table 2) builds on ResNet-18 rather than the full architecture.** Table 2 adds CVA, FPF, and AU embedding to a ResNet-18 baseline, but the actual model uses Swin Transformer + CVA stack, not ResNet-18. This makes it difficult to interpret the marginal contribution of each component *within the proposed architecture itself*. (That said, Tables 3–7 do perform proper within-architecture ablations by varying one design choice at a time while keeping the full model fixed, which partially mitigates this concern.)
+- **The "vertical movement is more important" claim lacks independent support**: The paper argues that "vertical facial muscle movement plays a more important role in MER than horizontal movement" (Section 2) but provides no anatomical, physiological, or prior literature evidence for this claim. The only support is the paper's own ablation (Table 3), which compares vertical vs. horizontal attention within the proposed architecture. This is circular — the claim motivates the design, and then the ablation is presented as evidence for the claim.
 
-- **Vertical attention motivation lacks prior-literature support.** The paper asserts that "vertical facial muscle movement plays a more significant role in micro-expression recognition" (Section 2) without citing any prior anatomical or computational evidence for this claim. The empirical result (Table 3) is valid, but framing the method as "identifying" this contribution rather than "hypothesizing and empirically confirming" it overstates the contribution.
+- **Ablation baseline mismatch**: Table 2 evaluates component contributions using ResNet-18 as the base architecture, but the full model does not use ResNet-18. The improvements measured on ResNet-18 may not transfer to the actual architecture, which uses stacked CVA blocks with convolutional layers. The paper does not acknowledge this limitation.
 
-- **Overfitting risk not addressed.** The model is large (Swin Transformer with depths [2,2,6]; four-layer CVA producing 512×14×14 feature maps; MLP classifier) trained on at most 255 videos. No training curves, validation loss trajectories, or regularization analysis are provided. While LOSO is the standard protocol, the paper does not discuss whether the model memorizes subject-specific artifacts given the large model-to-data ratio.
-
-- **Learning rate decay schedule is underspecified.** The paper states the learning rate is "exponentially decayed during the first 50 epochs out of 75 epochs total" without specifying the decay factor, decay frequency (every epoch? every batch?), or final learning rate. Weight decay of 0.6 is unusually high and is not justified or ablated. These details affect reproducibility.
-
-- **No limitations or failure-case analysis in the conclusion.** The conclusion simply restates results. There is no discussion of dataset constraints, AU annotation dependency, class imbalance effects, or situations where the method underperforms.
+- **Overclaimed language**: The abstract states "We also proved that including AU can further enhance accuracy" — the word "proved" is inappropriate for a single ablation study on two small datasets. This is correlation, not proof.
 
 ### Trivial
-None. (The typo-level and formatting criticisms were parser artifacts, not author errors.)
+
+- None.
 
 ## Nice-to-Haves
 
-- **Cross-dataset evaluation** (e.g., train on CASME II, test on SAMM) would be the strongest test of generalization and would substantially increase confidence in the method's robustness.
-- **Failure mode analysis** including confusion matrices, per-class F1, and misclassified examples would help assess whether the model learns generalizable features or is driven by class imbalance (especially the "others" category).
-- **Computational cost reporting** (inference speed, parameter count, GPU memory) would help practitioners assess practicality.
-- **Hyperparameter sensitivity analysis** for the learning rate, the unusually high weight decay (0.6), and the CVA reduction ratio would be useful given the small data size.
+- Including per-class F1 scores and per-subject accuracy distributions would allow readers to assess which emotions benefit and whether gains are concentrated on a few subjects.
+- A controlled re-implementation of MMNet (and μ‑BERT, if accessible) under the same preprocessing and evaluation pipeline would strengthen the comparison substantially.
+- Attention map visualizations (e.g., Grad-CAM) comparing vertical vs. full 2D attention would substantiate the central motivation.
+- Code release upon publication would address reproducibility concerns given the architecture's complexity.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **Formatting criticism of `max :{8, C/32}` notation** (parser artifact from `max(8, C/32)` — not an author error).
-- **Random rotation range "7° to 3°" as a typo** (likely a parser artifact where a negative sign was lost; the original submission does not have this issue).
-- **"AU annotation source should be stated explicitly"** — the paper already states in Section 4.1: "more detailed annotations for Action Units (AUs) have been provided" for both datasets.
-- **"10.87% improvement on CASME II seems inconsistent with earlier 6% claim"** — these are against different baselines (6% vs. MMNet; 10.87% vs. μ-BERT). No inconsistency exists.
-- **Strength Finder's "Thorough component-level ablation establishing causality"** — this strength conflicts with the verified weakness that Table 2's ablation uses a ResNet-18 baseline rather than the actual architecture, reducing its evidential value for the proposed model.
+- **μ‑BERT missing citation**: The reviewer flags this as a weakness. Since the parser strips references and appendices, this is a parser artifact, not an author error. Removed per hard rules.
+- **"Unclear how 2D attention map is pooled to scalar"**: The paper specifies P_M as "max pooling operations along both the height and width dimensions" (line 67), which is an adequate description. The reviewer's confusion is unwarranted. Removed per hard rules.
+- **"Table 2 not available in parsed text"**: Tables are embedded as images in the paper. The parser strips them; the original submission contains them. Removed per hard rules.
+- **"Code availability should be promised"**: Moved to Nice-to-Haves as a suggestion, not a weakness.
+- **Criticism about generic Swin Transformer description**: The paper specifies depths [2,2,6] and heads [4,8,16] (line 135). The description is partly specified, though patch/window sizes remain missing (kept as a Major weakness about missing details, not a generic description complaint).
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the expected tensions (variance reporting, ablation design, overfitting risk on small data) but do not identify any additional insight about the method or the problem that the authors themselves did not articulate.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Report means and standard deviations over at least 5 runs with different random seeds** for all main results and ablations. This is the single highest-impact fix because it would establish whether the reported improvements are statistically robust.
-2. **Add a within-architecture ablation** that removes CVA, FPF, and AU from the *full model* (start with the complete architecture and disable one component at a time), rather than adding them to a weaker baseline. This directly tests each component's contribution in the actual model.
-3. **Expand Section 4.3** to specify the learning rate decay factor, decay frequency, and final learning rate; justify or ablate the weight decay of 0.6.
-4. **Acknowledge limitations** in the conclusion: the small dataset sizes, reliance on ground-truth AU annotations, and the lack of cross-dataset validation — and suggest how these might be addressed in future work.
+1. Resolve the dimensional mismatch (512 vs. 196 channels) in the F_M and F_POS fusion — either clarify the intended operation or correct the dimensions.
+2. Provide confidence intervals or per-subject breakdowns for all main results.
+3. Either re-implement baselines under a controlled protocol or clearly caveat that Table 1 comparisons use published numbers and may reflect protocol differences.
+4. Clarify the weight decay value (0.6 seems implausible — was 0.06 intended?) and state the loss function explicitly.
+5. Tone down overclaimed language ("proved") throughout.
+6. Provide the missing Swin Transformer and MLP architectural specifications.
 
 ## Score and Decision
 
-The paper proposes a well-motivated architecture with reasonable design choices (vertical attention, Swin-based position encoding, AU embedding) and runs extensive ablations that support most of its claims. However, the absence of variance reporting is a structural weakness that makes the central empirical claim unverifiable given the small dataset sizes. The primary ablation's use of ResNet-18 rather than the full architecture further weakens the evidence for component-level contributions. These issues are addressable but require non-trivial additional experiments.
-
-**Originality**: Moderate — vertical-only attention is novel for MER, but the individual techniques (Swin Transformer, coordinate attention, AU embedding) are well-established.  
-**Importance**: Moderate — MER is a niche but active area with practical applications.  
-**Claims support**: Weak — the SOTA claims are not supported by statistical reliability measures.  
-**Soundness**: Fair — the ablations are well-structured (Tables 3–7) but the primary evaluation protocol has a significant gap.  
-**Clarity**: Good — the architecture and experiments are clearly described.  
-**Value to community**: Moderate — the vertical attention finding and CVA module are interesting contributions.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

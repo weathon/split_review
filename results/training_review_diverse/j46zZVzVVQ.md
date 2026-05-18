@@ -1,82 +1,96 @@
-Now I have a thorough understanding of the paper. Let me synthesize the review, carefully verifying each of the harsh critic's claims against the actual paper content.
+Now I have all the information needed. Let me write the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes **Preference Control RL (PCRL)**, a scheme to train a single meta-policy that takes a user preference vector as input and produces trajectories aligned with that preference on the Pareto frontier. The authors introduce **PreCo**, a novel gradient manipulation update rule that combines gradients from multiple value objectives with a gradient from a custom similarity function Ψ. Experiments across four MORL environments (Fruit-Tree, MO-Ant, MO-Hopper, MO-Reacher) with discrete/continuous actions and 2–6 objectives show PreCo consistently achieving strong hypervolume and cosine similarity.
+This paper proposes "Preference Control RL" (PCRL), a framework for training a single meta-policy conditioned on a user-provided preference vector that controls the trade-off among multiple conflicting objectives in MORL. The core algorithmic contribution is PreCo, a gradient-manipulation method that augments the standard MGDA-style min-norm update with a similarity gradient from a carefully designed similarity function, aiming to produce Pareto-optimal solutions aligned with the input preference. The paper claims theoretical convergence guarantees and presents experiments across four environments (Fruit-Tree, MO-Ant, MO-Hopper, MO-Reacher) with up to 6 objectives, using both TD3 (continuous) and PPO (discrete). Results show PreCo consistently achieves strong hypervolume and cosine similarity, with notably better controllability than linear scalarization baselines.
 
 ## Strengths
 
-1. **Novel formulation for preference-controllable MORL**: The paper introduces a single meta-policy conditioned on a user preference vector to control trade-offs among multiple objectives, addressing the scalability limitation of prior methods requiring separate models per preference. This is concretely evidenced by MO-Reacher experiments (Fig. 8b) where PreCo smoothly shifts state coverage across four preference directions.
+- **Novel preference-conditioned MORL formulation with a clear motivation.** The paper correctly identifies the limitations of linear scalarization in MORL — inability to reach non-convex Pareto front regions and lack of precise controllability — and frames preference-conditioned meta-policy learning as a solution. The proposed similarity function Ψ(p,v) = -½ || max_i(v_i/p_i)p - v ||² is a principled design that encourages focusing on the least-satisfied objective relative to the preference.
 
-2. **Consistent empirical superiority across diverse settings**: PreCo achieves the highest hypervolume (HV) and cosine similarity (CS) in the Fruit-Tree environment across 3–6 objectives (Table 1), strong HV in MO-Hopper and MO-Ant (Figs. 5–6), and is one of only two methods (alongside EPO) that produces preference-specific state coverage in the 4-objective MO-Reacher task (Fig. 8b). The ablation via SDMGrad — which replaces the similarity gradient with a convex combination of objective gradients — isolates the contribution of the proposed similarity function Ψ.
+- **Consistent empirical superiority across diverse environments.** PreCo achieves the highest hypervolume (HV) in all Fruit-Tree settings (3–6 objectives, Table 1), the highest HV in MO-Hopper (Fig. 6), and is one of only two methods (alongside EPO) that produce preference-specific state coverages in MO-Reacher (Fig. 8b), directly supporting the central claim of controllability. The 5-seed results with standard deviations provide reasonable statistical evidence.
 
-3. **Scalability to higher-dimensional objectives**: In Fruit-Tree with 6 objectives, linear scalarization methods degrade significantly while PreCo maintains strong controllability (CS) and Pareto coverage (HV) (Table 1), demonstrating that the method does not collapse as the number of conflicting objectives increases.
+- **Scalability to many objectives demonstrated.** The Fruit-Tree experiments with up to 6 objectives show that LS collapses to a single solution regardless of preference while PreCo maintains diverse, non-dominated value vectors (Fig. 4). This is a genuine advantage over LS-based approaches.
 
-4. **Compatibility with both discrete and continuous action spaces and multiple RL backbones**: The framework is implemented with PPO-clip for discrete actions (Fruit-Tree, MO-Reacher) and TD3 for continuous actions (MO-Ant, MO-Hopper), showing the scheme is not tied to a particular RL algorithm.
+- **Computational efficiency consideration.** The paper notes that solving the min-norm problem at the policy-output level (size m×B) rather than the parameter level (size m×M) avoids the memory and computational cost of handling high-dimensional parameter gradients — a practical concern for large models.
+
+- **Compatibility with multiple base RL algorithms and MOO methods.** The PCRL scheme is demonstrated with TD3 (continuous control) and PPO (discrete control) and supports plugging in various gradient manipulation methods (EPO, CAGrad, SDMGrad) as alternatives to PreCo.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **The gradient manipulation step is critically underspecified.** The paper uses the notation ∇_{π_p} v̂^{π_p} — gradients with respect to the *policy output* — and solves the min-norm problem (Eq. 6) at this "policy level" (producing a direction d* in output/action space of size B×1 for a batch of B transitions). However, the paper never explains how this direction d* is translated into an update of the policy **parameters** θ. The paper states "the gradient can be obtained by conventional RL methods, such as the policy gradient and the deterministic policy gradient" (line 88), but the standard policy gradient theorem gives ∇_θ J(θ), not ∇_π v. In deterministic policy gradient, one can obtain ∇_a Q(s,a) (gradient wrt action), but the paper does not explain how to propagate the solved direction d* back through the policy network to obtain a parameter update. This is a critical omission: without knowing how the output-level min-norm solution connects to a parameter-level update, the algorithm as presented is not reproducible. The paper either needs to (a) clarify the complete procedure (e.g., using d* as a regression target for the policy output, or propagating via ∇_θ π), or (b) adopt the standard parameter-level min-norm formulation (∇_θ v̂^{π_p}), which would resolve the conceptual gap.
-
-2. **The theoretical analysis section in the main text is essentially empty.** Section 4 (lines 104–119) consists of Definition 4.1 of the similarity function and a single sentence claiming a convergence rate — no theorem statement, no enumerated assumptions, no proof sketch. While the full proofs are presumably in the appendix (stripped by the parser), the main text of a new-method paper should at minimum state the main theorem, the key assumptions (non-convex smoothness, stochastic gradient setting), and a sketch of why the similarity gradient does not pull iterates away from Pareto stationary points. As it stands, a reader cannot assess even the plausibility of the theoretical claims without access to the appendix.
+- **Section 4 (Theoretical Analysis) is substantially incomplete in the main text.** Despite the abstract and introduction explicitly claiming "convergence and controllability are theoretically justified" and "comprehensive convergence analysis for stochastic optimization with non-convex smooth objective functions," Section 4 consists only of Definition 4.1 (the similarity function), a one-sentence intuition, and a brief statement that "we analyze the convergence rate of the proposed PreCo update in the stochastic gradient setting" referencing Algorithm 1. No theorem statements, lemmas, convergence rate bounds, or even informal statements of the guarantees are presented in the main text. Even if all proofs are deferred to a supplementary appendix (which is standard), the paper should state the main theoretical result in the body. As it stands, a reader of the main paper cannot evaluate the strength or validity of the claimed theoretical contribution.
 
 ### Minor
 
-3. **Baseline adaptations are insufficiently described.** The paper adapts EPO, CAGrad, and SDMGrad to the PCRL scheme, but the descriptions are vague. For EPO: "implement it as updating with similarity gradient for low similarity mode, MGDA gradient for high similarity mode" — this omits how the mode switch is determined. For CAGrad: "modify it to be a common ascent direction not too far from the similarity gradient" — the precise modification to the original CAGrad objective is not given. These adaptations effectively constitute new methods, and without exact specification, it is impossible to assess whether the comparisons are fair or whether the adaptations inadvertently handicap the baselines.
+- **The computation of ∇_{π_p} v̂^{π_p} is underspecified for stochastic/discrete policies.** The paper asserts that the Jacobian "can be obtained by conventional RL methods, such as the policy gradient and the deterministic policy gradient" and that the method applies to "both discrete action space and continuous action space." However, for PPO-based discrete-action environments (Fruit-Tree, MO-Reacher), the paper does not explain how the gradient with respect to the policy *output* (rather than parameters) is obtained, nor whether reparameterization or another technique is used. The concept is not fundamentally problematic — standard backpropagation through the policy network handles it — but the presentation lacks sufficient detail for reproducibility, and the claimed computational advantage of "policy-level" vs "parameter-level" computation requires clearer justification for stochastic policies.
 
-4. **The critical hyperparameter λ in PreCo is not discussed.** The coefficient λ appears in the min-norm problem (Eq. 6) balancing the value gradients against the similarity gradient, but the paper never states what value was used, how it was chosen (tuned separately per environment? fixed across all?), or how sensitive results are to this choice. This undermines reproducibility.
+- **Baseline adaptation descriptions are too vague to assess fairness.** CAGrad is described as "modified to be a common ascent direction not is not too far from the similarity gradient" — a significant departure from original CAGrad (which uses the average gradient as reference), with no details on how the constraint parameter or adaptation procedure differs. EPO's two-mode implementation ("low similarity" vs "high similarity") is described in one sentence. Without precise formulations, it is unclear whether the baselines are implemented in a way that reflects their original design intent.
 
-5. **No ablation of the specific similarity function Ψ.** The paper compares PreCo against SDMGrad as an ablation of linear-scalarization vs. similarity, but does not isolate the specific form of Ψ (Definition 4.1). Replacing Ψ with ordinary cosine similarity in the PreCo update would clarify whether the novel design of Ψ is essential or whether any similarity measure would suffice.
+- **The SDMGrad-vs-PreCo comparison is not a clean ablation for the similarity function.** The paper frames SDMGrad as an ablation case, but SDMGrad replaces the similarity gradient with a convex combination of objective gradients — meaning the two methods differ in more than just the presence of the similarity term (the min-norm objective itself changes). Attributing performance differences solely to the similarity function is not cleanly supported without additional controls.
 
-6. **Preference-conditioned critic training is not discussed.** The paper states that v̂^{π_p} can be estimated via a preference-conditioned multi-objective critic (Eq. 1), but does not explain how this critic is trained (e.g., multi-objective Bellman error). The critic is central to the gradient computation, yet its training procedure is absent.
+- **Inconsistency between the preference domain definition and experimental usage.** The paper defines the preference set as 𝒫 = {p ∈ ℝᵐ : pᵀ1 = 1, p ≻ 0} (strictly positive entries). However, the MO-Reacher evaluation uses preferences with zero entries ([0,1,0,0], [0,0.66,0.33,0], [0,0.33,0.66,0], [0,0,1,0]). Since the proposed similarity function involves max_i(v_i/p_i), division by p_i=0 is undefined. The paper does not address how this is handled (e.g., via epsilon smoothing or another mechanism).
 
-7. **PreCo's CS is slightly below EPO's in MO-Hopper** (line 172). The paper attributes this to soft vs. hard constraints, which is plausible but untested. While not a fatal weakness, the paper's claim of "consistently superior performance" should acknowledge this trade-off more explicitly.
+- **The underperformance of EPO and CAGrad below the random baseline in MO-Reacher (Fig. 7) receives only a brief explanation.** The paper attributes this to "high variance in the gradients for model update" from uniformly sampling preferences. While plausible, no learning curves, hyperparameter tuning details, or diagnostic analysis are provided to support this interpretation. This weakens confidence that the baselines were properly adapted to this setting.
 
 ### Trivial
-None.
+
+- Line 163: "LS agent policy is not uncontrollable by p" — appears to be a double negative; the intended meaning is "not controllable."
+- Line 48: "The threes plots" → "The three plots"
 
 ## Nice-to-Haves
 
-- **Ablation over λ values** (e.g., 0, 0.1, 1.0, 10.0) to demonstrate robustness of the method to this hyperparameter.
-- **Comparison against single-policy-per-preference baselines** (e.g., training 5–10 independent policies with different LS preferences) to quantify the benefit of conditioning on a single model.
-- **A brief "Limitations" subsection** discussing scenarios where the method might struggle (e.g., highly conflicting gradients, many-objective settings where the min-norm problem scales poorly).
+- The paper could briefly explain how the min-norm problem in Equation (6) is solved in practice (e.g., via a linear system, convex QP solver, or iterative method), to support the claimed computational efficiency.
+- A discussion of the limitation that preferences must have strictly positive entries (or an epsilon-padded variant) would strengthen the paper's completeness.
+- Learning curves for the MO-Reacher environment (and others) would help readers assess convergence behavior and diagnose the baselines' poor performance.
+- The related work section could be expanded to more clearly position PreCo against prior preference-conditioned MORL approaches (e.g., conditioned-policy methods by Yang et al., Abels et al.).
 
 ## Removed Points
-*These points are flagged to be removed, treat them with caution:*
-- **"Missing ± values in tables"**: The table is an image — this is a parser artifact, not a paper flaw.
-- **"Missing quantitative analysis of preference-value alignment"**: The paper uses Cosine Similarity (CS) as a quantitative metric precisely for this purpose. The reviewer appears to have overlooked this.
-- **"Single-policy-per-preference comparison should have been done"**: Scope creep — the paper's contribution is a single meta-policy; comparing against independent policies would be informative but is not required to validate the core claims. Moved to Nice-to-Haves.
-- **"The entire empirical evaluation could be invalid" (re: gradient ambiguity)**: The reviewer's rhetoric exaggerates the severity. The method is underspecified, but the experimental results themselves are not invalidated — the core idea is clear enough that the experiments are plausible. The underspecification is a real weakness (kept above as Major #1), but the language about invalidation is removed.
+
+These points from the Harsh Critic were removed for the following reasons:
+
+- **"Gradient computation with respect to the policy output is not adequately justified and may not be well-defined for all settings"** — The gradient IS well-defined via conventional RL methods (policy gradient / DPG) and standard backpropagation. The paper's description is underspecified (kept as a Minor weakness above), but the reviewer's characterization of a "fundamental gap" and claims about non-existence for discrete policies are inaccurate. The gradient exists for all differentiable policy parameterizations.
+- **"The definition of similarity is introduced without intuition"** — The paper provides intuition: "Intuitively, the similarity gradient ∇_v Ψ(p,v) encourages to focus on the less optimal objectives to reach the preference p." The reviewer missed this.
+- **"A discussion of limitations is missing"** — This is a nice-to-have, not a weakness. Moved to Nice-to-Haves.
+- **"Missing related works"** — Removed per instructions (cannot independently verify existence of missing references).
+- **"The main paper should include Algorithm 1"** — Removed per instructions about parser-stripped appendix content. The algorithm exists in the original submission.
+- **"The paper does not discuss the optimization problem in Equation 6"** — The paper notes it's a min-norm problem similar to MGDA, which is a standard formulation solved via quadratic programming. The computational efficiency discussion is present (m×B vs m×M). This is a nice-to-have elaboration, not a weakness.
+- **"No hyperparameter search details"** — Five-seed results with standard deviations are reported. Hyperparameter tuning demands are context-dependent; the paper's level of reporting is within normal practice for MORL conference papers. This is a wishlist item.
 
 ## Novel Insights
-None beyond the paper's own contributions.
+
+Beyond the paper's own contributions, the reviews collectively highlight a recurring tension in MORL papers that bridge MOO (multi-objective optimization) and RL: MOO methods typically assume access to exact gradients in a stationary setting, while RL provides noisy, high-variance, non-stationary gradient estimates from policy evaluation. The paper's empirical observation that EPO and CAGrad (which are well-behaved in supervised MOO) degrade badly in MORL settings like MO-Reacher — even below random — suggests that the interaction between non-stationary RL gradients and preference-conditioned training is not yet well understood. PreCo's robustness in these same settings may be as much about the structure of its min-norm+similarity formulation providing a natural regularizer against gradient variance as about achieving preference alignment per se. This distinction is worth deeper investigation.
 
 ## Suggestions
 
-1. **Clarify the gradient-to-parameter update step.** This is the single most important fix. Provide a complete, end-to-end description of how the min-norm solution d* (computed at the policy-output level) is used to update the policy parameters θ. If this is done by chaining with ∇_θ π (as in deterministic policy gradient), say so explicitly. Alternatively, adopt the parameter-level min-norm formulation (∇_θ v̂^{π_p}) — which, as the paper notes, is standard in MOO methods like CAGrad and SDMGrad — and justify why the computational cost is acceptable for the settings tested.
+1. **Move the main theoretical result into Section 4 of the main text.** At minimum, state a theorem: e.g., "Under Assumptions A1–A3, PreCo with stochastic gradients converges to a Pareto stationary point at rate O(1/T)" or similar. A brief proof sketch (1–2 paragraphs) would greatly improve readability. The full proof can remain in the appendix.
 
-2. **Present the main theoretical result in the main text.** State the convergence theorem, its assumptions (non-convex smoothness, bounded variance, etc.), and a brief sketch of why the similarity gradient does not prevent convergence to Pareto stationarity. Even a compact theorem statement with one paragraph of intuition would suffice.
+2. **Clarify how ∇_{π_p} v̂^{π_p} is computed for each policy type.** Provide separate explanations for TD3 (deterministic continuous: DPG through Q) and PPO (stochastic/discrete: policy gradient through logits, using the reparameterization trick or score function as appropriate). If the "policy-level" computation requires additional storage (e.g., storing the Jacobian), discuss whether the claimed memory advantage still holds.
 
-3. **Specify baseline implementations precisely.** For each adapted baseline (EPO, CAGrad), provide the exact optimization problem solved at each update, including how the adaptation differs from the original algorithm. Report the hyperparameter values used for each method and environment.
+3. **Provide full implementation details for adapted baselines.** For CAGrad, specify whether the constraint radius c is tuned and how the reference direction is set. For EPO, describe the similarity threshold and how the two modes are selected. Add a brief justification for any modifications.
+
+4. **Address the preference-zero inconsistency.** If a small epsilon is added to preferences during training, state this explicitly. If the similarity function is only used for training and evaluation uses a different metric, clarify.
+
+5. **Add learning curves.** Convergence plots for at least one environment would help assess whether all methods received adequate training budgets and would strengthen the interpretation of the MO-Reacher results.
+
+6. **Correct typos.** Fix "not uncontrollable" → "not controllable" (line 163) and "the threes plots" → "the three plots" (line 48).
 
 ## Score and Decision
 
-**Originality**: Moderate — conditioning a policy on preference vectors is known, but the PreCo update with the similarity-guided min-norm formulation is a novel combination.
+**Originality:** Moderate. The preference-conditioned meta-policy direction is not entirely new (building on conditioned policies in MORL), but the PreCo update combining min-norm optimization with a novel similarity function is a specific contribution.
 
-**Importance of research question**: High — precise controllability of multi-objective trade-offs is practically important for deploying RL in human-interactive settings.
+**Importance of research question:** High. Controllable multi-objective RL is practically important for applications requiring trade-off specification at deployment time.
 
-**Claims well-supported**: Partially — the empirical evidence supports the performance claims, but the method is underspecified (the gradient-to-parameter step is missing), which makes the claims partially unverifiable from the paper alone.
+**Claims support:** Moderate. The empirical results support the performance claims, but the theoretical claims are not assessable from the main text, and some experimental details (baseline adaptations, gradient computation) are underspecified.
 
-**Soundness of experiments**: Adequate — 5 seeds, 4 environments, reasonable metrics (HV, CS), good range of objectives (2–6). But missing hyperparameter analysis and ablation of the specific Ψ function.
+**Soundness:** Moderate. The experimental methodology (5 seeds, multiple environments, both discrete and continuous) is reasonable, but the underspecification of gradient computation and baseline adaptations creates uncertainty.
 
-**Clarity of writing**: Below the bar for acceptance — the gradient manipulation step is underdescribed, the theory section is essentially a placeholder, and baseline adaptations are vague.
+**Clarity:** Below average. The paper is readable at a high level but lacks precision in key technical details (gradient computation, baseline implementations, theoretical claims).
 
-**Value to the research community**: Moderate — the underlying idea is useful, but the paper needs substantial revision to be reproducible.
+**Value to community:** Moderate. If the method holds up, it provides a useful algorithm for preference-conditioned MORL. The current presentation, however, needs revision before it can be reliably built upon.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

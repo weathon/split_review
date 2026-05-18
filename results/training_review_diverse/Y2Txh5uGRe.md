@@ -1,86 +1,71 @@
-Now I have thoroughly verified all claims against the paper. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and all the reviewer claims. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes Text2Data, a two-stage diffusion framework for text-to-data generation under low-resource conditions where labeled text-data pairs are scarce. Stage 1 trains an unconditional diffusion model on all available (unlabeled) data using NULL-token conditioning to capture the marginal data distribution. Stage 2 finetunes this model on the limited labeled data using a lexicographic constrained-optimization objective that keeps parameters close to the pretrained space, mitigating catastrophic forgetting. Experiments across molecules (QM9), motions (HumanML3D), and time series (Yahoo Finance) with varying label proportions (2%–40%) show that Text2Data generally outperforms direct training on labeled data and naive finetuning without the constraint.
+The paper proposes Text2Data, a diffusion-based framework for text-to-data generation under low-resource conditions. The method operates in two stages: (1) pretraining an unconditional diffusion model on abundant unlabeled data to capture the overall data distribution, and (2) finetuning on scarce text-labeled data using a lexicographic constraint-optimization objective (Eq. 4, Algorithm 1) that regularizes parameters to stay near the pretrained space, thereby mitigating catastrophic forgetting while learning controllability. Experiments across three modalities (molecules, human motions, time series) at varying label proportions (2 %–40 %) show improvements over base diffusion models and their unconstrained finetuned variants.
 
 ## Strengths
 
-1. **Novel two-stage pipeline with a principled constrained-optimization objective.** The paper cleanly separates distribution learning (pretraining on all unlabeled data via Eq. 5) from controllable generation (finetuning with a lexicographic constraint). The constraint explicitly prevents catastrophic forgetting by keeping the finetuned parameters close to the pretrained space, which is a well-motivated design.
+- **Addresses a genuinely underexplored problem.** Low-resource text-to-data generation for modalities like molecules, motions, and time series is practically important and relatively neglected compared to image/text/audio domains where large labeled datasets exist. The paper identifies this gap and proposes a targeted solution.
 
-2. **Theoretical justification via generalization bounds.** Theorem 1 provides a confidence bound (derived from sub-Gaussian concentration) showing that the empirical optimal set from constrained finetuning covers the true optimal set with high probability. This directly supports the constraint formulation and its relaxation via hyperparameter ρ, giving the approach a theoretical grounding that goes beyond engineering intuition.
+- **Multi-modal evaluation across three diverse domains.** The paper evaluates on molecules (QM9, 6 properties), human motions (HumanML3D, 14 K motions), and time series (stock data, 210 K series), each at 8 different label proportions. This breadth, while uneven in treatment, provides evidence that the method generalizes beyond a single data type.
 
-3. **Demonstrated effectiveness across three qualitatively different low-resource modalities.** The method is tested on molecules (graph-structured), motions (sequential 3D joint coordinates), and time series (1D numeric), each with a distinct baseline diffusion model (EDM, MDM, DiffTS). On molecules, Text2Data achieves up to 58% improvement in negative log-likelihood and 19% better validity over EDM-finetune. On time series, it consistently achieves lower MAE across all six properties and all label proportions in Table 2. On motions, it outperforms both MDM and MDM-finetune at most label proportions (8% and above), with average R Precision gains of 5.57% over MDM.
+- **Consistent improvements over the compared baselines.** Text2Data outperforms the base model (EDM/MDM/DiffTS) and the unconstrained finetune ablation across most settings. For example, on motion generation (Table 1), Text2Data surpasses MDM and MDM-finetune in R Precision with average margins of 5.57 % and 2.31 %, respectively. On time series (Table 2), it achieves consistently lower MAE on frequency, skewness, and mean across all label proportions.
 
-4. **Problem formulation that directly addresses a realistic and under-explored challenge.** The low-resource text-to-data setting (|D_p| ≪ |D|) is prevalent in scientific and structured-data domains but receives far less attention than high-resource text-to-image or text-to-speech. The paper clearly articulates why standard remedies (data augmentation, semi-supervised learning, transfer learning) each have specific limitations in this setting.
+- **Clean problem formulation and method description.** The two-stage pipeline (distribution mastery via unconditional diffusion → controllable finetuning with constraint) is clearly motivated from the observation that p_θ(x) ≈ ∫ p_θ(x|c) p(c) dc, and the constraint optimization is technically well-specified in Algorithm 1.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **Missing comparison against simpler regularization baselines.** The core claimed novelty is the lexicographic constrained-optimization objective. Yet the experimental comparison against "finetune" baselines (EDM-finetune, MDM-finetune, DiffTS-finetune) is effectively a comparison against unconstrained finetuning only. The paper does not compare against standard, well-known regularization strategies that could achieve similar effects with less complexity, such as:
-   - L2 penalty on the parameter deviation from pretrained weights
-   - Elastic Weight Consolidation (EWC)
-   - Low-learning-rate finetuning (which already limits parameter drift)
-   
-   Without these baselines, it is impossible to determine whether the improvements come from the specific lexicographic constraint formulation (with its adaptive Lagrange multiplier λ) or simply from the generic benefit of preventing large parameter deviations from a good pretrained initialization. This is the most significant gap — it weakens the paper's central claim about the constraint optimization itself. A paper whose main contribution is a novel learning objective should demonstrate that this specific formulation outperforms simpler alternatives.
+- **Missing comparisons against established low-resource learning and anti-forgetting techniques.** The paper discusses data augmentation, semi-supervised learning with pseudo-labels, and transfer learning (including catastrophic forgetting) in its introduction and related work, dismissing each with reasoned arguments. Yet none of these approaches are included as experimental baselines. Concretely, the paper should compare against at least one representative from each class — e.g., (a) data augmentation on the labeled set, (b) pseudo-labeling on unlabeled data (a standard semi-supervised approach), and (c) explicit anti-forcing methods such as elastic weight consolidation (EWC) or L2 regularization toward the pretrained parameters. Without these, the claim of "superior performance over existing approaches" (line 23) is not adequately supported — the experiments only show superiority over the base model and an unconstrained finetune, which is the weakest possible comparison for testing the constraint's value. The two compared baselines (base model, unconstrained finetune) are necessary ablations but insufficient to establish the method's advantage over the broader landscape of low-resource learning strategies.
+
+- **The theoretical analysis (Theorem 1) rests on an unrealistic assumption and offers no practical guidance.** The theorem assumes the parameter space Θ is *finite* (line 142), which does not hold for neural networks with continuous parameters. The paper's attempt to handwave this (lines 156–157: "log|Θ| is not significantly larger than N_p... even though it is usually much larger than N") does not resolve the issue — a continuous space is not just "large" but uncountably infinite, and the bound's derivation via union bound over a finite set does not apply. Moreover, the bound is a generic uniform-convergence statement that does not depend on the diffusion objective, the specific form of the constraint, or the two-stage training procedure. It offers no insight into why the constraint mitigates catastrophic forgetting and provides no guidance for hyperparameter selection (e.g., how to set ρ). The paper's claim of having "theoretically validated" the approach (line 22) is overstated.
+
+- **Hyperparameter values (α, β, γ, ρ, ω) are not reported for any experiment.** The method's behavior depends critically on these values — especially ρ, which controls constraint relaxation — yet none are specified in the paper. This omission undermines reproducibility and prevents readers from assessing the sensitivity of results to these choices. No ablation or sensitivity analysis is provided for these parameters either.
 
 ### Minor
 
-2. **Naming inconsistency in Algorithm 1 between the defined losses and their computation.** In Eq. (8)–(9) (lines 92, 99), the losses are defined as: $\hat{\mathcal{L}}_1'(\theta) = \mathbb{E}[\|\epsilon_\theta(x^{(t)}, t) - \epsilon\|^2]$ (unconditional, the constraint) and $\hat{\mathcal{L}}_2(\theta) = \mathbb{E}[\|\epsilon_\theta(x^{(t)}, c, t) - \epsilon\|^2]$ (conditional, the objective). However, in Algorithm 1 (line 120), the computation is the reverse: it computes $\hat{\mathcal{L}}_2$ using the unconditional form $\|\epsilon_\theta(x^{(t)}, t) - \epsilon\|^2$ and $\hat{\mathcal{L}}_1'$ using the conditional form $\|\epsilon_\theta(x^{(t)}, c, t) - \epsilon\|^2$. The gradient update direction in line 101 then uses $\nabla\hat{\mathcal{L}}_2 + \lambda\nabla\hat{\mathcal{L}}_1'$, which — under the swapped naming — would put the unconditional loss (mislabeled as L₂) as the primary direction and the conditional loss (mislabeled as L₁') as the adaptively weighted term. This contradicts the intended optimization where L₂ (conditional) is the primary objective and L₁' (unconditional) is the adaptive constraint. This does not invalidate the method (the intent is clear from context), but it will confuse readers trying to implement the algorithm.
+- **The "text" framing conflates genuinely different settings.** For molecules and time series, the "textual descriptions" are template-generated from numerical property values (e.g., "very low polarizability," "frequency = 2.59×10⁻¹"). This is synthetic structured conditioning, not natural language. Only the motion domain uses genuine human-annotated text. The paper treats all three as "text-to-data generation," but the molecule and time-series tasks are essentially property-conditioned generation with a text-based interface. The claimed generality to "low-resource language understanding" is not tested — the method may simply be learning property-conditioning better, not language understanding. These settings should be clearly separated and discussed.
 
-3. **Distributional mismatch in the constraint: the paper's justification relies on an unquantified approximation.** The constraint in Eq. (3) evaluates the unconditional loss on the labeled subset D_p's marginal, while the pretraining target ξ is the infimum on the full dataset D. The paper justifies this via the approximation in Eq. (6): $p_\theta(x) \approx \int p_\theta(x|c) p_{\mathcal{D}_p}(c) dc$, arguing that the unconditional model on D approximates the marginal of the conditional model on D_p. This is a reasonable heuristic, but the gap is not quantified. When the labeled subset's marginal distribution differs significantly from the full data distribution (which is plausible at very low label proportions), the constraint may be poorly calibrated. The paper would benefit from either an empirical analysis of this gap or a discussion of when it may become problematic.
+- **The method underperforms unconstrained finetune at the lowest label proportions (2 %, 4 % on motion).** Table 1 shows MDM-finetune outperforming Text2Data on both R Precision and Multimodal Distance at 2 % and 4 % labels. The paper acknowledges this (line 289: "owing to milder catastrophic forgetting during finetuning with a smaller sample size") but does not investigate further. This anomaly is significant — it suggests the constraint can hurt when the labeled set is very small, which is precisely the setting the method targets. A diagnostic experiment (e.g., varying ρ at low proportions) is needed to understand this failure mode.
 
-4. **The mapping from extracted properties to "text descriptions" for the time series and molecule datasets is underspecified.** The paper states that features are extracted via tsfresh and then used as "text descriptions" (conditioned via T5 encoder). For molecules, properties like α, ε_HOMO, etc. are the "text." For time series, frequency, skewness, mean, etc. are extracted. It is unclear how these numeric/scalar values are converted into the natural language strings that the T5 encoder expects (e.g., are they formatted as "alpha=78.0"? Are normalized values used?). This matters because it affects the generalizability of the claimed "text-to-data" framing to settings with genuine free-form natural language descriptions.
+- **Classifier accuracy for molecular property evaluation is not discussed.** The paper trains classifiers to extract molecular properties from generated molecules and computes MAE against intended properties (line 231). If these classifiers are themselves trained on the same limited labeled data, their predictions may be unreliable, and the reported MAEs could reflect classifier error rather than true property mismatch. No information about classifier training data size, accuracy, or validation is provided.
 
-5. **Ablation on the hyperparameters α, β, γ, ρ is absent.** The method introduces four hyperparameters (plus the unconditional training probability p_uncond) that control the adaptive Lagrange multiplier λ and the constraint relaxation. The paper does not report sensitivity to these choices, nor does it show how λ evolves during training. This makes it difficult for practitioners to understand how robust the method is and how to tune it for new modalities.
+- **The time-series baseline (DiffTS) is a custom-designed model, not an established benchmark.** There is no comparison against any published text-to-time-series method. Combined with the synthetic template-based "text" for this modality, the time-series experiments are less convincing than they could be.
 
 ### Trivial
 
-6. **Statistical significance not reported for main comparisons.** The paper reports standard deviations but does not provide p-values or confidence intervals. Many entries differ by 0.01–0.02 (within one standard deviation), particularly at higher label proportions where performance converges. While significance testing is not standard practice in all subcommunities, its absence here makes it harder to evaluate whether the claimed advantages at converged proportions are meaningful.
-
-7. **The finite hypothesis class assumption in Theorem 1 is standard but the connection to neural network parameter counts is imprecise.** The paper correctly notes that log|Θ| is manageable (14M parameters), but strictly, |Θ| for a neural network is exponential in the number of parameters, not equal to it. This is a minor technical imprecision common in ML theory papers and does not undermine the bound's qualitative message.
+- **The claim that Text2Data "can be seamlessly adapted to other generative models" (line 325) is speculative and undemonstrated.** Adapting the constraint optimization framework to GANs, for example, would require substantial re-engineering given the different loss structure.
 
 ## Nice-to-Haves
 
-- Add comparisons against EWC, L2-penalized finetuning, and low-learning-rate finetuning to isolate the value of the specific lexicographic formulation.
-- Show the trajectory of λ during finetuning to verify that the adaptive mechanism behaves as intended (constraint tightening as training progresses).
-- Report ablation over α, β, γ, ρ (e.g., grid search on one modality) to establish practical robustness.
-- Clarify the exact string format used to encode scalar properties into text inputs for the T5 encoder.
+- A comparison against simpler regularization alternatives during finetuning (e.g., L2 weight decay toward pretrained parameters, a KL penalty on the unconditional score, or EWC) would directly isolate whether the lexicographic constraint formulation adds value beyond generic anti-forgetting.
+- A study of how the relaxation parameter ρ affects performance, especially at low label proportions, could address the anomaly where the constraint hurts.
+- Reporting the accuracy/validation error of the molecular property classifiers would strengthen confidence in the molecular controllability results.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **Criticism about novelty being "a minor variation of existing techniques"**: This is retained in weakened form under Major (the missing comparisons against alternatives is the real issue, not whether the technique is technically novel). The reviewer's characterization of the method as "standard pipeline with a well-known regularization technique" is a reasonable judgment call about contribution level, not a factual error, so it is kept as context for the missing baselines point rather than as a standalone claim.
 
-- **Strength Finder's "Clear problem formulation" (Strength 3 from Finder):** Generic; every acceptable paper states its problem. This is a baseline expectation, not a distinguishing strength. Moved here to avoid inflating the strengths list.
-- **Critique that the theoretical bound "does not add unique insight":** The bound is a standard sub-Gaussian concentration bound, but the reviewer's characterization that it "does not add unique insight" is too harsh — the bound does connect the constraint relaxation (ρ hyperparameter) to the confidence interval (ε) from Theorem 1, which is a non-trivial link. This is better reflected as a minor note than as a weakness.
-- **Complaint about not discussing EWC/SI/replay in Related Work (Section 3):** The paper is not a survey of catastrophic forgetting prevention methods; it is a new-method paper. The missing discussion is a scope-creep request, not a weakness.
-- **Strength Finder's "clear problem formulation":** Generic, removed. 
-- **Weakness claiming the t-SNE plot is "not a rigorous evaluation":** t-SNE visualization is a standard qualitative evaluation in time series generation literature (as cited by the paper's references). This is a methodological taste issue, not a weakness.
+- **"DiffTS is not an established baseline"**: Retained as a Minor point since the paper acknowledges designing DiffTS. The reviewer's stronger language about this being a fatal flaw is removed — the paper is upfront about DiffTS being custom-designed, and there is no single established text-to-time-series baseline in the literature.
+
+- **The criticism that "the paper does not articulate why this particular constraint is better suited to diffusion models than simpler alternatives"**: Partially addressed by the existing missing-baselines point (Major weakness #1). The reviewer's standalone framing as a novelty criticism is merged into that point.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a key methodological gap (missing comparison with simpler regularization baselines) and a naming inconsistency in the algorithm, but do not contribute any novel insight about the method that the authors themselves did not identify.
+None beyond the paper's own contributions. The reviews surface known tradeoffs in constrained fine-tuning (the constraint can hurt at very low label proportions) but do not reveal fundamentally new observations about the method or problem.
 
 ## Suggestions
 
-1. **(Highest priority)** Run the motion and molecule experiments with three additional baselines: (a) L2 penalty on ‖θ − θₚᵣₑ‖² from the pretrained model, (b) EWC, and (c) finetuning with a 10× smaller learning rate. If the proposed constraint matches or exceeds these, the contribution is strongly validated. If not, reframe the contribution around the two-stage pretrain+finetune paradigm rather than the specific constrained-optimization formulation.
-2. Fix the naming swap in Algorithm 1 between $\hat{\mathcal{L}}_2$ and $\hat{\mathcal{L}}_1'$ to match the definitions in Eq. (8)–(9).
-3. Clarify how extracted molecular/time-series properties are formatted as text strings for the T5 encoder.
-4. Add a brief empirical analysis of the constraint behavior — show a plot of $\hat{\mathcal{L}}_1'(\theta)$ vs. $\hat{\xi}$ during finetuning to verify the constraint is active and working as intended.
-5. Add an ablation table for α, β, γ, ρ on at least one dataset.
+1. Add comparisons against at least one representative from each class of low-resource learning strategy: data augmentation, semi-supervised pseudo-labeling, and explicit anti-forgetting (EWC or L2 regularization toward pretrained parameters). This is the most critical gap.
+2. Report the values of all hyperparameters (α, β, γ, ρ, ω) used in experiments and include a sensitivity study for ρ, especially at low label proportions.
+3. Clearly separate the three modalities in presentation — distinguish property-conditioned generation (molecules, time series) from true text-conditioned generation (motions) — and discuss what conclusions apply to each.
+4. Either strengthen the theoretical analysis (e.g., relate the bound to forgetting, relax the finite-Θ assumption with Rademacher complexity or VC dimension) or acknowledge its limitations and reposition it as heuristic motivation.
+5. Report the accuracy and training details of the molecular property classifiers.
+6. Investigate why the constraint hurts at 2 %–4 % labels on motion and whether adaptive ρ scheduling could address this.
 
 ## Score and Decision
 
-**Originality:** Moderate. The two-stage design is not entirely new, but the lexicographic constraint formulation for this specific problem is novel.  
-**Importance of research question:** High. Low-resource text-to-data generation is practically important and under-studied.  
-**Claims supported:** Partially. The central claim about the constraint optimization is weakened by missing comparisons against simpler baselines.  
-**Soundness of experiments:** Adequate breadth (3 modalities) but the control experiment is insufficient to isolate the claimed contribution.  
-**Clarity:** Generally clear, except for the named inconsistency in Algorithm 1 and the underspecified text encoding for time series/molecules.  
-**Value to community:** Moderate. The two-stage approach itself (pretrain on unlabeled, finetune with constraint) is a reasonable recipe, but the specific optimization needs stronger validation.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

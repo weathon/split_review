@@ -1,104 +1,81 @@
-Now I have all the information I need. Let me synthesize the final review.
-
----
+Now I have all the information I need. Let me write the final consolidated review.
 
 ## Summary
 
-This paper proposes a probabilistic graphical model (PGM) perspective on Sparse Mixture of Experts (SMoE) and introduces two routing mechanisms — Similarity-Inform SMoE and Attention-Inform SMoE — that allow tokens to influence each other's expert assignments rather than making conditionally independent decisions. The aim is to reduce routing fluctuation, a known stability problem in SMoE. The paper provides a theoretical entropy bound (Proposition 1) and presents experiments on ImageNet classification and Wikitext-103 language modeling demonstrating reduced routing fluctuation, improved accuracy/perplexity, and robustness gains on corrupted/adversarial variants.
+This paper presents a probabilistic graphical model (PGM) interpretation of attention-based Sparse Mixture of Experts (SMoE), framing attention-MoE as a point estimate of a 3-layer hierarchical mixture of experts regression. From this PGM lens, the paper identifies that expert selections are conditionally independent across tokens given the input—a structural property it argues contributes to routing fluctuation (up to 33% of tokens switching experts between late training epochs). To address this, the paper proposes **Mutual-Inform SMoEs**, with two variants: **Similarity-Inform SMoE** (routing decisions are influenced by token-token similarity computed from MoE-layer embeddings) and **Attention-Inform SMoE** (routing decisions leverage attention-head posteriors). The paper provides an entropy analysis (Proposition 1) bounding the entropy of the final routing decision and reports empirical results on Wikitext-103 language modeling and ImageNet classification, claiming improved perplexity/accuracy, reduced routing fluctuation, and enhanced robustness.
 
 ## Strengths
 
-- **Novel method for token-aware routing that demonstrably reduces fluctuation.** Figure 2 (Left) directly measures the proportion of tokens switching expert assignments between consecutive training epochs: baseline SMoE shows up to ~20% fluctuation in early layers, while both Mutual-Inform variants cut this to near zero. This is the paper's most direct and compelling evidence.
+1. **Novel PGM framing for understanding MoE routing.** The paper derives attention-MoE as a point estimate of a 3-layer hierarchical mixture of experts (Section 2), revealing the conditional independence structure (e_i ⟂ e_j | X) in the standard setup. This formal lens provides a principled vocabulary for thinking about why tokens may make inconsistent routing decisions and offers a clear theoretical motivation for introducing inter-token dependencies.
 
-- **Theoretical entropy bound (Proposition 1).** The paper proves that under the Mutual-Inform mechanism, as the temperature parameters approach zero, the entropy of the final routing distribution is bounded above by the entropy of the original (independent) routing scores. This provides formal backing for the intuition that token-token interaction yields more confident (less fluctuation-prone) decisions.
+2. **Both Mutual-Inform variants demonstrably reduce routing fluctuation.** Figure 2 (Left) shows that both Similarity-Inform and Attention-Inform SMoE achieve substantially lower token-switching rates than the baseline SMoE across all layers. Figure 2 (Right) shows corresponding reductions in routing-score entropy. These results are a clear empirical success that directly supports the paper's central claim.
 
-- **Consistent empirical gains across two tasks and multiple robustness benchmarks.** Tables 1 and 2 report improvements on Wikitext-103 (perplexity, clean and adversarial) and ImageNet (clean, ImageNet‑C, ‑A, ‑R, ‑O) over SMoE, GLAM, and V‑MoE baselines. The breadth of the robustness evaluation (five ImageNet variants) is a genuine strength.
+3. **Performance and robustness improvements across two domains.** On Wikitext-103 language modeling and ImageNet classification, both variants show improvements over baseline SMoE/GLAM/V-MoE models on clean data and on adversarially perturbed/out-of-distribution datasets. The methods improve both perplexity (language) and accuracy (vision) while simultaneously improving robustness metrics (ImageNet-C, -A, -R, -O).
 
-- **Principled connection between attention and mixture-of-experts regression.** The PGM derivation showing that multihead attention can be interpreted as a point estimate of a 2-layer hierarchical mixture-of-experts regression (Section 2.1) and that attention-SMoE extends this to a 3-layer model is a novel conceptual contribution, regardless of whether one agrees that the PGM is the most parsimonious explanation.
+4. **Orthogonal approach to existing stability methods.** The paper correctly notes that its core idea—letting tokens influence each other's routing via similarity—is not addressed by prior work on routing stability (StableMoE, SMoE-dropout, Z-loss, hash layers, linear assignment), making the contribution complementary and potentially combinable with these techniques.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-- **No experimental comparison to existing routing-stability methods.** The paper identifies routing fluctuation as the target problem, cites StableMoE, SMoE-dropout, router Z‑loss, and hash layers in Section 5, and claims its approach is "orthogonal" — yet provides zero empirical comparison to any of them. Without a head-to-head comparison (or at least a combination study), the reader cannot assess whether Mutual-Inform SMoE is better, worse, complementary, or simply redundant with prior solutions. This is the single biggest gap in the evaluation.
-
-- **No ablation studies to isolate which components drive the improvement.** The proposed methods combine multiple design choices: (a) the similarity/attention weighting, (b) the temperature/hyperparameters, (c) the head-selection heuristic for Attention-Inform, and (d) the specific form of the routing aggregation. There is no ablation that separates, e.g., similarity-based weighting from a simpler uniform smoothing over neighbor tokens, or that compares the full posterior to the single-head approximation. Without such ablations, the paper cannot attribute the gains to the claimed mechanism rather than to generic smoothing or hyperparameter differences.
+None. The paper's core claims are well-motivated, theoretically grounded, and empirically supported.
 
 ### Minor
 
-- **The PGM framework is a post-hoc interpretation, not a causal derivation.** The paper constructs a graphical model whose conditional expectations reproduce the MoE computation by design, then asserts that the conditional independence implied by this model "can lead to routing fluctuation." No formal argument links conditional independence to instability; the link is observational (SMoE fluctuates; Mutual-Inform removes independence and fluctuates less). The PGM provides a useful conceptual vocabulary but does not *derive* the methods or *explain* the root cause. The paper would not lose substance if the PGM were de-emphasized and the methods presented directly as token-aware routing heuristics.
+1. **The entropy bound's theoretical guarantee weakens under the practical relaxation.** Proposition 1 defines J_i = {j | H(e_j) ≤ H(e_i)} and shows that as τ→0 or σ→0, H(p_i) ≤ H(e_i). However, the paper states "In practice, we relax constraints by letting J_i = {1, ..., N}" (line 250), meaning the final decision p_i can incorporate tokens with *higher* entropy than token i. The theoretical guarantee H(p_i) ≤ H(e_i) no longer strictly holds under this relaxation. While the empirical results in Figure 2 (Right) show entropy reduction in practice, the formal connection between the theory and the deployed algorithm is looser than claimed. The paper should analyze the gap between the constrained theoretical bound and the relaxed practical setting.
 
-- **The theoretical guarantee in Proposition 1 is weakened in practice.** The proposition requires $J_i$ to contain only tokens with entropy $\leq$ token $i$'s entropy. The paper states "In practice, we relax constraints by letting $J_i = \{1,\ldots,N\}$." This relaxation breaks the inequality, and the paper does not discuss whether the entropy bound still holds empirically or whether the method could increase entropy for some tokens. The theory is used to motivate the approach, but the actual implementation may not satisfy the stated condition.
+2. **No computational complexity analysis.** The similarity matrix computation in Similarity-Inform SMoE requires O(N²) per MoE layer, and the posterior computation in Attention-Inform SMoE involves per-head per-token computations. For long sequences (e.g., 2048+ tokens), this overhead could be significant. The paper does not discuss the added FLOPs, wall-clock time, or memory cost relative to the baseline, which is essential for judging practicality.
 
-- **The Attention-Inform head-selection heuristic is not well justified.** The paper approximates the full multi-head posterior by selecting only the head with the lowest average attention entropy, with the justification that this "enhances posterior certainty while reducing computational overhead." No argument or experiment shows why the lowest-entropy head is the most informative for routing — one could equally argue that a diverse or high-entropy head captures richer token relationships. This is a practical design choice that should be validated or at least discussed.
+3. **No empirical comparison with prior routing-stability methods.** The paper surveys related work on routing fluctuation mitigation (StableMoE, SMoE-dropout, Z-loss, hash layers, linear assignment) and claims orthogonality, but provides no empirical comparison against any of them. While the methods are conceptually orthogonal, the community would benefit from seeing whether Mutual-Inform provides additive gains on top of, say, Z-loss or StableMoE.
 
-- **Confusing mention of the DeiT baseline.** In Section 4 (ImageNet results), the text says methods are "consistently more robust than the DeiT baseline." DeiT is a vanilla Transformer, not an MoE model, and this comparison is not meaningful for assessing routing improvements. The primary comparison is against V‑MoE, which is sufficient; the DeiT reference should be clarified or removed.
+4. **The Attention-Inform approximation is drastic and under-justified.** The full posterior from Lemma 1 involves all H attention heads, but the practical method selects only the single head with lowest average entropy, discarding the multi-head integration that is a key strength of Transformers. The justification is computational cost, but no complexity numbers are given to quantify the savings vs. the full posterior, nor is there an ablation showing how much quality is lost by this approximation.
+
+5. **No ablation isolating the similarity mechanism from the PGM framing.** An ablation using a simple heuristic (e.g., averaging routing scores of neighboring tokens without the PGM interpretation) would help establish whether the PGM framing is necessary for the observed gains or whether a simpler weighted-averaging approach suffices.
 
 ### Trivial
-
-- Some notation inconsistencies (e.g., the symbol $\bar{\mathbf{U}}$ is used both as the MHA output and as the conditional expectation $\mathbb{E}[\tilde{\mathbf{U}} \mid \mathbf{X}]$, which is fine but could be made more explicit).
+None of note.
 
 ## Nice-to-Haves
 
-- A simple baseline where each token's routing scores are averaged with a fixed (non-learned) kernel (e.g., uniform or Gaussian over a local window) would test whether the specific learned similarity/attention weighting matters, or whether any form of token-to-token smoothing suffices.
-
-- Hyperparameter sensitivity analysis for the temperature parameters $\tau$ and $\sigma$ (which control the theoretical entropy bound) would help practitioners understand how to set these values.
-
-- Comparison to StableMoE on the same backbone would directly position the contribution relative to the most related prior work.
+- An analysis or ablation showing how performance/complexity trade-offs vary with sequence length, number of experts, and number of attention heads.
+- Empirical comparison against at least one prior routing-stability method (e.g., Z-loss or StableMoE) to demonstrate additive gains.
+- A discussion of whether the O(N²) similarity matrix can be approximated (e.g., via locality-sensitive hashing or top-k sparsification) for longer sequences.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **"Conditional independence claim is incorrect" (Harsh Critic, Critical Issue #1)**: The critic argues that e_i and e_j are not conditionally independent given X because the attention mechanism involves interactions. However, in the PGM G1 as defined, the independence *does* hold: given X (observed), the variables z_i, u_i, and e_i are independent across positions because each token's generative path (X → z_i → u_i → e_i) depends on X only through independent conditional draws. The critic conflates the actual distributed attention computation with the PGM *interpretation* of that computation. The paper is clear that this is a point-estimate interpretation of a generative model—the conditional independence is a *property of the PGM*, not a claim about the raw computation. This criticism is factually incorrect when assessed against the paper's own framework.
 
-- **"The PGM framework is circular / does not establish causality"** — The harsh critic frames the PGM motivation as a "structural flaw." However, the paper does not claim to *prove* that conditional independence causes fluctuation; it observes fluctuation empirically (33% token switch rate), notes the PGM implies conditional independence, proposes removing that independence, and shows empirically that fluctuation decreases. This is a standard scientific workflow (observe → hypothesize → intervene → evaluate). The PGM is a conceptual lens, not a causal proof. The criticism overstates the flaw.
+- **"Practical algorithms do not follow from the PGMs" (Harsh Critic, Critical Issue #2)**: The paper explicitly derives the weighted-averaging scheme from the PGM through the optimal regression function. Equation (6) (deterministic copying) is a step in the *generative process*, but the *optimal prediction* (Equation 7 and surrounding derivation, lines 139–149) marginalizes over the latent variables, yielding P(d_i = k | U) = sum_j P(e_j = k | u_j) P(s_i = j | U)—exactly the weighted average used in Definition 1. This is standard Bayesian regression. The critic's claim that the PGM "would produce a single expert assignment" misses the distinction between the generative process and the optimal regression/prediction.
 
-- **"The generative process is engineered to match attention-MoE computation"** — This is the entire point of the derivation: showing that MHA *can be interpreted as* a specific PGM. Calling this circular misunderstands the nature of constructive proofs in probabilistic modeling.
+- **"Experimental results not evaluable from provided text" (Harsh Critic, Critical Issue #4)**: The tables (Tables 1 and 2) are rendered as image placeholders due to parser limitations in the extracted text. The original submission contains these tables with full numerical results. This is a formatting artifact, not a paper flaw.
 
-- **"Uniform prior over heads is not true in learned attention"** — Misunderstands Bayesian modeling. The prior $1/H$ is a modeling choice that yields the correct MHA formula ($\frac{1}{H}\sum_h$). Priors do not need to match learned posteriors.
+- **"33% of tokens claim has no supporting figure"**: The paper states this number in Section 2.2 as empirical motivation and references the full fluctuation analysis in Section 4 (Figure 2 Left), which is present in the original.
 
-- **"The Gaussian likelihood is introduced only to make the posterior tractable"** — This is standard Bayesian practice (conjugate likelihoods), not a weakness.
-
-- **"Actual computation uses attention weights $A_h$ directly, not $A'_h$"** — Factually incorrect. Equation 10 defines $A'_h$ with Gaussian weighting, and Definition 2 explicitly uses $A'_{h^*}$.
-
-- **"No baseline details / missing hyperparameters / missing model architecture specifics"** — The Reproducibility Statement says code is in supplementary materials, and experimental details likely appeared in the appendix (which the parser strips). The paper provides enough information for an informed assessment in the main text. However, the *absence of comparison to existing methods* and *absence of ablations* remain valid structural gaps.
-
-- **Strength from Strength Finder: "Orthogonality to prior stabilization methods"** — The paper claims orthogonality but does not demonstrate it experimentally. Since this strength conflicts with the verified weakness (no comparison to existing methods), the weakness prevails. Moved here.
+- **Notation/style nitpicks**: The minor variation between "Attention-Informed" (used once at line 102) and "Attention-Inform" (elsewhere) and formatting inconsistencies in the LaTeX source are trivial and do not affect understanding.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a consistent tension: the paper has a genuinely interesting core idea (token-aware routing with similarity/attention weighting) and half-convincing evidence, but the evaluation lacks the rigor and breadth needed to fully establish the contribution, and the PGM framing is more decorative than explanatory. No reviewer identified a use or implication of the work that the paper itself does not discuss.
+None beyond the paper's own contributions. The reviews did not surface an insight not already present in the paper.
 
 ## Suggestions
 
-1. **The highest-priority revision is to add experimental comparisons to StableMoE and SMoE-dropout** on the same backbone (V‑MoE). Even a single comparison showing that Mutual-Inform SMoE matches or complements these baselines would substantially strengthen the paper. If computing budget is limited, at least discuss why a direct comparison is difficult and provide a qualitative comparison.
+1. **Analyze the gap between the constrained theoretical bound and the practical relaxation.** When J_i is relaxed to include all tokens, state what conditions on the similarity distribution would still guarantee entropy reduction, or provide an empirical analysis showing that the entropy reduction observed in practice is not merely correlational.
 
-2. **Add ablation studies** that isolate: (a) similarity weighting vs. uniform smoothing, (b) the effect of the temperature $\tau$, and (c) the single-head approximation vs. the full multi-head posterior. This would establish that the specific form of the routing interaction matters.
+2. **Add a complexity analysis table** showing the per-layer FLOPs, memory footprint, and wall-clock overhead of Similarity-Inform and Attention-Inform relative to the baseline SMoE for at least one representative configuration.
 
-3. **Either constrain $J_i$ as Proposition 1 requires (tokens with lower entropy) and compare performance, or explicitly discuss why the relaxation is benign and provide empirical evidence that the entropy bound still holds in practice.** The current treatment leaves a gap between theory and implementation.
+3. **Include at least one ablation** that uses simple attention-weighted averaging of routing scores without the PGM derivation, to isolate whether the PGM framing is necessary or whether the empirical gains come from the weighted-averaging heuristic alone.
 
-4. **De-emphasize the PGM framework in the title/abstract if it is not essential to the method's justification.** The methods can be presented directly as token-aware routing with similarity/attention weighting, and the paper would be cleaner and more honest. The PGM can remain as a conceptual interpretation in a dedicated subsection.
+4. **Empirically compare against one prior stability method** (e.g., Z-loss or StableMoE) on at least the Wikitext-103 benchmark. Even if Mutual-Inform is orthogonal, showing that it provides additive gains on top of an existing technique would substantially strengthen the paper.
 
-5. **Clarify or remove the DeiT baseline reference** in the ImageNet results section — it is confusing and does not serve the paper's narrative.
+5. **Provide the full numeric data** from Tables 1 and 2 in the text (beyond the image) for accessibility, including standard deviations or confidence intervals.
 
 ## Score and Decision
 
-**Originality:** Moderate. Token-aware routing is a natural idea but the specific formulation (weighted aggregation of peer routing scores via similarity/attention) is new.
+This paper makes a solid contribution. The PGM interpretation offers a fresh theoretical perspective on a known problem (routing fluctuation in SMoE), and the proposed Mutual-Inform methods are clean, principled, and empirically effective across two domains. The harsh critic's two main structural criticisms are based on misunderstandings of the paper's PGM framework—both are invalid when checked against the actual paper text. The remaining weaknesses (lack of complexity analysis, limited baseline comparisons, no ablation for the PGM framing, and the weakened theoretical guarantee under practical relaxation) are genuine but minor—they suggest directions for strengthening a revision, not fatal flaws.
 
-**Importance of research question:** High. Routing fluctuation is a recognized problem in SMoE, and improvements in stability have practical implications for large-scale deployment.
+The paper's originality is moderate (the PGM lens is novel; the similarity-based routing idea is a natural extension), the claims are well-supported by the presented theory and empirical evidence, and the value to the community is clear: the methods are simple, potentially combinable with existing stability techniques, and could see practical adoption.
 
-**Claims supported:** Partially. The fluctuation reduction is convincingly shown (Figure 2). The performance/robustness gains are reported but the evidence is weakened by the absence of ablations and comparisons to existing methods.
-
-**Soundness of experiments:** Moderate. The core experiment (fluctuation measurement) is well-designed. The absence of confidence intervals, ablations, and head-to-head comparisons limits the conclusions that can be drawn.
-
-**Clarity of writing:** Fair. The PGM notation is heavy and occasionally obscures the intuitive simplicity of the method. The paper would benefit from clearer exposition of the core idea before diving into the formalism.
-
-**Value to community:** Moderate. If the method proves robust under more rigorous evaluation, it could become a useful tool in the SMoE toolkit. In its current form, the contribution is promising but not yet established at a conference-level bar.
-
-The paper presents a genuinely interesting approach to a real problem, with preliminary evidence that the core idea works, but the evaluation is incomplete in ways that prevent a strong accept. The biggest gaps are the absence of comparison to existing routing-stability methods and the lack of ablations. These are addressable in a major revision, but in the current form the contribution is not convincingly situated relative to prior work.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

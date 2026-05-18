@@ -1,92 +1,78 @@
-Now I have a thorough understanding of the paper. Let me produce the consolidated review.
-
----
+Now I have all the information I need. Let me write the final consolidated review.
 
 ## Summary
 
-This paper proposes a post-training procedure called **locality alignment** (implemented via **MaskEmbed**) that fine-tunes ViTs to better encode local semantics — i.e., what object classes are present at each spatial patch. MaskEmbed uses a masked-reconstruction loss where a lightweight transformer decoder reconstructs the pre-trained teacher's masked outputs from masked patch embeddings, forcing the encoder to learn localized representations without requiring any new annotations. The paper evaluates this with a vision-centric probing benchmark (patch-level multi-label classification on frozen embeddings) showing consistent improvements across many backbones, and with VLM experiments (using the Prismatic recipe) showing gains on spatial reasoning benchmarks for CLIP ViT-L/336 and SigLIP SO400M/384.
-
----
+The paper proposes locality alignment, a post-training stage for vision transformers (ViTs) that improves local semantic encoding via a self-supervised masked reconstruction procedure called MaskEmbed. The approach fine-tunes a pre-trained ViT to reconstruct masked views of its own embeddings using an expressive decoder, without requiring any labeled data. The authors demonstrate that locality alignment improves patch-level semantic segmentation probing across many backbones (CLIP, SigLIP, IN1k classifiers, MoCo v3, etc.) and that VLMs built with aligned backbones outperform those with standard backbones on spatial understanding benchmarks (RefCOCO, OCID-Ref, TallyQA, VSR, AI2D), using CLIP ViT-L @ 336px and SigLIP SO400M @ 384px with the Prismatic training recipe.
 
 ## Strengths
 
-1. **Efficient, self-supervised locality alignment that requires no human annotations.** MaskEmbed uses the pre-trained model itself as a teacher (masked-view reconstruction), bypassing the need for dense labels. The paper reports <1% of CLIP/SigLIP pre-training cost (≈60k steps at batch size 1024). This makes the procedure practical to add to existing VLM pipelines.
+- **Clean probing experiments validate the core claim independently.** The vision-centric evaluation (Figure 3, Section 4.3) uses a controlled setup: the same frozen backbone with the same two-layer transformer probing head, testing only whether the backbone's patch-level features encode class content. Locality alignment improves local probing across a wide range of backbones (CLIP, SigLIP, IN1k classifiers, MoCo v3, EVA02, DFN, OpenCLIP). This directly and cleanly supports the paper's central technical contribution — the aligned backbone encodes better local semantics — without any confound from adapter choice.
 
-2. **Consistent improvement across a wide range of vision backbones on a controlled probing benchmark.** Figure 3 shows that locality alignment improves patch-level local probing accuracy for all six language-supervised models tested (CLIP, SigLIP, OpenCLIP, DFN, EVA02) and for IN1k classifiers at three scales. The gains are substantial even for the largest backbones used in VLMs (CLIP ViT-L/336, SigLIP SO400M/384), indicating that scale alone does not solve the problem. These experiments use frozen embeddings with a separate probing head, cleanly isolating the encoder's contribution.
+- **Demonstrated VLM improvement across multiple benchmarks and two strong backbones.** The VLM experiments (Figure 4, Section 5.2) show consistent improvements on spatial understanding benchmarks for both CLIP ViT-L @ 336px and SigLIP SO400M @ 384px, across two data mixtures. The improvements span object localization (RefCOCO, OCID-Ref), counting (TallyQA), relational QA (VSR), and diagram understanding (AI2D), covering the main categories where VLMs are known to struggle.
 
-3. **Controlled VLM experiments showing improvements on spatial understanding benchmarks.** Figure 5 presents four controlled comparisons (two backbones × two data mixtures). Locality-aligned backbones improve on nearly all spatial benchmarks (RefCOCO, OCID-Ref, TallyQA, VSR, AI2D) while maintaining or slightly improving non-spatial ones (VQAv2, POPE). The SigLIP-based aligned model achieves better performance on nearly every benchmark.
+- **Computationally efficient.** MaskEmbed requires less than 1% of CLIP/SigLIP pre-training compute (approximately 60k gradient steps with batch size 1024 on IN21k). The ablation study verifies that strong improvements can be obtained in as few as 5 epochs of IN21k training.
 
-4. **Direct ablation isolating the importance of an expressive decoder.** Table 1 shows that CLIPSelf's average-pooling approach degrades probing performance (36.16 local vs. 44.63 teacher), while MaskEmbed with a transformer decoder improves to 46.32. This demonstrates that architectural design (expressive decoder, multiple masks) is critical and that the method outperforms the closest prior approach.
+- **Thorough ablation study.** The paper systematically ablates reconstruction target ([CLS] vs. full embedding sequence), mask sampling strategy, data augmentations, decoder size, and training data (IN1k vs. IN21k). These ablations provide concrete guidance for practitioners and demonstrate that the design choices (expressive decoder, full sequence reconstruction, diverse training data) are all important.
 
-5. **Honest discussion of limitations.** Section 6 acknowledges the focus on a single VLM architecture (Llava-style with frozen ViT), the need for a decoder adapter, and open questions about end-to-end fine-tuning, suggesting a thoughtful understanding of the method's scope.
-
----
+- **Outperforms CLIPSelf in a controlled comparison.** Table 1 shows MaskEmbed (local 46.32) improving over the teacher (44.63) while CLIPSelf degrades it (36.16), demonstrating that the decoder-based reconstruction approach is superior to the crop-averaging approach of CLIPSelf for local feature extraction.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **The VLM evaluation changes two variables simultaneously, leaving a confound unresolved.** The baseline VLM uses original ViT + MLP adapter. The aligned model uses aligned ViT + the MaskEmbed decoder as adapter. The paper acknowledges that a standard MLP adapter on aligned embeddings "slightly hurts performance," which is why the decoder adapter is used. However, the paper does **not** test the control condition: *train a VLM with the original (unaligned) ViT using a decoder trained via MaskEmbed on that same original ViT as the adapter*. If the decoder adapter alone (trained on the original embeddings via MaskEmbed with a frozen ViT) already improves VLM performance, then the gains attributed to locality alignment could be partially or fully due to the adapter change. The probing experiments in Section 4 independently confirm that alignment changes encoder outputs (using a separate probing head), which partially mitigates this concern. However, they do not measure whether the decoder adapter itself is beneficial independent of alignment, so the VLM-level claim is not as cleanly supported as it could be. This is the single most impactful weakness and should be addressed in revision.
+None.
 
 ### Minor
 
-2. **Radar charts use normalized axes, making raw magnitudes inaccessible.** The paper follows prior work (Prismatic) in scaling each benchmark's axis by the mean and standard deviation within the pool of models. While this makes relative comparisons visible, it obscures raw scores and absolute improvements. Raw numbers (with explicit note of single-run status) should be provided in a table, at minimum for the spatial reasoning benchmarks where the paper's main claims reside.
+- **The VLM evaluation varies the adapter alongside the backbone.** The comparison is between "original backbone + MLP adapter" and "aligned backbone + MaskEmbed decoder (trained during alignment)." The paper acknowledges that using an MLP with the aligned backbone "slightly hurts performance" (line 205) and switches to the decoder. This does not invalidate the core claim because (a) the probing experiments already provide clean, independent evidence that locality alignment improves local features without changing the output head, and (b) the decoder was trained jointly with the aligned backbone during MaskEmbed — it is not a separable variable. However, the paper would be strengthened by showing that a decoder-like adapter trained from scratch on the *original* backbone (without backbone fine-tuning) does not produce the same VLM gains. As it stands, the VLM evidence is slightly less cleanly attributable to the backbone change alone.
 
-3. **Potential labeling noise in the probing benchmark is not discussed.** The probing benchmark labels each patch with the union of all object classes whose pixel annotations fall within that patch. Since patch boundaries are arbitrary and do not align with object boundaries, this creates systematic labeling noise (e.g., patches straddling object boundaries will be labeled with multiple classes). The comparison is between aligned and unaligned versions of the same model, so this noise affects both sides equally and does not bias results. Still, a brief discussion would improve transparency.
+- **No statistical characterization of VLM results.** The VLM results (Figure 4) appear to be based on single-run evaluations. Given the stochasticity in VLM training (data ordering, initialization), reporting results from 2-3 seeds (or at least a subset of key benchmarks) would help establish that the improvements are not noise. This is standard practice for the field and is a concrete way to strengthen the paper.
 
-4. **CLIPSelf comparison is limited to a single small model (CLIP ViT-B/16).** Showing that MaskEmbed outperforms CLIPSelf on this one model is useful for validating the design choices (decoder vs. average pooling), but the paper does not extend this comparison to the large backbones (CLIP ViT-L, SigLIP SO400M) used in the main VLM experiments. The conclusion that MaskEmbed is "more effective" would be stronger with at least one comparison at scale.
+- **The CLIPSelf comparison (Table 1) uses only CLIP ViT-B/16.** While this is a reasonable starting point for a controlled comparison, the paper's strongest VLM claims involve CLIP ViT-L and SigLIP SO400M. Showing that MaskEmbed also outperforms CLIPSelf at those scales (or explaining why the comparison cannot be run at those scales) would strengthen the paper.
+
+- **"Negligible compute overhead" of the decoder adapter is not quantified.** The paper states the decoder adds "negligible compute overhead" (line 205) but provides no parameter count, FLOPs, or latency comparison vs. the MLP adapter. A sentence with concrete numbers would be reassuring.
 
 ### Trivial
-- None.
 
----
+- **Macro-averaged recall for the probing benchmark is stated but not compared against alternatives like mean average precision.** The paper justifies the metric choice (accounts for class imbalance), which is reasonable, but a brief note confirming the same trends hold with mAP or mIoU would be helpful.
 
 ## Nice-to-Haves
 
-- **Provide raw benchmark numbers** in a supplementary table for all VLM evaluations, enabling readers to assess absolute effect sizes.
-- **Run the decoder-as-adapter control on the original ViT** (as described in Major #1) to cleanly separate the contributions of alignment vs. the decoder architecture.
-- **Analyze the embedding space shift** quantitatively, e.g., by measuring cosine similarity between patch embeddings and CLIP text embeddings before vs. after alignment. The paper notes that aligned embeddings are "less interpretable" and in a "different space" — quantifying this would offer direct evidence for why the decoder adapter is needed and could serve as additional independent validation.
-
----
+- Run the comparison "original backbone + decoder trained as VLM adapter (from scratch)" to fully isolate the contribution of backbone fine-tuning in the VLM setting.
+- Report multi-seed variation for a subset of key VLM benchmarks.
+- Include a quantitative overhead analysis of the decoder adapter (parameter count, relative FLOPs).
+- Extend the CLIPSelf comparison to larger backbones (ViT-L, SO400M) if feasible.
+- Provide an analysis of what the aligned backbone learns differently, e.g., visualizing decoder cross-attention or probing spatial correspondence.
 
 ## Removed Points
 
-- **Weakness: "The probing benchmark does not bridge to the VLM setting."** Removed. The probing benchmark is explicitly a component test of the encoder (using frozen embeddings and a separate probe head). It was never claimed to independently verify VLM gains; its purpose is to verify that alignment changes encoder outputs. The VLM experiments independently test the full pipeline. Criticizing a component test for not being a system test misreads the paper's experimental design.
-
-- **Weakness: "The paper does not discuss whether the benefits might differ with partially fine-tuned ViTs."** Removed because the paper already acknowledges this in Section 6 ("one limitation... we focus on a single VLM training approach — the Llava-style patches-as-tokens architecture and the specific Prismatic recipe of training in a single stage with the ViT frozen").
-
-- **Weakness: "No statistical significance or variance is reported for VLM benchmarks."** Moved here. Single-run evaluation is standard practice for large-scale VLM training; the paper could state this explicitly, but its absence does not constitute a meaningful weakness.
-
-- **Weakness: "The paper does not specify the resolution of image patches in the probing benchmark."** Moved here. This is a minor reproducibility detail that could be clarified but does not affect evaluation.
-
----
+- **"Fatal confound" framing of the VLM evaluation**: Removed because the decoder is integral to the MaskEmbed method (trained jointly with the aligned backbone), not a separate intervention. The probing experiments already provide clean, controlled evidence for the core claim without any adapter confound. The issue is real but minor, not fatal. Moved to Minor above.
+- **"Speculative claim about information compression"**: The paper provides an intuitive explanation for why the decoder is needed ("information is compressed into a space that is difficult to use"), which is reasonable given the probing evidence. The critic's demand for probing/nearest-neighbor analysis is an enhancement suggestion, not a weakness. Removed.
+- **IN21k data coverage concern**: The paper explicitly acknowledges this limitation and lists web-scale data as future work (line 96). Already addressed. Removed.
+- **Mask sampling clarity**: The paper already describes the procedure clearly (lines 117-118) including formal notation in a footnote. This is a nitpick based on misreading. Removed.
+- **Formatting/style nitpicks**: Parser artifacts, not author errors.
 
 ## Novel Insights
 
-The most interesting insight to emerge from the reviews is that the paper's experimental design — while otherwise thorough — inadvertently conflates the encoder transformation (locality alignment) with the architectural change (decoder adapter) in the VLM setting. Neither the probing experiments (which independently validate the encoder change) nor the VLM experiments (which test the full pipeline) can individually resolve this confound. This suggests that the paper's contribution may be better framed as a *paired recipe* (aligned encoder + decoder adapter) rather than purely "the encoder improves VLMs." At the same time, the probing results provide strong independent evidence that the encoder itself genuinely changes how local semantics are encoded, so the confound is real but not fatal. A single additional control experiment would cleanly resolve the ambiguity.
-
----
+The most novel insight emerging across the reviews is that post-hoc locality alignment through masked embedding reconstruction can recover local semantics from globally-trained ViTs *without* sacrificing global understanding — and that the aligned embeddings live in a different representational space that requires an expressive decoder (vs. a simple MLP) to interface with downstream LMs. This suggests that the standard practice of plugging CLIP/SigLIP ViTs into VLMs via simple linear/MLP projections may leave useful spatial information on the table, not because the backbone lacks the information, but because the information is nonlinearly encoded and needs a learned projection specific to the aligned space. This observation — that representation "compression" during alignment creates an accessibility issue that must be addressed with a learned decoder — is an interesting practical finding that could inform future VLM architecture design.
 
 ## Suggestions
 
-1. **Run the missing control:** Train a VLM with the original (unaligned) ViT but using a decoder trained via MaskEmbed on that original ViT as the adapter. If this control does not improve performance, the locality alignment claim is strongly supported. If it does, then the adapter's contribution should be disentangled, and the paper's claim should be adjusted to reflect a joint contribution.
+1. **Run the experiment: original backbone + decoder adapter (trained from scratch during VLM training).** This would directly address the main reviewer concern by showing whether the decoder architecture alone explains the VLM gains. If the decoder-only variant performs worse, the locality alignment claim is cleanly supported.
 
-2. **Add a table of raw VLM numbers** alongside the radar charts, with brief notes about single-run status.
+2. **Add a brief statistical note.** Report the range or standard deviation for at least 2-3 seeds on one key benchmark (e.g., RefCOCO with CLIP ViT-L) to demonstrate reproducibility.
 
-3. **Present a brief discussion of the probing benchmark's labeling noise** (patch boundaries not aligned with object boundaries) and why it does not bias the aligned-vs-unaligned comparison.
+3. **Quantify decoder overhead.** Add a sentence: "The decoder adds X million parameters (Y% of the MLP baseline) and increases inference latency by Z%."
 
----
+4. **Acknowledge the adapter limitation clearly in the discussion.** Add a sentence noting that the aligned backbone's embeddings require the decoder adapter, and confirm via probing that the improvement is not an artifact of the decoder.
 
 ## Score and Decision
 
-The paper proposes a sensible, efficient, and potentially impactful method. The probing experiments provide clear evidence that MaskEmbed changes ViT embeddings to better encode local semantics. The VLM results are promising but weakened by the confound described above. The core issue is fixable and does not invalidate the paper's contributions. The paper is well-written, the ablations are thoughtful, and the authors are transparent about limitations.
+The paper makes a clear and useful contribution: a computationally efficient post-training method that improves local semantic encoding in ViTs, convincingly validated through well-designed probing experiments across many backbones, and translated to VLM improvements on spatial benchmarks. The VLM confound (differing adapters) is real but minor — it does not threaten the core claim because the probing experiments provide independent, controlled evidence. The paper would benefit from the missing baseline and multi-seed results, but these are addressable improvements, not fatal flaws.
 
-Given the major but addressable confound in the central VLM claim, and the otherwise solid supporting evidence, the paper falls between borderline and weak acceptance.
-
-**Score: 5.0**
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

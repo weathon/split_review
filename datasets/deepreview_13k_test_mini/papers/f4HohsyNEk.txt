@@ -1,0 +1,291 @@
+\title{NeuManifold: Neural Watertight Manifold Reconstruction with Efficient and High-Quality Rendering Support}
+
+\begin{abstract}
+We present a method for generating high-quality watertight manifold meshes from multi-view input images.
+Existing volumetric rendering methods are robust in optimization but tend to generate noisy meshes 
+with poor topology. Differentiable rasterization-based methods can generate high-quality meshes  
+but are sensitive to initialization.  
+Our method combines the benefits of both worlds; we take the geometry initialization obtained from neural volumetric fields, and further optimize the geometry as well as a compact neural texture representation 
+with differentiable rasterizers. 
+Through extensive experiments, we demonstrate that 
+our method can generate accurate mesh reconstructions with faithful appearance that are 
+comparable to previous volume rendering methods while being an order of magnitude 
+faster in rendering. We also show that our generated mesh and neural texture 
+reconstruction is compatible with existing graphics pipelines and enables downstream 3D applications such as simulation. Project page: \url{https://sarahweiii.io/neumanifold/}.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\begin{figure}[ht]
+\begin{center}
+   \includegraphics[width=\linewidth]{figures/teaser.png}
+\end{center}
+  \caption{\neumanifold takes 2D images as input and generates watertight manifold meshes with neural textures. \neumanifold enables many downstream applications including high-quality novel-view synthesis and soft-body simulation. }
+\label{fig:teaser}
+\end{figure}
+
+\newcommand{\methodname}{NeuManifold}
+Recent advancements in neural field representations~\citep{mildenhall2021nerf,muller2022instant,chen2023factor} have enabled scene reconstructions with photorealistic rendering quality. However, they use volumetric representations, resulting in slow rendering and limited support for standard 3D pipelines like appearance editing, physical simulation, and geometry processing.
+
+For many such applications, meshes---especially those that are manifold and watertight---are the preferred option.
+Meshes can be rendered efficiently with standard 3D rendering engines
+and the watertight manifold property is often favorable in many geometry processing algorithms, such as mesh boolean operations, approximate convex decomposition ~\citep{wei2022coacd}, tetrahedralization~\citep{hang2015tetgen} for simulation, and volumetric point sampling to initialize particle simulation.
+
+Although mesh reconstruction has been extensively studied in prior arts~\citet{schoenberger2016mvs,snavely2006photo,furukawa2010accurate}, reconstructing a high-quality mesh with realistic rendering remains a highly challenging task. To address this, recent advancements in inverse graphics through differentiable surface rendering have shown great promise, such as nvdiffrec~\citep{munkberg2021nvdiffrec} and nerf2mesh~\citep{tang2022nerf2mesh}. 
+Nevertheless, the rendering quality of these methods still lags behind that of neural field-based methods, and their meshes are only optimized for rendering applications, resulting in non-manifold models with self-intersections that are unsuitable for simulation and other geometry processing applications.
+
+Our objective is to bridge this gap by reconstructing high-quality meshes, that facilitate fast rendering and are broadly supported for 3D applications beyond rendering, while preserving the superior visual quality of volumetric approaches. To accomplish this, we introduce \methodname{}, a novel neural approach that can produce a high-quality, \emph{watertight manifold} mesh of a 3D scene with neural textures. As depicted in Fig.~\ref{fig:teaser}, our technique achieves photo-realistic rendering quality. More significantly, our mesh-based model can be employed directly in physical simulation engines that frequently require watertight and even manifold meshes. %, producing high-fidelity animations. %outcomes with the reconstructed 3D content.
+
+We achieve this by integrating advanced neural field rendering with differentiable rasterization-based mesh reconstruction techniques. We observe that volumetric neural field rendering and differentiable rasterization have mutually complementary benefits. While neural field-based approaches like TensoRF \citep{chen2022tensorf} can produce high visual quality and generate density fields as scene geometry, the exported meshes, when rendered using surface rendering (rasterization), cannot retain the original high visual quality achieved with volume rendering. In contrast, differentiable mesh rasterization techniques such as nvdiffrec~\citep{munkberg2021nvdiffrec} directly optimize the final mesh output using rendering supervision. Yet, they are sensitive to geometry initialization and can get stuck in local minima, especially when reconstructing high-resolution meshes. (see Fig.~\ref{fig:mesh_comparison}). Therefore, we propose leveraging neural field reconstruction techniques to create high-quality initializations for differentiable rasterization, significantly enhancing the final mesh reconstruction quality. Additionally, we have observed that the non-linearity of the density field can lead to undesirable artifacts when using previously prevalent differentiable marching algorithms~\citep{shen2021deep}, as illustrated in Fig.~\ref{fig:diffmc}. To address this issue, we introduce Differentiable Marching Cubes (DiffMC), which effectively eliminates these artifacts and results in significantly smoother surfaces.
+
+Furthermore, we enhance the visual quality of our model by modeling appearance using neural textures instead of the traditional BRDF textures utilized in most inverse rendering methods \citep{munkberg2021nvdiffrec,luan2021unified}. Specifically, we use TensoRF\citep{chen2022tensorf}
+to compactly factorize a 3D neural field into axis-aligned orthogonal 2D and 1D neural textures. While TensoRF uses volume rendering, we extract features from these neural textures at surface points on a mesh and decode view-dependent colors for surface rendering in differentiable rasterization. We demonstrate that our factorized neural textures produce superior rendering quality compared to other texture representations, including iNGP-base hash grid and MLPs (see Table~\ref{tab:stage2}).
+
+Our work offers the following key contributions:
+\begin{itemize}[leftmargin=*]
+\item We propose \methodname{}, which excels at producing high-quality watertight manifold meshes. These meshes support not only realistic rendering but also applications in a diverse array of physical simulations and geometry processing tasks.
+\item We introduce the first complete Differentiable Marching Cubes (DiffMC) implementation utilizing CUDA, delivering smooth surfaces from density fields. It runs around 10$\times$ faster than the previous prevalent mesh extraction algorithm (DMTet) at similar triangle counts.
+\item Furthermore, our mesh-based representation can be seamlessly integrated with GLSL shaders, enabling real-time rendering applications.
+
+\end{itemize}
+
+
+
+
+
+\section{Related Work}
+
+\paragraph{Neural field representations.}
+Neural rendering methods have demonstrated photo-realistic scene reconstruction and rendering quality. %~\citep{zhou2018stereo,thies2019deferred,sitzmann2019deepvoxels,lombardi2019neural,yariv2020multiview,mildenhall2021nerf}.%, demonstrating their superior in reproducing the original scene appearance over traditional methods.
+In particular, NeRF \citep{mildenhall2021nerf} introduced the neural radiance field representation and achieved remarkable visual quality with volume rendering techniques. 
+Various neural field representations have been proposed for better efficiency and quality, including MipNeRF \citep{barron2021mip} and RefNeRF \citep{verbin2022ref} that are based on coordinate-based MLPs, TensoRF \citep{chen2022tensorf} and DiF\citep{chen2023dictionary} that leverage tensor factorization, iNGP \citep{muller2022instant} that introduces multi-scale hashing, Plenoxels\citep{fridovich2022plenoxels} and DVGO\citep{sun2022direct} that are voxel-based, and Point-NeRF \citep{xu2022point} that is based on neural point clouds. 
+
+However, most neural field representations represent 3D geometry as a volume density field, which is hard to edit for 3D applications other than rendering.
+While several methods have enabled appearance editing or shape deformation for such neural fields \citep{xiang2021neutex, zhang2022arf, yuan2022nerf, wu2022palettenerf,kuang2022palettenerf,neumesh}, it is still highly challenging to apply them directly in modern 3D engines.
+Recent methods have proposed replacing density fields with volume SDFs to achieve better surface reconstruction with volume rendering \citep{wang2021neus,wang2022neus2,yariv2021volume,Oechsle2021ICCV}.
+However, neither density- or SDF-based models can be easily exported as meshes without significantly losing their \emph{rendering} quality. Another recent work MobileNeRF \citep{chen2022mobilenerf} converts the neural field into a triangle soup for real-time rendering. However, their mesh does not model accurate scene geometry and thus cannot be used for downstream applications. 
+Our work offers a general solution to convert volumetric neural field representations to high-quality manifold meshes, enabling both high-quality rendering and broad additional 3D applications like physical simulation.
+\paragraph{Mesh reconstruction and rendering.}
+
+Polygonal meshes are a staple in modern 3D engines, widely employed for modeling, simulation, and rendering. Previous research has extensively explored mesh reconstruction from multi-view captured images through photogrammetry systems\citep{pollefeys2002images,snavely2006photo,schoenberger2016mvs} like structure from motion\citep{schoenberger2016sfm,tang2018ba,vijayanarasimhan2017sfm}, multi-view stereo\citep{furukawa2010accurate,kutulakos2000theory,schoenberger2016mvs,yao2018mvsnet,cheng2020deep}, and surface extraction techniques\citep{lorensen1987marching,kazhdan2006poisson}. However, achieving photorealistic rendering with classical photogrammetry pipelines remains a formidable challenge.
+
+On the other hand, inverse rendering aims to fully disentangle intrinsic scene properties from captured images 
+\citep{goldman2009shape,hernandez2008multiview,zhang2021nerfactor,bi2020deepref, bi2020deep,bi2020neural,zhang2021physg, li2018learning, zhang2022iron,InvRenderer}. 
+Recent methods, such as nvdiffrec \citep{munkberg2021nvdiffrec}, nerf2mesh\citep{tang2022nerf2mesh}, BakedSDF \citep{yariv2023bakedsdf}, achieve high-quality reconstruction and fast rendering speed.
+Nevertheless, these methods often introduce self-intersections or an excessive number of triangles in the mesh reconstruction, which are undesired for simulation and geometry processing tasks.
+
+Moreover, in recent years, several studies \citep{liao2018deep,remelli2020meshsdf,shen2021deep,mehta2022level, shen2023flexible} have delved into differentiable mesh extraction algorithms due to their crucial role in mesh optimization workflows, connecting implicit field and explicit mesh representations. While they still have limitations, such as surface artifacts \citep{shen2021deep} and a lack of manifold guarantees \citep{liao2018deep, shen2023flexible}. Our DiffMC generates significantly smoother surfaces on density fields and maintains watertight manifold properties. In summary, our approach leverages neural field reconstruction to provide a high-quality initialization for differentiable rendering, and we integrate it with differentiable marching cubes to ensure that our final output is manifold and watertight. This enables our model to be directly applied to a wide range of 3D applications.
+
+
+
+\subsection{Watertight and Manifold Meshes}
+\boldstart{Watertight. } If all edges are shared by exactly two faces, then the mesh is watertight.
+
+\boldstartspace{Manifold. } A manifold mesh must meet the following properties: (1) all edges must connect at most two faces; (2) each edge is incident to one or two faces and faces incident to a vertex must form a closed or open fan; (3) the faces must not self-intersect with each other.
+
+\subsection{Volumetric Neural Fields.}
+Recent neural field representations utilize differentiable volume rendering for their reconstruction and leads to high visual quality.
+While our approach can generally support any neural field models, we apply two specific ones, TensoRF and NeuS, in our paper. We now briefly cover the preliminaries of these methods.
+
+\boldstartspace{TensoRF.} The original NeRF uses pure MLPs, which make it slow to train and incapable of modeling details accurately.
+TensoRF~\citep{chen2022tensorf} decodes the radiance field from a volume of features, and this feature volume is further factorized into factors leveraging CANDECOMP/PARAFAC decomposition or vector-matrix decomposition. In this work, we are interested in the vector-matrix decomposition, which factorizes the 4D feature volume as the sum of three outer products between a matrix and a vector. 
+
+
+\subsection{Differentiable Rasterization}
+\label{sec:diffrast}
+Differentiable rasterization refers to methods that optimize inputs of rasterization-based rendering pipelines. In this work, we are interested in nvdiffrast~\citep{Laine2020diffrast}, which consists of 4 stages, rasterization, interpolation, texture lookup, and anti-aliasing. We mainly use the rasterization stage, which maps triangles from 3D space onto pixel space, and the interpolation stage, which provides 3D coordinates of pixels to query the appearance network.
+
+To ensure the mesh optimized by differentiable rasterization is a watertight manifold, we need to apply a meshing algorithm that generates such meshes. In this work we propose DiffMC, which divides the 3D space into a deformable grid and takes a scalar field (often SDF) defined on its vertices as input. The algorithm turns the scalar field into an explicit mesh by a differentiable marching cubes algorithm.
+
+
+
+\section{Method}
+
+\begin{figure}[t]
+\begin{center}
+   \includegraphics[width=\linewidth]{figures/pipeline.pdf}
+\end{center}
+  \caption{Overall training pipeline for Stage 1 and 2 of \neumanifold. In Stage 1, volumetric rendering pipelines are used to initialize geometry and appearance networks. In Stage 2, the initialized geometry and appearance networks are further trained in differentiable rasterization with the help of DiffMC. The generated watertight manifold mesh and optimized appearance network are used in deployment. }
+\label{fig:pipeline}
+\end{figure}
+
+We present a 3D reconstruction pipeline that reconstructs scene geometry and appearance from captured multi-view images. 
+Our method consists of two main stages: initialization with differentiable volume rendering and manifold generation with differentiable rasterization, as illustrated in Fig.~\ref{fig:pipeline}, plus an optional fine-tuning stage. 
+In particular, we leverage neural field representations with volume rendering-based reconstruction to offer the initialization for the subsequent mesh optimization, where we further optimize the \emph{topology}, \emph{geometry} and \emph{appearance} with differentiable marching cubes and rasterization. Optionally, when the manifold property is not required, we fine-tune the \emph{geometry} and \emph{appearance} by directly moving mesh vertices. Finally, we deploy the pipeline with GLSL shaders for cross-platform real-time rendering and demonstrate the important role of anti-aliasing on visual quality.
+
+\subsection{Neural Field Representation.}
+We represent a 3D scene with a geometry network $G$ and an appearance network $A$. In particular, given an arbitrary 3D location $x$, the geometry network outputs its corresponding volume density $\sigma$, and the appearance network regresses a view-dependent color $c$ at the location. This can be expressed by:
+\begin{equation}
+    \sigma_{x}, c_x = G(x), A(x,d)
+\end{equation}
+where $d$ is the viewing direction.
+Our approach supports any common neural field representations for the geometry and appearance networks. In this work, we choose the state-of-the-art neural field representation TensoRF~\citep{chen2022tensorf} as the network architecture.
+
+In order to balance rendering quality and inference speed, we propose two kinds of appearance networks. For the \textit{high-quality} version, we adopt Vector-Matrix (VM) decomposition plus an MLP. For the \textit{fast} version, we utilize VM decomposition plus Spherical Harmonics (SH). This can greatly accelerate inference speed on deployment; we discuss this in detail in Sec.~\ref{sec:deploy}.
+
+\subsection{Initialization by Volume Rendering (Stage 1)}
+In the first stage, we train the networks through differentiable volume rendering to establish a strong initialization for the subsequent differentiable rasterization-based optimization phase. 
+As in NeRF, we render pixel colors $C$ using the volume density and view-dependent colors from our geometry and appearance models as: 
+\begin{equation}
+\centering
+        C =  \sum^N_{i=1} T_i (1-\exp (-\sigma_i \delta_i)) c_i, \quad 
+        T_i = \exp (-\sum_{j=1}^{i-1} \sigma_j \delta_j).
+    \label{eq:raymarching}
+\end{equation}
+where $T$ is the volume transmittance and $\delta$ is the ray marching step size. This differentiable rendering process allows us to optimize our networks with a rendering loss.
+
+\subsection{Manifold Generation \& Optimization (Stage 2)}
+\label{sec:stagetwo}
+
+\begin{wrapfigure}[17]{R}{0.4\textwidth}
+    \centering
+    \includegraphics[width=0.39\textwidth]{figures/diffmc.pdf}
+    \caption{DiffMC vs DMTet on non-linear fields. $f(\cdot)$ represents the SDF function and $\exp()$ is a non-linear transformation. }
+\label{fig:diffmc}
+\end{wrapfigure}
+
+In the second stage of our process, we leverage a similar pipeline as nvdiffrec~\citep{munkberg2021nvdiffrec} to optimize the object topology, geometry and appearance simultaneously. Unlike nvdiffrec that directly optimizes the SDF function from scratch, we utilize the pre-trained TensoRF models from the previous stage as initialization. Additionally, we replace the marching algorithm from Differentiable Marching Tetrahedra (DMTet)~\citep{shen2021deep} with our Differentiable Marching Cubes (DiffMC), which seamlessly integrates pre-trained density networks into the differentiable rasterization pipeline and significantly reduces artifacts on mesh surfaces.
+
+Different from nvdiffrec, which optimizes SDF values stored on the grid, our methods need to convert the output of the density network to these values, since SDF-based methods tend to exhibit lower visual fidelity and can lose high-frequency details in the geometry.
+With the pre-trained TensoRF density network, we convert their density into opacity as: $\alpha = 1-\exp(-\sigma \cdot \delta)$, where $\sigma$ denotes density, $\alpha$ denotes opacity, $\delta$ is the ray step size used in volume rendering.  We consider a threshold $t$ that controls the position of the surface with respect to opacity and send the value $\alpha-t$ to DiffMC to obtain our manifold mesh.
+
+During the conversion of the density field into a mesh, we encountered notable artifacts with DMTet. These issues arose primarily from the non-linear nature of the density field. As illustrated in Fig.~\ref{fig:diffmc}, when we apply a non-linear transformation like $\exp()$ to a standard SDF field, the mesh extracted by DMTet develops deformations with peaks and valleys. This happens because the conventional linear interpolation method is no longer adequate for dealing with the non-linear field, and the way it divides space into tetrahedra results in artifacts on surfaces that don't align well with these tetrahedral divisions. Given that most real-world objects tend to be axis-aligned, adopting an axis-aligned space division can significantly reduce these artifacts.~\ref{sec:supp_diffmc}.
+
+Therefore, we introduce Differentiable Marching Cubes (DiffMC), which operates on an axis-aligned grid. DiffMC not only extracts the mesh using the conventional marching cubes algorithm~\citep{lorensen1998marching} but also provides vertex gradients with respect to the grid, denoted as $\frac{\partial v}{\partial g}$. This enables the mesh extraction process to be seamlessly combined with the mesh optimization pipeline using the chain rule: $\frac{\partial L}{\partial \theta} = \sum_{v \in V}\frac{\partial L}{\partial v} \frac{\partial v}{\partial g} \frac{\partial g}{\partial \theta}$, where $L$ is the rendering loss, $\theta$ is the parameters in the density network, $V$ is the set of mesh vertices and $g$ is the grid. In a manner akin to the approach outlined in ~\citet{shen2021deep}, we incorporate deformable vectors into the grid that can be optimized. This allows the extracted mesh to adjust more effectively to the desired shape by making subtle adjustments within half of the cube. As shown in Fig.~\ref{fig:diffmc}, DiffMC is less influenced by the non-linearity and is capable of producing significantly smoother surfaces, even on geometries that are not aligned with the axis. To our best knowledge, we are the first to implement the complete differentiable marching cubes, achieving exceptionally fast speeds that are 10$\times$ faster than DMTet.
+
+ 
+
+We put the resulting mesh into nvdiffrast~\citep{Laine2020diffrast} to render 2D images and use the rendering loss to update the geometry and appearance networks. Precisely, the points on the mesh surface are passed through the appearance network to generate the output color for each pixel.
+
+With a strong initialization from networks pre-trained in volume rendering and the marching cubes algorithm, we are able to get watertight manifold meshes that are more accurate than both volumetric rendering and mesh rendering alone, with better visual quality. 
+
+\subsection{Geometry and Appearance Finetune (Stage 3)}
+
+The mesh generated in the previous stage is guaranteed to be a watertight manifold, which satisfies the rigorous requirements of common geometry processing algorithms. However, maintaining manifoldness may come at the cost of rendering quality, particularly for areas with intricate structures where preserving both structural details and optimal triangular connections can be challenging.
+
+We address this issue with an optional fine-tuning stage to further enhance rendering quality for applications where manifold properties are not necessary. Here, we solely fine-tune the mesh vertex positions and appearance network to improve the rendering loss. While this operation may introduce self-intersections, it preserves the original good edge connections, thus retaining watertightness.
+
+\subsection{Deployment}\label{sec:deploy}
+\boldstartspace{GLSL shaders.}
+Our pipeline produces a triangle mesh with an appearance network consisting of TensoRF and MLPs. This can be directly mapped to a traditional rasterization pipeline as GLSL shaders. We upload TensoRF weights as three 3D textures and three 1D textures with linear filtering, and MLP weights as 2D textures. After rasterizing triangles in the vertex shader, we evaluate TensoRF and MLPs in the fragment shader with model-space coordinates and viewing directions.
+
+We further accelerate the deployed rendering pipeline using different MLP size models as well as a spherical harmonics version. We summarize these quality/speed trade-offs in Table~\ref{tab:trade-off}.
+
+\begin{figure}[t]
+\includegraphics[width=\linewidth]{figures/sota.pdf}
+\caption{Rendering quality comparison between our and existing mesh rendering methods. Our methods are able to well preserve thin structures as well as achieve high rendering quality. (DT: direct transfer; F: fast; HQ: high-quality; m: manifold).}
+\label{fig:sota}
+\end{figure}
+
+\boldstartspace{Anti-Aliasing. }
+Aliasing is a common issue in rasterization pipelines due to the undersampling of high-frequency features, such as mesh edges and detailed textures. In contrast to volumetric rendering, where semi-transparent volumes can mitigate aliasing, mesh-based rendering pipelines are significantly affected by this problem.
+
+Supersample anti-aliasing (SSAA) is the most straightforward method to mitigate aliasing; it renders high-resolution images and down-samples them to the target resolution. While SSAA provides the best visual quality, it is computationally expensive due to the increased resolution. An alternative approach is multisample anti-aliasing (MSAA), which is enabled by modern GPU hardware. MSAA reduces the cost of anti-aliasing by increased shader evaluation only on pixels covered by multiple triangles, and it shades each triangle once.~\ref{fig:supp_aa}.
+
+
+
+\section{Experiments}
+
+\subsection{Implementation Details}
+For the first stage, we directly build on off-the-shelf volume rendering models. 
+Specifically, for TensoRF, we use the official implementation. We compare two of our models for our main results: a high-quality one, labeled with Ours (HQ), which uses the TensoRF (VM) with 48-dim input features and 12-dim output features, plus a three-layer MLP decoder; a fast one, labeled with Ours (F) that uses the TensoRF (VM) with 48-dim input features and output 27-dim SH coefficients. More details about the network architecture are in supplementary.
+
+We train all the stage 2 and 3 models with batch size of 2 for 10k iterations. We use DiffMC with a grid resolution of 256 for all results. Except when comparing with nvdiffrec, we use the default resolution of 128 as nvdiffrec's performance drops on higher resolutions, possibly due to the decreased batch size and harder optimization.
+
+\input{tables/sota_render.tex}
+
+\begin{figure}[t]
+\begin{center}
+   \includegraphics[width=\linewidth]{figures/mesh_comparison.pdf}
+\end{center}
+  \caption{Visual comparison of mesh quality of different methods. MobileNeRF generates a triangle soup that can only preserve the rough shape. Nvdiffrec gives coarse mesh and fails on some regions. TensoRF is over-detailed and NeuS is over-smoothed. Our method combines the merits of these methods, which is comparable and even better than non-manifold meshes of nerf2mesh. (Non-manifold methods are denoted by *)}
+\label{fig:mesh_comparison}
+\end{figure}
+
+\begin{figure}[t]
+\includegraphics[width=\linewidth]{figures/VSA.pdf}
+\caption{Average VSA-tolerance plot for test views from four NeRF-Synthetic scenes. Depth map of the mesh produced by Ours (HQ-m) achieves high matching scores consistently for different tolerance values. (Non-manifold methods are denoted by dotted line)}
+\label{fig:vsa}
+\end{figure}
+
+\subsection{Comparison on Novel-View Synthesis}
+In Table~\ref{tab:sota}, we show a quantitative comparison on novel view synthesis between our method and other neural rendering and differentiable rasterization methods. We perform the experiments on the widely-used NeRF-Synthetic dataset~\citep{mildenhall2021nerf}.
+We observe that even though NeuS and TensoRF have very high quality using their original volume rendering, when directly transferred to mesh rendering without any fine-tuning---shown as NeuS (DT) and TensoRF (DT) in the table---they have sharp performance drops. Specifically, we essentially extract meshes from their density or SDF fields and then use them for surface rendering. This involves fetching color information from their appearance networks using surface points.
+Nvdiffrec can generate watertight and manifold meshes but its rendering quality has a large gap with other neural rendering methods. 
+In contrast, our models (both high-quality and fast) can achieve high quality on both mesh reconstruction and rendering. 
+It is worth noting that our method attains the highest rendering quality compared to all other surface rendering techniques, surpassing even those that generate non-manifold meshes.
+In addition, when the manifold property is not required, our visual fidelity can be further boosted with the third stage fine-tuning, leading to an average PSNR 0.65 dB higher than vanilla NeRF.
+
+\input{tables/unbounded.tex}
+We also show visual comparisons on mesh-based rendering in Fig.~\ref{fig:sota}.  
+We can clearly see that the mesh rendering with meshes directly extracted from NeuS and TensoRF fails to recover the high-frequency details and thin 
+structures in the scene. Moreover, since they apply volume rendering and integrate the colors of multiple points along the ray to match the training 
+images during the optimization, simply extracting the color of a single point at the isosurface cannot faithfully recover the appearance of the scene. 
+Nvdiffrec directly applies mesh rendering during the training, but the recovered meshes can miss complex structures, thus resulting in a degradation in visual quality. 
+In contrast, our method benefits from the initialization from the neural volume rendering and can better recover the fine-grained details of the scene. 
+
+We also verify the effectiveness of our method on two real datasets, MipNeRF-360 dataset~\citep{barron2022mip} and LLFF dataset~\citep{mildenhall2019local}. The quantitative results on MipNeRF-360 is shown in Table~\ref{tab:unbounded}, where our method significantly outperforms other mesh-based methods on indoor scenes. 
+\input{tables/stage1_ablate.tex}
+\subsection{Comparison on Mesh Reconstruction}
+We observe that traditional mesh-distance metrics such as Chamfer distance are not suitable for mesh quality comparison, as they are often dominated by the performance of regions unseen during training. To this end, we propose to use the visible surface agreement (VSA) metric, modified from the visible surface discrepancy proposed by~\citet{hodavn2020bop}:
+\[e_{\text{VSA}} = \substack{\mbox{avg}\\{p\in V\cup \hat V}}
+\begin{cases}
+1 & \mbox{if } p \in V\cap \hat V \wedge |D(p)-\hat D(p)| < \tau \\
+0 & \mbox{otherwise}
+\end{cases}\]
+where given a view, $D$ and $\hat D$ denote the depth map of the ground-truth and reconstructed meshes, $V$ and $\hat V$ denote the pixel visibility masks, and $\tau$ is the misalignment tolerance. Higher VSA indicates a better match between depth maps.
+
+We compare the average VSA metric over 200 testing views of the NeRF-Synthetic dataset with different misalignment tolerances in Fig.~\ref{fig:supp_VSA}). We additionally provide a visual comparison of the reconstructed meshes in Fig.~\ref{fig:mesh_comparison}. From the comparisons, we can clearly see
+that our method achieves consistently better VSA performance than the manifold mesh baseline methods. Our generated  meshes better capture the detailed structures of the scene such as the lego wheels, even better than nerf2mesh~\citep{tang2022nerf2mesh} that generates non-manifold ones.
+
+\subsection{Ablation for Stage 1 \& 2}\label{sec:stage1}
+To show the importance and effectiveness of using initialization from volume rendering, we design an ablation study using different initialization methods for Stage 1. 
+As we can see from Table~\ref{tab:stage1}, directly optimizing the mesh without initialization from volume rendering, leads to the worst novel view synthesis performance. Both geometry initialization and appearance initialization can boost the accuracy, with geometry initialization playing a more critical role in the performance improvement.~\ref{fig:supp_init} highlight that when high-resolution grids are employed without appropriate geometry initialization, the mesh optimization process can easily become trapped in a local minimum.
+
+We validate the necessity of optimizing the meshes in Table~\ref{tab:stage2}. To achieve this, we compare against baselines that 
+keep the meshes from Stage 1 fixed and only optimize the appearance.We also provide the results using the GT mesh in combination with the TensorF appearance network as a reference, representing the upper limit of texture optimization methods. As we can see from the results, using the meshes without further optimization achieves much lower accuracy than our full method, 
+which demonstrates the essential of jointly optimizing the geometry and appearance in Stage 2. All appearance networks were trained from scratch for fair comparison. 
+
+\input{tables/quality_speed.tex}
+\subsection{Speed and Quality Trade-Off}
+We show the model performance and speed after being deployed into GLSL in Table~\ref{tab:trade-off} and show the trade-off between model capacity and inference speed. FPS is computed with the average time to render the first frame in the test set of NeRF-Synthetic dataset on an NVIDIA RTX 4090. 
+
+
+
+
+\section{Applications}
+
+
+\begin{figure}[t]
+\begin{center}
+   \includegraphics[width=\linewidth]{figures/applications.pdf}
+\end{center}
+  \caption{Applications of \neumanifold. (a) Geometry editing with Laplacian surface editing. (b) Appearance editing with vertex painting. (c) Collision shape for cloth simulation. (d) Collision-aware convex decomposition. }
+\label{fig:application}
+\end{figure}
+
+With a manifold mesh-based geometry representation, \methodname{} can be easily plugged into a wide variety of 3D content creation tools. This is a significant advantage over previous neural reconstruction methods and we demonstrate three such applications below. 
+
+\boldstart{Geometry editing. } Geometry editing algorithms often rely on good input mesh connectivity. In Fig.~\ref{fig:application}a, we demonstrate Laplacian surface editing~\citet{sorkine2004laplacian} for non-rigid deformation of the reconstructed microphone.
+
+\boldstart{Appearance editing. } Our meshes integrate directly into modeling software and can be edited by artists. In Fig.~\ref{fig:application}b, we load the generated mesh into Blender and paint its vertices. The painted color is multiplied with the original color in the GLSL shader.
+
+\boldstart{Physical Simulation. }
+Our reconstructed meshes can be used as static collision meshes for soft-body simulation (e.g., cloth simulation as shown in Fig.~\ref{fig:application}c) similar to previous works. Moreover, the watertight and manifold properties enable a wider range of applications. For example, they can be used as direct input to the collision-aware convex decomposition algorithm~\citep{wei2022coacd} for rigid-body collision shape generation (Fig.~\ref{fig:application}d). They can be directly converted to finite-element meshes by Delaunay tetrahedralizations~\citep{hang2015tetgen} and used in a finite-element simulation with incremental potential contact (IPC)~\citep{Li2020IPC} ( Fig.~\ref{fig:supp_flowers}).
+
+
+
+
+\section{Conclusion}
+
+We have introduced a novel method for reconstructing high-quality, watertight manifold meshes with accurate rendering support from multi-view images. However, our method currently faces limitations when dealing with specular areas, like the ``materials'' in NeRF-Synthetic and the ``room'' in the LLFF dataset. In these cases, the reconstructed meshes may exhibit discontinuities to capture the effect of different colors for the same point seen from different views. We believe that addressing this issue will require the incorporation of inverse rendering techniques and the inclusion of additional priors to ensure a more accurate geometry.
+
+
+
+
+
+
+

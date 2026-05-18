@@ -1,83 +1,83 @@
-Now I have a thorough understanding of the paper and all reviewer claims. Let me write the consolidated review.
+Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper diagnoses "delusional" behaviors in target-directed RL agents — chasing unreachable or unsafe targets — and traces them to miscoordination between a generator (proposes candidate targets) and an estimator (evaluates them). It introduces a taxonomy of problematic targets (G1: nonexistent; G2: temporarily unreachable) and estimator failures (E0, E1, E2), then proposes two hindsight-relabeling strategies — GenerateStr (expose estimator to generator-proposed targets) and PerEnvStr (expose estimator to targets from other episodes) — to augment training data with source-target pairs the agent could never experience. Experiments on a custom MiniGrid-style environment (SSM) with Skipper show that hybrid mixtures of these strategies reduce estimation errors and improve OOD generalization.
+This paper identifies and taxonomizes "delusions" in target-directed RL agents — false beliefs about targets (subgoals) that cause agents to chase unreachable or unsafe goals despite having the capacity to reject them. It distinguishes generator-side problematic targets (G1: nonexistent; G2: temporarily unreachable) from estimator-side delusions (E0, E1, E2), then proposes two assistive hindsight relabeling strategies (Generatestr and Perenvstr) and hybrid 2-slotted mixtures to correct them. Experiments on a custom SSM environment with the Skipper method show that the proposed hybrid strategies reduce delusion-related estimation errors by roughly half, cut delusional behavior frequencies substantially, and improve aggregated OOD success rates from under 40% (baselines) to over 60%.
 
 ## Strengths
 
-1. **Formal taxonomy of delusions in target-directed RL.** The paper systematically categorizes delusions into types (G1 nonexistent, G2 temporarily unreachable; E0, E1, E2) and explicitly links each to failures in the generator or estimator components (Sections 3.1, 3.2, Table 1). This provides a structured diagnostic framework that prior work on goal misgeneralization or hallucinations lacked, and the G1/G2/E1/E2 distinctions are clearly motivated by the temporal structure of source-target pairs.
+1. **Novel formalization and structured taxonomy of delusions in target-directed RL.** Sections 3.1–3.2 provide a clean, internally consistent vocabulary (G1/G2, E0/E1/E2) grounded in concrete SSM examples (Figure 2), filling a gap in the literature where failure modes of target-directed agents were previously ad-hoc or overlooked. Table 1 maps each relabeling strategy's advantages/disadvantages to specific delusion types, making the taxonomy operationally useful.
 
-2. **Identification that standard hindsight-relabeling strategies inherently cause blind spots, with targeted mitigations.** The paper shows that widely used strategies like *future* and *episode* relabeling create blind spots: the estimator never learns about unreachable targets (Section 3.2). It introduces GenerateStr (exposing estimator to generated candidates) and PerEnvStr (exposing estimator to cross-episode targets) that directly target E1 and E2 delusions respectively (Section 4.1). Empirical results confirm these strategies reduce delusion-specific estimation errors and delusional behavior frequencies (Figures 3b, 3c, 3f, 3g).
+2. **Principled mitigation strategies directly targeting identified causes.** Generatestr (§4.1.1) exposes estimators to generated candidate targets (addressing E1), and Perenvstr (§4.1.2) exposes them to cross-episode targets (addressing E2 and long-distance E0). The 2-slotted hybrid approach (§4.3) cleanly resolves the conflicting training needs of generators and estimators — a design insight that generalizes beyond HER.
 
-3. **Hybrid 2-slotted training decouples generator and estimator needs.** The paper recognizes that generators and estimators have conflicting data requirements (generators should not see problematic targets; estimators should) and proposes independent relabeling processes for each (Section 4.3). This design insight is validated in experiments (Figure 3h shows hybrids FEP and FEPG outperform single-strategy baselines on OOD generalization).
+3. **Strong quantitative evidence linking delusion reduction to improved OOD generalization.** On SSM with Skipper (Figure 3), the paper decomposes estimation error by type (E1, E2, non-delusional), tracks behavioral frequency, and shows that hybrid strategies (FEP, FEPG) simultaneously reduce E2 errors (Figure 3f), lower E2 delusional behavior frequency (Figure 3g), and improve aggregated OOD success (Figure 3h). The experiment uses ground-truth distances to separate error sources, providing a precise causal chain from reduced delusions to better generalization.
 
-4. **Controlled environment SSM designed for isolating delusion types.** The fully-observable SSM with semantic state classes (sword/shield possession) and lava traps creates clear ground-truth reachability categories (Section 2). This enables precise measurement of G1/G2 generation rates and E1/E2 estimation errors (Figures 3a, 3e), which standard benchmark environments cannot provide, making the empirical analysis of delusion causes and mitigations reliable.
+4. **Deliberately designed controlled environment (SSM) with ground-truth accessibility.** The sword/shield mechanics and lava traps create four semantic state classes and clear G1/G2 cases, enabling per-category estimation error tracking that most benchmarks cannot support. This is critical for validating claims about specific delusion types.
+
+5. **Empirical guidelines for practitioners.** Section 6 provides concrete, actionable steps (inspect candidates for E1 risks, analyze state structure for E2 risks, apply Generatestr/Perenvstr accordingly), translating the paper's theoretical insights into practical recommendations.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Only 1 of 4 claimed experiment sets is presented with results, undermining generality claims.** The paper states: "This leads to our 4 sets of experiments, coming from a combination of 2 environments (one dominantly haunted by G1, and another by G2) and 2 target-directed frameworks" (Section 5). Only Set 1 — "Skipper on SSM" (Section 5.5) — is actually shown with results. The remaining three sets (Skipper on the unnamed second environment, LEAP on SSM, LEAP on the second environment) are never described or visualized, and the paper merely states "All 4 sets of experiments align in terms of conclusions" (Section 5.6). The second environment is never named or characterized. This means the paper's central claim — that these strategies broadly reduce delusions and improve OOD generalization — is supported by a single case study on a custom environment designed to exhibit the targeted delusions. The reader cannot verify whether the findings replicate on an environment without G2 problems or with a different framework (LEAP). This is the single most consequential weakness and would need to be addressed for acceptance.
+None.
 
 ### Minor
 
-2. **Overstated claims about "autonomous" and "preemptive" delusion-addressal.** The abstract and conclusion frame the contribution as enabling agents to "address delusions autonomously and preemptively" (abstract, Section 7). In practice, the proposed strategies are manually engineered modifications to the training data distribution. The agent does not detect that it holds false beliefs and self-correct; rather, the experimenter designs the relabeling procedure to include specific source-target pairs. The "preemptive" aspect is also modest — the strategies expand training coverage for two known failure modes rather than anticipating novel delusion types at test time. The framing should be calibrated to what is actually achieved: designing training data to preemptively cover known failure modes.
+1. **E0 delusion definition is overly broad.** The paper defines E0 (Section 3.2) as "false estimations about non-delusional targets" — effectively any estimation error on valid source-target pairs. This includes ordinary approximation error, which dilutes the term "delusion." The paper's own framing (false beliefs that are "natural results of the learning process" that "cannot be corrected without targeted data exposure") does not cleanly apply to E0. Renaming this to "general estimation error" or "non-delusional bias" would sharpen the taxonomy without losing the useful tradeoff analysis (short- vs. long-distance accuracy).
 
-3. **No principled guidance for choosing mixing ratios.** The hybrid strategies use ratios such as 50/50 (FEG, FEP) and 2/3-1/3 with 1/4 GenerateStr (FEPG) without principled justification (Section 4.2, 5.4). A practitioner would have no guidance on how to set these for a new problem. Even a simple heuristic (e.g., "set PerEnvStr proportion proportional to observed G2 frequency during warm-up") would make the method more useful.
+2. **Novelty of the practical strategies relative to prior HER work is modest.** The paper acknowledges (Section 7) that similar mixture strategies were used by Nasiriany et al. (2019) and Yang et al. (2021) for sample efficiency, and that Generatestr builds on Zhao et al. (2024). While the paper's contribution is primarily the *diagnostic taxonomy and delusion-oriented framing*, rather than claiming the strategies themselves are fundamentally new, the presentation sometimes conflates these. The paper would benefit from more crisply distinguishing: the strategies are (individually) not entirely new, but the delusion-aware diagnosis and the principled hybrid design are.
 
-4. **No experimental comparison against prior methods addressing related failure modes.** The paper cites work on "goal misgeneralization" (Di et al., 2022) and "managing hallucinations" (Bengio et al., 2024) in the related work but does not benchmark against any of them. While these prior works address related but distinct problems, the paper would be strengthened by showing that the delusion framework yields measurable improvements over existing approaches, or at least explaining why direct comparison is infeasible.
+3. **Generator-side analysis is limited.** The paper discusses G1 and G2 as generator-side issues (Section 3.1) and claims the 2-slotted approach addresses conflicting generator/estimator needs. However, generator training strategies are held fixed (all use *future* relabeling) to isolate estimator effects (line 257). This means the paper does not fully validate its claims about mitigating G1/G2 *generation*, nor does it demonstrate the full potential of the 2-slotted approach by varying both slots. The design choice is reasonable for isolating estimator effects, but the claims about generality to generator-side issues remain incompletely supported.
 
-5. **Absolute OOD success rates are modest with limited discussion.** The final aggregated OOD performance (Figure 3h) shows hybrid methods achieving success rates around 0.3–0.4, with baselines below 0.2. The paper presents relative improvements but does not discuss whether these rates are practically meaningful or what the ceiling is. This is a significant context gap.
-
-6. **Computational cost of GenerateStr is not measured.** The paper notes that GenerateStr "incurs additional computational burden" (Section 4.1) but provides no measurement of training time or memory overhead. For practical deployment, the tradeoff between delusion reduction and computational cost should be quantified.
-
-7. **Failure modes and limitations of the proposed methods are not discussed.** The paper shows hybrid strategies improve over baselines but does not discuss when they might fail — e.g., if the generator is very poor, GenerateStr could flood the estimator with spurious targets; if the environment has no state structure with temporal irreversibility, PerEnvStr may add noise without benefit.
+4. **Claim of "preemptively and autonomously" addressing delusions is not directly tested.** The paper claims (abstract, line 20) that strategies enable agents to address delusions preemptively. The OOD evaluation does test generalization to unseen tasks, which partially supports this. However, there is no analysis of *when* during training the estimator learns to reject problematic targets — i.e., whether it learns to identify OOD delusions before encountering them at decision time, or relies on in-distribution pattern matching. A temporal analysis of error drops for OOD delusions would clarify the mechanism.
 
 ### Trivial
 
-8. **Some subfigures use 50% confidence intervals (Figures 3c, 3g) while others use 95%.** The paper explains this is "due to the chaotic overlap," but 50% CIs are unconventional and significantly less informative.
-
-9. **Section 7 (Empirical Guidelines) is generic** — the steps amount to "use an estimator," "use diverse data," and "inspect your problem." This section does not contribute actionable guidance beyond what the paper already states in Sections 3 and 4.
+1. **Heavy abbreviation load.** The paper uses G1, G2, E0, E1, E2, SSM, FE, FP, FG, FEG, FEP, FEPG, *future*, *episode*, *perenv*, *generate*, JIT, VI, MEL, MELs, OOD, etc. A glossary table or more sparing naming convention would substantially improve readability, especially for readers new to this sub-area.
 
 ## Nice-to-Haves
 
-- **Ablation isolating whether the delusion taxonomy is necessary for design.** An experiment comparing PerEnvStr against a simple diversity-maximizing alternative (e.g., random-state sampling) would test whether the G2 diagnosis specifically is needed, or whether any coverage expansion works.
-- **Theoretical analysis of convergence conditions.** The paper asserts "with convergent learning rules... the strategies should lead to the correct estimation" (Section 4.1) without proof or citation. A brief formal statement of conditions would strengthen the claims.
-- **Discussion of when PerEnvStr might hurt performance** (e.g., environments without G2 problems where it may add noise).
+- Include a concise summary (aggregated figure or small table) in the main text showing that the other three experiment sets (Skipper on the G1-dominant environment, LEAP on both environments) produce qualitatively similar outcomes. This would strengthen the generality claim for readers who do not consult the appendix.
+- Add a quantitative cost comparison (e.g., additional inference calls per estimator update) for Generatestr, since the paper notes real-world speed concerns.
+- Add an explicit ablation comparing Perenvstr against a "generic diversity" baseline (e.g., random cross-episode pairs without delusion-aware design) to show that the *specific* design matters.
+- A demonstration where the generator slot uses a non-*future* strategy (e.g., episode or perenv) to fully exercise the 2-slotted approach.
 
 ## Removed Points
 
-- **"Disconnect between the conceptual framework and proposed solutions" (from Harsh Critic — Critical Issue 2):** The paper does connect specific delusion types to specific strategies: GenerateStr → E1 (Section 4.1), PerEnvStr → E2 (Section 4.1). The claim that the taxonomy was "not necessary" is a philosophical judgment about discovery process, not a verifiable weakness of the paper's scientific validity. The taxonomy provides structured diagnosis; the strategies are the treatment. Many good ML insights can be motivated in multiple ways. This criticism is removed as an unrealistic standard of what papers must prove.
-- **"Section 3.1 — never shows that prior works actually ignored G2 targets":** The paper's claim that G2 targets are "often overlooked in literature" (Section 3.1) is a reasonable characterization of the literature gap, not a factual claim requiring point-by-point citation verification.
-- **"Section 3.2 — no precise operational definition of delusion":** The paper operationalizes delusions through estimation error metrics split by type (E0, E1, E2) in Section 5.2. The definition ("false beliefs from improper learning process") is adequate for the paper's purposes.
-- **"Section 4.3 — not a major technical innovation":** Whether the 2-slotted approach is a "major technical innovation" is subjective. It is a sensible design insight validated empirically.
-- **"Missing related works" —** Removed per instructions as I cannot verify existence of unmentioned works.
-- **Formatting/style nitpicks —** Removed per instructions (parser artifacts).
-- **Reproducibility nitpicks —** Removed per instructions (the paper includes a reproducibility statement with submitted code).
+- **Harsh Critic Critical Issue 1** ("Empirical validation rests heavily on a single environment in the main text"): This criticism centers on experimental results being in the appendix, which the parser strips from all papers. The other three experiment sets exist in the original submission. The concern about main-text self-containment is valid as a suggestion (moved to Nice-to-Haves) but not as a weakness about missing content.
+- **Harsh Critic's "strengthening" point about comparing with naive augmentation baseline**: Addressed in Nice-to-Haves above; not a core weakness.
+- **Harsh Critic's suggestion about a glossary table**: Subsumed by Trivial weakness #1 on abbreviation load.
+- **Strength Finder's generic phrasing** (e.g., "this paper addresses an important problem"): Not present in the filtered strengths I used.
 
 ## Novel Insights
 
-The most interesting observation emerging from the reviews is that the paper's core empirical weakness (only 1/4 experiment sets shown) and its overclaiming (about "autonomous" addressal) stem from the same root: the paper is a case study in a controlled environment dressed up as a general solution. The taxonomy of delusions (G1/G2, E0/E1/E2) is a genuinely useful conceptual lens, but the paper would be stronger if it more honestly scoped itself as "a diagnostic framework with a proof-of-concept on one environment" rather than claiming generality from incomplete evidence. The 2-slotted training insight — that generators and estimators have conflicting data requirements — is underappreciated in the HER literature and may be the paper's most practically useful contribution independent of the delusion framing.
+The reviews do not surface insights beyond the paper's own contributions. The most interesting tension that emerges is the definitional boundary problem with E0: the paper's taxonomy is most powerful where it identifies *specific, structured blind spots* (E1/E2) rather than general estimation inaccuracy (E0). This suggests that future work extending the taxonomy should focus on delusions with identifiable structural signatures rather than expanding the umbrella to cover all approximation error.
 
 ## Suggestions
 
-1. **Show the missing experiment sets** — or drop the claim of 4 sets and honestly scope the paper as a deep-dive on Skipper+SSM with preliminary indications for other settings.
-2. **Calibrate the language about autonomy:** replace "autonomously and preemptively address delusions" with "design training data to preemptively cover known delusion failure modes."
-3. **Add an ablation** comparing PerEnvStr against random-state relabeling to test whether the G2 diagnosis is driving improvements or simply diversity.
-4. **Add at least one paragraph discussing failure modes** — when would these strategies hurt?
-5. **Provide a heuristic for mixing ratio selection** (e.g., based on observed G2 frequency).
+1. Rename E0 to "general estimation error" or "non-delusional bias" to avoid diluting the "delusion" concept.
+2. In the main text, add a compact summary (one-paragraph or small table) stating that the three other experiment configurations (Skipper on the G1-dominant environment, LEAP on both environments) produced qualitatively aligned results.
+3. Add a temporal analysis figure showing when during training the estimator error drops for OOD delusions vs. in-distribution cases, to directly support the "preemptively" claim.
+4. Add a glossary of abbreviations in an early section or footnote.
 
 ## Score and Decision
 
-The paper presents a useful conceptual taxonomy and sensible mitigation strategies, but the experimental evidence is substantially incomplete — only 1 of 4 claimed experiment sets is presented, all on a custom environment. The "autonomous" framing overstates what is achieved. The conceptual contribution is real, but the paper as submitted does not provide sufficient evidence to support its generality claims.
+**Originality:** Good. The delusion taxonomy is novel and fills a real gap in the target-directed RL literature. The individual strategies are less novel but the diagnostic framing and hybrid design are.
 
-**Score:** 5.0
+**Importance:** High. Delusional behaviors in target-directed agents are a practical problem that existing literature has largely overlooked. The paper provides both a vocabulary to discuss them and actionable fixes.
 
-**Decision:** Reject
+**Claims support:** Mostly well-supported. The main experiment (Skipper on SSM) is thorough and the evidence chain is clear. The E0 definition issue is a conceptual overreach rather than an empirical flaw.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+**Soundness:** Good. The experimental design (ground-truth distances, per-category error decomposition, OOD evaluation across difficulty gradients, 20 seeds with CIs) is rigorous. The honest discussion of tradeoffs is a strength.
+
+**Clarity:** Adequate but has room for improvement due to abbreviation overload.
+
+**Value:** The taxonomy alone is a contribution worth publishing; the empirical validation that the strategies work adds practical weight.
+
+MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

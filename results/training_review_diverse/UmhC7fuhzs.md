@@ -1,83 +1,76 @@
-Now I have a comprehensive understanding of the paper. Let me produce the consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes a generative simulation framework that conditions a video diffusion model (modified I2VGen) on multisensory interoceptive signals — haptic forces, muscle EMG, hand pose, body pose, and gaze — to predict future video frames for fine-grained manipulation tasks. The core methodological contributions are: (1) a multimodal feature extraction paradigm using MoE encoders with channel-wise cross-attention to a video anchor and softmax fusion, designed to preserve modality-specific information while aligning to a shared space; and (2) a relaxed hyperplane projection regularization that decorrelates action features from context to capture interaction dynamics. Experiments on the ActionSense dataset with 64×64 video show improvements over text-conditioned (UniSim) and unimodal baselines, along with ablations validating design choices and demonstrations in policy optimization and long-term planning.
+This paper introduces multisensory interoceptive signals (haptic forces, muscle EMG, hand pose, body pose, gaze) to condition a video diffusion simulator for fine-grained generative simulation. The authors propose a multimodal feature extraction paradigm using MoE encoders with channel-wise cross-attention and softmax fusion that aligns modalities while preserving unique information, plus a context-aware interaction regularization scheme (relaxed hyperplane projection) that captures causal interaction dynamics. Experiments on the ActionSense dataset show improvements over text-conditioned and unimodal baselines, with extensive ablation studies and downstream applications in policy optimization and planning.
 
 ## Strengths
 
-- **First to introduce multisensory interoceptive signals (forces, EMG, pose, gaze) for conditioning generative video simulation.** The paper convincingly demonstrates through comparisons in Table 3a (quantitative) and Figure 4 (qualitative) that using all modalities together substantially outperforms text-only and single-modality conditioning for future frame prediction. This opens a new direction for fine-grained simulation control.
+- **First to bring multisensory interoceptive signals (force, EMG, pose, gaze) into generative video simulation.** The paper convincingly shows that fine-grained action modalities enable temporal control that text descriptions cannot capture. Table 3a (quantitative comparison against text-conditioned simulation) demonstrates substantially lower MSE and improved temporal consistency (LPIPS). Qualitative results in Figure 4 confirm that unimodal conditioning (e.g., only hand forces) causes temporal drift that the full multimodal model avoids.
 
-- **Robustness to missing modalities at test time is demonstrated and analyzed.** Table 1b and Figure 7 show that the model trained on all modalities degrades gracefully when individual modalities are removed at inference time, and even performs reasonably with only a single modality. The paper correctly attributes this to the softmax fusion and channel-wise attention architecture, which exploit substitutional information across correlated modalities.
+- **The multimodal feature extraction design (channel-wise cross-attention + softmax fusion) is well-motivated and outperforms contrastive alternatives for this task.** The paper provides a clear argument for why contrastive alignment methods (ImageBind, LanguageBind, Mutex) wash out fine-grained temporal information, and the experimental results in Table 6a bear this out: the proposed method achieves MSE 0.003 vs. 0.007 (ImageBind), 0.006 (LanguageBind), and 0.005 (Mutex), with consistent improvements across PSNR, LPIPS, and FVD.
 
-- **Ablation studies systematically validate the major design choices.** Table 1d ablates the interaction regularization (hard projection → relaxed hyperplane → removal) and fusion strategies (softmax vs. mean/max pooling), providing clear evidence that each component contributes positively. The ablation of individual sensory modalities (Table 1a) offers practical insight into which signals matter most for which types of motion.
+- **Demonstrated robustness to missing modalities at test time.** Table 1b shows that a model trained on all five modalities suffers only minimal degradation when individual modalities are withheld at inference (MSE stays near 0.003–0.004), and Figure 7 provides qualitative confirmation. This is a practically useful property for real-world deployment where sensor dropouts are common.
 
-- **The interaction regularization (relaxed hyperplane projection) is geometrically well-motivated and empirically effective.** The idea of projecting action features orthogonal to the context vector to isolate the "direction of change" is intuitive, and the relaxation to a half-space allows context-dependent variation. The ablation confirms that the relaxed version outperforms both the hard projection and the unregularized baseline.
+- **Extensive ablation coverage.** The paper ablates individual sensory modalities (Table 1a), test-time robustness (Table 1b), history horizon length (Table 1c), fusion strategies (mean/max/softmax pooling, Table 1d), the interaction regularization (raw y vs. hard projection vs. relaxed, Table 1d), and loss weighting (Table 1c). This breadth inspires confidence that the design choices are empirically grounded.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The central representational claim — "preserving unique information from each modality" while aligning — is asserted but never directly tested.** The paper argues that prior contrastive methods (ImageBind, LanguageBind) discard modality-specific details during alignment, and that the proposed channel-wise cross-attention and softmax fusion preserve complementarity. However, the only evidence provided is downstream prediction accuracy (MSE/PSNR/LPIPS/FVD). Better downstream performance could equally well come from simply having more total information (more input channels) rather than from retaining *unique* per-modality information. The paper would benefit from a direct analysis: (a) training linear probes on the joint feature to predict which sensory input is present, or (b) showing that different modalities activate non-overlapping latent dimensions. Without such evidence, the core representational contribution is under-supported.
+- **Dataset statistics and experimental uncertainty are not reported.** The paper states that five ActionSense subjects are used (one withheld for testing) and that data is parsed into 12-frame sequences, but it never reports how many total (context, future) sequences were extracted, how many test examples were evaluated, or any measure of variance across runs. The 36% accuracy improvement and 16% temporal consistency improvement are stated as absolute claims with no confidence intervals, standard deviations, or replication information. For a quantitative evaluation where the primary evidence is a set of numeric comparisons, this omission makes it impossible to assess whether the reported gaps are statistically reliable or could arise from a small / idiosyncratic test set. Training from scratch on a small multi-subject dataset without reporting training curves or multiple-seed experiments further compounds this concern.
+
+- **Equation (1) — the core cross-modal anchoring mechanism — is not clearly specified.** As rendered, Eq. (1) is self-referential (z_{t,m,j} appears on both sides in a way that reduces to an identity operation), and the notation conflates indices in a manner that does not correspond to a standard attention or normalization operation. The surrounding text describes "channel-wise cross-attention" at a high level, but does not state what serves as queries, keys, and values, which variables are learnable vs. fixed, or how the temporal dimension interacts with the channel-wise operation. Because this mechanism is central to the paper's claimed advantage over contrastive methods (preserving unique modality information while aligning), an implementable specification is essential. The authors should provide a standard QKV formulation or pseudocode.
+
+- **The interaction regularization ablation (Table 1d) does not isolate whether the geometric formulation specifically matters.** The ablation shows that removing the interaction module (using raw y) causes a large drop, while hard projection and the relaxed version are nearly tied. This is consistent with the regularization simply preventing the action feature from having large or misaligned components — any norm-based regularizer (e.g., an L2 constraint) might produce similar gains. Without comparing against a simpler regularization alternative, the paper's geometric claims about orthogonal decomposition and hyperplane partitioning are not empirically justified as anything beyond a pragmatic regularizer.
 
 ### Minor
 
-- **The headline quantitative claims ("increase accuracy by 36 percent and improve temporal consistency by 16 percent," abstract) are not tied to specific metrics in the prose.** The paper introduces four metrics (MSE, PSNR, LPIPS, FVD) in Section 3, but never states which metric(s) yield the 36% and 16% figures. The tables (embedded as images) presumably contain the numbers, but the reader must infer which metric maps to which percentage. The paper should state, e.g., "our method reduces MSE by 36% and improves FVD by 16% compared to the best baseline" directly in the text.
+- **The geometric motivation for the orthogonality constraint (Eq. 3) is under-justified.** The paper argues that "the same interaction vector applied to different contexts should introduce similar behavior relative to the new context" and concludes that the action vector should be orthogonal to the context vector. This conclusion only follows if one implicitly assumes a linear model with inner-product similarity, which is never stated or defended. The subsequent "relaxed hyperplane" formulation (Eq. 4) is then introduced without theoretical or empirical analysis of why the specific piecewise rule is appropriate. The geometric framing is evocative but the paper would benefit from either a tighter logical link or an acknowledgment that this is a pragmatic design choice.
 
-- **The equation for channel-wise cross-attention (Eq. 1) is notationally unclear and may hinder reproducibility.** The term \(z_{t,m,j}\) appears on both sides of the equation, suggesting a self-attention update, yet the text describes it as cross-attention between the anchor and action features. The indexing over \(i\) (anchor dimensions) and \(l\) (action feature dimensions) is not dimensionally compatible with standard attention. Similarly, the softmax fusion (Eq. 2) uses \(e^{z_{t,m}}\) where \(z_{t,m}\) is a vector, yielding a vector-valued weight \(w_{t,m}\), but the notation \(w_{t,m}\) and the summation \(y_t = \sum w_{t,m} z_{t,m}\) should explicitly clarify whether the weighting is element-wise.
+- **Multimodal feature extraction baselines (ImageBind, LanguageBind, Mutex, Signal-Agnostic Learning) are trained from scratch on a small dataset for a task they were not designed for.** While the paper provides a reasonable conceptual argument for why these methods are fundamentally ill-suited (contrastive loss wipes out fine-grained temporal information), training from scratch on ~4 subjects' data likely puts these baselines at an additional disadvantage beyond the conceptual mismatch. A stronger comparison would fine-tune from pretrained weights where available, or include a proxy-task sanity check. This does not invalidate the results but weakens the claim that the proposed paradigm is inherently superior for generative simulation.
 
-- **No discussion of limitations or failure cases.** The paper does not acknowledge the small dataset (single test subject, 64×64 resolution), the potential lack of generalizability to other tasks/environments, or the significant computational overhead of training separate expert encoders per modality plus a diffusion backbone from scratch.
-
-- **No statistical significance or variance reporting.** The test set (subject 5 of ActionSense) is small. The paper reports no confidence intervals, standard deviations, or results across random seeds. Given the dataset size, this makes it hard to assess whether improvements are reliable.
-
-- **The downstream policy optimization experiment conflates the value of the simulator with the specific loss design.** The comparison is between a policy trained with direct action regression and one trained with action regression + simulator loss. The improvement could come from any part of the pipeline (additional supervision signal, the specific loss weighting, the particular choice of diffusion policy backbone). The paper should ablate the contribution of the simulator specifically.
+- **The downstream policy optimization experiment (Section 4, Figure 10) is reported without numerical values or error bars.** The comparison between "policy with L2 alone" and "policy with L2 + simulator loss" is shown only as a bar chart. While the authors acknowledge this is a secondary contribution, including the specific numbers and ideally some measure of variance would strengthen the claim that the simulator is practically useful.
 
 ### Trivial
 
-- The paper uses "UniSim" to refer to the same diffusion backbone with text conditioning trained from scratch, but UniSim is originally a large-scale pretrained model. A brief clarifying sentence that this is the *approach* of text-conditioned simulation, not the original pretrained weights, would avoid confusion.
-
-- Minor grammatical issues throughout (e.g., "the the task" in Section 5, "benfti" in Section 3.1) that do not affect comprehension.
+- None of substance beyond the above.
 
 ## Nice-to-Haves
 
-- A direct feature-probe analysis to support the "preserving unique information" claim (see Major weakness above).
-- A simple concatenation-of-raw-features baseline in the main comparison table (it currently appears only in the ablation table).
-- Reporting at least one round of repeated experiments or bootstrapped confidence intervals.
-- Computational cost comparison (parameter count, inference time) to ensure gains are not purely from higher capacity.
-- Sensitivity analysis for the loss weighting hyperparameters \((\lambda_1,\lambda_2,\lambda_3)\).
+- A direct analysis of "preserving unique information": e.g., computing mutual information between each sensory modality and the learned action feature, or a qualitative comparison showing that the model distinguishes two action sequences differing only in force magnitude while a contrastive baseline cannot.
+- Hyperparameter sensitivity analysis for λ₁, λ₂, λ₃ and history horizon h.
+- Discussion of predictable failure modes (e.g., when multiple modalities are absent, or when actions involve unseen object interactions).
+- Computation time (training duration, inference speed).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **Criticism about "first to introduce multisensory signals" novelty claim requiring broader literature check.** Per policy, the area chair does not second-guess related-work coverage without external sources. Removed as missing related-work speculation.
-
-- **Criticism about missing appendix content (Sec. 6.5 details, reproducibility details deferred to appendix).** Per policy, the parser strips appendix sections; they exist in the original submission. Removed.
-
-- **Criticism about UniSim adaptation not being described.** The paper clearly states "All methods are trained from scratch on the same data with the same hardware and software setup" (line 121) and that the conditioning type is varied. This is sufficient.
-
-- **Criticism about the "mode collapse" claim lacking diagnostic experiments.** The paper provides qualitative comparisons (Fig. 8) and discusses the issue in context. While a quantitative diagnostic would strengthen the claim, the absence is not a structural flaw — the qualitative evidence supports the claim at an acceptable level for a conference paper.
-
-- **Criticism that "floating figures ... have no legible numbers" as a parsing issue.** This is a parser artifact; the original PDF tables are presumably readable. However, the separate criticism about percentages not being tied to metrics in prose is retained in Minor.
+- **Missing related work (action-conditional video prediction, kinematic-conditioned generation):** Per instructions, I cannot verify the existence or relevance of unmentioned works, and this is scope-creep for a paper that already positions against text-conditioned simulation baselines and multimodal feature learning methods.
+- **Criticism that the "36%" and "16%" improvement claims in the introduction lack backing:** The paper does reference Table 3a for these comparisons; the specific numbers are in the figures/tables. The real issue (addressed above) is the absence of variance/error bars, not that the claims are unsupported.
+- **Pure formatting/style critiques and any criticism about parser-induced artifacts:** These reflect PDF extraction, not author errors.
+- **Criticism that the paper evaluates UniSim but UniSim is a text-conditioned simulator:** This is the intentional point of comparison — the paper argues text is insufficient, so comparing against a text-based state-of-the-art is exactly the right baseline.
+- **Demand for complete training logs or large impractical artifacts:** Not standard for a conference submission of this type.
+- **Strength Finder claims that are generic or unsupported:** Some claimed strengths about "robustness to missing modalities" and "downstream utility" are retained above; generic platitudes like "this paper addressed an important problem" are dropped.
 
 ## Novel Insights
 
-The most valuable observation from the reviews is that the paper's central interpretative claim — that the method preserves unique modality information — is not directly supported by the experimental design. Downstream prediction tasks conflate information quantity with information uniqueness. This is a general issue that affects many multimodal representation learning papers that argue for "complementarity preservation" but evaluate only on joint downstream tasks. Testing this claim requires probe-based analyses or controlled information-theoretic measurements, which are uncommon in the current literature but would substantially strengthen papers making similar claims.
+The reviews surface an interesting tension: the paper's core methodological argument is that contrastive alignment destroys fine-grained temporal information needed for generative simulation, yet the paper itself does not directly measure information preservation (e.g., via mutual information estimates or a controlled discrimination experiment). This gap between the conceptual claim and the experimental validation is the single most impactful direction for improvement. Additionally, the reviews collectively note that the interaction regularization's geometric motivation is philosophically ambitious relative to the empirical evidence — the ablation shows the module helps, but not that the specific geometric form is responsible. This suggests the contribution could be usefully reframed as a pragmatic regularizer with intuitive geometric justification rather than a theoretically derived principle.
 
 ## Suggestions
 
-1. In the abstract and introduction, explicitly state which metrics correspond to the "36% accuracy improvement" and "16% temporal consistency improvement."
-2. Add a probing experiment: train linear classifiers on the learned joint feature to predict which individual modalities are present or to reconstruct individual modality inputs, and compare against a baseline with contrastive alignment loss.
-3. Clarify Eq. 1's notation: show the dimension compatibility explicitly, and distinguish the rescaled output from the input feature (e.g., use a different variable name).
-4. Add a brief limitations paragraph acknowledging dataset size, 64×64 resolution, and generalizability concerns.
-5. Report variance (e.g., std. dev. over 3 random seeds) for the main results.
+1. **Report dataset statistics and experimental uncertainty.** State the total number of training and test sequences extracted from ActionSense, and report all quantitative results with error bars (standard deviation or confidence intervals) across at least 3 random seeds or test splits.
+
+2. **Rewrite Equation (1) and the surrounding description in standard QKV attention terms.** Specify what serves as queries, keys, and values; which components are learnable; whether the attention is computed per time step or across time; and provide a diagram or pseudocode for the channel-wise cross-attention mechanism.
+
+3. **Add a simpler regularization baseline to the interaction ablation.** Compare the geometric formulation (hard projection, relaxed hyperplane) against an L2 norm constraint on the action feature or a learned MLP that predicts context-agnostic components. This would determine whether the specific geometric operation matters or whether any regularizer suffices.
+
+4. **Provide a concrete measurement or visualization of "preserving unique information."** Compute the pairwise similarity (or mutual information proxy) between input modalities and the learned action features for the proposed method vs. contrastive baselines, or show a qualitative example where two action sequences differing only in force magnitude produce distinguishable videos with the proposed method but nearly identical videos with a contrastive baseline.
 
 ## Score and Decision
 
-This paper introduces a well-motivated problem (multisensory-conditioned generative simulation) and a carefully designed method with reasonable ablations. The core empirical demonstration — that conditioning on multiple interoceptive signals improves video prediction — is convincing. However, the central representational claim (preserving unique modality information) lacks direct validation, falling back exclusively on downstream task performance. This and the untraceable headline percentages are addressable weaknesses that do not invalidate the contribution but do prevent acceptance at a top venue without revision. The paper is solid but not yet tight enough on its key evidence.
+The paper tackles a worthwhile problem, proposes a sensible and well-architected method, and provides extensive empirical evaluation. The main contributions — introducing multisensory interoceptive signals to generative simulation, and designing a feature extraction paradigm suited for this task — are novel and practically relevant. The weaknesses are real but addressable: the missing dataset statistics and error bars are the most serious issue (preventing full assessment of the claimed improvements), and Equation (1) needs clarification for reproducibility. The paper does not have fatal flaws, and the core claims are supported by converging evidence across multiple ablations and qualitative results. With the suggested revisions (particularly reporting basic experimental statistics and clarifying the attention mechanism), the paper would make a solid contribution.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL DECISION: <orange>Accept</orange>

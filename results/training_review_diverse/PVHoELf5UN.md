@@ -1,91 +1,73 @@
-Now I have all the information needed. Let me construct the final consolidated review.
+Now I have all the evidence needed. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes an unsupervised (zero-reference) framework for joint denoising and low-light enhancement. The key idea is to generate paired sub-images from a single low-light input via neighboring-pixel masking (for different noise realizations) and gamma correction (for different illumination levels), then enforce consistency between their reflectance maps under a Retinex decomposition. DCT-based frequency-domain priors and a cross-attention mechanism are used to separate compounding degradations. The method achieves strong quantitative results on LOLv1, LOLv2, SICE, and SIDD benchmarks against state-of-the-art unsupervised methods.
-
----
+This paper proposes a zero-reference, self-supervised framework for joint denoising and low-light enhancement. The method generates paired sub-images from a single low-light input via (1) neighboring pixel masking (sub-sampling 2×2 patches to produce two 1/4-resolution images with shared reflectance but different noise realizations) and (2) gamma correction applied to one sub-image to create an illumination difference while keeping the reflectance approximately consistent. It further introduces a DCT-based frequency-domain decomposition module (FIcoder) to extract illumination and multi-band frequency priors, which guide a transformer-based reflectance extraction network (REFnet) via cross-attention. The framework is trained end-to-end with a retinex decomposition loss, a self-supervised enhancement loss, and a regularization term. Experiments on LOLv1, LOLv2, SICE, and SIDD show that the method achieves state-of-the-art performance among zero-reference and unpaired approaches across multiple metrics.
 
 ## Strengths
 
-- **DCT-based multi-frequency prior encoding in sRGB space.** The paper explicitly decomposes images into five physically interpretable priors (illumination, low-frequency chromaticity/semantics, high-frequency edges/noise) using channel-wise 2D DCT with frequency masks (Section 3.3, Figure 4). This separates compounding degradations rather than handling them sequentially. The ablation in Table 3 confirms that removing any of these priors degrades performance (PSNR drops ~0.6 dB without the illumination prior), providing clear evidence for the design choice.
+1. **Physically grounded self-supervised training-pair generation.** The derivation of paired sub-images with controlled differences in noise (via pixel masking) and illumination (via gamma correction) from a single low-light image (Sec. 3.2, Eqs. 5–8) is principled and novel. This enables zero-reference joint denoising and enhancement with a clear theoretical basis, supporting the paper's main claim of a self-supervised framework.
 
-- **State-of-the-art quantitative results on multiple benchmarks.** The method achieves the best or runner-up scores on PSNR, SSIM, and LPIPS for LOLv1, LOLv2, and SICE (Table 1), and on BRISQUE/CLIPIQA for SIDD (Table 2), outperforming all compared unsupervised baselines (Zero-DCE, SCI, RUAS, EnlightenGAN, NeRCo, PairLIE, etc.). Qualitative comparisons (Figures 5–7) consistently show superior denoising, color fidelity, and illumination handling.
+2. **DCT-based frequency-domain degradation decomposition with quantitative validation.** The use of DCT masks to decompose the input into four frequency bands plus an illumination prior, integrated via a learned encoder (FIcoder) to guide reflectance extraction (Sec. 3.3, Fig. 4), is well-motivated. The ablation study (Tab. 3) confirms each prior contributes meaningfully: removing all priors drops ~0.9 dB PSNR, adding illumination prior recovers ~0.6 dB, and full priors give the best results.
 
-- **Systematic ablation studies.** The paper provides thorough ablations for the denoising design (Table 4, Figure 8 — masking mechanism, regularization term), hybrid priors (Table 3 — illumination, high-pass, low-pass components), LCnet adaptivity (Figure 8), and gamma factor selection (Figure 9). Each ablation clearly demonstrates the necessity of the proposed component.
+3. **State-of-the-art performance across real-world benchmarks.** The method achieves highest PSNR/SSIM/LPIPS on LOLv1 and LOLv2 (Tab. 1), and best BRISQUE/CLIPIQA on SIDD (Tab. 2) among compared zero-reference and unpaired methods. Qualitative results (Figs. 5–7) show clear improvements in denoising, color fidelity, and illumination handling over methods like EnlightenGAN, RUAS, and Zero-DCE.
 
-- **Interpretable illumination correction via LCnet.** Instead of a fixed reference-based adjustment, LCnet learns a one-dimensional scaling factor from illumination features to adaptively correct the illumination map (Section 3.2, Figure 8). The ablation shows this avoids local overexposure that plagues methods using fixed strategies (e.g., PairLIE-like reference adjustment).
-
----
+4. **Comprehensive ablation studies on key design choices.** Ablations on denoising design (neighborhood masking + regularization, Tab. 4), hybrid priors (Tab. 3), and gamma factor (Fig. 9) provide systematic evidence that each component contributes to performance. The ablation on the gamma enhancement factor (Fig. 9, right) explicitly explores the trade-off between illumination difference and the validity of the Taylor approximation.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The theoretical derivation for the self-supervised signal uses an approximation that does not hold for the actual training parameters.** The derivation (Section 3.2) relies on the Taylor expansion approximation \(R^{\lambda-1} \approx 1\), stated to require \(\lambda\) close to 1. However, the gamma factors are sampled from \(\lambda = 1/\sigma\) with \(\sigma \in (1.3, 1.7)\), giving \(\lambda \in (0.59, 0.77)\) — substantially less than 1. While the paper later acknowledges this in the ablation (Section 4.3: "the enhancement does not conform to the assumption \(R_{1}^{\lambda-1}=1\) during framework inference"), this admission sits in the ablation section rather than qualifying the main theoretical narrative. The paper claims the framework is "physically sound" and "interpretable" (contributions, abstract), yet a central step in the derivation uses an invalidated approximation. This is a significant overclaim. **Why it matters:** The stated theoretical justification does not match the implementation. The method may work well empirically, but the paper should either (a) constrain \(\lambda\) to values where the approximation is valid (e.g., 0.9–1.1), (b) provide an alternative derivation that does not require this step, or (c) reframe the contribution as an empirically motivated framework rather than a physically grounded one.
+1. **The core assumption that sub-image reflectance maps can be treated as equal is unexamined for the cases where it is most likely to fail.** The method forces \(\|R_1 - R_2\|_2^2\) via \(\mathcal{L}_R\) (Eq. 13), based on the claim that \(R_1\) and \(R_2\) "share the same ground truth reflectance" (line 122). However, adjacent pixels in a 2×2 patch can have genuinely different true reflectance at edges, texture boundaries, and fine details. Minimizing L2 distance between reflectance maps that are *not* equal in the ground truth could force the network to produce a smoothed average, losing high-frequency detail. The paper acknowledges that \(R_1\) and \(R_2\) are "highly similar in pixel values" (line 103) and includes a regularization term \(\mathcal{L}_{reg}\) (Eq. 15) that checks consistency at the original scale. But neither a quantitative justification of "how similar" adjacent-pixel reflectance truly is, nor a synthetic-data validation showing that the constraint does not erase legitimate detail, is provided. The ablation (Tab. 4) shows that removing masking hurts performance, but this does not validate the equality assumption — it only shows the paired structure helps overall. This is the central training signal of the method, and while the empirical results are strong, the assumption deserves direct validation (e.g., on synthetic data with known ground-truth reflectance).
 
 ### Minor
 
-- **The SIDD evaluation does not include full-reference metrics despite ground truth being available.** The paper reports only no-reference metrics (BRISQUE, CLIPIQA) on SIDD (Table 2), a dataset with clean ground-truth images. While direct PSNR/SSIM against the original clean images is problematic for a joint enhancement+denoising method (because illumination enhancement would shift brightness), the absence of any quantitative denoising-specific evaluation weakens the claim of "superior denoising." A controlled experiment (e.g., evaluating denoising on patches with comparable illumination, or using an aligned protocol) would substantially strengthen the evidence. This gap is partially mitigated by the LOL results (which use full-reference metrics), but SIDD is the primary dataset for realistic noise.
+2. **Gap between the Taylor approximation and the actual gamma range used.** The derivation (Eqs. 8–10) relies on \(R^{\lambda-1} \approx 1\) when \(\lambda\) is "close to 1." However, the method samples \(\sigma \in (1.3, 1.7)\), giving \(\lambda = 1/\sigma \in (0.59, 0.77)\), which is not close to 1. For a typical reflectance \(R=0.5\), the multiplier \(R^{\lambda-1}\) can be 1.23–1.32 — a 23–32% error in the effective noise magnitude. The paper's own ablation (Fig. 9, right) and discussion (lines 259–260) acknowledge that higher \(\sigma\) (lower \(\lambda\)) "does not conform to the assumption," and the chosen range reflects an empirical sweet spot rather than a regime where the theory is exact. This does not invalidate the method, but the theoretical derivation is presented as tighter than it actually is; a more careful treatment (e.g., not absorbing \(R^{\lambda-1}\) into the noise) would improve rigor.
 
-- **Missing key hyperparameters for reproducibility.** The DCT bandwidth threshold \(t\) (Section 3.3) is described only as "manually set" with no value given. All loss weighting factors (\(\omega_R, \omega_L, \omega_{con}, \omega_{enh}, \omega_{exp}, \omega_{col}, \omega_{reg}\) in Eqs. 14, 16–18) are listed symbolically but never assigned numerical values. These details are essential for reproducing the method, especially given the many competing loss terms.
+3. **SIDD evaluation uses no-reference metrics only and does not specifically test low-light enhancement.** The paper reports BRISQUE and CLIPIQA on SIDD and claims this demonstrates "enhancement capability in challenging low-light scenes" (line 228). However, SIDD is primarily a denoising benchmark; ground-truth clean images exist but are not used in this evaluation. No-reference perceptual metrics are weakly correlated with enhancement quality. Additionally, the paper tests the method on SIDD but not on a dedicated low-light denoising benchmark. This weakens but does not invalidate the claim of generalization to joint denoising and enhancement.
 
-- **The neighboring-pixel masking assumption about local homogeneity is not examined.** The method assumes that two sub-images generated from 2×2 pixel patches share the same underlying reflectance and illumination (Section 3.2). The paper describes them as "highly similar" but provides no analysis of when this assumption breaks (e.g., at edges, fine textures, or thin structures) or how it affects detail preservation. A quantitative analysis of structural similarity between sub-images or a test on high-texture crops would ground this assumption.
+4. **LCnet is ablated only visually, not quantitatively.** The ablation of the Light Correction Network (LCnet, Fig. 8 left) is shown only as a visual comparison. Given that LCnet is a core architectural component, reporting PSNR/SSIM with and without it on at least one benchmark (e.g., LOLv1) would strengthen the paper.
 
-- **Baseline configuration details are underspecified.** The paper states "all experiments were terminated after 100 training epochs" (Section 4.1) but does not state whether baselines were retrained under identical conditions or if numbers were taken from original papers. For unsupervised methods trained per dataset, convergence behavior across different loss formulations matters, and this detail is needed for a fair comparison.
+5. **The "interpretable" claim is overstated.** The title and introduction emphasize interpretability, but the paper provides no post-hoc analysis of what the network learns, how the degradation representations correspond to physical quantities, or how cross-attention separates degradations. The method is "physically grounded" (using Retinex theory and DCT priors), which is a strength, but this does not constitute interpretability in the standard sense (e.g., prototypical reasoning, concept attribution, or feature visualization). This is a presentation issue rather than a technical flaw.
 
 ### Trivial
 
-- The ablation studies in Tables 3 and 4 report only PSNR; including SSIM and LPIPS would strengthen the evidence for perceptual quality preservation.
-
-- The gamma factor ablation (Figure 9) is informative but only tests LOLv1 PSNR; testing on additional datasets and metrics would confirm the trend.
-
----
+6. **Missing quantitative detail on the REFnet/LUMnet architecture.** The description of "transformer blocks," "gating modules," and "cross-attention" (line 124) is too generic. The paper would benefit from specifying layer counts, head dimensions, and how Q/K/V are assigned in the cross-attention mechanism.
 
 ## Nice-to-Haves
 
-- An ablation of the DCT bandwidth \(t\) to show sensitivity of results to this hyperparameter.
-- A limitations section acknowledging assumptions about local homogeneity and the gamma approximation more prominently.
-
----
+- A synthetic-data experiment (e.g., using clean high-resolution images with known reflectance, sub-sampled with the 2×2 masking strategy) to quantify whether the enforced equality of \(R_1\) and \(R_2\) causes systematic blurring at edges versus uniform regions.
+- A more accurate noise-model derivation that avoids the \(R^{\lambda-1}\approx1\) approximation by keeping the full Taylor expansion or constraining \(\lambda\) to a range where the error is demonstrably negligible.
+- A breakdown of SIDD results on low-light versus normal-light subsets, or replacement with a proper low-light denoising benchmark.
 
 ## Removed Points
 
-- *"The claim that prior methods generally fail to differentiate feature layers is plausible but not specifically supported by citations"* — this is a general observation about framing, not a substantive weakness. The point is adequately illustrated by Figure 1.
-- *"Tables lack entries for several baseline methods (e.g., MIRNet, Restormer in Table 2 have no values)"* — Tables are embedded as images; cannot verify whether entries are missing or a parser artifact. Not a reliable criticism.
-- *"Strength: Physically grounded self-supervised training strategy"* — this strength conflicts with the verified weakness about the Taylor approximation / \(\lambda\) range, so per the meta-review rules the weakness prevails and the strength is removed from the main assessment.
-- *"The regularization term L_reg is described only in text; its exact role and why it aligns gradients across scales is unclear"* — the paper does provide the equation (Eq. 14) and text explaining it. The description is adequate for a methods paper.
+These points were flagged by reviewers but are removed from the main evaluation for the reasons stated:
 
----
+- **"Resemblance to Noise2Noise is not discussed"** – The paper explicitly discusses N2N in Section 2 (lines 79–90) and builds on it. This is not a weakness.
+- **"Does not compare with supervised methods"** – The paper is a zero-reference method; comparing against supervised methods is outside scope. The reviewer's framing implies an unfair expectation.
+- **"Ablation gains on priors are modest"** – 0.6 dB PSNR improvement is meaningful for zero-reference methods on real data. This conflates subjectivity with weakness.
+- **"SIDD has no low-light condition"** – SIDD does contain challenging lighting conditions, including low-light scenes (the paper's Fig. 7 caption calls it a "real-world low-light image from the SIDD dataset"). The concern about SIDD's relevance is retained in Minor weakness #3 but the absolute claim that SIDD has "no low-light condition" is removed as factually incorrect.
 
 ## Novel Insights
 
-The harsh reviewer identifies a genuine tension in the paper: the method works well empirically, but the theoretical narrative overclaims physical interpretability for a step (the Taylor expansion approximation for \(R^{\lambda-1} \approx 1\)) that is used outside its valid regime. This is a recurring pattern in the zero-reference / self-supervised literature — elegant theoretical derivations often rely on approximations that don't hold under the actual training conditions. The paper's own ablation (Figure 9) shows that performance cannot be improved by simply moving \(\lambda\) closer to 1 (where the approximation would be valid), because the images wouldn't have enough illumination diversity. This reveals a genuine trade-off: theoretical correctness and empirical performance pull in opposite directions for this design choice. Acknowledging this trade-off explicitly rather than framing the derivation as physically grounded would strengthen the paper.
-
----
+None beyond the paper's own contributions. The reviews do not surface a genuinely novel observation about the work that the paper itself does not already state or imply.
 
 ## Suggestions
 
-1. **Fix the theoretical narrative.** Either confine the training to \(\lambda\) values where \(R^{\lambda-1} \approx 1\) is reasonable, provide an alternative derivation, or reframe the contribution as empirically motivated. The current framing oversells the physical grounding.
-2. **Provide all hyperparameter values** (\(t\), all \(\omega\) weights) either in the main paper or supplementary. These are essential for reproducibility.
-3. **Add a SIDD experiment with full-reference metrics.** Even an approximate protocol (e.g., evaluating denoising on regions with similar illumination before/after enhancement) would strengthen the denoising claim.
-4. **Analyze the masking assumption.** Measure patch-level similarity between the generated sub-images on held-out data to validate the assumption that they share common reflectance/illumination.
+1. **Validate the reflectance equality assumption directly.** Create a synthetic dataset where the ground-truth reflectance is known (e.g., clean high-resolution images), apply the 2×2 masking, and check whether the learned \(R_1\) and \(R_2\) deviate from the ground truth in structured ways (edges, fine textures). Even a single-figure analysis would substantially strengthen the paper's claim.
 
----
+2. **Acknowledge and quantify the Taylor approximation error.** Either modify the derivation to explicitly keep \(R^{\lambda-1}\) as a multiplicative factor on the noise (removing the approximation), or provide a numerical simulation showing that for the chosen \(\lambda\) range the error is negligible in practice.
+
+3. **Add a quantitative ablation for LCnet.** Report PSNR/SSIM on LOLv1 with and without LCnet, similar to how the other ablations are handled.
+
+4. **Either add an evaluation on a low-light denoising dataset (e.g., a real low-light subset of SIDD) or adjust the claim about SIDD to accurately reflect that it primarily tests denoising performance.**
+
+5. **Tone down or better justify the "interpretable" claim.** If the term is meant to mean "physically grounded" or "principled," state this explicitly. If the authors intend a stronger notion of interpretability, include a post-hoc analysis (e.g., attention visualization, probe of the degradation representation).
 
 ## Score and Decision
 
-**Originality:** Good. The combination of neighboring-pixel masking with gamma adjustment for zero-reference joint denoising and enhancement, plus DCT-based multi-frequency priors, is novel.  
-**Importance:** Good. Real-world low-light joint enhancement+denoising is practically important.  
-**Claims supported:** Partially. Empirical claims are well-supported; the "physically grounded" claim is overstated given the approximation issue.  
-**Soundness of experiments:** Good overall. Multiple datasets, thorough ablations, but some missing hyperparameters and the SIDD evaluation gap.  
-**Clarity:** Adequate. The method is described clearly, but some details (masking spatial arrangement, hyperparameter values) are underspecified.  
-**Value to community:** Positive. Provides a practical unsupervised framework and useful design insights (frequency-domain degradation separation, LCnet).
+The paper presents a genuinely novel self-supervised training strategy with strong empirical results across four benchmarks. The main concerns are (a) the unexamined core assumption about reflectance equality and (b) a gap between the theoretical derivation and the actual parameter regime. Neither is fatal — the empirical results are consistent and the method clearly outperforms comparable zero-reference approaches — but both warrant direct validation before the theoretical claims can be fully accepted. The paper makes a substantial empirical contribution that would benefit from tightening the theoretical narrative.
 
-The paper makes a real contribution and the weaknesses are addressable. The theoretical overclaim is the most significant issue but does not invalidate the empirical contribution.
-
-**MY FINAL SCORE: <pineapple>6.5</pineapple>**
-**MY FINAL DECISION: <orange>Accept</orange>**
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

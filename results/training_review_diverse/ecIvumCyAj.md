@@ -1,18 +1,18 @@
-Now I have a thorough understanding of the paper and the reviews. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes MoE-F, a stochastic filtering-based online gating mechanism for combining pre-trained LLMs in time-series prediction tasks. The method frames expert selection as a finite-state HMM, derives Wonham-Shiryaev filtering equations (Theorem 1) for online expert weight estimation, and includes a follow-the-leader Q-matrix update. Experiments on a financial market movement (FMM) classification task with 7 LLM experts (Llama-2/3, Mixtral, DBRX, GPT-4o) show a 17% absolute F1 improvement (0.52 vs. 0.35) over the best individual expert.
+The paper proposes MoE-F, an algorithm that uses Wonham-Shiryaev stochastic filtering to dynamically combine LLM expert predictions for time-series tasks. The key idea is to frame the online expert selection problem as a continuous-time HMM and derive filtering equations (Theorem 1) that optimally update mixture weights based on each expert's running loss. The algorithm operates in three steps: (1) parallel filtering to obtain expert-specific weight estimates, (2) softmin aggregation of filter outputs, and (3) a heuristic update of the HMM transition rate matrix Q. Empirical results on a Financial Market Movement (FMM) task show a 48.5% relative F1 improvement over the best individual expert (0.52 vs. 0.35).
 
 ## Strengths
 
-1. **Principled connection between stochastic filtering and online MoE gating.** The paper grounds expert weight estimation in the Wonham-Shiryaev filter, which provides closed-form SDEs for the posterior distribution of the masking process. This is a well-motivated framework for online belief updating that avoids Monte Carlo simulation, and it is a novel application of filtering theory to the MoE-LLM setting (lines 194–201, Section 3, and related work in Section 6).
+- **Novel application of stochastic filtering to online LLM gating**: The paper's core idea — using the Wonham-Shiryaev filter to adaptively combine LLM predictions in an online time-series setting — is genuinely novel and departs from static learned-routing MoE approaches. The three-step architecture (parallel filters → softmin aggregation → Q-matrix update) is thoughtfully structured.
 
-2. **Plug-and-play deployment with arbitrary pre-trained LLMs.** MoE-F requires no modification of expert models — it wraps existing black-box LLMs as a harness (Section 4, Algorithm 1). This contrasts with learned routing approaches (Switch Transformers, Mixtral) that require joint training, and enables adding/removing experts on the fly (line 707).
+- **Large empirical gains on a real-world task**: On the NIFTY FMM dataset with 317 test days, MoE-F achieves F1=0.52 against the best individual expert's 0.35 (Table 1). The ablation experiments (Tables 2, 3) confirm consistent improvements and demonstrate that the filter dynamically re-weights experts, with per-class decomposition showing the method mitigates degenerate experts (e.g., the "+nifty" adapter that always predicts Neutral).
 
-3. **Dynamic regime adaptation demonstrated qualitatively.** The heatmap (Fig. 4) and trajectory plots (Fig. 3) illustrate how expert weights shift across different market regimes, providing visual evidence that the filtering-based gating adapts to non-stationary environments — something static MoEs cannot do.
+- **Plug-and-play design**: The algorithm requires no expert retraining and can be applied as a "harness" over any set of pre-trained LLMs, with the ability to add/remove experts online (Section 7). This is a genuine practical advantage over learned routing approaches.
 
-4. **Ablations across model families and fine-tuned variants.** Tables 2 and 3 evaluate MoE-F with both base and LoRA-fine-tuned Llama-2/3 models, including a per-class label decomposition (Table 4). The consistent superiority of MoE-F over individual experts across these settings strengthens the empirical case, even if the comparison set is limited.
+- **Auxiliary theoretical guarantees for Q-matrix update**: Propositions 1 and 2 provide formal guarantees about the perturbation used in Step 3 (invertibility, row-stochasticity, KL-bound stability). While narrow in scope, these are non-trivial and correctly proved.
 
 ## Weaknesses
 
@@ -21,55 +21,57 @@ None.
 
 ### Major
 
-1. **Missing ensemble baselines undermine the core attribution claim.** The experiments compare MoE-F only to individual LLM experts. There is no comparison to simple averaging, weighted averaging based on recent loss, exponentially smoothed inverse loss, or any other standard online ensemble method. Without these, the 17% absolute F1 improvement cannot be attributed to the filtering mechanism rather than to the mere fact of ensembling. The paper's own ablation (Table 2) shows MoE-F with only Llama experts achieves 0.43 F1, while Table 1 with more and better experts achieves 0.52 F1 — this suggests expert quality and diversity matter substantially, and simpler aggregation schemes might do as well. This is the most significant gap in the paper.
+- **Binary cross-entropy loss used for a 3-class classification problem.** The theoretical development (Theorem 1 and Equation 4) is built on the binary cross-entropy loss: ℓ(y,ŷ) = y log ŷ + (1-y) log(1-ŷ). However, the FMM task has three classes (Fall, Neutral, Rise), as shown in the test statistics (Table 1) and the per-class breakdown (Table 3). The paper never explains how a binary loss is applied to a 3-class problem, nor how the filtering equations (derived specifically for the binary CE case) remain optimal when applied to a non-binary setup. If a one-vs-rest binarization was used, it should be stated; if a categorical cross-entropy was used instead, the core theoretical guarantee no longer applies to the implementation. This gap makes the connection between theory and experiment unverifiable.
 
-2. **Theoretical-empirical gap: continuous-time SDE framework not justified for discrete daily classification.** The paper builds an elaborate continuous-time apparatus: a hidden Markov chain with a Q-matrix, noisy observations via an SDE driven by Brownian motion, and the Wonham-Shiryaev filter. Yet the experiments are a 3-class classification task with daily discrete labels. The paper does not verify that its modeling assumptions (Brownian noise, SDE drift structure, continuous path xₜ) hold in the data, nor does it argue why this sophisticated machinery is needed. The discretization in Algorithm 1 is presented as a standard Euler–Maruyama scheme, but the paper never shows that the discretized version inherits the continuous-time optimality guarantees of Theorem 1. Assumption verification is absent.
-
-3. **Overclaimed and mischaracterized contributions.** 
-   - Theorem 1 is an application of the standard Wonham–Shiryaev filter to a specific SDE model. The "optimality guarantee" is that the filter gives the conditional expectation — this is a definitional property of the filter, not a new result. The paper calls it "closed-form," which is defensible within filtering conventions, but the framing as a novel theoretical contribution is overstated.
-   - The paper claims (line 68) that the Q update "optimizes a lower bound for the expected performance" and attributes this to Theorem 1, yet neither Theorem 1 nor any other part of the paper presents this lower bound derivation. This claim is unsupported.
-   - The conclusion states MoE-F provides "the first viable online mixture of expert frameworks used in quantitative finance" — this is an overstatement given the long history of online ensemble methods (e.g., Hedge, online Bayesian model averaging) in financial applications.
+- **Theorem 1 is asserted without derivation or verification of the observation model structure.** The theorem claims closed-form optimal filtering equations for the hidden Markov process w_t given observations ℓ_t^(n). The Wonham-Shiryaev filter requires the observation process to satisfy a specific diffusion structure (dZ_t = h(w_t) dt + dV_t with independent Wiener noise). The paper provides no derivation showing that ℓ_t^(n) (which depends on Y_t, which itself shares the same Brownian motion W_t driving the signal) satisfies this required structure. The theorem is simply stated, and the filtering equations are presented as given. For a paper whose central theoretical contribution is this optimality guarantee, the lack of justification undermines trust in the core claim. The algorithm's filtering step may still perform well empirically, but the "optimality" label is unsubstantiated.
 
 ### Minor
 
-1. **No measures of uncertainty reported.** Table 1 reports "mean of 3 (random seed) runs" but shows only point estimates with no standard deviations, confidence intervals, or significance tests. With only 3 runs on a test set of 317 imbalanced samples (73/143/101), the reported F1 of 0.52 could be within random variation. Some standard error or a paired test against the best individual expert is needed.
+- **Temporal indexing ambiguity between theory and experiments.** The continuous-time model (Eq. 1) indexes predictions and targets concurrently: the drift at time t uses F(x_{[0:t]}) and contributes to Y_t. The experiment description (line 569) states that experts predict "the market movement the following day (i.e., t+1)" from data up to day t. The paper does not clearly reconcile these two temporal conventions. The reviewer's concern about "look-ahead bias" is overstated for the cross-entropy case (the B function in Algorithm 1 line 6 does not actually depend on Y_t in the cross-entropy case used in experiments — see Eq. 7 definition), and the filter does not appear to use future information improperly. However, the lack of a clean mapping from the continuous-time formalism to the discrete daily data makes it unnecessarily difficult to verify the correctness of the implementation, and some of the notational choices (e.g., writing ℓ(Y_t, f^(n)(x_{[0:t]})) where the experimental prediction is for t+1) are confusing.
 
-2. **Key hyperparameter values not specified.** The paper does not report the values used for λ (softmin temperature), α (perturbation weight in Q update), or the discretization step size Δ (implicitly 1 day, but this should be stated explicitly). These are necessary for reproducibility.
+- **Missing comparison to simple online ensemble baselines.** The experiments compare against individual experts but not against obvious lightweight alternatives such as uniform averaging of expert predictions, exponentially-weighted (Hedge) aggregation with a fixed learning rate, or follow-the-leader. Since the softmin aggregation in Step 2 already provides a simple ensemble mechanism, ablating the contribution of the filtering step (Step 1) is necessary to isolate whether the improvement comes from the stochastic filter or from the aggregation. The large reported gains (17% absolute F1) are less convincing without this control.
 
-3. **Step 3 (Q update) is heuristic with no link to filtering theory.** The follow-the-leader update using softmin weights → ReLU(log(P)) is presented as a "closed-form" update, but it is a heuristic. Propositions 2 and 3 only guarantee that the perturbation makes the matrix invertible and bound the KL divergence; they do not establish that this Q update improves the filter's predictive accuracy or converges to the true dynamics. An ablation showing the effect of this component (e.g., fixed Q vs. learned Q) is missing.
-
-4. **Algorithm presentation is cluttered.** The helper functions A and B (Eqs. 3 and 5) contain conditional compilation macros (`\ifthenelse{\boolean{is_loss_L2}}`) that clutter the presentation. Only the cross-entropy branch is used in experiments. The algorithm box (Algorithm 1) is embedded in a wrapfigure, making it difficult to read, and some notation in the pseudocode (e.g., P, P^{(n)}) is underspecified.
+- **No uncertainty quantification on reported results.** All numbers are given as point estimates (means over 3 seeds for open-weight models, single run for GPT-4o). No standard deviations, confidence intervals, or significance tests are reported. Given the small test set (317 days) and the inherent variance in LLM outputs, it is impossible to assess whether the 0.52 F1 is statistically distinguishable from, say, 0.40.
 
 ### Trivial
-- The helper functions A and B contain LaTeX conditional macros suggesting draft-level preparation. The paper would benefit from a clean presentation with only the relevant loss branch.
-- The window size H for the autoregressive task is never specified.
-- "Wohman-Shiryaev" appears to be a misspelling in the abstract (should be "Wonham-Shiryaev").
+- The perturbation equation (Eq. 15) has a self-referential definition: P_t^α ≜ (1-α)P_t^α + α I_N. This appears to be a typo — it should presumably be P_t^α ≜ (1-α)P_t + α I_N.
+- The score equation (Eq. 11) uses s_m instead of s_n, an apparent notation slip.
 
 ## Nice-to-Haves
-- An ablation comparing MoE-F with fixed Q vs. learned Q would help isolate the contribution of Step 3.
-- A computational cost analysis (filtering overhead relative to LLM inference) would aid practical deployment assessment.
-- If the continuous-time theory is retained, a brief argument for why the SDE assumptions are reasonable for financial daily data (or a relaxation to a discrete-time filtering derivation) would bridge the gap.
+- A sketch of the derivation of Theorem 1 in an appendix, verifying that ℓ_t^(n) satisfies the required Wonham-Shiryaev observation structure.
+- Comparison against a simple online learning baseline (e.g., Hedge with fixed learning rate) to ablate the filter's contribution.
+- Standard deviations or bootstrap confidence intervals for all reported metrics.
+- Clarification of how the binary CE loss is applied to the 3-class FMM task, or a binarized version of the task.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-- **"The 'Goldman model' is never fully introduced"**: The term "Goldman model" does not appear anywhere in the paper. This is a reviewer hallucination.
-- **"Data and reproducibility concerns — dataset not described as publicly available"**: The NIFTY dataset is properly cited (saqur2024nifty). Per policy, questioning the availability of a cited resource is treated as a reviewer knowledge gap, not a paper error.
-- **"Theorem 1 is stated without proof or reference to the Wonham-Shiryaev filter"**: The paper explicitly references the Wonham-Shiryaev filter in the abstract (line 4) and related work (line 699) with citations (wonham1964some, Sirjaev1965Filtering). The claim is factually incorrect.
-- **"Pure formatting/style nitpicks" about algorithm box readability**: The wrapfigure embedding is a formatting choice, not a substantive flaw.
+
+- **Look-ahead bias through B_{t-1}^{(n)}(Y_t) (from Harsh Critic Point 1, partially)**: The critic claims that using Y_t in B_{t-1}^{(n)}(Y_t) introduces future information. However, for the cross-entropy loss case used in the experiments, B_t^{(n)}(y_t) does not actually depend on y_t at all — the definition (Eq. 7, else branch) is simply −log(f/(1−f)), a function of the expert prediction only. The critic did not notice this conditional compilation in the paper's helper function definition. The temporal indexing ambiguity is real and kept above; the specific "look-ahead" accusation is factually incorrect for the cross-entropy setting.
+
+- **"Double use of Y_t" claim (from Harsh Critic Other Observations)**: The critic claims that Y_t is used "both inside the filter update" and in scoring. For the cross-entropy case, the filter update does not actually use Y_t (B does not depend on Y_t, and the ΔL uses losses from t-1 and t-2). The scoring uses Y_t after it has been observed, which is standard sequential prediction. This point is factually incorrect.
+
+- **Criticism that the paper does not include an appendix/proof of Theorem 1 in the appendix**: The parser strips appendices from all papers. A derivation sketch would be valuable, but the absence of an appendix section is an artifact of the review format.
+
+- **Claim that the paper should cover additional domains/tasks**: The paper is evaluated on a specific financial task with ablations. Requesting broader benchmarks is scope creep.
+
+- **Generic strengths from Strength Finder**: "Plug-and-play design with no expert retraining required" is kept above as a genuine strength. However, the Strength Finder's claim that "Propositions 4 and 5 (Section 4.1-4.2)" guarantee stability is referencing proposition numbers that don't exist in the paper (the actual propositions are labeled 1 and 2). The strength about theoretical optimality is weakened by the missing derivation, so it is kept only in qualified form.
+
+- **Criticism about missing related works**: This is removed per instructions as I cannot verify external coverage.
 
 ## Novel Insights
-Beyond the paper's own contributions, the reviews surface an interesting tension: the paper applies sophisticated continuous-time stochastic filtering to what is empirically a discrete classification problem, but this very mismatch raises the possibility that the core insight — that filtering-based belief updating could outperform static gating — might be testable in a simpler discrete-time framework that would be more accessible and easier to baseline against. The reviewers collectively suggest that the paper may have a real algorithmic contribution buried under an over-engineered theoretical presentation.
+
+Beyond the paper's own contributions, a genuinely novel observation emerging from this work is the demonstration that stochastic filtering theory — normally confined to signal processing and control — can be productively applied to the problem of dynamically routing among LLM experts without retraining. The per-class analysis (Table 3) offers a subtle insight: the filter's advantage comes less from finding a single "best" expert and more from suppressing degenerate experts (those that collapse to predicting only the majority class) while preserving diversity across market regimes. This suggests that the filter acts as a form of online regularization against expert collapse, which is a different benefit than what static routing or standard ensemble methods typically provide.
 
 ## Suggestions
-1. **Add at least 2–3 ensemble baselines** (simple average, inverse-loss-weighted average, softmin over recent loss) to isolate the effect of the filtering mechanism. This is the single most important addition.
-2. **Report standard deviations or confidence intervals** for all metrics, and consider a paired significance test (e.g., McNemar's) between MoE-F and the best individual expert.
-3. **Either ground the theory in a discrete-time filtering recursion appropriate for the classification setting, or provide a rigorous justification** for the continuous-time assumptions (or at minimum acknowledge the gap in the limitations section).
-4. **Present clean helper functions** with only the cross-entropy loss branch, and specify all hyperparameter values (λ, α, Δ).
-5. **Ablate the Q update** by comparing MoE-F with the learned Q against a fixed identity Q or constant Q, to show this component's contribution.
-6. **Tone down overclaims** — Theorem 1 is a straightforward application of Wonham–Shiryaev to a specific model; the "lower bound" claim needs explicit support or removal; the "first viable" claim in finance should be qualified.
+
+1. **Reconcile the loss function with the 3-class task**: Either binarize the FMM task (e.g., Rise vs. Fall, dropping Neutral) so the binary CE theory applies directly, or extend the theoretical development to handle multi-class cross-entropy and explain how the filtering equations change.
+2. **Add a derivation sketch for Theorem 1** showing that ℓ_t^(n) satisfies the Wonham-Shiryaev observation structure, or at minimum cite the specific result from the filtering literature that guarantees the SDE form under the paper's assumptions.
+3. **Add simple ensemble baselines**: Uniform averaging, exponentially-weighted aggregation (Hedge), and an ablation running Step 2 alone (softmin on raw expert predictions without the filter) to isolate the filter's contribution.
+4. **Report error bars** (standard deviations or confidence intervals) for all metrics.
+5. **Clarify the temporal indexing**: Provide a clear table showing how continuous-time quantities (t, Y_t, f^(n)(x_{[0:t]}), ℓ_t) map to discrete-time quantities in the experiment, resolving whether the prediction at step t targets Y_t or Y_{t+1}.
 
 ## Score and Decision
-The paper proposes an interesting direction — stochastic filtering for online LLM gating — and provides a clean theoretical derivation of the filtering equations. However, the empirical evaluation has a critical gap: the absence of any ensemble baselines means the claimed 17% F1 improvement cannot be attributed to the filtering mechanism. Combined with the theoretical-empirical mismatch and unsupported lower-bound claim, the paper in its current form does not convincingly demonstrate that the elaborate filtering structure is beneficial over simpler methods.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+**Summary**: The paper proposes a genuinely novel approach to online LLM ensembling using stochastic filtering, and the empirical results on a real financial task are striking. However, the paper has two major, unresolved weaknesses: (1) the theoretical optimality claim (Theorem 1) is presented without derivation, and (2) the loss function used in the theory (binary CE) does not match the experimental setup (3-class classification) without explanation. These gaps sever the link between the paper's theoretical apparatus and its empirical evaluation. The missing baselines and lack of error bars are secondary but further weaken the empirical contribution. The paper would need substantial revisions to be acceptably rigorous.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

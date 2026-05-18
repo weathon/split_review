@@ -1,24 +1,22 @@
-Now I have a thorough understanding of the paper and all the reviewer claims. Let me produce the consolidated final review.
+Now I have thoroughly read and verified the paper content against all reviewer claims. Let me compose the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper introduces **ReDial**, a human-annotated parallel benchmark of ~1,200 Standard English–AAVE prompt pairs spanning algorithm, math, logic, and comprehensive reasoning tasks. Using this benchmark, the authors evaluate 10 LLMs and find that virtually all models suffer statistically significant performance drops on AAVE prompts — even when the prompts are semantically identical to their Standard English counterparts. The paper further investigates why this gap exists (data skewness only partly explains it; perplexity-matched typo noise hurts less than AAVE for large models) and whether simple fixes like standardization prompting close it (they do not, and they increase cost). The primary contribution is the dataset and the robustly supported finding that LLMs are unfair and brittle to dialect in reasoning tasks.
+This paper introduces **ReDial**, the first human-annotated parallel benchmark of 1,216 Standard English–AAVE prompt pairs spanning four canonical reasoning tasks (algorithm, math, logic, and comprehensive reasoning). The authors hire AAVE speakers — including those with CS backgrounds for code tasks — to rewrite existing benchmark instances (HumanEval, MBPP, GSM8K, SVAMP, LogicBench, Folio, AsyncHow) while preserving semantics and ground-truth labels. Evaluating 13 LLMs (GPT-4o/4/3.5-turbo, LLaMA-3/3.1, Mistral/Mixtral, Phi-3), they demonstrate statistically significant performance drops on AAVE queries for nearly every model tested, analyze why simple explanations like data skewness do not fully account for the gap, and show that instructing models to rephrase into Standard English before answering does not close the gap while increasing cost.
 
 ## Strengths
 
-1. **First end-to-end human-annotated AAVE–Standard English reasoning benchmark.** ReDial fills a concrete gap: prior dialect benchmarks relied on rule-based transformations or LLM translation (which may embed the very biases under study). The authors hire AAVE speakers (including CS experts for algorithm tasks) and conduct multi-round cross-validation for both naturalness and correctness (Section 2, Figure 2). This yields a more authentic and reliable testbed than prior work.
+- **First human-annotated parallel dialect benchmark for reasoning tasks.** The paper fills a clear gap: prior dialect benchmarks (e.g., Multi-QS) do not cover reasoning, and prior AAVE benchmarks rely on rule-based transformations or LLM translation — both of which introduce biases. ReDial is the first dataset of its kind with end-to-end human annotation (§1, §2).
 
-2. **Comprehensive, well-controlled evidence of LLM unfairness to AAVE in reasoning.** The paper tests 10 LLMs (GPT-4o, GPT-4, GPT-3.5-turbo, LLaMA-3/3.1, Mistral/Mixtral, Phi-3) across two prompting settings (zero-shot and CoT). All models except LLaMA-3-8B show statistically significant drops (McNemar's test with Holm-Bonferroni correction, Table 1). GPT-4o drops 0.116 in zero-shot; most models fall below 0.6 pass rate on AAVE even with CoT. This core finding is robustly supported.
+- **Statistically significant performance drops across nearly all tested LLMs.** Table 1 reports rigorous McNemar's tests with Holm–Bonferroni correction. GPT-4o drops from 0.832 to 0.716 pass rate (Δ=0.116) in zero-shot; similar or larger drops appear across GPT-4, GPT-3.5-turbo, LLaMA-3.1-70B, Mixtral, Mistral, and Phi-3 models. Only LLaMA-3-8B-Instruct shows a non-significant drop (§3.2, Table 1).
 
-3. **The perplexity-matching experiment shows data skewness is not the full story.** Section 5.1 adds character-level typos to Standard English until perplexity exceeds that of AAVE, then compares performance. For LLaMA-3.1-70B and Phi-3-Medium, performance on AAVE is worse than on higher-perplexity noisy text — meaning the model is *more familiar* with AAVE (lower perplexity) yet performs worse on it. This suggests that naive data augmentation alone may not close the gap, an insight not shown in prior robustness work.
+- **Evidence that AAVE brittleness is not explained by data skewness alone.** Section 4.1 compares AAVE against character-level typos at matched and higher perplexity levels. LLaMA-3.1-70B-Instruct and Phi-3-Medium-128K-Instruct perform *worse* on human-written AAVE than on more-perplexing typo-ridden English. This shows the problem exceeds a simple "unfamiliarity" account — a non-trivial finding that distinguishes dialectal variation from generic noise.
 
-4. **Standardization prompting fails to close the gap and increases cost.** Section 5.2 shows that instructing models to rephrase AAVE into Standard English before answering improves performance but still leaves a gap relative to vanilla Standard English performance, while increasing token counts (Figure 5). This demonstrates that the problem is not trivially fixable by prompting and that dialect users may pay more (in tokens) for inferior service.
+- **Systematic ablation of a natural mitigation strategy.** Section 4.2 tests whether asking models to "rephrase in Standard English first" closes the gap. Even with standardization, AAVE performance does not reach vanilla Standard English levels, and token costs increase (Figure 3). This demonstrates that simple prompting fixes are insufficient.
 
-5. **Evaluation methodology is sound for the primary claims.** Temperature zero, consistent pass/fail metrics across tasks, and per-model McNemar's tests with multiple-comparison correction (Table 1) make the central finding reliable. The model selection spans proprietary and open-source families, small to large scales, and varied training paradigms.
-
-6. **Qualitative error analysis provides concrete failure modes.** Section 5.3 identifies three patterns (wrong question rephrasing, distraction by irrelevant info, failure to execute all steps) with specific examples from GPT-4o on math, giving insight into *why* the gap persists even after standardization.
+- **Multi-faceted evaluation:** 13 models across 4 reasoning categories, 2 prompting methods (zero-shot, CoT), with statistical testing and qualitative error analysis.
 
 ## Weaknesses
 
@@ -26,57 +24,60 @@ This paper introduces **ReDial**, a human-annotated parallel benchmark of ~1,200
 None.
 
 ### Major
-None. The paper's core contribution — the ReDial dataset and the finding that LLMs show significant performance drops on AAVE reasoning prompts — is robustly supported. The issues below are important to address but do not threaten the paper's central claims.
+None. No single weakness invalidates the core contribution — the dataset and the demonstrated unfairness — nor does any weakness undermine the paper's primary claims beyond repair.
 
 ### Minor
 
-1. **Table 2's statistical testing is underspecified.** The caption reports "pass rates by task averaged across responses from all models" with significance from "McNemar's tests applied to AAVE and Standardized English." It is unclear how McNemar's test — which requires paired binary data from a single model — was applied to data aggregated across models. If model–instance pairs were pooled, this inflates sample size and violates the pairing assumption; if per-model tests were run and aggregated, that should be stated. The per-task claim ("all reasoning tasks are brittle to AAVE") is consistent with Table 1's per-model results, so the overall conclusion stands, but the ambiguity should be clarified. The authors should report per-model per-task breakdowns or clarify the aggregation method.
+- **Limited transparency on annotator verification and inter-annotator agreement.** The paper recruits self-identified AAVE speakers and has them cross-check each other's work, but reports no statistics on the number of annotators, their regional/stylistic diversity, or inter-annotator agreement on naturalness or semantic preservation. The Ethics Statement (§7) explicitly acknowledges not collecting annotator personal information and lacking full control over vendor recruitment. While these choices are ethically defensible (privacy protection, avoiding essentialist definitions of dialect), they leave the representativeness of the AAVE in ReDial unquantified. The core unfairness finding is likely robust to this variation, but it weakens the "high-quality" characterization of the dataset. *This is a real limitation, openly acknowledged by the authors, but they could partially address it by computing agreement metrics on a subset of doubly-annotated items.
 
-2. **Floor effect confounds the scaling argument for LLaMA-3-8B vs. LLaMA-3-70B.** The paper argues "scaling does not make models more robust" by noting that LLaMA-3-8B's delta (0.009, non-significant) is smaller than LLaMA-3-70B's (0.066, significant). However, LLaMA-3-8B's Standard English pass rate (0.489) is near chance — there is little room to drop further, making absolute delta comparisons misleading. The broader scaling claim is also supported by other evidence (Phi-3 models show inconsistent patterns; Mixtral-8x7B drops more than Mistral-7B), so this does not invalidate the argument, but the floor effect should be acknowledged and relative drops reported alongside absolute ones.
+- **The perplexity-matching experiment (typo vs. AAVE comparison) conflates qualitatively different kinds of deviation.** Character-level typos (replace/delete/add characters) introduce token-level noise that an LLM can often recover from via shallow spelling correction, whereas AAVE involves rule-governed morphosyntactic and lexical shifts (copula deletion, habitual "be," etc.) that engage deeper linguistic processing. The finding that AAVE causes more brittleness than higher-perplexity typos is genuinely informative — it *does* show that data skewness alone is not the whole story. However, the paper's claim that this "means that naive data augmentation might not solve the problem" is appropriately hedged with "may not" (line 260), but could be sharpened by directly testing a simple augmentation strategy or by including a more linguistically-motivated control (e.g., synonym substitution, word-order scrambling). The current experiment is suggestive but does not directly test augmentation.
 
-3. **The perplexity-matching experiment supports a nuanced conclusion that the paper mostly gets right, but the "data augmentation might not help" framing could be tempered.** The paper's actual language is hedged ("does not explain the whole picture," "naively... may not diminish"), which is appropriate. However, two subtle gaps remain: (a) perplexity reflects unconditional token probability and may not capture whether the model has learned *systematic* associations with AAVE features (e.g., linking dialect features to informal contexts where reasoning is less reliable); (b) the result for Phi-3-Mini goes in the opposite direction (better on AAVE than on matched-perplexity noise), acknowledged by the authors but not fully discussed. The overall claim is defensible, but a slightly more explicit caveat about what the experiment *cannot* isolate would strengthen the paper.
+- **The "comprehensive reasoning" (AsyncHow) category's compositionality claim is not directly demonstrated.** The paper observes that AsyncHow has the lowest absolute pass rates and the largest relative drop under AAVE, and states that "LLMs face further difficulty when they are asked in a dialect to compose different skills" (§3.2). This is a plausible observation, but the paper does not control for confounds: AsyncHow is harder in Standard English to begin with (0.191 zero-shot), and the AAVE annotations for this specific dataset may introduce more ambiguity due to its complex structure. A per-category annotation validation pass rate table would clarify whether AsyncHow annotations are of comparable quality to other categories. The claim about compositionality interacting with dialect is interesting but remains speculative without a controlled comparison (e.g., compositional vs. non-compositional versions of the same content).
 
-4. **No inter-annotator agreement metric for the AAVE rewrites.** The paper describes cross-validation between annotators (Section 2.2) but does not report a quantitative measure like Cohen's kappa or percentage agreement on naturalness or correctness. While the multi-round validation pipeline is thorough, a formal agreement metric would strengthen confidence in the dataset's consistency.
+- **The "scaling widens the gap" claim lacks a formal statistical test.** The paper compares the LLaMA-3-8B drop (Δ=0.009, not significant) to the LLaMA-3-70B drop (Δ=0.066, significant) and concludes scaling widens the gap. The paper correctly notes the 8B drop is not significant, so the claim that scaling "does not close the gap" is supported, but the claim that scaling "widens" it would require a formal interaction test (model size × dialect). This is a small presentation issue but worth correcting.
 
 ### Trivial
 
-- The typo perturbation experiment (Section 5.1) should clarify whether perturbations were applied to the full prompt (task instructions + query) or just the query portion. The description says "Standardized ReDial," which is the full prompt, but explicit confirmation would help reproducibility.
-- LLaMA-3.1-8B is not tested, which would have made the LLaMA-3 vs. 3.1 scaling comparison cleaner (noted by the critic; the paper acknowledges this indirectly by omission).
+- The paper does not report whether AAVE prompts differ in average token length from their Standard English counterparts. While temperature 0 and generous max-token limits likely make this irrelevant, reporting it would cleanly rule out length effects.
+- Table 4 reports per-category averages, but per-dataset breakdowns within logic (binary LogicBench vs. multi-choice LogicBench vs. Folio) would give a finer-grained picture of where the AAVE gap concentrates.
 
 ## Nice-to-Haves
 
-- **Report relative (percentage) performance drops** alongside absolute deltas, especially for the scaling comparison where baseline performances differ substantially.
-- **Per-model per-task breakdowns** (as a heatmap or supplementary table) would make the per-task analysis more transparent than the current aggregated Table 2.
-- **Cost analysis in dollars** for the standardization experiment (GPT-4o and GPT-4 price per token) would strengthen the fairness implication — dialect users pay more for worse service.
-- A controlled comparison of AAVE+standardization vs. **Standard+standardization** is already implicit in Figure 5; making the explicit comparison in the text would sharpen the finding that standardization benefits Standard English too (suggesting it acts partly like CoT).
-- An ablation separating **lexical vs. syntactic AAVE features** would be interesting but is well outside the paper's scope — this is a natural direction for follow-up work.
+- Reporting chance-adjusted metrics (e.g., Cohen's kappa or normalized accuracy) for logic tasks where binary classification has a 0.5 random baseline would clarify whether the AAVE drop exceeds what random guessing would produce.
+- Providing inter-annotator agreement statistics on a subset of doubly-annotated items would strengthen confidence in ReDial.
+- Including an additional control in the perplexity experiment (e.g., synonym substitution or word-order scrambling) would make the comparison more linguistically grounded.
+- A per-category breakdown of annotation validation pass rates would address the AsyncHow concern directly.
 
 ## Removed Points
 
-These points were flagged for removal; treat them with caution if referenced elsewhere.
+These points are flagged to be removed; treat them with caution.
 
-- **Criticism that the perplexity experiment's conclusion is "too strong":** The paper's actual text uses hedging language throughout ("does not explain the whole picture," "may not," "might be"). The claim is appropriately scoped for what the experiment demonstrates. Moved here because it mischaracterizes the paper's actual strength of claim.
-- **Criticism about missing LLaMA-3.1-8B as a "cleaner comparison":** The paper already tests multiple model families and the missing model does not undermine any conclusion; this is a minor wishlist item.
-- **Criticism that the paper should discuss why standardization improves Standard English:** This is an interesting question but not a weakness — the paper reports the empirical finding, and the effect (standardization prompting acting like additional reasoning steps akin to CoT) is a reasonable speculation that the critic supplies, not something the paper is missing.
-- **Criticism that the paper does not ablate lexical vs. syntactic AAVE features:** Scope creep — the paper does not claim to perform this analysis, and requiring it would constitute a different paper.
-- **Strength Finder's generic phrasing ("this paper addressed an important problem"):** No such generic strengths were present; all strength-finder entries had specific, citable content.
+1. **"The standardization experiment overstates the gap reduction because the prompt also helps Standard English."** — The paper already notes this effect (§4.2: "standardization improves model performance even when the prompt input is already in Standard English"). The reviewer agrees the paper's conclusion that "standardization does not close the gap" is still valid. This is not a weakness.
+
+2. **"Qualitative error patterns may be due to content changes introduced by rewriting, not dialect features."** — The comparison is between AAVE (with standardization) and the *same content* in Standard English. The lexical choices in the AAVE version *are* the dialectal features under study. The argument presupposes an artificial split between "dialect grammar" and "dialect lexis" that would negate the object of study. The examples given (e.g., "crazy silly school series") are natural AAVE lexical choices — they are not annotation artifacts.
+
+3. **"Missing related works" and "missing appendix" complaints** — The parser strips appendices and some references; these exist in the original submission.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews confirm what the paper already establishes: the dataset is valuable, the core empirical finding is solid, and the secondary analyses (perplexity experiment, standardization, scaling) are individually suggestive but collectively reinforce the main conclusion rather than adding orthogonal discoveries.
+None beyond the paper's own contributions. The reviews identify useful clarification points and suggest strengthening existing analyses, but do not surface a genuinely novel observation about the paper's findings that the authors missed.
 
 ## Suggestions
 
-1. **Clarify the statistical testing methodology for Table 2** (per-model tests followed by aggregation, or some other approach). If the current aggregation is invalid, replace with per-model per-task results (e.g., a supplementary heatmap) or drop the significance claim from the aggregated table and report effect sizes descriptively.
-2. **Acknowledge the floor effect** in the LLaMA-3-8B comparison and report relative drops alongside absolute deltas for the scaling discussion.
-3. **Add a brief caveat** in Section 5.1 noting that perplexity captures unconditional familiarity but may miss systematic associations between AAVE features and model behavior (e.g., learned correlations with informal contexts).
-4. **Report inter-annotator agreement** for the dataset validation (or note its absence as a limitation).
+1. **Report inter-annotator agreement or annotation consistency metrics** on a small doubly-annotated subset (even 50–100 items) to quantify the natural variability in AAVE rewriting and give readers a concrete sense of reliability.
+2. **Provide a per-category validation pass rate table** showing how many items from each source dataset passed/failed each stage of the quality pipeline, especially for AsyncHow.
+3. **Add a formal interaction test** (model size × dialect) before claiming scaling "widens" the gap, or hedge to "does not close" as the paper already does for the core claim.
+4. **Tone down the data augmentation speculation** slightly: the evidence shows data skewness does not explain the *whole* picture, which is a well-supported claim. The stronger inference that augmentation "might not help" is reasonable but speculative — explicitly flag it as such.
+5. **Report average token lengths** for Standard English vs. AAVE prompts to rule out simple length effects.
 
 ## Score and Decision
 
-**Originality:** High — first human-annotated AAVE reasoning benchmark. **Importance:** High — addresses fairness for a large demographic of dialect speakers. **Claims well-supported:** Mostly yes; the primary claim is robust, secondary analyses have minor gaps. **Soundness:** Good; the core evaluation (Table 1) is properly conducted. **Clarity:** Good, though Table 2's statistical test needs clarification. **Value to community:** High — the dataset enables a line of evaluation that did not previously exist.
+**Originality:** High — ReDial is the first human-annotated parallel AAVE reasoning benchmark.  
+**Importance of research question:** High — dialect fairness in LLMs is a timely and socially relevant problem.  
+**Claims support:** Good — core claims are well-supported by statistical tests and multiple models. Secondary/interpretive claims (data augmentation, compositionality) are appropriately hedged but could be tightened.  
+**Soundness of experiments:** Solid — multi-model, multi-task evaluation with proper statistical testing. Some secondary analyses could be deeper.  
+**Clarity:** Good — the paper is well-structured and clearly written.  
+**Value to the community:** High — ReDial provides a reusable benchmark and the findings document a real, consequential unfairness.
 
-The paper's contribution is substantial and the main finding — that LLMs are unfair and brittle to AAVE in reasoning tasks — is well-supported. The weaknesses are concentrated in the secondary analyses and are addressable through clarifications and modest reframing rather than new experiments. This is a clear accept.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

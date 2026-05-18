@@ -1,87 +1,74 @@
-Now I have all the evidence I need. Let me write the consolidated review.
+Now I have a thorough understanding of the paper. Let me synthesize the final review.
 
 ## Summary
 
-This paper proposes MGF-IMM, a framework that combines pretrained generative models (VAE/GAN/DDPM) with an evolutionary multiobjective optimization algorithm to generate diverse in-betweening human motion sequences in a single inference pass. The core idea is to formulate the in-betweening task as a bi-objective optimization problem (diversity vs. smoothness) and use nondominated sorting (NSGA-II-style) to evolve a population toward the Pareto front, with the generative model acting as the offspring-producing operator. Experiments on four motion datasets show large improvements in diversity metrics over several baselines.
+This paper introduces MGF-IMM, a framework that frames human motion in-betweening as a bi-objective optimization problem (diversity vs. smoothness) and solves it using nondominated sorting within an evolutionary algorithm, where a pretrained generative model (VAE/GAN/DDPM) produces candidate motion sequences. The key idea is to use multiobjective optimization to encourage intra-batch diversity at inference time without additional training.
 
 ## Strengths
 
-- **Novel formulation of intra-batch diversity as a multiobjective optimization problem.** The paper identifies a genuine gap — most generative models do not explicitly control for diversity across samples produced within a single batch — and connects it to the diversity-maintenance mechanisms long studied in multiobjective evolutionary algorithms. This framing is creative and the bi-objective formulation (Sections 3, Eqs. 2–4) is clean.
+- **Novel framing of batch diversity as multiobjective optimization**: The paper connects two distinct fields (multiobjective EAs and generative models) to address the practical problem of generating diverse motion sequences in a single batch. This is a creative and practically motivated direction.
 
-- **Plug-and-play integration with multiple generative backbones.** The ablation in Table 3 shows that the multiobjective framework improves APD, ACC, FID, and ADE regardless of whether the underlying generative model is a VAE, GAN, or DDPM. This supports the claim that the framework is backbone-agnostic and operates at inference time without retraining the generative model itself.
+- **Quantitative improvements across multiple backbones**: Table 1 shows that MGF-IMM with VAE, GAN, and DDPM backbones consistently outperforms baselines (RMI, MITT, Motion DNA, ACTOR, etc.) on FID, ACC, and the diversity metric APD across BABEL, HumanAct12, NTU RGB-D, and GRAB datasets. This demonstrates the framework's generality.
 
-- **Comprehensive ablation studies.** Tables 2, 3, and 4 systematically isolate the contributions of variable-length generation, the multiobjective framework, and the intra-class difference term. The ablation structure is clear and the design choices are well motivated.
+- **Ablations isolate the multiobjective contribution**: Tables 3 and 4 provide controlled comparisons showing that the multiobjective generation framework improves diversity over the base generative model, and that the intra-class difference term \(P_c(Y)\) further boosts performance.
+
+- **Variable-length transitions**: Section 4.1 introduces a sensible cosine-similarity-based mechanism for determining transition length, and Table 2 shows this outperforms fixed-length alternatives.
 
 ## Weaknesses
 
-### Fatal
-
-None. The core idea is coherent and no single issue invalidates the paper's contribution. However, several significant issues exist (see below).
-
 ### Major
 
-- **Offspring generation mechanism (Eq. 5) is underspecified and appears inconsistent with the "no retraining" claim.** Equation 5 states that for iterations \(i \ge 1\), the generative model \(G\) is conditioned on \(Y_{i-1}^{[n]}\) (the previous elite sequence) in addition to \(X_1, X_2\). However, the generative model architecture described in Section 4.2 (GRU + Transformer VAE) is trained on triplets \((X_1, Y_{\text{ground truth}}, X_2)\) — it has never been trained to consume a previously generated sequence as a conditioning signal. The paper asserts this works "without introducing any additional training parameters" (Section 1, bullet 2; Section 7), but provides no explanation of the conditioning mechanism. How does a pretrained generator, whose forward pass maps latent \(Z\) and conditions \(X_1, X_2\) to a sequence \(\hat{Y}\), also consume an additional input \(Y_{i-1}^{[n]}\) without architectural modification or fine-tuning? This is not a minor clarity issue — the central algorithmic step is not reproducible as described. The authors must either (a) specify the exact conditioning mechanism (e.g., encoding \(Y_{i-1}^{[n]}\) into the latent prior and sampling nearby, or feeding it as an additional input channel) and explain why this does not require retraining, or (b) acknowledge that the model requires modification and describe the training procedure.
+- **Offspring generation mechanism is critically underspecified (reproducibility gap)**: Equation (5) states that for iterations \(i \ge 1\), the generative model produces offspring conditioned on \(Y_{i-1}^{[n]}\) (a previous population member) in addition to \(X_1, X_2\). However, Section 4.2 and Figure 2 describe a VAE whose generator takes only \((Z, X_1, X_2)\) as inputs — there is no mention of how \(Y_{i-1}^{[n]}\) is encoded, fused, or otherwise incorporated into the generation process. The paper says "the generative model is conditioned not only by the user-provided sequences but also by the sequences already generated," but the architecture description does not support this claim. Without specifying whether the conditioning is architectural (requiring a different training setup) or merely refers to selection pressure, the method cannot be reproduced or meaningfully evaluated. This gap undermines confidence in the core evolutionary mechanism.
 
-- **Missing comparison to CondMDI (Cohan et al., 2024), a directly relevant state-of-the-art in-betweening method cited by the paper itself.** The related work section discusses CondMDI as a recent diffusion-based in-betweening pipeline, yet Table 1 compares only against methods up to MoFusion (2023) and MultiAct (2023). The claim of "state-of-the-art performance, surpassing the latest methods" (Abstract, Section 6.1) is unsupported without empirical comparison to CondMDI, which is explicitly acknowledged as a current leading approach. This is not a request for an additional baseline — it is a missing comparison that the paper's own scope requires. OmniControl (Xie et al., 2024), also cited, is a text-conditioned generation method (a different task), so omitting it is less critical, but CondMDI is directly comparable.
-
-- **The classifier \(C(Y)\) is a critical component that remains completely unexamined.** The entire diversity component (\(\alpha_1, \alpha_2\)) is built around a classifier that maps motion sequences to one of \(D\) class labels and provides class probabilities. The paper merely says "We assume the availability of a classifier \(C(Y)\)" (Section 3) — no description of: (a) how this classifier is obtained (pretrained separately? jointly?), (b) its architecture, (c) training data and labels used, (d) its accuracy or suitability for each dataset, or (e) how the number of classes \(D\) is determined for BABEL, HumanAct12, NTU RGB-D, and GRAB. Since the multiobjective selection pressure is directly driven by this classifier's outputs, the entire method's behavior is contingent on its quality. This is a significant unacknowledged dependency.
-
-- **The magnitude of diversity improvements raises concerns about what is actually being measured.** Table 3 shows APD jumping from 0.358 (base VAE without MGF) to 0.956 (MGF-IMM VAE) on BABEL — a 167% relative improvement. The fact that accuracy metrics (FID, ACC, ADE) also improve uniformly, rather than trading off with diversity, is unusual for a method that explicitly optimizes for diversity. One concern is that the multiobjective selection may be driving the population toward different classifier labels, inflating APD through label diversity rather than genuine motion-level diversity. The paper should (a) report per-class APD to show that diversity is not just cross-label, (b) compare against a single-objective EA baseline (e.g., maximizing only an aggregated objective) to isolate the benefit of the Pareto-based approach from mere evolutionary search.
+- **APD metric is never defined**: Section 5.3 lists "Frechet Inception Distance (FID), Action Accuracy (ACC) and Average Displacement Error (ADE)" but then simply states "Specifically, APD aims to evaluate the diversity performance." APD is not a standard abbreviation in human motion generation, and the paper never states what it stands for (e.g., Average Pairwise Distance) or how it is computed. Since the paper's main diversity claim rests on APD improvements (Table 1), an undefined metric makes the central quantitative result uninterpretable.
 
 ### Minor
 
-- **Smoothness component \(\beta(Y)\) (Eq. 3) only checks boundary smoothness** between \(X_1[-1]\) and \(Y[0]\), and between \(Y[-1]\) and \(X_2[0]\). Internal smoothness of the generated sequence is not explicitly enforced. While the pretrained generative model may produce internally smooth motions from training, the gap should be acknowledged.
+- **Classifier details omitted**: The diversity objective \(\alpha_1(Y) = \frac{1}{D}(C(Y) + P_c(Y))\) relies on a classifier \(C\) that is assumed available but never described — its architecture, training data, accuracy, or even a reference to a standard classifier are absent. Since the classifier drives the diversity signal, its quality directly affects the method's behavior. The paper should at minimum report the classifier's accuracy and specify how it was obtained.
 
-- **Variable-length padding strategy** repeats the last pose of the generated sequence to pad to \(Y_{\text{max}}\). This can introduce a static tail that degrades realism and smoothness. The paper does not analyze whether this causes artifacts or whether shorter sequences are disproportionately affected.
+- **No convergence or sensitivity analysis for the EA**: Population size (20) and max iterations (20) are stated without any justification, convergence curves, or sensitivity study. For a high-dimensional search problem, it is unclear whether 400 total evaluations (20×20) are sufficient to approximate a Pareto front. The latent space dimensionality is not reported, making this impossible to assess. Adding a simple convergence plot (objective values vs. generation) would substantially strengthen the empirical evaluation.
 
-- **No variance or confidence intervals reported.** Given the population-based stochastic nature of evolutionary algorithms, single-run results without variance give no sense of stability. This is standard practice in many ML venues, and the paper would benefit from reporting mean/std over multiple independent runs.
+- **Objective scale mismatch not addressed**: \(F_1(Y) = \alpha_1(Y) + \beta(Y)\) where \(\alpha_1 \in [0,1]\) and \(\beta\) is an unbounded Euclidean distance that can be orders of magnitude larger. While NSGA-II's crowding-distance computation normalizes objectives by their range, the paper does not mention this or address whether the scale difference affects Pareto dominance comparisons. A brief note would resolve the concern.
 
-- **The \(\alpha_1(Y) = \frac{1}{D}(C(Y) + P_c(Y))\) formulation** adds an integer class label (0 to \(D-1\)) to a probability (0 to 1) and divides by \(D\). While this does produce a number in \([0,1]\), the mixing of a discrete and a continuous quantity is unconventional. The paper should clarify the intended semantics (e.g., is \(C(Y)\) a hard argmax or a softened embedding?).
-
-- **The claim that the same GRU+Transformer architecture works for VAE, GAN, and DDPM "by aligning the loss functions and training details"** (Section 4.2 Remark) is undersupported. Each generative family requires substantially different training procedures, objectives, and architectural considerations (e.g., diffusion requires a noise schedule and iterative denoising; GAN requires a discriminator). The paper provides no specifics for the GAN or DDPM variants.
+- **Baseline comparisons are not fully controlled for the classifier's informational advantage**: The baselines (RMI, MITT, Motion DNA, etc.) do not have access to a motion classifier at inference time, while MGF-IMM uses one to guide diversity. The ablations in Table 3 (w.o. MGF vs. w. MGF using the same backbone) help isolate the multiobjective framework's contribution, but the paper's framing of "state-of-the-art against all baselines" (Table 1) does not account for this asymmetry. The authors should acknowledge this limitation.
 
 ### Trivial
 
-- APD is used but never expanded or formally defined in the extracted text — the reader must infer it stands for "Average Pairwise Distance."
+- Figure 4 (Pareto front visualization) does not label its axes, making the plot difficult to interpret.
+- Theorems 1 and 2 are correct but are straightforward consequences of the additive objective structure. They are not a weakness per se, but the paper's framing of them as deep theoretical contributions oversells their significance.
 
 ## Nice-to-Haves
 
-- A comparison to a single-objective EA baseline (e.g., optimizing a weighted sum \(\lambda F_1 + (1-\lambda)F_2\) with NSGA-II-style nondominated sorting removed) would isolate whether the Pareto-based approach specifically adds value over mere evolutionary search.
-- A brief limitations section discussing the classifier dependency, computational cost of the EA (population 20 × iterations 20 = up to 400 evaluations plus offspring generation), and boundary-only smoothness would improve the paper's completeness.
+- The paper could benefit from a diagram or pseudocode explicitly showing the forward pass of the generative model during offspring generation at iteration \(i \ge 1\), clarifying how \(Y_{i-1}^{[n]}\) enters the computation.
+- Reporting the classifier architecture and its accuracy on each dataset would strengthen the diversity claim.
+- A convergence plot of the bi-objective values over generations would demonstrate that 20 generations are sufficient.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-1. **"Theorems 1 and 2 are not correctly justified / Theorem 1 is false."** — This criticism is factually incorrect. Theorem 1 is correct: because \(\alpha_2(Y) = 1 - \alpha_1(Y)\), the two objectives are coupled such that any solution with strictly higher \(\beta\) cannot dominate a \(\beta\)-minimizer in both objectives simultaneously. The reviewer's attempted counterexample fails because the mathematics shows no such domination is possible. Theorem 2 is also correct (the bound \(4/D\) is a conservative but valid threshold). The "missing proof" complaint likely refers to a proof deferred to the appendix, which the parser strips. Removed per the rule: "REMOVE criticisms that are factually wrong or misunderstand the paper" and "REMOVE weaknesses about missing appendix."
-
-2. **"The paper should not be accepted in its current form" as a standalone weakness.** This is a judgment, not a weakness. It is converted into the score and decision below.
-
-3. **Strength: "State-of-the-art quantitative results on multiple diverse human motion benchmarks."** — This conflicts with the verified weakness about missing CondMDI comparison. The SOTA claim is unsubstantiated without the most relevant baselines. Moved to Removed Points per the rule: "Drop strengths that conflict with a verified weakness — when a strength and weakness disagree, the weakness wins."
-
-4. **Criticism that internal smoothness is not enforced by \(\beta\).** — This is kept in Minor above (it is a valid observation). However, the reviewer's framing of it as a structural flaw is excessive; the paper uses a generative model trained on real data, which inherently produces plausible internal motion.
+- **"The method cannot be adapted to GAN/DDPM because of the same conditioning issue"**: The paper states that the architecture is adaptable by "aligning the loss functions and training details... with standard implementations." This is a reasonable claim for a method paper whose primary implementation is VAE-based. The reviewer's assertion that adaptation requires "explicit training" is a speculation not verified against the paper's claims.
+- **"Theorem 1 is trivial / Theorem 2 is straightforward"**: The correctness of the theorems is not in question; the reviewer's qualitative assessment of their depth is a matter of opinion, not a factual weakness. The paper makes a valid theoretical contribution by formally establishing properties of its objective formulation.
+- **"The method is misleading about not introducing additional parameters"**: The paper says "without introducing additional training processes and parameters." The classifier is pretrained and fixed — the framework itself adds no new training. This is technically accurate, not misleading.
+- **"Figure 4 doesn't support diversity claims"**: The figure shows the Pareto front evolution, which is a standard visualization in multiobjective optimization. The "diversity" of the actual motions is evaluated quantitatively (Table 1) and through the Pareto front spread. The reviewer's demand that a scatter plot directly show motion diversity is misplaced.
 
 ## Novel Insights
 
-The reviews surface a useful observation beyond the paper's own contributions: the tension between "training-free diversity enhancement" and the need for the generative model to consume new conditioning inputs (previous elite sequences) points to a broader design challenge in combining generative models with evolutionary search. Many papers in this emerging area assume generative models can be treated as black-box samplers within an EA loop, but the conditioning requirements of directed evolution (using elite solutions to guide search) often demand architectural or training modifications that are not trivial. This is a methodological caution that future work in this direction should address explicitly.
+The most notable insight from these reviews is that framing batch diversity as a multiobjective optimization problem is a genuinely underexplored direction in generative modeling. The paper's core idea — that population-based EAs naturally produce diverse solution sets, and that this property can be harnessed to improve intra-batch diversity of generative models — is creative and well-motivated. However, the reviews also reveal that the paper's current presentation leaves a critical mechanism (offspring generation) underspecified, which prevents the community from building on this idea. The gap between the interesting high-level concept and the missing implementation detail is the central tension in this submission.
 
 ## Suggestions
 
-1. **Clarify the offspring generation mechanism in detail.** Provide the exact forward pass for \(i \ge 1\): how does \(Y_{i-1}^{[n]}\) enter the pretrained generator? If it is fed as an additional input, this requires architectural modification — describe it. If it is used to condition the latent prior (e.g., encoding \(Y_{i-1}^{[n]}\) and sampling nearby in latent space), explain this and note whether this is consistent with the pretrained VAE's latent prior.
+1. **Clarify the offspring generation mechanism**: Provide a detailed description (pseudocode or architectural diagram) of how \(Y_{i-1}^{[n]}\) conditions the generative model at iteration \(i \ge 1\). If the generative model simply re-samples from its prior at each iteration (with selection pressure driving evolution), state this explicitly and explain why the notation \(G(\cdot \mid Y_{i-1}^{[n]}, \ldots)\) is justified. If there is an architectural adaptation, describe it fully.
 
-2. **Add CondMDI as a baseline** in Table 1, and report results on the same metrics. If the method is competitive, this substantiates the SOTA claim. If not, the claim should be removed.
+2. **Define APD**: Clearly state what APD stands for (e.g., Average Pairwise Distance), give its formula, and cite prior work that uses it. This is essential for the reader to interpret the main quantitative results.
 
-3. **Describe the motion classifier \(C(Y)\)** in detail: architecture, training dataset, accuracy, number of classes \(D\) per dataset. Add an ablation varying classifier quality (e.g., using ground-truth labels vs. classifier predictions) to show sensitivity.
+3. **Report classifier details**: Provide the architecture, training procedure, and accuracy of the motion classifier used in the objective function. If a standard pretrained classifier is used (e.g., from the dataset), cite it.
 
-4. **Add a single-objective EA baseline** (e.g., optimizing a weighted sum aggregation) to Table 3, so the reader can see whether the Pareto-based approach specifically adds value over any evolutionary search.
+4. **Add convergence analysis**: Plot the bi-objective values over generations for at least one dataset to demonstrate that 20 generations are sufficient. Optionally vary population size (e.g., 10, 20, 40) to show robustness.
 
-5. **Report per-class APD** to confirm that diversity improvements are not solely driven by pushing sequences into different classifier bins, but reflect genuine motion-level diversity.
-
-6. **Add variance estimates** (mean ± std over at least 3 runs) to all tables.
+5. **Acknowledge the classifier advantage**: Add a sentence noting that the baselines do not use a classifier at inference time, and clarify that the state-of-the-art claim applies to the combined system (multiobjective framework + classifier), not to the multiobjective framework alone.
 
 ## Score and Decision
 
-The paper proposes a genuinely novel connection between multiobjective optimization and generative diversity, with clean ablations and promising quantitative results. However, the core algorithmic step is underspecified to the point of being non-reproducible, the most relevant SOTA baseline (CondMDI) is missing from comparisons, and a critical component (the motion classifier) is left entirely unexamined. These are major issues that require substantial revision to address. The idea has merit, but the execution in its current form does not meet the evidentiary standard for a method paper.
+The paper presents a promising and creative idea — using multiobjective optimization to improve intra-batch diversity in generative models — supported by generally positive quantitative results across multiple backbones and datasets. However, two structural gaps prevent acceptance: (1) the offspring generation mechanism, which is the engine of the evolutionary search, is critically underspecified, making the method irreproducible; (2) the primary diversity metric (APD) is never defined, making the main quantitative claim uninterpretable. These are addressable in revision but undermine the paper's contribution as-is.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL SCORE: <pineapple>4.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

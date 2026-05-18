@@ -1,18 +1,20 @@
-Now I have all the information I need. Let me synthesize the final review.
+Now I have all the information I need. Let me compose the final review.
 
 ## Summary
 
-This paper proposes EEP (Efficient Expert Pruning), a gradient-free evolutionary search method for pruning experts in SMoE language models. The key idea is to parameterize expert pruning and merging via two matrices (router mapping W_RM and expert merging W_EM) and optimize them using evolutionary strategies requiring only inference (no backpropagation). EEP supports two use cases: reducing total experts (memory savings) and reducing active experts (inference acceleration). Experiments on Mixtral 8×7B, 8×22B, and Qwen MoE models show that EEP achieves aggressive sparsity (up to 75% expert reduction) while maintaining or improving performance, often outperforming baselines like NAEE by large margins.
+This paper introduces EEP (Efficient Expert Pruning), a gradient-free evolutionary method for pruning experts in Sparse Mixture-of-Experts (SMoE) language models. EEP operates in two phases: (1) discrete expert pruning via evolutionary search over a router mapping matrix (one-hot) to select which experts to retain, and (2) continuous expert merging where the same matrices become real-valued to combine knowledge from pruned experts into survivors. The key empirical results are striking: on Mixtral 8×7B, pruning from 8 to 4 experts raises average accuracy across 10 benchmarks from 62.4% (full model) to 70.3% (prune-only) and 74.2% (prune+merge), with SQuAD improving from 53.4% to 80.6%. The method generalizes to Mixtral 8×22B, Qwen-MoE models, and MMLU (including out-of-distribution tasks), and yields measurable memory savings (47-71%) and inference speedups (up to 1.41×).
 
 ## Strengths
 
-- **Novel gradient-free search space design.** The parameterization of expert pruning and merging via W_RM and W_EM matrices is clean and flexible, unifying two operations (pruning and merging) under a single evolutionary optimization framework. This allows the method to run on devices capable of inference without requiring gradient computation, lowering the barrier for practical deployment.
+- **EEP achieves high sparsity with substantial performance improvements, even without fine-tuning.** Reducing experts by 50-75% consistently improves over the full model on most benchmarks. At 4 experts on Mixtral 8×7B, Prune Only averages 70.3% vs. the full model's 62.4% (Table 1). The improvement is sustained across 10 diverse tasks, not cherry-picked.
 
-- **Consistent and large improvements across diverse settings.** EEP (Prune Only) with 4 experts on Mixtral 8×7B achieves 70.3% average accuracy across 10 tasks, far exceeding the best baseline NAEE (60.5%) and even the full model (62.4%). With 2 experts, EEP (Prune+Merge) achieves 65.6% vs. the full model's 62.4%. These improvements are consistent across nearly all 10 datasets, not just a cherry-picked subset (Table 1), which lends credibility to the phenomenon.
+- **The two-phase gradient-free paradigm (pruning + merging via evolutionary search) is novel and effective.** The paper cleanly separates discrete selection (pruning phase) from continuous weight combination (merging phase), and shows that merging consistently adds 3-6 points over pruning alone (Table 1). This contrasts with prior work that either requires gradient-based fine-tuning or uses predefined importance criteria.
 
-- **Cross-model and cross-task generalization.** EEP is validated on Mixtral 8×22B, Qwen1.5-MoE-A2.7B, and Qwen2-MoE-A14B with consistent improvements (e.g., Mixtral 8×22B with 4 experts: EEP 80.4% vs. full model 66.5%). The MMLU experiments (Table 4) show that EEP generalizes to out-of-distribution tasks, outperforming NAEE on both IID and OOD settings.
+- **The method generalizes across models, model scales, and task distributions.** Results on Mixtral 8×22B (Table 2) and Qwen models show consistent improvements. The MMLU experiment (50 in-distribution + 7 OOD tasks, Table 3) demonstrates that EEP outperforms all baselines on both held-in and unseen tasks.
 
-- **Practical dual-use efficiency.** Profiling results (Table 6) show concrete memory savings (71% reduction from 88.6 to 25.6 GB with 2 experts) and speedups (up to 1.41× with 4 total experts + 1 active expert), providing actionable guidance for deployment scenarios.
+- **Profiling data shows practical deployment benefits.** Reducing total experts from 8 to 4 cuts GPU memory from 88.6 GB to 46.6 GB (47% savings) while maintaining or improving accuracy, and combining with 1 active expert achieves 1.41× speedup (Table 4).
+
+- **The observation that pruning improves routing is supported by activation pattern analysis.** Section 5.6 provides suggestive evidence (Figure 5) that the router's behavior shifts meaningfully after pruning, offering a plausible mechanism for the counterintuitive performance improvement.
 
 ## Weaknesses
 
@@ -20,58 +22,55 @@ This paper proposes EEP (Efficient Expert Pruning), a gradient-free evolutionary
 None.
 
 ### Major
-
-- **Lack of statistical reliability for the stochastic search method.** EEP relies on evolutionary search, which is inherently stochastic, yet the paper reports only single-run results with no variance or confidence intervals. By contrast, the Random baseline is run 30 times and its variance is reported — the reader has no way to assess whether EEP's dramatic improvements (e.g., SQuAD: 53.4% → 75.2%) are consistent across seeds or a lucky configuration found by chance. Given the surprising nature of the central claim (pruning improves performance without any parameter update), this omission substantially weakens the empirical evidence.
-
-- **Insufficient explanation of the mechanism behind performance improvement from pruning alone.** The paper reports a 22-point gain on SQuAD from simply removing 4 out of 8 experts. While Section 5.6 offers a plausible hypothesis (the router operates better with fewer experts), the analysis is limited to one transformer block's activation patterns (Figure 4). There is no causal analysis linking the observed routing changes to the performance increase, no ablation showing the hypothesis holds across layers, and no discussion of why the original router would be so suboptimal that removing half the experts produces a 22-point gain. The paper's most striking result is the least explained.
+None.
 
 ### Minor
 
-- **The constraint W_RM = W_EM during the pruning phase is stated without justification.** The paper imposes that these matrices be identical during pruning yet does not explain why this restriction is necessary or what would happen if it were relaxed. This appears to artificially limit the search space without a clear rationale.
+- **Search cost is not quantified.** The paper claims efficiency ("Efficient Expert Pruning") and that the method "can be conducted on devices capable of inference," but provides no concrete numbers on the computational cost of the evolutionary search — GPU hours, number of forward passes, or wall-clock time. The limitations section merely acknowledges it "requires a potentially costly search process" without bounding it. This makes it difficult for a practitioner to assess the trade-off between search cost and downstream gains. Reporting search cost (e.g., total forward passes or GPU hours for the main Mixtral 8×7B experiments) is essential.
 
-- **Computational cost of the evolutionary search is not quantified.** The paper mentions a "costly search process" in the limitations but does not report the number of forward passes, GPU-hours, or wall-clock time for any experiment. This makes it difficult to assess whether the method is practical for typical users and to compare its efficiency against NAEE (which also requires many forward passes for loss evaluation). The claim that EEP "can run on devices affordable for inference" is unsubstantiated without a concrete cost analysis.
+- **Search hyperparameters are absent from the main text.** Population size, number of generations, mutation rate/noise scale, the exact size of the sampled search subsets per dataset, and whether crossover is layerwise or matrixwise are not reported in the main paper. While the appendix (stripped by the parser) may contain these, key numbers (e.g., search set size, number of generations) should be in the main text for reproducibility and to let readers assess the search's affordability.
 
-- **The number of training examples used for the evolutionary search is unspecified.** The paper states that "a small subset" of the training set is used per dataset but does not quantify this. Given that the search directly optimizes downstream task accuracy on these examples, the risk of overfitting is non-trivial. The MMLU OOD experiment partially addresses this, but without knowing the search set size, the reader cannot evaluate how much the results depend on memorization vs. genuine generalization.
+- **No confidence intervals or variance estimates for EEP results.** The paper reports random-baseline variance (30 runs) but presents all EEP results as point estimates. Given the stochastic nature of evolutionary search, reporting standard deviations across multiple search runs (or at least across different search subsets) would strengthen confidence that reported gains are robust rather than tied to a specific search trajectory.
 
-- **Speedups from active expert reduction are modest and the accuracy-speed tradeoff is not fully discussed.** The 1.24× speedup from reducing top-2 to top-1 active experts is useful but not dramatic, and the paper does not systematically discuss the performance drop vs. speedup tradeoff (e.g., Table 5 shows that with 8 total and 1 active, average accuracy drops from 59.6 to 51.4 for the full model, and EEP restores it to 65.3 — but the comparison is against the original top-2 full model, not a top-1 full model). Clarifying the exact nature of the improvement would help.
+- **The "without any fine-tuning" phrasing is imprecise when applied to the full pipeline.** The abstract states EEP achieves better performance "without any fine-tuning" and supports this with the prune-only SQuAD result (53.4%→75.4%). This is accurate for the prune-only phase. However, the full EEP pipeline includes the merging phase, which updates all surviving expert weights via linear combination — an operation many readers would consider a form of adaptation. The paper should clearly distinguish "no gradient-based fine-tuning" from "no weight updates at all."
+
+- **The MMLU OOD result is modest relative to in-distribution gains.** On the 7 unseen MMLU datasets (Table 3), EEP (Prune+Merge) achieves 71.3% at 6 experts vs. the full model's 72.6% — a slight degradation. The claim of "strong generalization ability" should be tempered; the method generalizes well across in-distribution tasks but does not meaningfully improve over the full model on OOD tasks.
+
+- **Router analysis is illustrative but not conclusive.** Section 5.6 provides activation statistics (Figure 5) for one layer on one dataset. While suggestive, this does not constitute a direct causal test of the "fewer experts improve routing" hypothesis. Controlled experiments (e.g., comparing EEP-selected patterns against random pruning with equivalent sparsity, or measuring router agreement with a reference assignment) would strengthen the mechanistic claim.
 
 ### Trivial
 
-- The abstract reports a SQuAD improvement to 75.4% while Table 1 shows 75.2% (Prune Only, Num=4). Minor numerical inconsistency.
+- **Numerical inconsistency:** The abstract and contributions section report SQuAD prune-only accuracy as 75.4%, while Table 1 shows 75.2% for the same condition. Likely a rounding or run-to-run variation, but should be reconciled.
 
 ## Nice-to-Haves
 
-- Run the evolutionary search with multiple seeds (≥5) and report mean and variance for the main results (especially SQuAD) to address the reproducibility concern.
-- Include an ablation comparing EEP's use of downstream task accuracy as the search objective vs. using language modeling loss (like NAEE) to isolate whether the improvement comes from the search space/algorithm or the objective function.
-- Add a cost analysis table (GPU-hours or number of forward passes) for a representative setting (e.g., Mixtral 8×7B, Num=4, 10 datasets).
-- Analyze the merged experts (W_EM weights) to show whether the merging produces interpretable combinations (e.g., weighted averages of semantically similar experts).
+- A controlled ablation comparing EEP-selected pruning patterns against random pruning at the same sparsity level (with the same merging applied) would help isolate the benefit of the search from the benefit of the merging mechanism.
+- Profiling across multiple tasks and batch sizes (not just SQuAD at batch size 256) would strengthen the efficiency claims.
+- A simple baseline that uses NAEE/Frequency to select the pruning pattern and then applies a lightweight merging (uniform averaging or frequency-weighted) would help disentangle the value of the evolutionary search from the value of the merging itself.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **"Baselines are one-shot methods that do not use any training data" (from Critical Issue 4).** This is incorrect. NAEE "exhaustively evaluates the loss between the full model and all pruning choices" — this requires data. Frequency and soft-activation baselines also require forward passes on data to compute activation statistics. The comparison is not as inequitable as claimed. This point is removed as factually wrong.
 
-- **Missing hyperparameters for evolutionary search (population size, iterations, mutation rate).** The paper defers these to the appendix, which is stripped by the parser. Per the hard rules, this is not a valid criticism of the submission as received.
-- **"Cannot independently verify" concerns about entity existence.** Any cited model, benchmark, or reference is assumed to exist.
-- **Criticism that NAEE comparison is unfair because EEP uses downstream task accuracy.** This is a design choice that gives EEP an advantage, not a flaw. If anything, it highlights that the objective function matters — a useful insight rather than a weakness.
-- **Template-matching confound for SQuAD.** While theoretically possible, this is speculative and not supported by evidence in the review. The paper uses the same evaluation protocol (OpenCompass) for all methods, so any template artifacts would affect all methods equally.
-- **Speedup is "modest" (1.24×).** This is a matter of perspective; 1.24× is a real improvement. The concern is reframed as a minor point about missing tradeoff discussion, not the magnitude itself.
-- **Strength Finder claim that EEP surpasses full model on MMLU with 4 experts (56.9% vs. 60.7%).** This is factually incorrect; the full model outperforms EEP at Num=4. The Strength Finder's claim is inaccurate.
+- **Criticisms about missing appendix content** (e.g., reproducibility details from Critical Issue 5). The review parser strips appendix sections from all papers; these details exist in the original submission. However, the main-text omission of key numbers (population size, search set sizes, GPU hours) remains a valid minor weakness as noted above.
+
+- **The claim that the SQuAD improvement is "extraordinary" and the most plausible explanation is overfitting (Critical Issue 2).** The improvement is large but consistent across 10+ benchmarks. It is unlikely that overfitting to a single search subset would simultaneously improve performance on 10 diverse tasks (COPA, MultiRC, WIC, WSC, RTE, BoolQ, CB, ReCoRD, DROP, SQuAD). The overfitting concern is valid but the reviewer overstated its severity.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one genuinely novel observation: the consistent pattern of improvement across nearly all 10 datasets in Table 1 suggests that the phenomenon of "pruning improving performance" in SMoE models is not an evaluation artifact or a single-dataset fluke, but may reflect a genuine structural property of SMoE architectures — specifically, that a simple one-layer perceptron router struggles to effectively manage many experts, and reducing the number of experts alleviates this bottleneck. This hypothesis is stated in the paper but under-explored; the reviews reinforce that this is the paper's most provocative finding and deserves deeper investigation. The interaction between search objective (downstream accuracy vs. LM loss) and the gap between EEP and NAEE is another under-analyzed dimension.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Report multi-seed variance for EEP.** This is the single most important fix — without it, the central empirical claim is not fully credible. Run at least 5 seeds on the SQuAD experiment and report mean ± std.
-2. **Quantify the search cost** in terms of GPU-hours or forward passes for a representative setting. This is essential to support the claim of practical deployability.
-3. **Justify or remove the W_RM = W_EM constraint** in the pruning phase, or ablate it to show it matters.
-4. **Provide the number of training examples used for search** on each dataset to allow readers to assess overfitting risk.
-5. **Expand the mechanistic analysis** (Section 5.6) to multiple blocks/layers and consider adding a simpler metric like routing entropy or expert load balancing before/after pruning to strengthen the router-improvement hypothesis.
+1. **Quantify search cost** in the main text: report GPU hours or total forward passes for the main experiments (Mixtral 8×7B, 4 experts, on a representative task). This directly addresses the most significant omission and lets readers judge the efficiency claim.
+2. **Report EEP results with variance** across at least 3 search runs or search-subset samples for one or two representative tasks to demonstrate robustness against overfitting.
+3. **State search set sizes explicitly** for each experiment (e.g., "1024 examples per task").
+4. **Clarify the "no fine-tuning" language** throughout to distinguish "gradient-free" from "no weight updates" — the pruning phase genuinely requires no updates, while the merging phase performs weight averaging.
+5. **Include a controlled router experiment** (e.g., random pruning vs. EEP-selected pruning at the same sparsity, with both followed by the same merging) to strengthen the mechanistic claim.
 
 ## Score and Decision
 
-This paper proposes a novel and practical approach to expert pruning in SMoE models with consistently strong empirical results across multiple models and tasks. The core idea — gradient-free evolutionary search over a unified pruning+merging parameter space — is well-motivated and the experiments are extensive. However, the paper's most striking claim (pruning improves performance without parameter updates) rests on results lacking statistical variance reporting, and the mechanistic explanation is thin given the magnitude of the improvements. These are fixable weaknesses that reduce the paper's current credibility but do not invalidate its contribution. The paper would benefit from a major revision addressing reproducibility and analysis depth, but the method and results are compelling enough to warrant acceptance with the expectation that these issues be addressed in the camera-ready version.
+This paper makes a genuine contribution: a novel, effective, gradient-free approach to expert pruning that achieves strong empirical results across multiple models and tasks. The core claims are well-supported by the experimental data. The weaknesses are real but minor — they concern missing details and presentation clarity rather than structural flaws. The paper would benefit from addressing these in a revision, particularly the search-cost quantification.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,75 +1,77 @@
-Now I have all the information I need. Let me write the final consolidated review.
+Now I have all the information I need. Let me construct the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces **spatial instruction tuning** for region-level vision-language understanding. The key idea is to replace region-of-interest placeholders (e.g., `<region1>`) in user instructions with actual RoI features extracted via a multi-level feature pyramid and RoIAlign, then interleave these features with text embeddings as a single sequence fed to the LLM (Vicuna). The model is trained in two stages on multiple region-text datasets. GPT4RoI achieves state-of-the-art results on the Visual Commonsense Reasoning (VCR) benchmark (81.6% Q→AR, +6 points over prior best) and strong results on ViP-Bench, region caption, and Visual-7W.
+This paper proposes *spatial instruction tuning*, where references to bounding boxes (regions-of-interest) are embedded as special tokens in the instruction text. During tokenization, these tokens are replaced with region features extracted via RoIAlign on a multi-level feature pyramid derived from a CLIP ViT-L/14 encoder, interleaved with language embeddings and fed into Vicuna (7B/13B). The resulting model, GPT4RoI, is trained on seven consolidated region-text datasets plus detector-augmented LLaVA150K and evaluated on ViP-Bench, VCR, Visual-7W, and region caption. It achieves strong results, notably 81.6% Q→AR on VCR, approaching human performance.
 
 ## Strengths
 
-1. **State-of-the-art on VCR by a wide margin**: GPT4RoI-13B achieves 81.6% Q→AR accuracy on VCR, surpassing the second-best method (HunYuan at 75.6%) by 6 points. This is the clearest and most impactful empirical result in the paper (Table 5).
+- **Spatial instruction tuning provides a natural interface for fine-grained region-level interaction.** The paper introduces the `<region{i}>` token mechanism, enabling users to refer to arbitrary bounding boxes within language instructions, which image-level models like LLaVA cannot do. Qualitative demonstrations (Figures B and D) validate that GPT4RoI correctly identifies fine-grained details (e.g., "reading a magazine") where LLaVA fails, showing the mechanism works in practice.
 
-2. **Novel end-to-end architecture for region-level understanding**: The paper proposes the first end-to-end design that replaces textual region references with actual RoI features (via RoIAlign on a multi-level feature pyramid), then interleaves them with text embeddings. This avoids reliance on external vision tools (unlike MM-REACT, InternGPT, DetGPT) and enables the LLM to process visual region features directly.
+- **State-of-the-art results on Visual Commonsense Reasoning (VCR).** GPT4RoI-13B achieves 81.6% Q→AR accuracy, surpassing all prior methods (second-best HunYuan-VCR at 75.6%) and approaching human performance (85.0%). The gap to prior work is large and consistent across all three VCR subtasks (Table 4).
 
-3. **Broad and generally strong evaluation across multiple benchmarks**: Beyond VCR, the model is evaluated on ViP-Bench (35.1 overall, beating InstructBLIP and Shikra-7B), region caption on Visual Genome (CIDEr 145.2 after fine-tuning, surpassing GRiT's 142.0), open-vocabulary recognition on Cityscapes and ADE20K, and Visual-7W (84.82%, new SOTA). This breadth demonstrates the method is a general-purpose region-level model rather than a one-task specialist.
+- **Competitive generalist performance across multiple region understanding benchmarks.** GPT4RoI achieves the highest aggregate score on ViP-Bench (35.1), outperforms the specialist GRiT on Visual Genome region caption (CIDEr 145.2 vs. 142.0 after fine-tuning), and achieves 84.82% accuracy on Visual-7W, exceeding prior specialist models. These results demonstrate breadth across recognition, captioning, and reasoning tasks.
 
-4. **New interaction paradigm demonstrated**: The paper shows concrete examples (Figure 3) where spatial instructions with bounding boxes enable tasks that fail with image-level models (e.g., LLaVA mistakes a "boy reading a magazine" for "holding a bag"). This is a genuine qualitative improvement in human-AI interaction attributable to the spatial instruction design.
+- **Systematic consolidation of diverse region-text datasets.** The paper transforms seven public datasets (COCO, RefCOCO/+/g, Flickr30K Entities, Visual Genome, VCR) plus detector-augmented LLaVA150K into a unified spatial instruction tuning format, creating a large-scale region-level training corpus that enables broad capability.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-1. **Ambiguity in region caption evaluation (Table 4 / Table `tab:region_cap`) concerning Visual Genome data usage**: The paper states Stage 2 training constructs single-region caption data from "Visual Genome (VG) region caption part and RefCOCOg" (line 179). The base GPT4RoI-7B model thus already trains on VG region caption data. Yet the ◇ variants (GPT4RoI-7B^◇, GPT4RoI-13B^◇) are described as "after fine-tuning on Visual Genome" — evaluation is on the VG *validation* set. The paper never clarifies whether this additional fine-tuning is on the VG **training** set (continued training → plausible but unexplained) or the VG **validation** set (→ data leakage). The improvement from 134.5→145.2 CIDEr is substantial enough that the ambiguity matters. This does **not** affect VCR, ViP-Bench, Visual-7W, or open-vocabulary results — which appear to use clean protocols — but it undermines the region caption claim specifically. This requires a straightforward clarification from the authors; it is **not** fatal if the answer is clean.
+- **No controlled ablation isolating the spatial token mechanism from LLM scale and data quantity.** The paper's core claim is that *spatial instruction tuning* enables region-level understanding, but it does not compare against a controlled baseline: a model with the same LLM (Vicuna-7B/13B) and image encoder (CLIP ViT-L/14) trained on the *same region-text datasets* but using image-level input (e.g., LLaVA fine-tuned on the same data, or feeding cropped/cocatenated regions as separate images). Without this, the strong VCR results (81.6% vs. 75.6%) could be explained simply by scaling to a 7B/13B LLM (prior VCR methods use sub-1B models) and adding more training data, rather than by the spatial token mechanism. This is the most consequential omission: the central methodological contribution is unsubstantiated by direct evidence.
 
-2. **VCR headline result confounded by LLM scale with no controlled ablation**: GPT4RoI-13B (13B parameters) is compared against prior VCR models in the ~221M–1B range (ViLBERT 221M, VQA-GNN-L 1B+). While the paper acknowledges this at line 340 ("demonstrates the significant benefits of the Large Language Model"), the abstract and introduction frame the result as evidence of the *method's* value ("surpassing all existing models by a significant margin"). Without an ablation that holds the LLM constant and varies only the region reference format (e.g., region features vs. coordinate tokens in the same Vicuna-13B), it is impossible to isolate what spatial instruction tuning contributes beyond simply using a larger base LLM. This is a common weakness in this emerging field but it weakens the paper's central narrative.
+- **Insufficient architectural detail for the region feature extractor — a core contribution.** The description on line 71 (still containing a `\shilong{}` placeholder) states only that "a multi-level feature pyramid is constructed based on ViT-L/14" and that RoIAlign is applied on each level with multi-level features "fused to a single embedding." It does not specify: (a) which ViT layers are used to construct the pyramid, (b) how features are upsampled/downsampled to create pyramid resolutions, (c) how multi-level features are fused (concatenation, weighted sum, learned projection?), or (d) the output embedding dimension. The referenced `sec:roi_extractor` does not exist in the provided text. As the region feature extractor is the key architectural novelty, this lack of detail prevents reproducibility and thorough assessment.
 
 ### Minor
 
-1. **Uneven ViP-Bench performance not discussed**: GPT4RoI-7B achieves the highest overall score on ViP-Bench (35.1) but is *behind* Shikra-7B on Recognition (35.6 vs. 40.2) and Language Generation (13.8 vs. 20.6). The paper claims it "surpasses by a clear margin" without acknowledging these sub-dimension deficits. A brief discussion of why the method excels on Relationship (32.5 vs. 18.9) but lags on Recognition would improve transparency.
+- **ViP-Bench "clear margin" claim is overstated.** GPT4RoI's aggregate score of 35.1 is only 1.4 points ahead of Shikra (33.7) and 3.4 points ahead of InstructBLIP (31.7). Moreover, GPT4RoI underperforms Shikra on Recognition (35.6 vs. 40.2) and Language Generation (13.8 vs. 20.6), with the aggregate lead coming largely from Relationship (32.5 vs. 18.9). The paper should temper its claims and discuss the sub-category trade-offs.
 
-2. **No ablation of key architectural choices**: The paper does not ablate (a) region features vs. coordinate-only references while keeping all other factors fixed, (b) the multi-level feature pyramid vs. single-level RoIAlign, or (c) whether the region name tokens ("region1" inserted before `<region1>`) actually help. These ablations would strengthen the paper's methodological claims.
+- **VCR comparison conflates model capacity with methodological contribution.** Prior VCR methods use models under 1B parameters, while GPT4RoI uses a 7B/13B LLM. The paper acknowledges this (line 340: "the significant benefits of the Large Language Model") but does not isolate how much of the 6-point gain comes from scale vs. spatial instruction tuning. A baseline matching LLM scale without spatial tokens is needed (see first Major weakness).
 
-3. **Claim of "almost reaching human-level performance" is imprecise**: The abstract says "almost reaching human-level performance of 85.0%" at 81.6%. A 3.4-point gap on a multiple-choice task where the next-best method is at 75.6% is legitimate progress, but "almost" is not the right descriptor for a gap that exceeds the gap between the author's model and the second-best method (6.0 pts). This is a small presentation issue.
+- **Open-vocabulary recognition uses an indirect, unvalidated evaluation protocol.** The paper computes segmentation metrics (PQ, AP, mIoU) by mapping generated region captions to vocabulary lists via CLIP similarity (line 235), rather than evaluating direct region recognition. While this follows prior work (Osprey), the paper does not validate that this CLIP-based mapping produces reliable proxy metrics for segmentation/recognition quality, making the claim of "robust and comprehensive region recognition capabilities" somewhat speculative.
+
+- **Placeholder text indicates incomplete manuscript preparation.** The text contains `\shilong{}` (line 71, wrapping the entire architectural description of the region feature extractor) and `\rebuttal{confidential}` (line 340, referring to a redacted commercial product). These suggest the paper was not properly cleaned before submission and undermine confidence in presentation quality.
 
 ### Trivial
 
-- The Related Work subsection "Other Region Reference Format" (line 53–54) appears truncated in the parsed version, leaving a stray `}`. This is a parser artifact; the original submission presumably has complete content.
+None.
 
 ## Nice-to-Haves
 
-- **Ablation comparing region features to coordinate tokens** within the same LLM (Vicuna-13B) would directly demonstrate the value of spatial features over Shikra-style textual coordinates.
-- **Breakdown of Stage 2 data proportions** and the number of training steps per dataset would help assess whether VCR dominance is partly due to more reasoning-focused training data.
-- **Confidence intervals or variance** across runs would be helpful but are not standard practice for large LLM training; this is a wish-list item.
+- **Basic training hyperparameters** (learning rate, batch size, number of epochs, optimizer) are absent from the main paper and would aid reproducibility.
+- **Ablation of the two-stage training strategy**: What is the contribution of Stage 1 (pre-training on simple region-text pairs) vs. Stage 2? What happens if only Stage 2 data is used?
+- **Ablation of LLaVA150K+detected-boxes data augmentation**: The paper adds this but does not quantify its contribution.
+- **Evaluation on standard referring expression comprehension benchmarks** (RefCOCO/+/g) as a direct test of region-level understanding, given the model trains on these datasets.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **Criticism about VCR test set overlap with training data.** The reviewer stated the paper claims to "remove overlapping images with the test set from Visual Genome" for both VCR and Visual-7W. The paper makes this statement only for Visual-7W (line 323), and VCR uses movie images, not Visual Genome images. This is a factual misreading. *The underlying concern about model capacity conflation is preserved in the Minor weaknesses above.*
 
-- **"Related work section appears truncated"**: This is a parser artifact — the missing content exists in the original submission.
-- **"Missing failure case examples"**: The paper references Section~\ref{sec:failure} which was likely in the appendix (stripped by the parser). Not a valid criticism of the main paper.
-- **"Missing variance/confidence intervals"**: Single-run evaluation is standard practice for large LLM training; moved to Nice-to-Haves.
-- **"Shikra's low Math score suggests training data mismatch — paper should comment"**: This concerns another method's performance, not a flaw in this paper.
-- **Weakness about unfair comparison on VCR**: The paper partially acknowledges the LLM benefit (line 340). The criticism is kept (see Major #2 above) but it is not as fatal as the harsh critic implies — the paper does not hide that it uses a larger LLM.
-- **"The paper should also cover Y / domain Z" type demands**: Not applicable; the paper's scope is well-defined.
+- **Criticism about missing sections (`sec:train_details`, `sec:roi_extractor`, `sec:failure`) as evidence of incomplete submission.** Per the instructions, these sections likely existed in the original submission and were stripped by the parser. The core concern about insufficient architectural detail is preserved in the Major weaknesses.
+
+- **Criticism about missing training hyperparameters.** Moved to Nice-to-Haves; the absence is unfortunate but not fatal.
+
+- **Strength Finder strengths that are generic or conflict with verified weaknesses:** None needed removal after filtering.
 
 ## Novel Insights
 
-The harsh critic's most valuable observation is the ambiguity surrounding the VG region caption evaluation, which the paper genuinely fails to clarify. Beyond the paper's own contributions, the reviews surface a recurring challenge for the field: when LLM scale and method innovation are conflated in comparisons, it becomes difficult to assess whether the architectural contribution or the model size drives the gains. This is a broader community issue that the paper does not solve, but the review process correctly identifies it as a missing control experiment.
+Beyond the paper's own contributions, the reviews surface a recurring tension in the region-level VL field: benchmarking progress against prior work with vastly different model scales (sub-1B vs. 7B+) without controlled baselines makes it impossible to attribute gains to architectural innovation vs. scale. This is a systemic evaluation-practice issue, not unique to this paper. The paper's approach of interleaving RoI features directly into the LLM embedding sequence is architecturally clean, but the community would benefit from a standard set of scale-controlled baselines (e.g., LLaVA fine-tuned on region-text data without spatial tokens) before any new region-level method claims superiority.
 
 ## Suggestions
 
-1. **Clarify the VG data usage in region caption evaluation** explicitly. State whether the ◇ variant's "fine-tuning on Visual Genome" uses the VG **training** set, the VG **validation** set, or some other split. If it uses the training set, explain why the improvement is substantial. If it uses only training data, the ambiguity is resolved and the results are clean.
-2. **Add an ablation** comparing region features vs. coordinate tokens within the same Vicuna-7B/13B backbone, keeping training data and all other factors identical. This would directly isolate the value of spatial feature extraction.
-3. **Discuss the ViP-Bench sub-dimension trade-offs** — why the method excels on Relationship but underperforms on Recognition and Language compared to Shikra. This would improve the paper's depth of analysis.
+1. **Run the central ablation experiment**: Fine-tune LLaVA-7B/13B (same LLM, same image encoder) on the *same region-text datasets* used for GPT4RoI's Stage 2, presenting region information via alternative mechanisms (textual coordinate descriptions, or cropped-and-resized regions as additional input images). Compare on VCR, Visual-7W, and ViP-Bench. If GPT4RoI outperforms these baselines, the spatial token mechanism's value is convincingly demonstrated. If not, reframe the paper's contribution accordingly.
+
+2. **Provide complete architectural specifications** for the region feature extractor in the main paper: which ViT layers form the pyramid, how features are resized, the fusion mechanism for multi-level features, and the output embedding dimension. Replace the `\shilong{}` placeholder with actual content.
+
+3. **Include scale-matched baselines** in the VCR and Visual-7W tables (e.g., LLaVA-7B/13B fine-tuned on VCR with image-level input) so readers can assess the contribution of spatial tokens beyond LLM scale.
+
+4. **Temper the ViP-Bench claim**: Acknowledge the modest aggregate margin and the sub-category trade-offs (weaker on Rec and Lang vs. Shikra).
 
 ## Score and Decision
 
-This paper makes a genuine contribution: it proposes a clean end-to-end architecture for region-level instruction tuning, achieves impressive results on VCR, and evaluates broadly. The main methodological issue is the lack of a controlled ablation isolating the contribution of region features from LLM scale, and the ambiguity in the VG region caption evaluation protocol. Neither is fatal — the former is common in this emerging field, and the latter requires only a clarification. On the positive side, the VCR result (+6 pts) is remarkably strong, the architecture is well-designed, and the breadth of evaluation is solid.
+This paper targets an important problem — fine-grained region-level understanding in vision-language models — and proposes a clean architectural solution (interleaving RoI features into LLM token sequences). The results on VCR are genuinely impressive. However, the paper suffers from a central methodological weakness: it does not provide a controlled ablation that isolates the spatial token mechanism from LLM scale and training data, which is essential for a methods paper making architectural claims. Combined with insufficient architectural detail for the key novel component and some overclaimed results, the contribution is not adequately substantiated in its current form. A substantially revised version with the suggested ablation experiments and architectural clarifications could be publishable.
 
-The paper would benefit from a clarifying revision and additional ablations, but in its current form it presents sufficient evidence of a meaningful contribution.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**MY FINAL SCORE: <pineapple>5.0</pineapple>**
+**MY FINAL DECISION: <orange>Reject</orange>**

@@ -1,77 +1,74 @@
-Now I have all the information needed. Let me synthesize the final review.
+Now I have a complete picture. Let me synthesize the final review.
+
+---
 
 ## Summary
 
-This paper proposes VBH-GNN, a framework for cross-subject emotion recognition that aligns the *distribution of spatio-temporal relationships* between multi-modal physiological signals (rather than aligning raw signal features) using a variational Bayesian heterogeneous graph neural network with Relationship Distribution Adaptation (RDA). The RDA consists of Bayesian Graph Inference (BGI) for aligning relationship distributions across domains and Emotional Graph Transform (EGT) for making those relationships emotion-discriminative. Experiments on DEAP and DREAMER show large improvements over 15 baselines.
+This paper proposes VBH-GNN, a framework for cross-subject emotion recognition that aligns multi-modal physiological signals (EEG, ECG, GSR, etc.) across source and target subjects by matching the *distribution of spatio-temporal relationships* rather than the distribution of raw signal features. The approach consists of two stages: (1) Bayesian Graph Inference (BGI), which models the multi-modal relationship distribution as a heterogeneous graph and aligns it across domains via a variational Bayesian KL divergence; and (2) Emotional Graph Transform (EGT), which refines the aligned graph to be discriminative for specific emotion classes. Experiments on DEAP and DREAMER show consistent improvements over 14+ baselines.
 
 ## Strengths
 
-- **Novel and well-motivated approach**: The core idea—aligning spatio-temporal relationship distributions rather than raw signal features for cross-subject domain adaptation—is a genuine departure from prior work. The paper's physical motivation (individual differences in signal features make feature alignment brittle, but relationships between modalities may be more transferable) is clearly articulated and practically sensible.
+1. **Novel alignment target — relationship distributions rather than feature distributions.** Prior cross-subject DA methods attempt to match raw EEG feature distributions, which the paper correctly identifies as extremely difficult due to high individual variability. VBH-GNN circumvents this by aligning the distribution of spatio-temporal relationships between modalities — a genuinely different and more transferable alignment target. The paper explicitly frames this distinction ("A new approach to align source and target distributions by multi-modal spatial-temporal relationships," Section 1).
 
-- **Strong empirical results**: Table 1 shows VBH-GNN substantially outperforms all 15 baselines on both datasets. On DEAP valence accuracy, VBH-GNN achieves 89.82% versus the next best (MMDA-VAE) at 73.81%—a margin exceeding 16 percentage points. These gains are consistent across both datasets and both valence/arousal tasks.
+2. **Strong and consistent empirical results across two datasets.** VBH-GNN outperforms all 14+ baselines (including both DA and non-DA methods) on DEAP and DREAMER for both valence and arousal classification (Table 1). The gains are in the 1–3 percentage point range over the best competitors, and the ranking is consistent across all four task/dataset combinations.
 
-- **Comprehensive experimental design**: The paper includes ablation studies (Table 2), modality-deficient experiments (Table 3), distribution visualization (Figure 4), and interpretability analysis linking learned relationships to known neuroscience findings (Figure 5). The cropping strategy with explicit data leakage prevention is a careful design choice.
+3. **Two-stage alignment (BGI → EGT) is well-motivated.** The separation into domain alignment (BGI) followed by emotion-discriminative refinement (EGT) is conceptually clean. The ablation study (Table 2) confirms that both losses are essential — removing either degrades performance substantially — and the t-SNE visualizations (Figure 4) provide qualitative support for the distinct roles of each stage.
+
+4. **Modality-deficient experiments validate multi-modal complementarity.** Using all modalities consistently outperforms any single modality (Table 3), confirming the paper's motivation that multi-modal signals provide complementary spatio-temporal relationships. EEG yields the best single-modality results, which is consistent with neuroscience priors.
+
+5. **Interpretability analysis connects learned relationships to known physiology.** The paper shows that inferred spatio-temporal relationships (e.g., frontal-lobe correlations under positive emotions, heart–central-sulcus correlations under positive emotions) align with prior findings (Min et al. 2022; Kreibig 2010), building trust in the model's internal representations.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **Insufficiently verified theoretical derivation of the core BGI component.** The BGI derivation proceeds through several approximations: infinite Bernoulli edges → Binomial → Gaussian via De Moivre–Laplace → parameterized Gaussian proxy → KL divergence → closed-form loss. However: (a) the paper asserts that the Gaussian proxy has "minimal constant divergence" (line 151) but provides no bound or empirical verification of this approximation in the actual experimental setting; (b) the closed-form solution for the BGI loss (Eq. 22) is presented without derivation or citation, making it impossible to verify that it actually upper-bounds the intractable KL divergence or is independent of \(n\) as claimed; (c) the variance of the posterior Gaussian is parameterized as \(\mu(1-\mu)\), tying it deterministically to the mean (Eq. 14–15), which the paper does not justify. Since BGI is the paper's central theoretical contribution, these gaps are significant. The paper would be substantially strengthened by verifying the approximation quality (e.g., Monte Carlo estimates for a tractable small case) or by providing a cleaner derivation of Eq. 22.
-
-- **Ablation reveals an unexplained catastrophic failure mode.** Removing the BGI loss causes accuracy to collapse to ~40% on *both datasets and both valence/arousal tasks* (Table 2)—substantially below random chance (50% for binary classification). The paper's explanation that BGI "determines whether the model converges" (line 259) restates the observation rather than explaining why removing one loss component causes the model to learn *worse than random*. Several questions remain unanswered: Does the remaining loss landscape have pathological local minima? Do the modality-specific feature extractors produce degenerate embeddings without BGI? Is the graph attention mechanism somehow dependent on the BGI signal? Without diagnosing this failure mode, it is unclear whether the full model's strong performance arises from the claimed relationship distribution alignment or from an unrelated artifact (e.g., BGI loss providing necessary gradient regularization that a simpler alternative could also supply).
+1. **The BGI loss (Eq. 22) is presented without a derivation chain, leaving its theoretical status unclear.** The paper defines the BGI loss as the KL divergence between a Binomial prior (with n→∞) and a Gaussian posterior (Eq. 19), states that this is intractable due to the infinite n, and then directly gives a "closed-form upper bound" (Eq. 22) without showing the steps that lead from the KL to that expression. Terms like `μ_lt²/2` and `p_s²/2` appearing inside logarithms are unexplained. No reference is cited for this specific bound. Since BGI is the core alignment mechanism and the ablation shows it is essential (performance collapses without it), the derivation gap is significant. The formula itself is explicit and implementable, but a methods paper whose central loss function is not theoretically justified leaves a credibility gap. The authors need to either (a) provide a step-by-step derivation, ideally published in full, or (b) replace the loss with a standard variational objective whose KL can be computed exactly (e.g., Gaussian–Gaussian KL).
 
 ### Minor
 
-- **Overclaim in the introduction.** The paper states "no studies have yet combined multi-modalities and DA for cross-subject ER" (line 17), yet later uses MMDA-VAE (Wang et al., 2022) and SST-AGCN-DA (Gu et al., 2023) as baselines, both of which combine multi-modal data with domain adaptation. The genuinely novel contribution is *how* they combine them (relationship distribution alignment), not the combination itself. This framing should be corrected.
+2. **No statistical significance reporting for main results.** Table 1 reports point estimates only — no standard deviations, confidence intervals, or significance tests. Given the variability inherent in leave-one-subject-out evaluation and 5-fold splits, the 1–3 percentage point margins over baselines may not be reliably separatable from noise. Reporting per-subject variance or conducting significance tests would substantially strengthen confidence in the claims.
 
-- **No variance or statistical significance reported.** Table 1 reports only point estimates (accuracy and F1). Given the leave-one-subject-out setup with multiple folds, per-subject variance should be reported to assess robustness. Without it, the reader cannot determine whether the reported improvements are statistically reliable.
+3. **Extreme sensitivity to BGI loss is acknowledged but not diagnosed.** Removing BGI drops accuracy to ~40% (near or below chance for binary classification) on both datasets. The paper states this "suggests that the BGI loss determines whether the model converges or not," but does not investigate the mechanism (e.g., training loss curves, node embedding norms, gradient diagnostics). Understanding whether the collapse is due to optimization failure, representation collapse, or some other cause is important for establishing that the method works for the claimed reasons.
 
-- **No sensitivity analysis on loss weights.** All four loss weights \(\lambda_1\)–\(\lambda_4\) are set to 1 (line 78). Given the ablation results showing extreme sensitivity to the BGI loss, it is important to know whether performance is stable across a range of weight values. A sensitivity analysis for at least \(\lambda_1\) and \(\lambda_2\) would substantiate the robustness of the method.
+4. **Reproducibility details are insufficient.** The paper describes hyperparameters only as "all conditions are kept constant except for the hyperparameters of models." Key architectural details (number of layers, hidden dimensions, learning rate, optimizer, batch size, training epochs, the `ϵ` hyperparameter in Eq. 22) are not reported. The "Wav-to-Node" stage is referenced to Jia et al. (2021) without sufficient architectural summary for a reader to implement the pipeline independently.
 
-- **t-SNE visualization lacks quantitative support.** Figure 4 shows qualitatively improved domain coupling after BGI and class separation after EGT, but no quantitative alignment metrics (e.g., MMD, A-distance, JSD) are reported. The claim of "high coupling state" relies on visual inspection, which is subjective.
+5. **Comparison with non-DA baselines may be structurally unfair.** The evaluation follows a supervised DA paradigm where the target domain provides one fold of labeled data during training. Non-DA baselines (e.g., DGCNN, EEGNet, HetEmotionNet, SST-EmotionNet) do not perform domain adaptation and likely were not given the same access to target labels in the same manner. Including a simple DA baseline (e.g., fine-tuning a feature extractor on target labels) would help isolate whether gains come from the relationship alignment method itself or merely from the additional labeled target data exploited via the supervised DA setup.
 
-- **Labeled target data requirement not acknowledged as a limitation.** The supervised DA paradigm uses 20% of the target subject's data as labeled training data (one fold out of five). Many cross-subject ER settings assume zero or very few labeled target samples. This practical constraint should be discussed explicitly.
+6. **The "first time" claim in the Conclusion is overstated.** The paper states "this is the first time emotional knowledge transfer is achieved by aligning the spatio-temporal relationships of multi-modal signals between domains." Multi-modal relationship alignment has been explored in other domains (video-text matching, multimodal hashing). The contribution should be scoped more modestly.
 
 ### Trivial
 
-- None.
+7. **No limitations section** — discussing failure cases (e.g., very few labeled target samples, sensor layout mismatch between datasets) would improve the paper's completeness and honesty.
+
+8. **The interpretability analysis (Section 4.6) is qualitative.** This is appropriate for an initial interpretability study, but the claims of consistency with prior findings could be strengthened by a quantitative overlap metric.
 
 ## Nice-to-Haves
-
-- A controlled comparison where RDA is replaced by a standard feature-level alignment method (e.g., MMD or CORAL on node embeddings) while keeping the same Wav-to-Node and classifier components would directly test whether relationship-distribution alignment adds value beyond feature alignment.
-- Experiments varying the amount of labeled target data (e.g., 1%, 5%, 10%) would clarify practical applicability in low-label regimes.
-- Reporting computational cost (training time, parameter count, inference speed) relative to baselines would be informative.
+- A simple DA baseline (e.g., fine-tuning a pre-trained feature extractor on the labeled target fold) to contextualize the benefit of relationship alignment.
+- A controlled experiment replacing the BGI loss with a standard Gaussian–Gaussian KL on edge embeddings (no Binomial approximation) to validate whether the specific formulation is necessary.
+- Training loss curves and gradient norms for the no-BGI ablation to diagnose the collapse.
+- A brief discussion of scalability (e.g., to datasets with different sensor layouts or many more modalities).
 
 ## Removed Points
-
-These points were flagged by reviewers but are removed or downgraded per the review guidelines:
-
-- **"Missing baselines"** (e.g., ST-GCN, Transformer-based, contrastive learning approaches): Removed per the "DO NOT mention missing related works" rule—there is no way to verify whether these methods exist, are applicable, or were omitted for legitimate reasons.
-- **"Undisclosed training hyperparameters"** (optimizer, learning rate, batch size, epochs): Removed per the rule classifying such nitpicks about reproducibility as removable.
-- **"Method reduces to ad-hoc distribution matching"**: This is an interpretation, not a verified flaw. The paper does present a coherent (if imperfect) mathematical framework, so this characterization is removed as a strawman.
-- **"The claim of SOTA requires comparison to methods that are SOTA today"**: The paper compares against 15 baselines including several from 2021–2024. The number and recency are reasonable; the specific missing methods cited by the reviewer cannot be verified, so this criticism is removed.
+- **Data leakage concern** (reviewer asked whether trial-level splitting is enforced): The paper states "cropping is done strictly after splitting the training and testing set" and explicitly warns about neighboring segment leakage. The 5-fold split is applied before cropping, so segments from the same trial cannot cross folds. The paper already addresses this.
+- **"Interpretability analysis is qualitative" as a major weakness**: Qualitative post-hoc interpretability is standard for this type of analysis; labeling it a weakness conflates the inherent nature of the analysis with a flaw.
+- **Generic "missing related works"**: Cannot be independently verified; removed per policy.
+- **References to missing appendix content**: The paper does not reference an appendix; the BGI derivation weakness above concerns the main text, not missing appendix material.
 
 ## Novel Insights
-
-None beyond the paper's own contributions.
+The key insight from this review process is that the paper would be materially strengthened not by more experiments or bigger gains, but by a clear, self-contained theoretical derivation of its central loss function (BGI). Currently, the paper has strong empirical scaffolding (ablation, modality-deficient, visualization, interpretability) wrapped around a theoretically underspecified core. If the derivation is valid, the paper is a solid contribution; if not, the strong results may be artifacts of the specific functional form. The reviewers converge on this being the paper's single most important vulnerability — not a fatal flaw, but the thing that most needs addressing before the contribution can be fully trusted.
 
 ## Suggestions
-
-1. **Derive or cite the closed-form BGI loss (Eq. 22).** Currently, Eq. 22 appears without derivation or reference. The authors should either show that it upper-bounds the KL divergence between the Binomial prior and Gaussian posterior, or provide a citation that does so. If a clean derivation does not exist, the authors should replace the variational Bayesian framing with a simpler, verifiable alignment procedure.
-
-2. **Diagnose the ablation collapse.** The below-chance performance without BGI loss demands an explanation. A minimal diagnostic experiment: examine the model's output distribution (e.g., are all predictions collapsing to one class? Is the loss diverging? Are embeddings degenerate?) and test whether a simple regularization loss (e.g., L2 on embeddings) can prevent the collapse. This would clarify whether BGI is uniquely necessary or whether any well-behaved auxiliary loss suffices.
-
-3. **Correct the overstatement in the introduction.** Replace "no studies have yet combined multi-modalities and DA" with a precise statement about what is novel about the proposed combination (specifically, relationship distribution alignment rather than feature alignment).
-
-4. **Add variance/confidence measures to Table 1** and consider a sensitivity analysis over at least the BGI and EGT loss weights.
+1. Provide a complete, step-by-step derivation of Eq. 22 from the KL divergence between Binomial(n,p_s) and Gaussian(μ, μ(1-μ)). Publish this in full.
+2. Report per-subject standard deviations or confidence intervals for the main results (Table 1).
+3. Report the collapsed-model diagnostics (training curves, embedding norms) for the no-BGI ablation.
+4. List all essential hyperparameters (learning rate, optimizer, batch size, epochs, layer dimensions, ϵ value) in the main text or a reproducibility table.
+5. Add a simple DA baseline (e.g., fine-tuned feature extractor) to contextualize the gain from target labels vs. the gain from relationship alignment.
+6. Moderate the "first time" claim in the conclusion.
 
 ## Score and Decision
 
-The paper proposes a genuinely novel and well-motivated approach and demonstrates strong empirical results. However, the core theoretical derivation has gaps that prevent verification of whether the method works for the reasons claimed, and the ablation study reveals an unexplained catastrophic failure mode that raises questions about the training dynamics. These issues are major but not fatal—the paper has clear potential.
-
-Score: 5.5
-
-Decision: Reject
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

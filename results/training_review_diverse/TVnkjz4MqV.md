@@ -1,20 +1,22 @@
-Now I have a comprehensive understanding of the paper and all the review inputs. Let me construct the final consolidated review.
+Now I have a complete picture. Let me synthesize the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces Neural Manifold Regularization (NMR), a supervised dimensionality reduction method that projects neural population activity into a 2D latent space regularized by movement label distances and densities. The key innovation is a regression-based mechanism that filters contrastive pairs: it uses linear regression to predict labels from embeddings, then selectively forms positive/negative pairs based on whether predicted labels fall within a threshold of the true labels (pulling together embeddings with nearby predictions regardless of correctness, and using mispredicted-distant samples as negatives). The paper evaluates NMR across an unusually broad set of 68 sessions spanning four neural signal modalities (single units, LFP bands, unsorted events, multiunit threshold crossings), three movement tasks (center-out reaching, natural random-target movements, attempted handwriting), multiple brain areas (M1, PMd, S1, precentral gyrus), and two species (macaque, human), consistently finding large improvements over CEBRA and pi-VAE.
+This paper introduces Neural Manifold Regularization (NMR), a supervised dimensionality reduction method that embeds neural population activity into a 2D latent space regularized by the distances and densities of continuous movement labels. NMR is evaluated across 68+ sessions spanning four neural signal modalities (single units, unsorted events, three LFP bands), three movement types (center-out reaching, grid-based natural reaching, free natural reaching, attempted handwriting), multiple brain areas (M1, PMd, S1, precentral gyrus), and two species (macaque and human). Combined with a linear decoder, NMR consistently and significantly outperforms CEBRA and pi-VAE.
 
 ## Strengths
 
-1. **First quantitative demonstration of 2D latent dynamics matching 2D movement trajectories.** NMR achieves explained variance of 0.88 (M1) and 0.9 (PMd) in 2D latent space for center-out reaching, whereas prior work required 3+ dimensions (Fig 2, Section 4.1). This directly fulfills a goal stated as open in the literature.
+1. **Comprehensive, rigorous experimental evaluation with large-margin improvements**: NMR achieves dramatically higher explained variance than hyperparameter-optimized CEBRA and pi-VAE across nearly every setting — M1 center-out (0.88 vs 0.48 vs 0.43), PMd (0.90 vs 0.53 vs 0.37), natural movements with sorted units (0.82 vs 0.55 vs 0.45) and unsorted events (0.65 vs 0.36 vs 0.25), all with strong statistical significance (paired t-tests, multiple comparisons corrected). This evidence directly supports the claim of >50% improvement over baselines.
 
-2. **Consistent large-margin improvements across the largest multimodal benchmark assembled for this problem.** Across 68 sessions, NMR outperforms both baselines in every condition: center-out reaching (0.88 vs 0.48 vs 0.43 in M1), natural grid movements for both sorted units (0.82 vs 0.55 vs 0.45) and unsorted events (0.65 vs 0.36 vs 0.25), free natural movements (0.79 vs 0.58 vs 0.56), and attempted handwriting in a paralyzed human (0.78 vs 0.59 vs 0.23) (Figs 2, 5, 6, 7).
+2. **Enables robust cross-session and cross-subject decoding with a simple linear decoder**: NMR achieves nearly twice the cross-session decoded variance of CEBRA (t=18.5, p=1.5e-47) and six times that of pi-VAE (t=21, p=1.4e-55) across 28 M1 sessions (Fig 3). The low cross-session variance (std 0.02–0.03) and successful decoding across hemispheres and years with hyperparameter-free linear regression is a genuinely impressive result.
 
-3. **Practical cross-session, cross-subject, and cross-year decoding with a simple linear decoder.** NMR embeddings enable a hyperparameter-free linear regression to decode movements nearly twice as well as CEBRA cross-session (t=18.5, p=1.5e-47) and six times better than pi-VAE (t=21, p=1.4e-55) (Fig 3, Section 4.2). This directly demonstrates BMI-relevant generalization.
+3. **First demonstration of high-fidelity 2D latent dynamics for 2D movements**: As the paper argues, prior work required 3D or higher latent spaces even for 2D movements. NMR reveals well-aligned 2D latent dynamics for center-out reaching, random reaches, and attempted handwriting — including single-trial latent dynamics with no overlap for directions separated by 22.5° in a paralyzed patient (Fig 7b, r²=0.96). This is a novel capability.
 
-4. **Lower session-to-session variability and computational efficiency.** NMR exhibits standard deviation of 0.03 (M1) and 0.02 (PMd) across sessions vs 0.1/0.06 for CEBRA (Fig 2), and runs significantly faster (119 vs 163 seconds, t=12, p=3e-14; Fig 5f) by avoiding unnecessary distance computations.
+4. **Evaluated across diverse signal modalities with computational efficiency**: NMR works on single-unit spikes, multiunit unsorted events, and LFP bands (LMP, Gamma, Beta) from macaque motor/premotor/somatosensory cortex, as well as human precentral gyrus recordings for attempted movements. NMR also runs faster than CEBRA (119 vs 163 seconds for single units, t=12, p=3e-14; 149 vs 166 seconds for unsorted events, t=3.5, p=0.001), with computational savings holding under different hyperparameters.
 
-5. **Honest limitation reporting.** The paper transparently discusses where NMR fails (complex handwriting characters, Section 5), shows greater variability on LFP data (Section 4.3), and identifies a specific session with poor cross-session performance with a plausible explanation (Section 4.2).
+5. **Code is provided** (stated in the abstract), enabling reproduction and further study.
 
 ## Weaknesses
 
@@ -22,44 +24,70 @@ This paper introduces Neural Manifold Regularization (NMR), a supervised dimensi
 None.
 
 ### Major
-- **The method description in the extracted text is significantly truncated by the parser (sections 3.1–3.2 are missing entirely; section 3.3 ends mid-sentence), but even the readable portion is not fully self-contained as a method specification.** The core idea is conveyed (regression-based pair filtering, thresholded positive/negative assignment, density weighting), but several design details are underspecified for a new-method paper: (a) how the threshold for positive/negative pairs is determined (fixed hyperparameter? percentile-based heuristic?) is not stated; (b) "ConR loss" is referenced without definition — readers need to consult the CEBRA paper to know the base loss function; (c) whether the linear regression for label prediction is trained jointly with the embedding network or in a two-stage process is ambiguous from the phrase "without altering the embeddings"; (d) the density-dependent weighting mechanism for infrequent labels is mentioned only in the abstract with no mathematical description. Since this is a methods paper whose central contribution is the NMR loss, the main text (or a clearly signaled appendix) should provide a complete algorithmic specification including the full objective in mathematical form. The code being uploaded mitigates but does not fully resolve this.
+
+1. **The method is inadequately specified for a methods paper.** Section 3.3 ("New Loss Function for CEBRA") — the only methods subsection visible in the extracted text — describes the loss only in conceptual, prose-based terms, referencing a figure's colorbar scale to explain how positive/negative pairs are selected. There is no formal loss equation, no explicit training objective, and no quantitative specification of the density-weighting mechanism for infrequent labels. Key details — the neural architecture, training procedure, and hyperparameter search ranges referenced as "Table 1" and "Fig 6" — appear in sections that the parser stripped (Sections 3.1, 3.2 are absent from the extracted text). While code availability partially mitigates reproducibility concerns, a methods paper's central contribution should be understandable from the paper itself without reverse-engineering code. This is the single most significant barrier to evaluating the paper's contribution. *Why this matters: without a clear, self-contained method description, novelty cannot be assessed, the contribution cannot be verified by peer reviewers, and the paper does not meet the standard for a methods publication.*
+
+2. **No ablation or component analysis.** NMR involves at least three discernible design choices: (a) predicting labels from embeddings via linear regression and using those predictions to select positive/negative pairs through a threshold, (b) discarding samples with far-away predicted labels, and (c) applying greater force to infrequent labels via density weighting. None of these components are ablated. Without an ablation study, the paper cannot attribute the reported performance gains to any specific aspect of NMR rather than to generic factors (e.g., the auxiliary regression task itself providing regularization, different optimization dynamics, or the method being more heavily supervised). This weakens the paper's claim about what "Neural Manifold Regularization" actually achieves. *Why this matters: the paper's central contribution is a new method; without understanding which components drive improvement, the scientific contribution is unclear.*
+
+3. **The relationship between NMR and CEBRA is ambiguous.** Section 3.3 is titled "New Loss Function for CEBRA," suggesting NMR is a modified loss applied within CEBRA's framework. Yet the experiments treat NMR, CEBRA, and pi-VAE as three separate methods compared against each other. It is never clarified whether NMR uses the same architecture as CEBRA with a different loss, a different architecture entirely, or a different training scheme. This ambiguity undermines interpretation — if NMR is a better loss for CEBRA's framework, the comparison should control for architecture; if NMR is a separate method, it needs its own full description. *Why this matters: the fairness and interpretation of the experimental comparison depend on knowing what is being compared.*
 
 ### Minor
-- **No ablation study isolating the contribution of the regression-based pair selection vs. the density weighting.** The paper claims two innovations on top of CEBRA's contrastive framework — (1) using linear regression to filter contrastive pairs rather than using all pairs, and (2) density-dependent weighting for infrequent labels — but never tests whether both components are necessary or how much each contributes. An ablation (e.g., NMR without regression filtering, NMR without density weighting, or a simple label-distance-based contrastive baseline without the regression mechanism) would strengthen the causal attribution of improvements.
-  
-- **The number of test examples per session and the precise train/test split procedure are not stated in the main text.** The paper repeatedly refers to "test trials" in figure captions and shows cross-session decoding matrices, but the data-splitting scheme (e.g., fraction held out, cross-validation folds) should be explicitly described in the experiments section rather than deferred entirely to figure captions and the (parser-stripped) appendix.
 
-- **Hyperparameter ranges and tuning budgets for CEBRA/pi-VAE baselines are not summarized in the main text.** The paper states that "the best hyperparameters were chosen" and references supplementary figures (Figs 12, 13, 18, 22), but the main text would benefit from a concise summary of the search space (e.g., number of configurations evaluated per session, range of learning rates/dimensions/temperature). This is standard practice for fairness of comparison.
+4. **The "over 50% improvement" claim is not precisely defined.** The abstract states NMR "outperformed other dimensionality reduction methods by over 50% across 68 sessions," but does not specify whether this is relative improvement (e.g., (0.88−0.48)/0.48 ≈ 83%) or absolute improvement, nor whether the baseline is the best of the two comparators or some average. The paper should state this explicitly to avoid overclaiming.
+
+5. **The rat hippocampus experiment is too brief to support generalizability claims.** It is mentioned in a single sentence ("The results demonstrated a 37% improvement of NMR over CEBRA (Fig 11)") with no figure, no experimental details, no statistical test, and no discussion. As presented, this result neither strengthens nor weakens the paper's core claims about hand movements. Either remove it or describe it properly.
+
+6. **No analysis of why embeddings are stable across sessions.** The cross-session decoding results are the paper's most striking finding, yet the paper offers no mechanistic analysis of why NMR yields more consistent embeddings. Is it the 2D constraint, the density weighting reducing sensitivity to distribution shift, or something else? This is a missed opportunity to strengthen the central claim.
 
 ### Trivial
-- The abstract's "over 50% improvement" claim is not precisely operationalized (50% relative improvement in explained variance relative to the best baseline, averaged across conditions? minimum across conditions?). The numbers in Section 4.1 are consistent with this claim, but the abstract could be more explicit.
-- The paper reports many t-tests with multiple comparisons correction but does not name the specific correction procedure (Bonferroni, Holm, Benjamini-Hochberg). This is a minor transparency detail.
+
+None.
 
 ## Nice-to-Haves
-- Ablation studies isolating the regression-based pair selection and density weighting components (as described above — this would strengthen rather than fix a flaw)
-- Hyperparameter sensitivity analysis for NMR itself (varying the threshold, batch size) to provide practical user guidance
-- Reporting effect sizes (Cohen's d) alongside p-values for the main comparisons
+
+- A formal loss equation with clear notation would significantly improve the paper.
+- An ablation study isolating the three main design choices (prediction-based pair selection, thresholding, density weighting) would directly validate the contribution.
+- Explicitly stating whether "50% improvement" is relative or absolute would prevent potential misinterpretation.
+- A brief analysis of embedding stability (e.g., measuring alignment of embedding manifolds directly across sessions) would turn the cross-session results from an observation into a mechanistic understanding.
 
 ## Removed Points
-*These points are flagged to be removed, treat them with caution*
-- **"Baseline comparison is narrow"** — The paper explicitly justifies why CEBRA (contrastive SOTA) and pi-VAE (generative SOTA) were chosen, noting both benchmark against many earlier methods (PCA, UMAP, fLDS, LFADS, etc.). The "over 50%" claim is relative to these SOTA baselines, which is standard practice. This is not a genuine weakness.
-- **"Tuning procedure is underspecified"** — The paper references supplementary figures (Figs 12, 13, 18, 22) for hyperparameter search details, which the parser stripped. The main text states that baselines were "hyperparameter-optimized" and that model parameters were fixed across sessions. This is adequate for a conference paper.
-- **"Effect sizes and confidence intervals not reported"** — This is not standard practice for this field; the paper reports t-statistics and p-values with multiple comparisons correction, which is the norm. A nice-to-have, not a weakness.
-- **"The paper does not specify the multiple comparisons correction method"** — The paper explicitly states "paired t-test with multiple comparisons correction" throughout. The specific method (Bonferroni, Holm, etc.) is a minor implementation detail commonly deferred to the appendix.
-- **"Section 3.3 is garbled / fractured mid-sentence"** — Parser artifact. The original submission does not have this issue.
-- **"The paper does not include a dataset summary table"** — The paper references "Table 2" for session details, suggesting this exists in the original submission (stripped by parser).
+
+- *Criticism that the method is "not adequately defined" because architecture/training details are entirely absent* — Sections 3.1 and 3.2 appear to have been stripped by the parser. It is not possible to confirm from the extracted text whether those sections contained architecture and training details. However, **Section 3.3 (loss function description) is visible and is genuinely inadequate** — this criticism is retained but narrowed to the loss function specification.
+- *Criticism about "ConR loss" lacking citation* — the references section was likely stripped by the parser; the citation likely exists in the original submission.
+- *Criticism about formatting artifacts or garbled text (e.g., ".3)", "mathsf")* — these are parser artifacts, not author errors.
+- *Generic strengths from the Strength Finder that lack specific content or conflict with verified weaknesses* — none found; all strengths listed are specific and evidence-backed.
 
 ## Novel Insights
-None beyond the paper's own contributions.
+
+The most interesting observation emerging from the reviews is the tension between the paper's substantial experimental program and its thin methodological specification. The experimental results — particularly the cross-session decoding (nearly 2× CEBRA, 6× pi-VAE) and the successful 2D embedding of attempted handwriting in a paralyzed patient — appear to represent a genuine empirical advance. Yet because the method is not formally described, it is difficult for a reviewer to determine whether this advance comes from a genuinely novel algorithmic idea or from a well-tuned combination of existing building blocks (contrastive learning with thresholding, auxiliary regression, density weighting). The paper would be significantly strengthened by resolving this ambiguity — either by showing through ablation that the specific combination is novel, or by formally specifying the loss so the novelty can be evaluated on its own terms.
 
 ## Suggestions
-1. Rewrite Section 3 (or ensure the complete version is available in the camera-ready) to provide a self-contained, mathematical description of the NMR loss function, including: (i) the full objective function; (ii) how the threshold is determined; (iii) whether the regression head is learned jointly or in two stages; (iv) the mathematical form of the density weighting for infrequent labels. Pseudocode would be helpful.
-2. Add at least one ablation isolating the regression-based pair selection from the density weighting to demonstrate that both components contribute.
-3. State the train/test splitting procedure explicitly in Section 4, and summarize the hyperparameter search space for both baselines in a paragraph or table in the main text.
+
+1. **Add a formal Methods section** (or expand Section 3) with: (a) the loss function written as a mathematical equation, (b) a clear description of the neural encoder architecture (or a statement that NMR is a loss applied to a fixed architecture shared with baselines), (c) the density-weighting mechanism specified quantitatively, and (d) pseudocode or a schematic diagram of the training procedure.
+
+2. **Clarify the relationship between NMR and CEBRA**: explicitly state whether NMR shares CEBRA's architecture, whether it is a drop-in replacement for its loss, or whether it is a completely separate framework. Adjust the experimental comparison and section title accordingly.
+
+3. **Add at least one ablation study** isolating the main components (linear regression prediction, threshold-based pair selection, density weighting). Even a simple "w/o density weighting" or "w/o prediction-based filtering" condition on one dataset would substantially improve the paper's scientific value.
+
+4. **Define the "over 50% improvement"** as relative vs. absolute improvement and specify the reference baseline.
+
+5. **Either develop or remove the rat hippocampus experiment** — as presented, it does not support the generalizability claim.
+
+6. **Add a brief discussion** analyzing why NMR yields more consistent embeddings across sessions — this would turn a striking observation into a mechanistic insight.
 
 ## Score and Decision
 
-This paper tackles a well-motivated problem (aligning 2D latent neural dynamics with 2D movements), proposes a clearly motivated methodological modification to contrastive dimensionality reduction, and validates it with an unusually thorough and honest experimental evaluation spanning 68 sessions, multiple neural modalities, brain areas, tasks, and species. The empirical results are consistently strong and presented transparently, including honest discussion of failure cases and variability. The core weaknesses are (1) the method description, while present in its mechanism, is not fully self-contained as a mathematical specification in the extracted text (partially a parser issue), and (2) the lack of ablations makes the causal attribution of the two claimed innovations less certain than it could be. Neither issue is fatal — the method's idea is clear, the code is provided, and the empirical evidence for the method's effectiveness is overwhelming. These are standard revision items.
+**Originality**: 6/10 — the combination of label prediction with contrastive pair selection is moderately novel, but the lack of formal specification and ablation makes it hard to assess true novelty.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Importance of research question**: 8/10 — aligning 2D latent dynamics with 2D movement trajectories is a well-motivated and practically important problem for both neuroscience and BMI.
+
+**Claims supported**: 5/10 — the experimental results support the performance claims, but the method itself is underspecified, and the lack of ablation prevents evaluation of what drives the improvement.
+
+**Soundness of experiments**: 7/10 — extensive, multi-modal, cross-session evaluation with statistical tests and hyperparameter optimization is a strength; the ambiguity in the NMR-vs-CEBRA comparison and lack of ablation reduce confidence.
+
+**Clarity of writing**: 4/10 — experimental sections are reasonably clear; the methods section is inadequate for a methods paper.
+
+**Value to the research community**: 6/10 — if the method were properly specified, the paper would be a useful benchmark; in its current form, the experimental results are compelling but difficult to build upon.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,93 +1,80 @@
-Now I have a thorough understanding of the paper and can verify claims against the actual text. Let me write the consolidated review.
-
----
+Now I have all the information needed. Let me compose the final review.
 
 ## Summary
 
-This paper proposes Coevolving Multidirectional Curriculum Learning (CCL), a method for multi-agent reinforcement learning under sparse rewards. CCL aims to generate intermediate tasks tailored to individual agents' progress using an evolutionary algorithm with an "individual-perspective" crossover/mutation operator, combined with a sigmoid-based fitness function for task selection. The method is evaluated on five cooperative tasks across MPE and Hide-and-Seek environments against several baselines.
+This paper proposes CCL (Co-evolutionary Curriculum Learning), a framework that combines automatic curriculum learning with evolutionary task generation for multi-agent systems (MAS) under sparse-reward conditions. CCL maintains a population of intermediate tasks, evaluates them via a sigmoid-shaped fitness function that selects tasks of moderate difficulty, and generates new tasks through crossover/mutation operators intended to operate at the level of individual agents. The task population evolves alongside MAPPO-based agent training in a loop. Experiments on MPE and HnS benchmarks report strong results, particularly on the HnS tasks where baselines struggle.
 
 ## Strengths
 
-- **Individual-perspective task generation is a well-motivated direction.** The paper correctly identifies that in sparse-reward MARL, shared reward signals fail to differentiate individual agent contributions, and evolving task sub-goals at the per-agent level is a plausible way to address this. The idea of decoupling intermediate task generation from monolithic joint-goal representations is the most interesting aspect of the paper.
+1. **Addresses a well-motivated and important problem.** Sparse-reward multi-agent coordination is genuinely hard, and the idea of automatically generating intermediate tasks at the individual-agent level is a plausible way to tackle it. The paper explicitly identifies the challenge of shared rewards in MAS and the limitations of single-agent curriculum learning methods in this setting.
 
-- **Sigmoid-based fitness function with ablation.** The paper provides a concrete non-linear fitness function (Eq. 5) and conducts an ablation (Fig. 4) showing that the sigmoid form outperforms a linear alternative. This is one of the few cleanly communicated components of the method.
+2. **Strong reported results on challenging HnS tasks.** Table 2 shows CCL achieving >95% success on lock-and-return and ramp-passing in Hide-and-Seek, while several baselines (POET, GoalGAN, VACL) are reported as failing to converge. This directional advantage is consistent across the tasks tested and suggests the approach has practical potential.
 
-- **Strong reported performance on HnS tasks.** The paper reports that CCL achieves >95% success on Hide-and-Seek tasks where several baselines (POET, GC, GoalGAN, VACL) fail to converge. If the results hold under proper experimental controls, this would be a meaningful empirical contribution.
+3. **Ablation studies confirm design choices.** Figure 4 comparing the sigmoid fitness function against a linear alternative, and Figure 3 comparing adaptive vs. fixed vs. no mutation step size, provide evidence that these specific design decisions contribute to CCL's performance. The paper explicitly confirms the sigmoid variant outperforms the linear form.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-**1. Method critically under-specified — the central contribution cannot be reliably understood or reproduced (structural).**
+1. **Methodological core is significantly under-specified.** Multiple critical components are either not defined or not explained, making the method impossible to reproduce or fully evaluate:
+   - **θ in the crossover operator (Eq. for D_{i,j}) is never properly defined.** Line 122 initializes "MAS policy θ" and line 142 updates "θ using MAPPO," but at line 214 we see θ_{i,j}^{A} - θ_{i,j}^{B} used as a crossover *direction in task space*. It is never explained how policy parameter differences (which live in parameter space) define meaningful directions in task parameter space, nor what the indexing (i,j) on θ refers to. This is not a minor omission — it is central to how the operator works.
+   - **The "variational" label is unexplained.** The paper calls the operator "variational individual-perspective evolutionary operator" but describes no variational inference, latent-variable model, or Bayesian component. The term appears purely decorative, which is misleading.
+   - **"k-prototype fitness evaluation" (Algorithm 1, line 9) is never defined.** The algorithm requires "number of prototypes k" as input and calls this procedure, but the paper provides no explanation of what a prototype is, how k is chosen, or how this evaluation works. The conclusion mentions "elite prototype fitness evaluation strategy" but again without definition.
+   - **Task encoding is not described.** The evolutionary operators operate on tasks, but the paper never specifies what the task representation space is for MPE or HnS — how task parameters (goal locations, agent positions, obstacles) map to the vectors being crossed over and mutated. Without this, the operators are black boxes.
 
-This is the paper's most serious problem. For a new-method paper, the methodology description is insufficient to establish what the contribution is:
+2. **"Co-evolution" is an overclaim.** The paper repeatedly claims "co-evolution between agents and environment" or "co-evolution of tasks and agent capabilities" (lines 20, 97, 238), but only the task population undergoes evolution (crossover + mutation). Agent policies are trained via MAPPO, a gradient-based RL method — they are not evolved. The loop where tasks evolve while agents are trained in parallel is a reasonable design, but calling this "co-evolution" conflates parallel training with evolutionary dynamics and inflates the contribution.
 
-- **Sections 4.1 and 4.2 are identical.** Both are titled "THE VARIATIONAL INDIVIDUAL-PERSPECTIVE EVOLUTIONARY OPERATOR" and the opening text of each subsection is nearly verbatim the same. This is not a minor formatting issue — it means the paper does not have a proper method section.
+3. **Experimental validation lacks rigor.** (a) Only **3 random seeds** are used per condition. For stochastic multi-agent environments with high variance, this provides minimal information about reliability, and the standard deviation computed from n=3 is itself highly uncertain. (b) **No learning curves are shown** anywhere in the paper; only final aggregate numbers in tables. Since the main claim is about training efficiency, convergence behavior over time is essential evidence. (c) **No statistical significance tests** are reported. The paper cannot support claims of "superior performance" without establishing whether the gaps are significant given the variance.
 
-- **Algorithm 1 has a real bug.** On line 10, an empty population `C_{i+1}` is created. However, lines 14 and 17 add offspring to `C_i` (the old population) instead of `C_{i+1}`. Lines 20–21 then sample from `C_{i+1}` — which would be empty — and from `C_j` for `j=0 to i`. As written, the algorithm's main loop does not populate the next generation, so it cannot function as described.
+4. **Baseline adaptations are unclear and potentially disadvantage baselines.** POET, GC, GoalGAN, and VACL were designed for single-agent settings. The paper states it "employ[s] the same coding techniques used in CCL" for POET (line 228) and enhances GoalGAN "with attention mechanisms" (line 230), but never specifies how single-agent methods were adapted to the multi-agent setting, what modifications were made, or whether these modifications preserve the original algorithms' intent. This makes the comparison difficult to interpret and potentially unfair (favoring CCL, which is designed for multi-agent from the ground up).
 
-- **The crossover operator's core equation uses undefined notation.** Equation 6 (line 214) computes `D_{i,j}` using `θ_{i,j}^A - θ_{i,j}^B`. The symbol `θ` was introduced on line 122 as the MAS policy parameters (used in MAPPO updates). If `θ` here refers to task goal coordinates, that would be a different quantity and is never defined. If it refers to policy parameters, then subtracting them across task populations is a cross-level confusion that is unexplained. Either way, the reader cannot determine what the operator actually computes.
-
-- **"Elite prototype fitness evaluation" / "k-prototype fitness evaluation" is invoked (Algorithm 1, line 9; Conclusion) but never defined.** No description is given of what this function computes, how prototypes are selected, or why it reduces computational overhead.
-
-Without a clear, internally consistent specification, the paper does not establish its claimed methodological innovation.
-
-**2. Meaningful experimental controls are absent, making the reported results uninterpretable.**
-
-- **Baselines are modified without controlled comparison.** POET is described as employing "the same coding techniques used in CCL," and GoalGAN is "enhanced with attention mechanisms." These are not standard implementations. The paper provides no ablation or analysis showing whether these modifications are neutral or biased in CCL's favor. A baseline modified to incorporate elements of the proposed method is not a fair comparison.
-
-- **The central claim — that individual-perspective crossover drives performance — is not ablated.** The ablation studies (Section 5.2) test only (a) adaptive vs. fixed mutation step size and (b) sigmoid vs. linear fitness function. Neither ablation isolates the core claimed innovation: comparing individual-perspective crossover against monolithic joint-goal crossover. Without this, the paper cannot support its thesis that per-agent decomposition is what matters.
-
-- **Hyperparameter selection and tuning protocols are not reported.** The paper does not state how hyperparameters were chosen for any method, whether baselines were tuned comparably, or what computational budgets were matched. This makes it impossible to assess whether reported improvements are meaningful or artifacts of asymmetric tuning.
-
-**3. Misleading terminology inflates the apparent contribution.**
-
-The method is repeatedly described as "variational" ("variational individual-perspective evolutionary operator," "variational evolutionary algorithm"). The paper contains no variational inference, no variational lower bound, no KL divergence, and no evidence lower bound — none of the technical apparatus that the term "variational" denotes in the machine learning literature. This is not a minor naming quibble; it misrepresents what the method does and misleadingly suggests a connection to a well-established family of techniques. The paper should either justify the term or remove it.
+5. **Section 4 has a structural defect that signals incomplete revision.** Subsections 4.1 and 4.2 both have the identical title "THE VARIATIONAL INDIVIDUAL-PERSPECTIVE EVOLUTIONARY OPERATOR." Section 4.1 is a three-line stub that does nothing but refer to Algorithm 1; all substantive content appears in 4.2. While this is a presentation issue, it reflects the broader problem that the methodology section is not yet a finished exposition.
 
 ### Minor
 
-- **Naming inconsistency:** The abstract introduces the method as "Collaborative Multi-dimensional Course Learning (CCL)" while the introduction (and the paper title) uses "Coevolving Multidirectional Curriculum Learning (CCL)." These are different expansions of the same acronym.
+6. **Attention mechanism is mentioned but never explained.** Line 226 states CCL incorporates "attention mechanisms (Vaswani et al., 2017) to further enhance the performance of CCL" by "improving agent decoupling," but no further detail is given about where attention is used, what it attends to, or how it is integrated. This reads as an afterthought rather than a described component.
 
-- **Only 3 random seeds per task.** While not unheard of in MARL, 3 seeds is at the low end of the acceptable range given the high variance typical of multi-agent sparse-reward settings. The paper does not discuss whether the results are stable across these seeds.
+7. **Framing of sparse rewards is awkward.** The paper says (line 34) that "the sparse reward setting provides a more flexible and effective solution" — but the entire paper is about overcoming the *difficulties* of sparse rewards. The phrasing is not contradictory (the paper can mean "sparse rewards avoid the prior-knowledge problem of dense rewards, but create new learning challenges"), but it is confusing and could mislead readers. This is a presentation issue, not a conceptual flaw.
+
+8. **The mapping from generated tasks back to environment parameters is never specified.** Algorithm 1 generates new tasks via crossover and mutation, but how these task representations translate to actual environment configurations (positions, goals, obstacles) in MPE and HnS is not described. This is essential for reproducibility.
+
+9. **Fitness function is presented without positioning against similar prior work.** The sigmoid-shaped fitness function (f̃ = 1/(1+e^{-2|r-0.5|})) encodes the standard curriculum-learning heuristic that tasks with success rates near 0 or 1 are less useful. The paper presents this as a contribution of CCL without discussing whether similar or identical formulations appear in prior work (e.g., in self-paced learning or existing ACL methods). Adding a citation or at least acknowledging this design choice's relationship to existing practice would be appropriate.
 
 ### Trivial
 
-- **Tables are embedded as images** in the extracted text, making the numerical results inaccessible in this format. The authors should ensure tables are machine-readable in any resubmission.
+None beyond what has been covered above.
 
 ## Nice-to-Haves
 
-- Comparing individual-perspective crossover against a version that treats the joint goal as a single monolithic vector would directly test the paper's central thesis. This is the single most informative experiment missing from the current submission.
-- Providing standard, unmodified implementations of POET, GoalGAN, GC, and VACL as additional baselines (or ablating the modifications) would strengthen confidence in the comparisons.
-- Defining the task representation space `Ω` concretely (e.g., goal positions per agent) and clarifying the encoding used for evolutionary operators.
-- Increasing to 5–10 random seeds with confidence intervals.
+- Adding learning curves for a representative subset of tasks would dramatically strengthen the paper's claims about training efficiency.
+- Increasing the number of seeds to at least 10 and adding a statistical test (e.g., Mann-Whitney U) would substantiate the claimed superiority over baselines.
+- If the "variational" label is not tied to any variational Bayesian method, the authors should either explain its technical basis or remove the term.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"Garbled formula in Algorithm 1 line 8"** — The garbled `1+e−2|1rj −0.5|` is a text-extraction artifact from the PDF parsing process; the original formula is well-formed elsewhere in the paper.
-- **"Tables are unreadable images so quantitative results cannot be assessed"** — This is a formatting/parser artifact. The original submission's tables were likely readable in the PDF. The underlying concern (numerical results should be accessible) is addressed in Trivial.
-- **"Co-evolution is mischaracterized"** — The paper evolves task goals (which define the environment/task) alongside agent policies, which is a reasonable use of "co-evolution" in the curriculum learning context. The abstract's phrasing "co-evolution between agents and their environment" is slightly imprecise but not misleading enough to retain as a weakness.
+- **"Algorithm 1 line 8 is garbled"** — Removed per formatting-artifact rule. The garbled characters (`1+e−2|1rj −0.5|`) are a PDF parser artifact; the original submission likely has properly rendered math. The underlying content (computing sigmoid fitness) is clear from context.
+- **"The paper reverses the standard difficulty claim about sparse rewards" (critic's point 3)** — Weakened to a minor weakness (point 7 above). The original criticism overstates the issue: the paper's phrasing is awkward but not contradictory. The paper is saying sparse rewards avoid the prior-knowledge burden of dense rewards (a positive) while acknowledging they create learning challenges (the problem CCL addresses). This is not a reversal.
+- **Several of the "Other Observations" items are generic or pedantic** (e.g., "the related work section does not connect to the specific operator," "fitness function is presented without citation"). These have been either absorbed into the minor weaknesses above or are too generic to merit standalone inclusion.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the paper's structural problems clearly but do not reveal any unexpected insight about the method or problem that the paper itself does not claim.
+None beyond the paper's own contributions. The reviews surface real methodological gaps but do not synthesize novel theoretical or empirical insights about multi-agent curriculum learning that the paper itself does not already gesture toward.
 
 ## Suggestions
 
-1. **Rewrite the methodology section from scratch.** Remove the duplicate subsections. Provide a single, coherent description of CCL with all symbols defined before use. Fix the algorithm bug (offspring should be added to `C_{i+1}`). Define what "k-prototype fitness evaluation" computes.
-
-2. **Either justify or drop the term "variational."** If the method genuinely involves variational inference, show the derivation. If not, rename the operator (e.g., "individual-perspective evolutionary operator") to avoid misleading readers.
-
-3. **Add an ablation of the individual-perspective crossover.** Compare against a version that treats the joint goal as a single vector without per-agent decomposition. This directly tests the paper's central claim and is the single most impactful experiment to add.
-
-4. **Run fair baselines.** Either use standard, unmodified implementations of POET, GoalGAN, GC, and VACL, or provide controlled ablations that isolate the effect of any modifications. Report hyperparameter tuning protocols and computational budgets.
+1. **Clarify the method's core definitions.** Explicitly state what θ represents in the crossover operator and justify (or remove) the claim that policy parameter differences define meaningful directions in task space. Define the task encoding for each environment. Define the "k-prototype" evaluation or replace it with a standard alternative.
+2. **Either explain the "variational" label or remove it.** If the operator uses a stochastic mechanism that justifies the term, state what it is. Otherwise, rename it to avoid misleading readers.
+3. **Add learning curves and increase seeds to at least 10.** Without these, the experimental claims rest on thin evidence.
+4. **Describe baseline adaptations transparently.** Specify how each single-agent baseline (POET, GoalGAN, VACL) was extended to the multi-agent setting, including any modifications.
+5. **Describe or remove the attention mechanism mention.** If attention is part of CCL, explain where and how it is used. If it is incidental, remove the reference.
+6. **Tone down the "co-evolution" language** to accurately reflect that only the task population undergoes evolution, while agent policies are trained via MAPPO.
 
 ## Score and Decision
 
-**Originality:** The core idea (per-agent task generation in MAS curricula) is reasonably novel. **Importance of question:** The sparse-reward MARL problem is important and timely. **Claims supported:** No — the method is insufficiently specified to evaluate, and the experimental comparisons are not properly controlled. **Soundness of experiments:** Weak — modified baselines, no ablation of the central claim, no tuning protocol reported. **Clarity of writing:** Poor — duplicate sections, undefined notation, algorithm bug, misleading terminology. **Value to the community:** The idea has potential value, but the current paper does not deliver a verifiable contribution.
-
-The paper proposes an interesting direction but fails to establish its contribution due to fundamental problems in both method specification and experimental validation. A major revision is required.
+The paper tackles an important problem and shows promising directional results, particularly on HnS. However, the methodological description has fundamental gaps (θ undefined in the core crossover operator, "variational" unexplained, k-prototype undefined, task encoding unspecified) that prevent reproducibility and evaluation. The experimental validation is too thin (3 seeds, no learning curves, no statistical tests) to support the claimed superiority. These are major, not fatal, issues — the core direction has merit — but the paper in its current form is not ready for acceptance.
 
 MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

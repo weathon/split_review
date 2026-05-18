@@ -1,18 +1,18 @@
-Now I have a thorough understanding of the paper. Let me produce the consolidated review.
+Now I have a thorough understanding of the paper. Let me synthesize the final review, carefully cross-referencing each claim against the actual paper content.
+
+---
 
 ## Summary
 
-MAESTRO presents a self-supervised set representation learning architecture for cytometry data, combining masked autoencoding with a teacher-student self-distillation framework and set-specific attention blocks (ISAB, PMA, SAB) to produce fixed-dimensional sample-level embeddings from variable-sized sets of up to 1.4 million cells. The method is evaluated on a large cytometry cohort through linear probing for diagnosis, age, and sex prediction, as well as cell-type distribution retrieval.
+MAESTRO proposes a self-supervised set representation architecture combining Set Transformer components (ISAB, PMA) with masked autoencoding and self-distillation (student-teacher via EMA). Targeted at cytometry data with up to ~1.4M cells per sample, the model learns fixed-dimensional, permutation-invariant set representations while using a teacher network to encode the full cell set and a student to process a masked subset. The paper evaluates these representations on linear probing tasks (diagnosis, age, sex classification/regression) and cell-type distribution retrieval, benchmarking against manual gating, clustering, Deep Sets, Set Transformer, and OTKE.
 
 ## Strengths
 
-- **Handles variable-sized sets at unprecedented scale for self-supervised set learning**: The dataset spans 11,829 to 1,386,520 cells per sample, and the architecture employs Induced Set-Attention Blocks (ISAB) to reduce complexity from O(n²) to O(nm) (Section 3.1.2). This directly supports the claim of scaling to cytometry-scale sets while maintaining permutation invariance.
+1. **Novel combination of set-attention mechanisms with self-supervised learning for large-scale sets.** MAESTRO integrates ISABs (O(nm) complexity), PMA pooling, masked autoencoding, and self-distillation into a coherent framework that handles sets with hundreds of thousands to over a million elements while preserving permutation invariance. The ablation study (Table 1) cleanly demonstrates that both masked modeling and self-distillation contribute meaningfully to performance — removing either degrades results across the board.
 
-- **Provides formal theoretical guarantees for set operations**: The paper proves permutation equivariance of ISAB and SAB (Theorems 2 and 4) and permutation invariance of PMA (Theorem 3), ensuring the model correctly handles unordered sets without positional encodings — a non-trivial requirement for set representation methods.
+2. **Promising qualitative evidence that embeddings capture clinically meaningful structure.** The UMAP projection of sample-level embeddings (Figure 3) shows clustering by diagnosis, and the nearest-neighbor contingency table has high diagonal values. These results, combined with the held-out reconstruction visualizations (Figure 2) showing that MAESTRO can reconstruct cell populations absent from the unmasked input, suggest the model is learning biologically relevant structure.
 
-- **Ablation study validates the contribution of key modules**: The ablation (Table 1) confirms that removing masked modeling or self-distillation significantly degrades performance, establishing that both components are essential for the learned representations.
-
-- **Demonstrates sample-level representations encode clinically relevant information without labels**: The linear probing results for diagnosis, sex, and age prediction, along with cell-type distribution retrieval, show that the frozen embeddings carry information useful for downstream tasks — going beyond cell-level SSL methods that dominate prior single-cell work.
+3. **Application of modern set representation methods to an underexplored domain.** The paper bridges a gap by benchmarking Deep Sets, Set Transformer, and OTKE on cytometry data — methods not previously applied in this setting — alongside traditional approaches (manual gating, clustering). This provides a useful reference point for the community even if the comparison is imperfect.
 
 ## Weaknesses
 
@@ -21,67 +21,56 @@ None.
 
 ### Major
 
-- **Baseline comparison confounds architecture advantage with data advantage.** MAESTRO uses the full set of cells (up to 1.4M), while Deep Sets, Set Transformer, and OTKE are restricted to random subsets of 10,000 cells (Section 4.4, line 180). The paper does not report MAESTRO's performance under the same 10,000-cell subsampling. Without this controlled experiment, the claimed superiority cannot be attributed to better representation learning rather than simply seeing more data. This is the single most important gap in the experimental validation.
+1. **Confounded comparison with baseline methods prevents attribution of the source of improvement.** The paper states that Deep Sets, Set Transformer, and OTKE "are unable to handle the number of cells in a sample," so baselines are given a random subset of 10,000 cells while MAESTRO uses the full set (Section 4.4, Figure 4). The paper presents this as a system-level demonstration, but it conflates two distinct sources of advantage: (a) the benefit of the proposed architecture/self-supervised learning scheme, and (b) the benefit of using an order of magnitude more data. Without a controlled experiment where *all methods* operate on the same input size (e.g., all restricted to 10k cells), the reader cannot tell whether MAESTRO's outperformance reflects superior representation learning or simply the information advantage of seeing more cells. This is exacerbated by the absence of any description of how the baseline methods were trained — the paper describes Deep Sets and Set Transformer as "supervised approaches" (Related Work) but never clarifies whether they were trained end-to-end on the labeled data, used as untrained random encoders, or given any form of pretraining adapted to cytometry. If the baselines were applied as fixed random feature extractors while MAESTRO was pretrained on the same data, the comparison is structurally unfair. The same confound applies to the cell-type distribution retrieval experiments (Figure 5).
 
-- **No error bars, confidence intervals, or significance tests for any quantitative benchmark.** The linear probing results (Figure 4) and cell-type distribution retrieval (Figure 5) are reported as point estimates. Given the likely small sample sizes (the cohort size is not even stated in the main text), the observed differences could be within noise. This weakens every quantitative claim in the paper.
-
-- **Masking ratio ρ is not reported.** The NRBM algorithm (Algorithm 1) defines ρ ∈ [0,1] but the specific value used in experiments is never given in the main text. Since the masking ratio directly controls the difficulty of the reconstruction task and the student's information budget, this is a missing critical hyperparameter.
+   *Why this matters:* This is the paper's primary evaluative evidence for claiming superiority over existing set representation methods. The lack of a controlled comparison and the missing baseline training protocol mean the central benchmarking claim is not adequately supported.
 
 ### Minor
 
-- **Reconstruction evaluation is only qualitative.** Figure 2 shows UMAP overlays for 8 test samples, but no quantitative metric (e.g., MSE between predicted and true masked cells, cosine similarity, or per-feature correlation) is reported. Without this, claims about reconstruction quality rest entirely on visual inspection of UMAP projections, which are known to be sensitive to random seeds and hyperparameters.
+1. **No uncertainty quantification.** All reported results (Figures 4, 5; Table 1) are point estimates without error bars, confidence intervals, or any indication of variance across runs or train/test splits. For a paper making comparative claims, this is a significant omission. The ablation study in particular would be much more informative with some measure of variability.
 
-- **NRBM is not compared against standard random masking.** The paper motivates NRBM as promoting "diverse learning" (Section 3.2.1), but no experiment compares NRBM against simple random masking. Since random masking is the default in masked autoencoding (MAE), the paper should demonstrate that NRBM provides a meaningful advantage rather than introducing data-dependent bias.
+2. **Non-Random Block Masking (NRBM) is not compared against standard random masking.** The ablation study (Table 1) removes "Masked Modelling" entirely but never isolates whether the *block-structured* design of NRBM matters. A simple comparison of NRBM vs. random masking at the same mask ratio is needed to justify the added complexity of NRBM. Without it, the paper cannot attribute any of the model's success to the specific masking strategy rather than to masked modeling in general.
 
-- **Data description is incomplete.** The main text reports the cell count range but omits the total number of samples, number of protein markers, cohort demographics, and study composition. The reader cannot assess the generality or statistical power of the results. (Line 156 states only "Disease diagnostic and meta data were provided by the primary clinician teams for each study.")
+3. **Reconstruction evaluation is purely qualitative.** Figure 2 shows UMAP overlays of reconstructed cells, but no quantitative reconstruction metric (e.g., cosine similarity, mean squared error, or retrieval precision between predicted and true masked cells) is reported. The claim that areas with few unmasked cells are "accurately reconstructed" relies entirely on visual inspection of a 2D projection, which is not rigorous.
 
-- **Teacher forward-pass feasibility is asserted but undocumented.** The paper states the teacher processes the full set "only [requiring] an encoder" (Figure 1 caption) with EMA-updated parameters. While a forward-only pass is indeed cheaper than training, no hardware configuration, memory usage, or wall-clock time is reported. For n=1.4M cells through ISAB+SAB+PMA, this is non-trivial and the paper should describe how it was achieved (gradient checkpointing? inducing point count m? number of layers?).
-
-- **Conclusion overclaims scope.** The final paragraph claims MAESTRO is "essential for predicting outcomes, identifying health trajectories, and advancing precision medicine" based on linear probing on a single dataset. The paper does not test any of these claimed applications directly. A limitations paragraph acknowledging this gap would improve scientific honesty.
+4. **Key experimental details are absent from the main text.** The mask ratio ρ, number of inducing points m, the sampled subset size N (for the student), dataset size and class balance, and the exact linear probing protocol (train/validation/test split, regularization, number of runs) are not specified in the main body. While some of these may appear in appendices (which the parser stripped), the main text should contain enough information to assess the validity of the core claims.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
-- A comparison of MAESTRO's performance when also subsampled to 10,000 cells, to isolate the effect of the architecture from the effect of using more data.
-- Quantitative reconstruction metrics (e.g., per-cell MSE on held-out masked cells).
-- An ablation comparing NRBM vs. random masking to justify the design choice.
-- A brief limitations section in the conclusion.
+
+- A simple baseline of mean-pooling cell features followed by a linear probe would clarify how much improvement comes from learned set representations vs. naive aggregation.
+- Reporting a quantitative reconstruction metric would strengthen the claims about masked modeling.
+- A comparison on equal input size (all methods on 10k cells) would disentangle the data-quantity advantage from the architectural/SSL advantage.
 
 ## Removed Points
-- *Criticism that "manual gating is a manual process, not a learnable representation method" making the comparison less meaningful* — The paper explicitly acknowledges this ("Manual gating is a method where experts visually identify... labor intensive and subject to operator bias") and states it is SOTA *for cytometry set representation* because no SSL methods exist for this task. The reviewer misreads the paper's own framing.
-- *Criticism that the teacher model's feasibility is a "collapse" of the method* — Overstated. The teacher uses EMA weights and only performs forward passes (no backpropagation). This is standard practice in self-distillation (DINO, BYOL). The ISAB reduces complexity from O(n²) to O(nm). The concern is valid as a request for documentation but not as a structural flaw.
-- *Criticism about "the first attention-based self-supervised set representation learning architecture" claim not being fully supported* — The claim is appropriately qualified ("to the best of our knowledge") and the scalability evidence (O(nm) complexity, handling 1.4M cells) is provided. The missing hardware details weaken but do not invalidate the claim.
-- *Criticism about missing baseline training details in main text* — The paper states "Details on each implementation can be found in F.5" (appendix section). Per parser-stripping rules, the appendix exists in the original submission. The reviewer's broader concern about fairness (different input sizes, different training regimes) is moved to Major Weaknesses above, reframed as a controlled-experiment issue rather than a missing-detail issue.
+
+The following criticisms from the raw reviews were removed or substantially weakened after verification against the paper:
+
+- **Teacher model computational feasibility:** The paper explains (Figure 1 caption) that the teacher is encoder-only, updated via EMA (no backpropagation through the teacher), and uses ISAB with O(nm) complexity. This is a reasonable explanation — the teacher forward pass on the full set is tractable. The reviewer's claim of a "contradiction" misreads the paper.
+- **"First" claim too narrow:** The claim is qualified with "in the context of single-cell data" and "attention-based self-supervised set representation learning." This is appropriately scoped for a domain-specific contribution. Perceiver IO is a general architecture, not specifically a self-supervised set representation method.
+- **Missing proofs / appendix content:** The proofs for Theorems 1–4 and experimental details (appendices E.3.2, F.5) are referenced but stripped by the parser. Per review guidelines, criticisms about missing appendix content in the parsed text are not valid weaknesses.
+- **Typo "demonstratedy":** Removed per rule against formatting/typo nitpicks.
+- **Error bars on large-scale benchmarks:** While error bars would strengthen the paper, the absence alone does not invalidate the results, and the trends in the ablation study are clear enough to support the design choices. Moved from Major to Minor.
 
 ## Novel Insights
-The reviews converge on a clear picture: MAESTRO's architectural design is well-motivated and theoretically grounded, but the experimental evaluation suffers from a confounded comparison (different input sizes for baselines), missing error bars, and incomplete reporting of key hyperparameters (mask ratio ρ) and feasibility constraints (teacher forward-pass cost). The harsh critic correctly identifies that the central claim of superiority is not convincingly demonstrated given these gaps. The strength finder accurately identifies the genuine contributions — handling 1.4M cells, the self-supervised formulation, and the theoretical guarantees — but overstates the strength of the empirical evidence by not accounting for the confounded comparison. An important insight is that the paper's main advance may be architectural scalability rather than representation quality per se, and the experiments as designed cannot distinguish these.
+
+The harsh reviewer's point about the confounded comparison setup is the most insightful observation: the paper frames MAESTRO's "ability to handle the full set" as a strength while comparing against methods artificially restricted to 10k cells, but never runs the controlled experiment (all methods at 10k) that would isolate whether MAESTRO's architectural/SSL choices provide a benefit independent of data quantity. This is a genuinely useful diagnostic: a follow-up experiment on equal input size could either strongly validate the approach (if MAESTRO still wins) or reveal that the practical advantage is mainly about scale handling rather than representation quality — both of which are interesting but different claims. The ablation study (Table 1) partially mitigates this by showing that within the MAESTRO family, removing masked modeling or self-distillation degrades performance, confirming those design choices matter even if the baseline comparison is confounded.
+
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Run MAESTRO with 10,000-cell subsampling** and report results alongside the full-set version. If performance remains superior, the architecture claim is strongly validated. If not, the contribution is primarily about scaling, which is still valuable but should be reframed.
-
-2. **Add error bars or significance tests** (e.g., bootstrapped confidence intervals, repeated linear probing with different random seeds) to all quantitative figures.
-
-3. **Report the masking ratio ρ** used in experiments, the number of inducing points m in ISAB, and the hardware configuration (GPU, memory, time per epoch) for both student and teacher forward passes.
-
-4. **Replace the qualitative UMAP reconstruction (Figure 2) with a quantitative metric** (e.g., per-cell MSE between predicted and true expression on held-out masked cells) to objectively validate the reconstruction objective.
-
-5. **Add an ablation comparing NRBM vs. standard random masking** to justify the design choice and rule out data-dependent bias.
+1. **Add a controlled experiment on equal input size.** Either restrict MAESTRO to the same 10k-cell subset as the baselines or (if computationally feasible) allow the baselines to access a larger subset. This is the single most important experiment to add, as it would either validate or bound the paper's central comparative claim.
+2. **Clarify the baseline training protocol.** State explicitly how Deep Sets, Set Transformer, and OTKE were trained for the linear probing and cell-type retrieval tasks — were they trained end-to-end, used as fixed encoders, or given any form of pretraining? If they were untrained, this must be disclosed as a limitation.
+3. **Report error bars or confidence intervals** for all quantitative results, especially the ablation study and the linear probing benchmarks.
+4. **Compare NRBM against random masking** at the same mask ratio to justify the added complexity of the block-masking design.
+5. **Add a quantitative reconstruction metric** (e.g., cosine similarity between predicted and true masked cell representations in the embedding space) to accompany Figure 2.
 
 ## Score and Decision
 
-**Originality**: 6/10 — Combines known components (ISAB, PMA, MAE, self-distillation) in a novel configuration for a new domain. The NRBM masking strategy is a genuine novelty but its benefits are not rigorously shown.
-
-**Importance of research question**: 8/10 — Cytometry data analysis is a clinically important problem where set-level SSL methods are genuinely lacking.
-
-**Claims supported**: 4/10 — The central claim of superiority over baselines is not convincingly supported due to the confounded comparison, missing error bars, and incomplete methodological reporting.
-
-**Soundness of experiments**: 4/10 — The evaluation design has a critical confound (different input sizes), lacks statistical rigor, and is missing key ablations.
-
-**Clarity of writing**: 7/10 — The motivation and method are clearly described. The architecture and theoretical properties are well-presented. Experimental reporting is the main weakness.
-
-**Value to community**: 6/10 — If the experimental gaps are addressed, this would be a useful contribution to both the set representation learning and computational cytometry communities.
+The paper makes a genuine architectural contribution — combining ISAB-based set transformers with self-distillation and masked modeling for large, variable-sized sets — and the ablation study convincingly shows that these design choices matter. However, the primary benchmarking evidence for superiority over existing set methods is compromised by a confounded comparison (different input sizes) and a complete lack of clarity on how baselines were trained. These are addressable issues, but in their current form the evaluative claims are not adequately supported. The paper's architectural contributions are real and novel, but the empirical case needs substantial strengthening.
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

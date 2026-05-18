@@ -1,96 +1,70 @@
-Now I have a thorough understanding of the paper and can verify each claim. Let me compose the final consolidated review.
-
----
+Now I have all the evidence needed. Let me produce the consolidated review.
 
 ## Summary
 
-This paper conducts a systematic empirical study of the feature learning strength γ (the output scaling parameter in μP) across architectures (MLPs, CNNs, ResNets, Vision Transformers) in the online training setting. It maps the γ–η phase portrait, identifies scaling laws for the learning rate (η* ∝ γ² for γ≪1, η* ∝ γ^{2/L} for γ≫1), catalogs dynamical phenomena (catapults, silent alignment, stepwise loss drops, progressive sharpening), and shows that large-γ networks can match or exceed γ=1 performance given sufficient training and proper η scaling. A minimal linear-network model analytically reproduces all observed scaling exponents.
+This paper presents a systematic empirical study of how the feature-learning strength parameter γ interacts with the learning rate η in neural networks trained online with SGD. Across MLPs, CNNs, ResNets, and ViTs, the authors map out phase portraits in the γ–η plane, identify scaling laws for the optimal learning rate (η* ∝ γ² for γ≪1 and η* ∝ γ^{2/L} for γ≫1), catalog dynamical phenomena (catapults, silent alignment, stepwise loss drops, progressive sharpening), and explain the observed scalings analytically with a simple linear-network model. The core contributions are an empirical map of the optimization landscape as a function of γ and η, and the finding that—contrary to prior offline results—large γ can match or exceed the performance of γ=1 in the online setting with appropriate learning rate scaling.
 
 ## Strengths
 
-1. **Systematic identification of scaling regimes in the γ–η plane across diverse architectures.** The paper sweeps γ and η over many orders of magnitude for MLPs, CNNs, ResNets, and ViTs, revealing a consistent phase portrait with the distinctive "triangle of optimizability" at large γ (Figures 1c,d). The predicted scalings η* ∝ γ² (lazy) and η* ∝ γ^{2/L} (ultra-rich) are observed as the boundaries of the convergent region, and this depth-dependent large-γ scaling is a novel finding not previously highlighted.
+- **Systematic identification of scaling regimes in the γ–η plane across diverse architectures.** The paper performs joint sweeps over γ and η across MLPs, CNNs, ResNets, and ViTs on multiple datasets (MNIST-1M, CIFAR-5M, TinyImageNet), revealing a characteristic phase portrait (Figure 1) that is consistent across architectures and depends primarily on the loss function. The scaling laws η* ∝ γ² (lazy) and η* ∝ γ^{2/L} (ultra-rich) are supported by both empirical sweeps and the theoretical model (Table 1, Section 4).
 
-2. **Theoretical derivation of all observed scalings from a minimal linear model.** Section 5 derives η_min, η_crit, and η_max for both MSE and cross-entropy loss from a single-parameter deep linear network (Table 1). The model reproduces the full phase portrait and explains the origin of the depth-dependent η_max ∝ γ^{2/L} scaling via the Hessian at the minimizer (Equation 3). This connects the empirical observations to first principles.
+- **Demonstration that large γ is competitive with γ=1 in online training, contrasting with prior offline findings.** With the correct learning rate scaling, the paper shows that larger γ yields equal or better final test accuracy than γ=1 (Figure 2b), and the loss scaling laws improve with γ (Figure 2a). This directly contradicts prior offline results (Petrini et al., 2022; Sclocchi et al., 2023) that found performance degradation at large γ, highlighting the importance of the online setting.
 
-3. **Discovery and catalog of ultra-rich (γ≫1) regime dynamics.** The paper documents silent alignment, stepwise loss drops, and progressive sharpening at large γ (Figures 2a, 4b, Section 3.3) and shows these phenomena — previously studied only in simpler settings — occur in realistic deep networks. The finding that early-time dynamics become γ-invariant under τ = ηt/γ rescaling provides testable predictions for theories of feature learning.
+- **A simple theoretical model that analytically reproduces all observed scalings.** The one-parameter linear network model (Section 4) derives the minimal, critical, and maximal learning rates for both MSE and cross-entropy losses in both regimes (Table 1), explaining the origin of the depth-dependent γ^{2/L} scaling at large γ. The model also captures the difference between MSE and cross-entropy catapult regimes via the shape of the loss tail (quadratic vs. linear).
 
-4. **Demonstration that large γ yields competitive performance in the online setting.** Figure 2b shows that with proper learning-rate scaling and sufficient training time, larger-γ networks match or exceed γ=1 generalization. This contrasts with offline results (Petrini et al. 2022) and isolates the effect of γ on optimization from dataset-repetition confounds.
+- **Catalog of dynamical phenomena controlled by γ.** The paper identifies and characterizes catapult effects, silent alignment, stepwise loss drops, and progressive sharpening, showing they are systematically governed by γ across architectures and datasets. These observations extend prior work (which was mostly on linear networks or restricted settings) to realistic deep networks.
 
-5. **Consistency across architectures and datasets.** The main findings replicate across MLPs, CNNs, ResNet-18, and Vision Transformers on MNIST-1M, CIFAR-5M, and TinyImageNet. The use of large synthetic/curated datasets to approximate the online setting is methodologically sound.
+- **Consistent Hessian spectral analysis showing two-regime scaling.** The paper shows that the top Hessian eigenvalues exhibit clean two-regime scaling (γ⁻² for γ≪1, transitioning at large γ) that matches theoretical predictions, and reveals that the rich regime features many eigenvalues growing to sizeable range rather than just a few outliers.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
 None.
 
 ### Minor
 
-1. **Scaling-law claims rely on qualitative visual evidence rather than quantitative extraction.** The paper's central empirical claim — the scaling exponents η* ∝ γ² and η* ∝ γ^{2/L} — is supported by dashed lines overlaid on accuracy heatmaps (Figures 1c,d) and by the theoretical derivation (Section 5). However, the empirical boundaries are not quantitatively extracted: there is no thresholding of accuracy to define the convergent region, no power-law fitting to the boundaries, and no reported exponents with confidence intervals. While the visual match is compelling and the theory provides the exponents, this gap between the qualitative empirical demonstration and the precise quantitative claims reduces the paper's rigor. The authors could substantially strengthen the paper by extracting boundaries via accuracy thresholding and fitting power laws.
+1. **Hessian scaling "verification" lacks quantitative fitting.** Section 3.2 states "we verify a scaling going as γ^{-2/L}" but the supporting plot (Figure 4a) is presented on log-log axes without a fitted exponent, confidence interval, or comparison line for the predicted slope. While the theoretical derivation in Section 4 (Equation 356) independently predicts this scaling, and the empirical trend is visually consistent, the language "verify" is stronger than the evidence provided. Adding fitted exponents with uncertainties for the MLP, CNN, and ViT cases would turn a qualitative observation into a crisp empirical result directly validating a core theoretical prediction.
 
-    *Versus the overly strong version in the harsh review*: I keep this as Minor rather than Major because (i) the theoretical derivation independently provides the exponents, (ii) the visual match in the phase portraits is clear, and (iii) the paper is primarily an empirical catalog, not a precision measurement paper. It is a real limitation but not one that invalidates the core contribution.
+2. **Function similarity claim lacks quantitative measures.** The claim that "rich networks agree in their function outputs at the end of training" (Figure 5a) is supported only by a scatter plot. While the paper also provides CKA analysis (Figure 5b), no scalar measure (e.g., R² between outputs, fraction of variance explained) is reported to quantify how strong the agreement actually is. The scatter plot alone does not let the reader judge whether agreement is "strong" or merely above chance, especially since the critic notes visible scatter around the diagonal on the rich plot. Computing R² or mean-squared-error between function outputs across random seeds would make this claim precise and falsifiable.
 
-2. **"Optimal" vs. "maximal" learning rate terminology is ambiguous.** The abstract and introduction use η* ("optimal learning rate"), but the technical discussion in Sections 3.1 and 5 focuses on η_max (the maximum convergent learning rate derived from Hessian eigenvalues). The phase portraits show accuracy, so the "optimal" η would be the best-performing one, which may not coincide with η_max. The paper should clarify whether the scaling laws apply to the maximal convergent η, the best-performing η, or both, and whether these are empirically the same.
+3. **Motivation and generality of the cross-entropy toy model constants could be clearer.** Equation (13) defines a binary cross-entropy loss with specific constants (denominators 1+e^{-1} and 1+e) chosen so the minimum occurs at \tilde{f}=1. While the paper correctly notes that the key difference from MSE is the linear vs. quadratic tail shape—which is robust to reparameterization—it does not explicitly argue that the derived scalings (η_min, η_crit, η_max) are independent of the particular class-imbalance encoded by these constants. A brief note showing that the scalings are unchanged under, e.g., p_0 = 1/(1+e^a) for any a>0 would remove a potential concern about the theory's generality.
 
-3. **The time-rescaling claim (τ = ηt/γ) is asserted but not demonstrated in a figure.** Line 248 states that "upon rescaling time as τ = ηt/γ, the early time dynamics coincide," and line 398 derives this from the linear model. However, no multi-γ collapse plot is shown in the main paper. A figure overlaying loss or alignment curves for several γ values before and after rescaling would directly support this claim and is straightforward to produce.
-
-4. **Function-comparison evidence is thin.** Section 3.4 claims that large-γ networks learn "the same function" and that representations agree under time rescaling. The evidence consists of a single scatter plot (Figure 5a) comparing network outputs and an end-of-training CKA plot (Figure 5b). The scatter plot's caption mentions "pairs of networks" but the text describes comparing "two distinct networks A and B" — it is unclear how many pairs, seeds, or γ values are compared. The CKA figure shows only end-of-training values, yet the text mentions that "after adopting a suitable time rescaling, the alignment scores for a variety of networks across γ agree" — the time-rescaled version is not shown. This claim would be much stronger with systematic pairwise comparisons across multiple seeds and γ values, and with a time-rescaled collapse plot for CKA.
-
-5. **Inconsistency between described η sweep range and actual plotted range.** Line 151 states sweeping η from 10¹² down to 10⁻¹², which the reviewer notes is implausibly large. In context, the sweep starts at the high end and stops upon finding the first convergent η, so the actual η values used in training are far smaller — but this procedural detail is easy to misread. The paper should clarify the actual η ranges that were used in the reported experiments.
+4. **The catapult regime for cross-entropy is not clearly visible in the empirical phase portrait.** The paper states catapults occur for η in a band between γ² and γ for cross-entropy (Table 1, line 54), but the empirical phase portrait (Figure 1d) does not obviously distinguish a separate catapult region from the divergent region. The paper should explain how the catapult regime is empirically identified (e.g., loss eventually converges vs. diverges) and whether this distinction is clearly visible or only inferred from the toy model.
 
 ### Trivial
 
-None.
+- **Loss-curve scaling exponents are not reported.** Figure 3a overlays dashed lines showing "different power law scalings of loss with training time observed in the lazy and rich regime," but no fitted exponents are given in the caption or text. Reporting the fitted exponents would make this figure substantially more informative.
 
 ## Nice-to-Haves
 
-- **Add a summary table** (beyond Table 1) comparing predicted and observed scaling exponents for η_min, η_crit, η_max for both losses across all architectures. This would clarify the connection between theory and experiment.
-- **Quantify the scaling exponents** by extracting the convergent-region boundaries from the phase plots and fitting power laws with error bars. See Weakness #1 above.
-- **Add a multi-γ collapse plot** for the τ = ηt/γ time rescaling to visually demonstrate the claimed invariance.
-- **Brief discussion of batch-size scaling** and how it might interact with the γ–η phase portrait.
-- **Practical guidance paragraph** on how practitioners should tune γ and η (e.g., "set γ large, then tune η via η ∝ γ^{2/L}").
+- **Validation of the online-data approximation.** The paper uses CIFAR-5M as a proxy for infinite data, citing prior work. A brief comparison (e.g., training on CIFAR-5M vs. CIFAR-10 with heavy augmentation for a subset of runs) would help readers assess the finite-data approximation's validity within the paper's own setup.
+
+- **Limitations paragraph.** The paper currently concludes with future work on other optimizers but does not explicitly discuss its scope: only vanilla SGD, only supervised classification/regression, only online training, only certain architectures. A brief limitations paragraph would help readers assess transferability.
+
+- **Compute budget note.** Given the scale of the sweeps (γ and η across many orders of magnitude for several architectures), reporting approximate total GPU-hours would be standard practice for a paper of this scope.
 
 ## Removed Points
 
-- **ViT lazy-limit claim unsupported in main text**: This criticism questions evidence that lives in the appendix, which was stripped by the parser. The rule explicitly requires removing weaknesses about missing appendix content. The original submission contains this evidence.
+The following points from the reviews were removed as per meta-review guidelines:
 
-- **Figure 3a caption truncated**: Parser artifact — the original submission has the complete caption. Removed per rule about formatting/parser artifacts.
-
-- **"implausible" η range (10¹² to 10⁻¹²)**: The reviewer misread the methodology. The sweep proceeds *downward* until convergence is found, so the extreme η values are starting points, not training values for all configurations. The text describes the procedure clearly.
-
-- **Comments about missing related works**: Removed per rule (cannot verify existence of missing references without external sources).
-
-- **Reproducibility nitpicks / missing implementation details**: Removed per rule (trivial implementation details impractical for a submission).
-
-- **Generic or superficial strengths from Strength Finder**: None were generic enough to drop; all cited specific content.
-
-- **Strength about "large-γ networks converge to similar functions" retained despite Weakness #4**: The strength notes the claim, while the weakness notes the evidence is thin. These are not contradictory — the paper does indeed make this claim and present some evidence; the weakness merely argues the evidence is insufficient. Keeping both is appropriate.
+- **Criticism that the paper overclaims the performance improvement at large γ** — The paper's claims ("usually exceed or match," "returns are marginal past some point") are well-calibrated to the data. The improvement is modest but real, and the paper explicitly acknowledges diminishing returns. The criticism that the framing "gives a stronger impression than the data support" overstates the issue; the paper already addresses it.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the most insightful observation from reviewing this work is how the combination of broad empirical sweeps and a minimal theoretical model generates a complete picture that neither approach alone would provide. The empirical phase portraits show the phenomena exist in realistic networks, while the linear model shows the scaling exponents arise from elementary Hessian and gradient-flow calculations, establishing that depth-dependent scaling (γ^{2/L}) is a generic feature of learning in deep networks — not a quirk of nonlinear activations or wide architectures. The tension with offline results (Petrini et al.) further highlights that the γ dependence of generalization is fundamentally tied to the data regime, a point with practical implications for hyperparameter tuning in large-scale models where data repetition is minimal.
+The reviews surface two interesting observations beyond the paper's own contributions. First, the fact that the critic and strength-finder disagree on the magnitude of the large-γ performance improvement (the paper shows a real but modest 2-3 percentage point gain) suggests that this specific claim would benefit from a standardized reporting format (e.g., "across all architectures and datasets, the improvement from γ=1 to the plateau was at most X points") so readers can calibrate expectations. Second, the near-absence of major or fatal weaknesses across both reviews, despite the critic being quite harsh, is itself informative: it means the paper's core empirical contributions are robust and the main value of revision is in tightening presentation and quantification, not in fixing errors.
 
 ## Suggestions
 
-1. **Clarify the η*/η_max distinction.** Either use η_max throughout when discussing the boundary scalings derived from Hessian analysis, or explicitly state whether η* (optimal for accuracy) empirically coincides with η_max and provide evidence.
-
-2. **Add a quantitative boundary extraction.** Threshold the accuracy maps in Figures 1c,d (e.g., where accuracy drops below 90% of maximum) and fit power laws to the resulting boundaries, reporting exponents with standard errors. This would convert the scaling claims from visual to quantitative.
-
-3. **Provide the τ = ηt/γ collapse plot.** Overlay loss curves for γ ∈ {10, 100, 1000} before and after rescaling on the same axes. This single figure would substantively support a claim made in multiple places.
-
-4. **Strengthen the function comparison analysis.** Show pairwise function correlations or CKA values across multiple seeds and γ values (e.g., γ ∈ {0.01, 1, 10, 100}) with error bars, demonstrating that within-regime agreement exceeds cross-regime agreement statistically.
+1. Fit the exponent of λ_max vs. γ in the ultra-rich regime and report it with confidence intervals, comparing to the predicted 2/L. This directly validates a core scaling prediction.
+2. Compute and report R² between function outputs across random seeds at the same γ and at different γ values (for Figure 5a).
+3. Provide fitted exponents for the loss-curve power laws in Figure 3a.
+4. Add a brief note or derivation showing the cross-entropy scalings are independent of the specific constants chosen in Equation (13).
+5. Clarify how the catapult region is distinguished from the divergent region in the empirical cross-entropy phase portrait, and whether this distinction is visually clear or inferred from theory.
 
 ## Score and Decision
 
-This paper makes a real contribution: it provides the first systematic mapping of the γ–η phase diagram across architectures in the online setting, identifies novel depth-dependent scaling laws, catalogs rich dynamical phenomena, and explains them with a minimal model. The weaknesses are real but addressable: the scaling claims would benefit from quantitative boundary extraction, the time-rescaling claim needs a collapse plot, and the function comparison analysis is thin. None of these undermine the core contribution.
-
-The paper is clearly written, the experiments are thorough (spanning MLPs, CNNs, ResNets, ViTs on multiple large datasets), the theoretical model is elegant, and the findings have practical implications for hyperparameter tuning in large-scale models.
-
-Score: 7.0 — A solid paper with clear contributions and addressable weaknesses.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

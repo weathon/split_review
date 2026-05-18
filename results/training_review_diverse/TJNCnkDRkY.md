@@ -1,58 +1,79 @@
-Now I have a thorough understanding of the paper and all reviews. Let me construct the consolidated review.
+Now I have a thorough understanding of the paper and the reviewer claims. Let me write the final consolidated review.
 
 ## Summary
-GPST proposes a hierarchical transformer (global + local) for one-stage speech language modeling, combining semantic and acoustic tokens within a single autoregressive model. The key idea is that the global transformer processes the temporal sequence while the local transformer models the per-timestep RVQ code stack, reducing complexity from O(N·T₂²·D²) to O(N_g·T₂² + N_l·T₂·D²). Results on LibriSpeech show competitive WER and speaker similarity against VALL-E and other baselines, with extensions to 16-quantizer Hi-Res speech and zero-shot cross-lingual (English→Chinese) generation.
+
+GPST introduces a hierarchical transformer architecture for one-stage speech language modeling, combining a global transformer that processes semantic tokens and stacked (summed) acoustic tokens, with a local transformer that autoregressively predicts the individual residual codes. The architecture is designed to avoid the multi-stage pipelines of prior work (AudioLM, VALL-E) while reducing the quadratic complexity of modeling long acoustic token sequences.
 
 ## Strengths
-- **Novel one-stage hierarchical transformer architecture with theoretical efficiency gains.** Section 3.5 provides a clear complexity analysis showing O(N_g·T₂² + N_l·T₂·D²) versus O(N·T₂²·D²) for naive unfolding, and the FLOPs analysis indicates roughly D× speedup. This is the paper's central architectural contribution and is well-motivated.
-- **Strong empirical results against VALL-E under comparable conditions.** In Speaker Identity Transfer (Table 1), GPST (190M params) achieves WER 4.2 vs. VALL-E's 5.9 and SPK 0.605 vs. 0.580. In Acoustic Continuations, GPST achieves WER 2.8 vs. VALL-E's 3.8 and SPK 0.536 vs. 0.508. Both comparisons use the same ASR (HuBERT-Large) and the same codec (EnCodec), making them fair.
-- **Demonstrated zero-shot cross-lingual transfer without text supervision.** Table 3 shows that a model trained only on English LibriLight can perform acoustic continuation on Chinese Aishell-2 (CER 33.3%), close to the Chinese-trained model (30.2%) and near ground-truth (26.4%). This is technically interesting as a speech-to-speech (not text-based) cross-lingual capability.
-- **Ablation study on global vs. local layer allocation provides practical design guidance.** Table 4 varies N_g+N_l while keeping total parameters fixed, showing that more local layers improve WER (3.2→2.8) and SPK (0.531→0.536) at a modest speed cost.
+
+1. **Well-motivated architectural design.** The hierarchical factorization (global transformer for time-dimension context, local transformer for code-dimension autoregression) is a principled response to the challenge of modeling long acoustic sequences from neural codecs. The complexity analysis (Section 3.6) shows O(N_g T₂² + N_l T₂ D²) versus O(N T₂² D²) for naive unfolding, which is a real and meaningful complexity reduction.
+
+2. **Competitive results on LibriSpeech (if the architecture is sound).** Table 1 reports that GPST (190M params) achieves WER 4.2 and SPK 0.605 in speaker identity transfer, versus VALL-E (337M params) at 5.9 WER / 0.580 SPK. In acoustic continuations, GPST achieves WER 2.8 vs VALL-E 3.8. These results, if validated, demonstrate strong performance with fewer parameters.
+
+3. **Ablation study validating the local transformer's role.** Table 5 systematically varies the split between global and local layers while keeping total parameters constant. Increasing local layers (from 4 to 12) improves WER from 3.2 to 2.8 and SPK from 0.531 to 0.536, directly attributing acoustic modeling gains to the hierarchical design.
+
+4. **Demonstration of Hi-Res (16 quantizer) generation.** GPST-Hi-Res with 207M params generates 12kbps speech, showing competitive WER (5.3 vs VALL-E 5.9) and improved DNSMOS (4.02 vs GPST's 3.89). This explores a higher-quality regime not evaluated in prior codec-based speech LMs.
 
 ## Weaknesses
 
 ### Fatal
-None.
+
+**Training-inference information leak in the global-to-local conditioning.** The paper describes a global transformer that processes the full input sequence [s₁,...,s_{T₁}, a₁,...,a_{T₂}] with causal masking, where each acoustic input a_t = Σ_{q=1}^{D} E_a(a^q_t) is the sum of all D ground-truth code embeddings at time t. The hidden state h_{T₁+t} (at the position of a_t) is then fed to the local transformer, which autoregressively predicts a¹_t,...,a^D_t. Because the causal mask allows self-attention at position T₁+t to attend to a_t itself, h_{T₁+t} already encodes the summed embedding of the very codes the local transformer is asked to predict.
+
+During inference, the paper never specifies how the global hidden state is obtained for a time step whose acoustic codes have not yet been generated. At generation time, a_t is unavailable (it is what the model must produce), so there is no way to compute h_{T₁+t} in the same manner as training. The paper provides no step-by-step inference algorithm, no description of how the global and local transformers interact during autoregressive generation, and no discussion of this mismatch. The claimed factorization in Equation (7) conditions on a^{≤D}_{<t} (previous time steps only), which contradicts the actual computation where h_{T₁+t} accesses a_t. The significant results reported in Tables 1 and 2 may therefore reflect the model learning to exploit the training-time leakage of a_t into h_{T₁+t} rather than learning a genuine generative distribution. Since this issue goes to the core of whether the architecture implements a sound generative model, the paper's central contribution cannot be evaluated as written. The authors would need to either (a) redesign the conditioning so that h_{T₁+t} does not depend on a_t, (b) provide a complete inference procedure that resolves the asymmetry, or (c) demonstrate that the model works correctly despite the apparent leak (e.g., by showing that the local transformer does not actually exploit the a_t information).
 
 ### Major
-- **WER comparison with AudioLM in Semantic-to-Acoustic is invalid due to mismatched ASR pipelines.** The table footnote (line 187) honestly states that AudioLM's WER (6.0) was obtained by a Conformer Transducer model, while all others (including GPST) use HuBERT-Large finetuned on LibriSpeech. These are different recognizers with different error profiles, so the WER numbers are not directly comparable. Yet the main text (line 261) tells readers "GPST reaches the lowest WER score with only 33% parameters of AudioLM" without caveating this mismatch. The abstract and introduction's claim that GPST "significantly outperforms the existing speech language models in terms of word error rate" rests partially on this invalid comparison. The paper either needs to re-evaluate AudioLM under the same ASR or explicitly decouple the claim.
-- **Multilingual evaluation lacks any baselines, making the results difficult to interpret.** Table 3 reports only GPST's own English and Chinese WER/CER. No comparisons to VALL-E X, PolyVoice, or any other multilingual speech LM are provided. The paper cites VALL-E X (text-based cross-lingual TTS) and PolyVoice (speech-to-speech translation) in related work, yet does not benchmark against them. The "first work that supports spoken multilingual speech generation" claim (line 24) may be defensible in the narrow sense of speech-to-speech without text, but without baselines the reader cannot assess whether GPST is competitive. The zero-shot cross-lingual result is interesting but stands in isolation.
+
+**Efficiency claims lack empirical validation against actual baselines.** The paper provides a theoretical FLOPs comparison (Section 3.6) against a "naive unfolded transformer" with O(N T₂² D²) complexity, but this is a strawman—actual multi-stage baselines (AudioLM, VALL-E) also avoid this quadratic cost through their multi-stage decompositions. The only wall-clock numbers offered are sentences/s in the ablation (Table 5), comparing different GPST configurations only, with no baseline comparison. The abstract claims "significantly reduces computational costs," but no training or inference throughput comparison with AudioLM or VALL-E on the same hardware is provided. For a paper whose contribution centrally includes efficiency, this gap undermines the claim.
+
+**Inference procedure is underspecified.** Section 3.3 describes four inference modes at a high level but never provides the step-by-step algorithm showing how the global and local transformers interact during autoregressive generation. In particular, how is the global transformer's input sequence constructed for the acoustic part at each generation step? Is a dummy/zero embedding used for the current time step? Is the last hidden state (from a_{t-1}) used instead? This is not just a reproducibility concern—it is directly tied to the training-inference mismatch described above and is essential for evaluating whether the architecture is sound.
 
 ### Minor
-- **Local-drop technique is described but never evaluated.** Section 3.2 introduces local-drop as a training efficiency technique for Hi-Res speech, but the experiments contain no ablation, measurement, or even qualitative discussion of its effect. The reader cannot tell whether this is a meaningful contribution or a negligible trick. A simple ablation (e.g., WER/SPK with and without local-drop on a small subset) would validate the method.
-- **DNSMOS comparison is uncontrolled and the reported difference is negligible.** The paper (line 196) explains that DNSMOS scores are compared "with the examples provided on VALL-E's demo page for fairness" because baselines are not open-sourced. Demo page samples are typically cherry-picked, making this an uncontrolled comparison. Moreover, the reported advantage (GPST 3.89 vs. VALL-E 3.87) is within measurement noise. This does not weaken the paper's other quality evidence (WER, SPK), but the DNSMOS claim should be presented with appropriate caveats or dropped.
-- **No standard deviations or confidence intervals reported.** The paper states experiments are repeated three times and averaged (line 191), but Table 1 reports only point estimates. WER and SPK metrics have known variance across runs, especially with small test sets. Reporting variability would substantially strengthen the evaluation.
-- **Efficiency analysis is purely theoretical with no empirical speed measurements.** Section 3.5 provides FLOPs complexity analysis but no actual wall-clock training or inference speed comparisons against baselines. The Table 4 ablation reports "Sentences/s" for GPST variants but not for any competing model. The claimed efficiency advantage would be more convincing with empirical runtime data.
-- **Training hyperparameters and implementation details are not reported.** The paper does not specify learning rate, batch size, optimizer, GPU configuration, or training steps. Given that the model is not released, this makes reproduction difficult. While some of these details may be deferred, their absence in the current manuscript is a limitation.
+
+**"First work" claim needs qualification.** The paper claims to be "the first work that supports spoken multilingual speech generation and Hi-Res speech synthesis." For multilingual generation, VALL-E X and PolyVoice (both cited in the paper) already perform cross-lingual speech generation, albeit with text conditioning. The paper's "spoken" (text-free) framing is a meaningful distinction but the claim as stated is imprecise. For Hi-Res (16 quantizers), using more quantizers from EnCodec is a straightforward extension—the paper does not discuss whether existing codec-based models (e.g., AudioLM) could be run with more quantizers but simply were not. The claim should either be made more precise or toned down.
+
+**Controlled comparisons are weak.** Baselines use different codecs (SoundStream vs. EnCodec), different ASR models (Conformer Transducer for AudioLM WER vs. HuBERT-Large for GPST), and different model sizes. While this is acknowledged in the table caption, the paper does not discuss the potential impact of these differences. The DNSMOS comparison (Table 2) is against values from demo pages. The multilingual experiment (Table 3) has no baselines at all.
+
+**Local-drop is introduced but never evaluated.** Section 3.2 proposes local-drop as a training efficiency technique for Hi-Res generation, but no ablation or analysis of its effect on quality or speed is presented. It is unclear whether the main results use local-drop and at what drop rate.
+
+**No variance reported.** The paper states "All experiments are conducted three times and the average scores are reported" but provides no standard deviations or confidence intervals. For metrics like WER and SPK, variance could be nontrivial.
 
 ### Trivial
-- The Speaker Identity Transfer row in Table 1 shows "-" for AudioLM and SPEAR-TTS WER. While this is simply reflecting what those baselines reported, the asymmetry makes the table harder to interpret. A brief note in the caption explaining why these entries are missing would help.
+
+None beyond the formatting artifacts from the PDF extraction.
 
 ## Nice-to-Haves
-- A controlled DNSMOS evaluation using the same codec, prompts, and evaluation pipeline for all models would be more rigorous, though the practical constraints (baselines not open-sourced) are acknowledged.
-- Adding a single multilingual baseline (e.g., VALL-E X on a comparable task) would significantly strengthen the multilingual claims.
-- An empirical efficiency comparison (training time, inference throughput) against VALL-E or a comparable model would ground the theoretical FLOPs analysis.
+
+- A wall-clock speed benchmark comparing GPST against AudioLM and VALL-E (or reproduction thereof) on the same hardware for both training and inference would substantiate the efficiency contribution.
+- An ablation of local-drop showing its effect on training speed, model quality, and convergence would complete the description of this technique.
+- Reporting standard deviations for the main results would strengthen Table 1.
+- Adding multilingual baselines (e.g., a VALL-E X model trained on the same data, or a cascaded system) would make the cross-lingual results more convincing.
 
 ## Removed Points
-- **"Global transformer never sees individual code identities (lossy sum of embeddings)":** This is a deliberate architectural design choice, not a flaw. The global transformer handles high-level temporal structure; the local transformer processes individual codes. The paper explains this division of labor. Not a weakness.
-- **"AudioLM/SPEAR-TTS missing WER in Speaker Identity Transfer makes comparison incomplete":** The paper reports what those baselines' original papers provide. This is not the authors' omission.
-- **"Missing reproducibility details (hyperparameters, GPU config, etc.)":** Typical for papers that defer such details to appendix/code release. While noted as a minor concern, the harsh critic's framing as a major reproducibility issue is disproportionate.
-- **Pure formatting/style nitpicks and typos (parser artifacts):** Removed per instructions.
-- **Criticism about "the paper should also cover Y / domain Z":** Not applicable; the paper's scope is clearly defined.
+
+**From Harsh Critic:**
+- *"The paper does not discuss whether existing codec-based models (e.g., AudioLM) could be run with more quantizers but simply were not"* regarding the Hi-Res "first" claim — moved from Major to Minor; the core criticism about claim precision is kept but the specific speculation about running AudioLM with more quantizers is not verifiable and constitutes guesswork.
+- *"One-stage modeling with hierarchical transformer drastically reduces computational complexity"* from Strength Finder — kept as a recognized strength (Complexity analysis is real); no removal needed.
+- *"Local-drop training technique enables efficient Hi-Res training"* from Strength Finder — this is listed as a strength but local-drop is never evaluated, so this strength is contradicted by a verified weakness; moved here per the rule that when a strength and weakness disagree, the weakness wins. The paper claims local-drop enables Hi-Res but provides no experimental support.
+
+**From Strength Finder (generic/superficial/conflicting):**
+- The strength "First demonstration of Hi-Res and cross-lingual speech generation in a single model" — this is partially a claim and partially a strength, but the "first" claim is contested (kept as Minor weakness). The demonstration itself (Hi-Res and cross-lingual results) is real but its validity is contingent on resolving the fatal architectural issue. Kept in Strengths with caveat.
 
 ## Novel Insights
-Beyond the paper's own contributions, the reviews do not surface genuinely novel insights that the authors missed. The key concern — the invalid WER comparison with AudioLM — is an evaluation rigor issue, not a conceptual insight.
+
+The central tension in this review is between an interesting architectural idea (factorizing acoustic modeling across time and code dimensions in a single hierarchical transformer) and a potentially fatal oversight in how the training conditions the local transformer. If the information leak can be resolved (e.g., by confirming that the global transformer actually uses a shifted conditioning that does not attend to the current a_t, or by providing a valid inference-time workaround), GPST would represent a genuine step forward in unifying the multi-stage pipelines of prior work. But as written, the paper does not explain how inference avoids the mismatch, and the claimed "exact" factorization (Equation 7) appears inconsistent with the described training computation. This is a case where the architecture's elegance may have obscured a subtle but critical design issue.
 
 ## Suggestions
-1. **Re-evaluate AudioLM under the same ASR pipeline (HuBERT-Large) for the Semantic-to-Acoustic condition.** If this is infeasible, add a clear, prominent caveat in the abstract and Section 4 that the AudioLM WER comparison uses a different ASR and is not directly comparable.
-2. **Add at least one multilingual baseline** — e.g., compare against VALL-E X or PolyVoice on the same English→Chinese zero-shot task, even if only on a subset.
-3. **Provide a brief local-drop ablation study** showing WER/SPK with and without the technique, even on a small evaluation set.
-4. **Report standard deviations or 95% confidence intervals** for all primary metrics in Table 1 and Table 3.
-5. **Include wall-clock training/inference speed comparisons** against VALL-E or another single-stage baseline to ground the efficiency claims empirically.
+
+1. **Provide a complete inference algorithm.** Write out pseudocode showing how the global and local transformers interact step-by-step during autoregressive generation. Specify exactly what hidden state conditions the local transformer at each step and how the global transformer's input is constructed during inference.
+2. **Analyze and resolve the training-inference mismatch.** If the local transformer actually conditions on h_{T₁+t-1} (the hidden state from the previous acoustic time step) rather than h_{T₁+t}, state this explicitly and explain why the equations appear otherwise. If it conditions on h_{T₁+t}, explain how this is obtained during inference without access to a_t, or redesign the architecture. An ablation controlling for the leak (e.g., comparing against a version where the local transformer's conditioning provably does not see a_t) would be ideal.
+3. **Provide wall-clock speed comparisons** against at least one multi-stage baseline (AudioLM or VALL-E) on the same hardware to substantiate the efficiency claim.
+4. **Qualify the "first" claims** and add baselines for the multilingual experiments.
+5. **Add an ablation for local-drop** to clarify whether and how it was used.
 
 ## Score and Decision
 
-This paper proposes a genuinely novel architecture (hierarchical one-stage transformer for speech LM) that is well-motivated and clearly described. The comparisons against VALL-E (same ASR, same codec) are fair and show clear improvements. However, the evaluation has two significant gaps: (a) the headline WER comparison against AudioLM uses mismatched ASR pipelines without adequate caveat in the central claims, and (b) the multilingual results lack any baselines. These are fixable but non-trivial issues that prevent the paper from convincingly demonstrating its claimed advantages. The core architecture is sound and the VALL-E comparisons are credible, but the paper's strongest claims are undercut by these evaluation gaps.
+The paper presents a well-motivated architecture and competitive results, but the training-inference information leak in the core conditioning mechanism is a potentially fatal flaw that invalidates the claimed results until resolved. The paper does not describe how inference works at the level of detail needed to assess whether the model is sound. The contribution cannot be accepted in its current form.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>4.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

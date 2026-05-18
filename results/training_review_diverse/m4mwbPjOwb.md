@@ -1,18 +1,18 @@
-Now I have a thorough understanding of the paper. Let me write the consolidated review.
+Now I have all the information needed. Let me produce the consolidated review.
 
 ## Summary
 
-The paper proposes Simple-TTS, a latent diffusion model for end-to-end text-to-speech synthesis that eliminates the need for phonemizers, forced aligners, duration models, and multi-stage pipelines required by prior diffusion TTS systems (NaturalSpeech2, VoiceBox). The method adapts the U-ViT image diffusion architecture to 1D audio sequences (U-AT), conditions on byte-level ByT5 representations, and uses a scaled noise schedule to improve text-speech alignment. The authors report strong WER (2.4% text-only, nearly matching ground-truth 2.2%) and competitive speaker-prompted results, with open-source release planned.
+Simple-TTS proposes a latent diffusion model for text-to-speech that avoids phonemizers, forced aligners, duration predictors, and multi-stage pipelines — a genuine simplification over prior diffusion TTS systems. Using EnCodec latents (75 Hz), ByT5 byte-level conditioning, and a scaled cosine noise schedule, the model achieves strong objective metrics (text-only WER 2.4%, near ground-truth 2.2%) and outperforms open-source baselines in both automated and human evaluation. The paper's core thesis — that latent diffusion with the right design choices can bypass alignment bottlenecks entirely — is compelling and well-motivated.
 
 ## Strengths
 
-- **First end-to-end diffusion TTS without external alignment tools.** The paper demonstrates a genuinely simpler design than NaturalSpeech2 and VoiceBox, which require phonemizers, forced aligners, duration models, and in some cases pitch models (Table 1). This simplification is the paper's central contribution and is validated empirically.
+1. **First diffusion TTS that eliminates all explicit alignment components.** Table 1 directly contrasts Simple-TTS with NaturalSpeech2 and VoiceBox, showing it is the only system that needs only the raw text transcript. No phonemizers, forced aligners, duration predictors, or pitch models are required. This simplification is a genuine architectural advance.
 
-- **Strong intelligibility results with informative ablations.** The text-only WER of 2.4% approaches ground-truth (2.2%). The ablations (Table 4) are revealing: replacing ByT5 with T5 increases WER 4.4×, and using the standard cosine noise schedule increases WER 2.2×. These large-magnitude drops directly support the paper's key design claims.
+2. **Strong empirical results across multiple settings.** Simple-TTS achieves text-only WER of 2.4% (Table 2), nearly matching ground-truth human speech (2.2%), and surpasses single-speaker VITS-LJ and MMS-TTS while also performing multi-speaker synthesis. In the speaker-prompted setting, it achieves WER 3.4% vs. Vall-E's 5.9% and speaker similarity of 0.514 vs. YourTTS's 0.337. The human study (Table 3) confirms statistically significant gains in both QMOS (+0.52) and SMOS (+1.46) over YourTTS.
 
-- **Human evaluation provides subjective validation.** The paper collects QMOS and SMOS from 11 annotators with bootstrapped 95% CIs (Table 3), showing statistically significant improvements over YourTTS. This is important because automated metrics alone can miss perceptual quality.
+3. **Critical ablation evidence for byte-level conditioning.** The ablation (Table 4) shows that replacing ByT5 with T5-Large increases WER by 4.4×, cleanly validating the importance of character-aware text representations for TTS — a finding that goes beyond typical text-to-image conditioning choices.
 
-- **Parameter-efficient architecture.** The U-AT (243M parameters) is smaller than VALL-E (302M) and VoiceBox (364M), while operating on a compact latent space of 75 vectors/second from EnCodec, avoiding the long token sequences that plague autoregressive approaches.
+4. **Commitment to open-source the strongest publicly available multi-speaker TTS system.** The paper states it will release model weights and code (Section 8), which would provide the community with a strong, reproducible baseline and enable downstream research.
 
 ## Weaknesses
 
@@ -20,58 +20,46 @@ The paper proposes Simple-TTS, a latent diffusion model for end-to-end text-to-s
 None.
 
 ### Major
+1. **Ablation studies conducted only at 50k training steps.** The ablations in Table 4 are explicitly limited to 50k training steps and text-only TTS. The paper itself notes the model is "still improving at the end of training" (200k steps), so it is unclear whether the ablation conclusions (e.g., the relative importance of ByT5 vs. the noise schedule) hold at the full training budget. Additionally, no ablation is reported for the speaker-prompted setting, leaving open whether the same design choices carry over. Since the paper stakes strong claims about what is "critical" (e.g., "the scaled diffusion noise schedule" and "character-aware language representations are critical"), the evidential basis for those claims is narrower than it should be.
 
-- **Speaker-prompt conditioning mechanism is entirely unspecified.** Section 4 describes text conditioning via ByT5 embeddings and latent diffusion on EnCodec features, but never explains *how* the speaker prompt is incorporated into the model. There is no architecture diagram, no description of whether the prompt is encoded with a separate encoder, added as cross-attention, or concatenated. Yet the paper evaluates speaker-prompted TTS and compares against VALL-E and YourTTS on speaker similarity (Table 2). This is not a missing hyperparameter—it is a missing component of the core method for the speaker-prompted setting. Without this description, the speaker-prompted experiments are unreproducible and the claimed improvements (SMOS 0.514 vs. 0.337) cannot be properly evaluated. *Note: this gap does not invalidate the paper's text-only TTS contribution, which is the primary focus.*
-
-- **Data leakage risk between training and evaluation sets unaddressed.** The model is trained on the English subset of MLS (44.5K hours from LibriVox audiobooks) and evaluated on LibriSpeech test-clean, which is also derived from LibriVox audiobooks. The paper does not disclose whether any speaker overlap filtering was performed. If speakers overlap, the near-human WER of 2.4% vs. 2.2% could partly reflect memorization rather than generalization. While this evaluation protocol follows prior work (VALL-E, VoiceBox also used this setup), the paper should at minimum acknowledge the risk and report the degree of overlap.
+2. **Missing core training hyperparameters.** The experimental section reports only "200k steps with a batch size of 256 audio clips" (Section 5). No optimizer, learning rate schedule, warmup steps, gradient clipping threshold, weight decay, or checkpoint selection criterion is disclosed. These are standard and essential details for reproducibility. While the paper promises open-source release upon acceptance, the training configuration should be straightforward to document in the paper itself given the system's emphasis on simplicity.
 
 ### Minor
+1. **"End-to-end" framing lacks qualification.** The term "end-to-end" is used repeatedly in the abstract and introduction without acknowledging that the pipeline relies on two large pre-trained and frozen components (EnCodec for audio encoding/decoding and ByT5 for text embedding), neither of which is trained jointly with the diffusion backbone. The paper does contrast its approach with alignment-heavy systems, and the usage is defensible in that context, but a brief clarifying statement (e.g., "end-to-end in the sense that alignment emerges without explicit supervision") would prevent misunderstandings.
 
-- **No variance reported for automated metrics.** Table 2 reports single-point WER and speaker similarity without standard deviations, confidence intervals, or significance tests. WER can vary across sampling configurations (Figure 3 shows variation with guidance scale and sampling steps), yet Table 2 uses fixed settings. Multiple sampling runs with reported variance would strengthen confidence in the reported numbers. (The human evaluation does provide bootstrapped CIs, which partially mitigates this concern.)
+2. **Human evaluation compares against only one baseline.** The subjective study (Table 3) compares only against YourTTS. The paper's explanation — that Vall-E and VoiceBox are not publicly available — is reasonable, but the claim that Simple-TTS "outperforms more complex models" in subjective quality rests on a single comparison against the weakest of the baselines. Including even a simple A/B test against a reproduced Vall-E-style system (e.g., XTTS or VoiceCraft) would have substantially strengthened the subjective evidence.
 
-- **Comparison against non-public baselines lacks shared pipeline validation.** The paper compares against reported metrics from VALL-E, VoiceBox, and NaturalSpeech2 (Table 2). While the paper acknowledges these systems are not publicly available and follows their evaluation protocols, the WER is computed with a HuBERT-L ASR model without specifying decoding parameters (beam size, language model) that can affect results. The numerical comparisons are suggestive but not rigorous without running baselines in an identical pipeline.
+3. **Noise schedule modification's relationship to prior work is underexplored.** The paper presents the scaled cosine schedule (s=0.5) as a key contribution, showing it improves WER by 2.2× over the default schedule. However, it does not discuss connections to prior work on noise schedule modifications (e.g., offset noise, SNR reparameterization), nor does it compare against alternatives like a learnable schedule. The modification appears to be a tuning trick rather than a principled contribution, though the paper's ablation does demonstrate its empirical importance.
 
-- **Ablation studies conducted at 50k steps (25% of training) may not reflect final behavior.** The paper trains the full model for 200k steps and notes it is "still improving." The key design choice comparisons (ByT5 vs T5, noise schedule) are shown at 50k steps. While the large-magnitude differences (4.4× and 2.2×) suggest the ordering would likely hold, this is not guaranteed and should be noted.
-
-- **U-AT architecture numbers stated but not motivated.** The paper states that the U-Net downsamples from 1504 frames to 188 frames across 4 stages, but does not explain how these specific numbers are derived from the EnCodec frame rate (75/sec) and typical clip lengths.
+4. **Model not converged at 200k steps.** The authors honestly note the model "is still improving at the end of training." This means the reported numbers may be a lower bound on achievable performance (which actually favors the paper), but it also raises the question of why training was stopped at 200k steps and whether checkpoint selection was based on validation performance or fixed schedule.
 
 ### Trivial
-- "First diffusion model capable of end-to-end TTS synthesis" could be more precisely phrased as "first diffusion model capable of fully end-to-end TTS synthesis (without external alignment tools)" to avoid potential misinterpretation, since NaturalSpeech2 and VoiceBox are also diffusion-based (though they require alignment components).
+1. **U-AT architecture description is adequate but could be more precise.** The paper describes the U-Net encoder/decoder (4 stages, downsampling 1504→188) and transformer backbone (12 layers, 768 dim), but omits details like attention variant, positional encoding, and residual connection specifics. Since the architecture is a 1D adaptation of U-ViT, most of these choices follow from the reference, but a brief note would be helpful.
 
 ## Nice-to-Haves
-- A formal significance test (e.g., Wilcoxon signed-rank) between Simple-TTS and YourTTS in the human evaluation, beyond reporting CIs.
-- Running an open-source baseline (YourTTS or VITS) in the same evaluation pipeline to demonstrate pipeline consistency.
-- Learning curves or checkpoints showing model behavior at intermediate training steps to address the non-convergence concern.
+- A 2×2 ablation (ByT5 vs. T5 × scaled vs. standard schedule) at both 50k and 200k steps would cleanly separate the contributions of the text encoder and noise schedule.
+- Diagnostic experiments probing whether the model has learned implicit alignment (e.g., analyzing attention patterns or latent representations for duration/phonetic cues) would directly support the paper's most interesting claim.
+- A dedicated limitations section acknowledging English-only evaluation, reliance on EnCodec's fixed temporal resolution, sensitivity to CFG strength, and lack of prosody control.
+- Reporting inference FLOPs or generation latency would be useful for practical deployment comparisons.
 
 ## Removed Points
-Despite being flagged for removal, I will still enumerate them to show transparency.
-
-- **VITS-LJ comparison is "apples-to-oranges"** (Harsh Critic Point 5, baseline selection criticism): This asymmetry favors the baseline (VITS-LJ is single-speaker on ~24 hours; Simple-TTS is multi-speaker on 44.5K hours). The paper explicitly acknowledges this and still shows Simple-TTS outperforming VITS-LJ. Showing that a multi-speaker model trained on diverse data beats a single-speaker model trained on clean data is a valid comparison when the multi-speaker model also provides additional capability. Rule applied: asymmetry favors baseline, not author's method. → Removed.
-
-- **"Will open-source doesn't help during review"** (Harsh Critic, Section 8): This criticizes release status/timeline, not the paper's content. The reproducibility concern about missing architectural details is kept (see speaker conditioning). Rule applied: questions about release status removed. → Removed (but the underlying concern about insufficient architectural detail is kept in Major weaknesses).
-
-- **EnCodec bandwidth not specified** (Harsh Critic, Missing Parts): The paper states it trains the model to produce "the 128-dimensional continuous embeddings from the EnCodec encoder, before vector quantization." Since the model generates continuous latents that are quantized afterward during decoding, the bandwidth is determined by the decoder's quantizer configuration, not the generation process. The paper also states it uses "all 32 quantizers" for decoding. This is sufficiently specified. → Removed.
-
-- **"First diffusion model capable of end-to-end TTS" contradicted by related work** (Harsh Critic, Abstract/Introduction): The paper's claim is about being "end-to-end" (no external alignment), not about being a "diffusion TTS model" in general. Table 1 explicitly shows NaturalSpeech2 and VoiceBox require phonemizers, forced aligners, and duration/pitch models. The claim is accurate within the paper's framing. → Downgraded to Trivial (phrasing could be more precise to avoid misinterpretation).
-
-- **"The paper should also compare against XTTS, Coqui TTS"** (Harsh Critic, Section 5): This is scope creep—demanding additional baselines beyond what is standard. The paper compares against YourTTS (the strongest open-source multi-speaker system), VALL-E, VoiceBox, VITS, and MMS-TTS, which are the standard baselines in the TTS literature. → Removed.
-
-- **"Why 1504? Why 188?"** (Harsh Critic, Section 4): These are implementation details derived from the EnCodec frame rate (75/sec) and training clip lengths. The paper states the architecture clearly; the specific values are not a weakness. → Removed.
-
-- **DDPM/DDIM observations not quantified** (Harsh Critic, Section 6): Figure 3 visually quantifies these observations with WER and speaker similarity curves. The observations are supported by data in the figure. → Removed.
+- **"VoiceBox WER of 5.9% comparison is misleading" (Harsh Critic):** The 5.9% WER is Vall-E's, not VoiceBox's (line 24: "Vall-E (WER of 3.4% vs. 5.9%)"). This criticism is based on a misreading of the paper.
+- **"U-AT architecture description is vague" as a major concern:** The paper provides concrete architectural parameters (4 stages, dims, layer counts) and references U-ViT, which is standard for an architecture adaptation paper. The level of detail is adequate for the submission format.
+- **"Comparison on the same metric" criticism about text-only column:** Without access to the actual table image, this criticism relies on speculation. The paper explicitly states VoiceBox requires a speech prompt and cannot do text-only synthesis, so any comparison would be in the speaker-prompted setting.
 
 ## Novel Insights
-Beyond the paper's own contributions, a genuinely novel takeaway from these reviews is that the paper's most impressive results (text-only WER of 2.4%) are the most robust because the text conditioning mechanism (ByT5) and noise schedule are fully specified and ablated, while the speaker-prompted results—though visually compelling—rest on a methodological gap that prevents independent verification. This asymmetry between the paper's two settings is a pattern worth noting: the core contribution (simpler text-to-speech) is well-supported, but the secondary contribution (speaker-prompted synthesis) needs additional documentation to be credible. The reviews also surface that the field has a collective blind spot regarding data leakage between MLS and LibriSpeech evaluation, since this protocol is used by multiple prior papers without scrutiny.
+
+The most interesting finding that emerges from this review is that the paper's strongest claim — that alignment emerges naturally without explicit supervision — is also its least directly tested claim. The paper shows that the system works (via WER), but does not probe how or why alignment emerges. The ablation shows ByT5 is critical, and the noise schedule tuning improves alignment, but these are black-box observations. A probing analysis (e.g., visualizing attention maps between text tokens and audio latents, or measuring whether the model implicitly learns phoneme durations) would transform this from an empirical demonstration into a mechanistic understanding. This gap between what the paper claims (alignment-free end-to-end learning) and what it demonstrates (good WER with two key design choices) is the review's central observation.
 
 ## Suggestions
-1. **Specify the speaker-prompt conditioning mechanism** in detail (encoding method, cross-attention vs. concatenation, training procedure for conditional/unconditional objectives). This is the single most critical addition.
-2. **Audit and report speaker overlap** between MLS training data and LibriSpeech test-clean. If overlap exists, re-evaluate on a non-overlapping subset or clearly acknowledge the bound.
-3. **Report variance for automated metrics** by running the evaluation pipeline over multiple seeds or bootstrap sampling, even if just for the final model.
-4. **Clarify the "first diffusion model capable of end-to-end TTS"** phrasing to "first diffusion model capable of fully end-to-end TTS (without external alignment tools)" to avoid ambiguity.
+1. Add a dedicated hyperparameters table with optimizer, LR schedule, warmup, gradient clipping, weight decay, and checkpoint selection details.
+2. Run the ablation (ByT5/T5 × scaled/standard schedule) at both 50k and 200k steps for both text-only and speaker-prompted settings.
+3. Add a brief qualification of "end-to-end" in the abstract/introduction (e.g., "end-to-end in the sense that no explicit alignment supervision is required").
+4. Include at least one open-source multi-speaker baseline (e.g., XTTS or VoiceCraft) in the human study, or at minimum conduct an A/B preference test.
 
 ## Score and Decision
 
-The paper presents a clean, well-motivated, and elegantly simple approach to TTS that delivers strong results. The core contribution—an end-to-end latent diffusion TTS model without aligners or phonemizers—is well-supported and valuable to the community. The missing speaker conditioning specification is a genuine gap but mainly affects the secondary (speaker-prompted) experiments, not the primary (text-only) claim. The data leakage concern is worth addressing but reflects standard field practice. Overall, the paper's strengths outweigh its weaknesses, and the identified issues are fixable. I recommend acceptance with a request for the authors to address the speaker conditioning gap in the final version.
+The paper presents a genuinely simpler TTS architecture with strong empirical results. The weaknesses are real but fixable: the ablation scope and missing training details do not invalidate the core contribution but weaken the rigor of the presentation. With the suggested improvements, this would be a strong paper.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

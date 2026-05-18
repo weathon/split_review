@@ -1,32 +1,24 @@
-Now I have a thorough understanding of the paper and all the review inputs. Let me produce the consolidated review.
-
-## Consolidated Meta-Review: Dog-IQA
+Now I have a thorough understanding of the paper and all the reviewer claims. Let me construct the final consolidated review.
 
 ---
 
 ## Summary
 
-Dog-IQA proposes a training-free, zero-shot image quality assessment (IQA) framework that combines a segmentation model (SAM2) with a multimodal large language model (mPLUG-Owl3). It introduces two key mechanisms: (1) **standard-guided scoring** that uses discrete integer scores paired with human-interpretable adjectives (1="Very Bad" through 7="Perfect") to ground the MLLM's outputs, and (2) **mix-grained aggregation** that fuses global image scores with object-centered local scores via area-weighted averaging plus a mask-count-based bonus term. On five diverse IQA benchmarks, Dog-IQA achieves SOTA among all training-free methods and is competitive with training-based methods in cross-dataset evaluations.
-
----
+Dog-IQA proposes a training-free, zero-shot image quality assessment method that uses a pre-trained MLLM (mPLUG-Owl3) and segmentation model (SAM2) to score images without any task-specific fine-tuning. Its two core designs are (1) a **standard-guided scoring** mechanism that maps discrete quality levels to descriptive words (e.g., "7: Perfect") for more reliable MLLM scoring, and (2) a **mix-grained aggregation** that combines a global image score with area-weighted local scores from segmented object regions plus a segmentation-count bonus. The method achieves SOTA among training-free methods across five datasets and is competitive with training-based approaches in cross-dataset scenarios.
 
 ## Strengths
 
-- **SOTA among all training-free IQA methods with large margins.** Table 1 shows Dog-IQA outperforms CLIP-IQA and all other training-free baselines on every dataset and metric (e.g., SRCC 0.902 vs 0.738 on SPAQ; 0.823 vs 0.658 on AGIQA-3k). This directly supports the paper's central claim and represents a genuine advance for zero-shot IQA.
+- **Standard-guided scoring with word anchors significantly outperforms number-only and sentence-only prompts.** The ablation (Table 3, experiments 1, 2, 7) shows that the word-based prompt raises SRCC on SPAQ from 0.764 (number only) and 0.836 (sentence) to 0.885 (word). This directly validates the central insight that combining text labels with numeric scores is more effective for MLLM-based IQA.
 
-- **Competitive with training-based methods in cross-dataset settings despite requiring zero fine-tuning.** Table 2 shows Dog-IQA outperforms Q-Align (training-based) on multiple cross-dataset pairs (KonIQ→SPAQ: SRCC 0.902 vs 0.887; KonIQ→AGIQA-3k: SRCC 0.823 vs 0.735), demonstrating practical value for out-of-distribution generalization.
+- **Mix-grained aggregation consistently improves over scoring the global image alone.** Experiment 5 (global only) achieves SRCC 0.858 on SPAQ; adding area-weighted local scores with the full pipeline (experiment 8) pushes SRCC to 0.902. The area-weighted average (experiment 7, 0.885) substantially outperforms a simple mean (experiment 3, 0.767), supporting the claim that area-weighting better aligns with human perception.
 
-- **The standard-guided scoring mechanism is well-motivated and validated.** The paper provides an upper-bound analysis (Table of K values) showing discrete scoring with K=7 incurs negligible precision loss (average upper bound >0.96). Ablations confirm that word+number standards significantly outperform number-only or sentence-based prompts, supporting the design rationale.
+- **Dog-IQA achieves state-of-the-art among training-free methods across all five tested datasets and is competitive with training-based methods in cross-dataset scenarios.** In Table 1, Dog-IQA's SRCC on KonIQ (0.819) far exceeds the next best training-free method (CLIP-IQA, 0.695). In Table 2, it achieves the highest SRCC on AGIQA-3k when models are trained on either KonIQ (0.823) or SPAQ (0.823), outperforming all training-based methods including Q-Align.
 
-- **The mix-grained aggregation mechanism is thoroughly ablated.** The paper systematically validates each component: area-weighted vs. mean averaging (Exp 3 vs 7), bounding-box vs. mask cropping (Exp 4 vs 7), global-only vs. local-only vs. combined (Exps 5, 6, 8), and the contribution of s_seg (Exp 6 vs 7). The ablation confirms that the full method (Exp 8) outperforms all partial configurations.
+- **Thorough ablation of the number of quality levels K (3, 5, 7, 9) establishes K=7 as optimal.** Table 4 demonstrates that performance plateaus at K=7 across datasets, and even K=3 surpasses most prior training-free methods. This careful hyperparameter analysis strengthens the credibility of the design choices.
 
-- **The original-pixel padding solution to the black-padding problem is a practical and effective contribution.** The paper identifies that zero-padding in segmentation masks misleads the MLLM's visual encoder, and shows that bounding-box cropping with original-pixel values (SRCC 0.885) dramatically outperforms zero-padded masks (0.715) — a 24% relative improvement.
+- **Honest and detailed discussion of limitations**, including dependence on MLLM capability (Table 5 shows weak MLLMs give near-zero SRCC), sensitivity to segmentation quality, and inference speed (6 hours for SPAQ on a single GPU). This transparency is a research-practice strength.
 
-- **Comprehensive MLLM backbone evaluation.** Table of MLLM selection tests eight models and shows that mPLUG-Owl3 is crucial (0.858 vs next-best 0.450 SRCC), while also revealing that weaker MLLMs perform poorly — an honest limitation acknowledged in the Limitations section.
-
-- **Honest discussion of limitations.** The paper explicitly acknowledges dependence on MLLM capability, segmentation model quality, and inference speed, including concrete runtime measurements (50 min segmentation + 6 hours scoring for SPAQ on a single GPU, 1.5 hours on 4 GPUs).
-
----
+- **Evaluation on five diverse datasets** (in-the-wild: KonIQ, LIVEC, SPAQ; synthetic: KADID-10k; AI-generated: AGIQA-3k) demonstrates generalization across distortion types and content domains.
 
 ## Weaknesses
 
@@ -34,72 +26,59 @@ Dog-IQA proposes a training-free, zero-shot image quality assessment (IQA) frame
 None.
 
 ### Major
-None.
+
+- **The `s_seg` term requires dataset-level statistics (`c_max`), which undermines the paper's zero-shot framing.** The segmentation score is defined as `s_seg = c·K/c_max`, where `c_max` is "the maximum number of masks observed across the entire dataset" (line 247). In a genuine zero-shot or deployed scenario, the evaluator does not have access to the full test set in advance. The paper does not specify how `c_max` is determined in cross-dataset evaluations (e.g., when applying Dog-IQA to AGIQA-3k or KADID-10k without training): is `c_max` computed from each test set itself? If so, the evaluation is not truly zero-shot. If `c_max` is carried over from one dataset (e.g., SPAQ's value of 71), this transferability is not justified. The ablation (Table 3, experiments 6 vs. 7) shows that `s_seg` contributes only ~0.01–0.02 improvement in PLCC, so the issue is not the method's effectiveness but its framing: **Dog-IQA is not as purely data-free as claimed unless this term is either removed or replaced with a principled, dataset-agnostic normalization.** The fix is tractable — the authors could use a fixed universal constant, or simply omit `s_seg` — but the current presentation is misleading.
 
 ### Minor
 
-- **PLCC computation protocol is underspecified.** The paper does not state whether a non-linear mapping (e.g., 4-parameter logistic function, standard practice in IQA) was applied before computing PLCC. Q-Align, the primary training-based competitor, explicitly uses such a mapping. If Dog-IQA's PLCC is computed without one while Q-Align's uses one, the comparisons in Table 2 are not perfectly apples-to-apples. **However**, (a) SRCC (which requires no mapping) tells the same story and strongly supports the paper's claims, (b) Dog-IQA's outputs are already on a scale roughly aligned with the ground truth (1–7 range), reducing the need for mapping, and (c) the training-free comparisons in Table 1 are unaffected. The paper should clarify this protocol and preferably report PLCC with and without logistic mapping for transparency.
+- **Sensitivity to the area threshold `t` in the segmentation pipeline is not analyzed.** Algorithm 1 uses a minimum mask area threshold `t` to filter small objects. The paper states that detailed hyperparameter configurations are in the supplementary material, but no analysis is provided in the main text showing how performance varies with `t`. Since `t` affects which masks are retained and therefore influences both `s_local` and `s_seg`, the robustness of results to this parameter is unclear. Providing a sensitivity curve (e.g., SRCC vs. `t` over a reasonable range) would strengthen the claim that the method does not rely on carefully tuned dataset-specific parameters.
 
-- **The segmentation bonus score s_seg uses a dataset-specific normalization constant c_max.** Equation (s_seg = cK/c_max) uses c_max as "the maximum number of masks observed across the entire dataset" (line 247), which for the main results appears to be computed per test dataset (line 299: max=71, stated in the context of SPAQ statistics). While the contribution of s_seg is small (0.014–0.019 PLCC improvement), this technically introduces test-set information into the prediction pipeline. In a strict zero-shot deployment where no test-set statistics are available, practitioners would need a fixed global c_max. The paper should discuss how to set this parameter on an unseen dataset (e.g., using a conservatively large bound or c_max observed across known datasets), or show that results are similar without s_seg.
-
-- **Ablation results lack uncertainty quantification.** Several ablation differences are small (e.g., s_seg improves PLCC by 0.014–0.019; Exp 7 vs 6 in Table of ablation-1). Without confidence intervals or any measure of variance, it is unclear whether these differences are meaningful or within noise. The paper should report bootstrapped confidence intervals (sampling images with replacement) for key ablation comparisons.
+- **The equal weighting in the aggregation formula `(s_global + s_local)/2` is empirically motivated but not justified beyond "for simplicity" (line 501).** While the ablation shows that combining global and local helps, the equal weighting and the additive combination with `s_seg` are presented as a heuristic rather than a principled design. The paper does not explore whether learned weights or multiplicative combination would yield different results. This is not a fatal flaw — many effective IQA methods use heuristic aggregation — but it reduces the generality claims somewhat, because the combination strategy may need re-validation on new domains.
 
 ### Trivial
-
-- **MLLM decoding strategy not specified.** The paper states mPLUG-Owl3 uses "its default hyperparameters" (line 300) but does not confirm greedy decoding (temperature=0). For a deterministic evaluation where reproducibility matters, this should be stated explicitly.
-
-- **The s_seg formula is presented without formal justification.** The linear scaling cK/c_max is plausible but the paper could briefly note why a linear (rather than e.g., logarithmic) relationship between mask count and quality is assumed.
-
----
+None.
 
 ## Nice-to-Haves
 
-- Add 95% bootstrapped confidence intervals to the ablation tables (Table of ablation-1) to distinguish meaningful improvements from noise.
-- Show the effect of fixing c_max to a global constant (e.g., 100 or 200) across all datasets to validate robustness.
-- Report PLCC both with and without a 4-parameter logistic mapping for the main comparisons (Table 2), or cite the protocol used by each baseline paper.
-- Include a brief deployment discussion on how c_max would be set when applying Dog-IQA to an unseen dataset.
-
----
+- Include a sensitivity analysis for the mask area threshold `t` to show that performance is stable across a reasonable range.
+- Report whether the MLLM's output is deterministic or whether multiple trials were needed; provide standard deviations if applicable.
+- Provide a breakdown of inference time (segmentation vs. MLLM per-crop vs. MLLM whole-image) to help identify the bottleneck.
+- Include a scatter plot or table showing cases where global and local scores disagree, to directly illustrate the benefit of mix-grained aggregation beyond aggregate correlations.
 
 ## Removed Points
 
-These points are flagged for removal; treat them with caution.
+- **Claim that Table 2 (discrete scoring upper bound) is not relevant:** This criticism misunderstands the purpose of the table. Table 2 shows the theoretical upper bound of discretizing MOS to K levels, which is a valid motivation for using discrete scoring — it demonstrates that the precision loss from discretization is small. The table is clearly labeled as an upper bound, not a claim about Dog-IQA's performance. The paper's final scores extending beyond [1,K] is noted and explained by the paper itself (lines 392–395). This criticism is removed as it attacks a strawman.
 
-1. **Criticism that Min_gt and Max_gt being per-dataset makes the method "not fully zero-shot"** — REMOVED: Equation 1 applies Min_gt/Max_gt to the *ground-truth MOS* only, not to the model's predictions. This is a standard evaluation preprocessing step that does not leak test-set information into the model's outputs. The critic conflated this ground-truth scaling with c_max's role in the prediction pipeline.
+- **Claim about segmentation model quality / poor crops not being analyzed:** The paper explicitly discusses this limitation in Section 5 (lines 577–580: "if the segmentation model primarily outputs bounding boxes that lack a clear main object... this can lead to MLLM's misjudgment"). The paper acknowledges this risk and identifies it as a limitation. The reviewer's concern is already addressed by the paper.
 
-2. **Criticism that "without logistic mapping, PLCC values are not directly comparable across methods"** — DOWNGRADED from critical to minor: This is overblown. SRCC (which requires no mapping) tells the same story. Dog-IQA's outputs are naturally aligned with the MOS range. The concern is real but not of "critical" severity.
+- **Claim about "statistical significance" / multiple trials:** The MLLM with greedy decoding produces deterministic outputs. The request for standard deviations from repeated trials does not apply in a deterministic setting. This point is removed.
 
-3. **Claim that baseline numbers in Table 2 are "not referenced"** — REMOVED: All baselines are properly cited. The source of numbers (original papers) is standard practice.
+- **Criticism about Q-Align outperforming Dog-IQA in one scenario (SPAQ→KonIQ):** The paper explicitly acknowledges this (lines 385–386: "Dog-IQA performs slightly lower than Q-Align"). The reviewer notes the framing is fair. This is an observation, not a weakness.
 
-4. **Criticism that comparing with training-based methods is unfair** — REMOVED: The paper itself acknowledges this (line 267: "Comparing training-free methods with training-based methods may seem unfair...") and presents it as an extra stress test, not a primary claim. The critic's point duplicates the paper's own caveat.
-
-5. **Strength from Strength Finder about "novel and lightweight contribution" of s_seg** — KEPT but adjusted: The contribution is indeed novel, but "lightweight" is misleading since it requires running SAM2, which is heavy. However, the strength is about the idea, not the cost. Kept.
-
----
+- **Suggestions about adding more MLLM+segmentation combinations, running time breakdown, more visualization examples:** These are reasonable suggestions but not weaknesses. They are moved to Nice-to-Haves.
 
 ## Novel Insights
 
-The most interesting insight that emerges from reading the reviews against the paper is that **Dog-IQA's core technical recipe — combining an off-the-shelf segmentation model with standard-guided MLLM prompting — reveals a subtle but important boundary in zero-shot IQA: the method's training-free success depends disproportionately on the base MLLM's competence.** The MLLM selection table (Table of ablation-3) shows that weaker MLLMs (InternLM-XComposer-1.0: SRCC 0.054, LLaVA-v1.5-7b: 0.006) produce essentially random scores even with the same prompting and aggregation. This means Dog-IQA is not a universally applicable "recipe" for making any MLLM into an IQA model; rather, it is a method that *unlocks* the latent IQA capability already present in sufficiently capable MLLMs. This dependency — which the paper honestly acknowledges — is a crucial boundary condition that future work should investigate further.
-
----
+The reviewers collectively highlight a meaningful tension in the paper: the strongest contributions (standard-guided word anchors and area-weighted local aggregation) are clean, principled, and fully zero-shot, while the weakest component (`s_seg`) is the one that introduces the framing problem. This suggests the paper might be strengthened by decoupling: presenting the central contribution as "mix-grained aggregation *without* the segmentation-count bonus," which is both cleaner and still SOTA among training-free methods. The reviewers also note that the paper's honest limitations section (dependence on MLLM capability, segmentation quality, inference speed) is unusually thorough for a conference paper and adds credibility.
 
 ## Suggestions
 
-1. **Clarify the PLCC protocol.** State explicitly whether a logistic mapping was used. If not, provide the raw PLCC alongside PLCC with a 4-parameter logistic fit for the main comparisons. This single change would remove the largest ambiguity in the evaluation.
+1. **Resolve the `c_max` issue.** Either (a) provide a fixed universal constant for `c_max` derived from a large generic image collection and show that it works across all test datasets without degradation, or (b) remove `s_seg` entirely and present the method as purely global + area-weighted local aggregation. Option (b) is simpler; the ablation shows that without `s_seg` the method still achieves SRCC 0.884 on SPAQ (Exp 6), which is well above all prior training-free methods.
 
-2. **Fix c_max globally or show results without s_seg.** Set c_max to a single global maximum (e.g., across all five datasets) and rerun the main tables, or add a statement in Limitations that s_seg uses dataset-specific c_max and suggest a practical alternative for deployment.
+2. **Add a sensitivity analysis for the area threshold `t`** over a reasonable range (e.g., 0.1%–5% of image area) on at least one dataset to demonstrate that performance is not driven by a carefully tuned value.
 
-3. **Add bootstrapped confidence intervals** to the ablation table (Table of ablation-1) using 1,000 bootstrap samples with replacement. This is computationally cheap (the predictions are already computed) and would immediately validate which ablation differences are meaningful.
-
-4. **State that greedy decoding (temperature=0) is used** to ensure deterministic, reproducible outputs.
-
-5. **Discuss the deployment scenario** for a completely unseen dataset where no prior statistics are available — specifically, how c_max and any score range adjustments would be handled.
-
----
+3. **Clarify the `c_max` determination** in the cross-dataset evaluation protocol: specify for each dataset in Table 1 what `c_max` value was used and how it was obtained.
 
 ## Score and Decision
 
-This paper presents a well-motivated, clearly explained, and empirically strong contribution to training-free IQA. The method is novel in its combination of standard-guided prompting and mix-grained aggregation, and the results convincingly demonstrate SOTA among training-free methods. The two main concerns — the PLCC protocol and the use of c_max — are relatively minor and easily fixable; they do not threaten the paper's core claims. The strengths substantially outweigh the weaknesses, and the paper is already within the publishable range.
+**Originality:** Good — standard-guided scoring with word anchors is a novel and well-validated design for training-free IQA.  
+**Importance:** High — training-free IQA with strong performance is practically valuable for out-of-distribution generalization.  
+**Claims support:** Partially — the zero-shot claim is weakened by the `c_max` issue, but the core performance claims are well-supported.  
+**Soundness:** Generally sound — the ablation study is thorough and the comparisons are comprehensive.  
+**Clarity:** Good — the methodology is clearly explained and the figures are effective.  
+**Value to community:** Good — provides a strong training-free baseline and useful design insights.
 
-**MY FINAL SCORE: <pineapple>7.0</pineapple>**
-**MY FINAL DECISION: <orange>Accept</orange>**
+The paper presents a genuine contribution with clean, well-validated ideas. The most significant weakness — the `c_max` issue — is fixable without changing the core contribution. I recommend acceptance conditional on addressing this concern.
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

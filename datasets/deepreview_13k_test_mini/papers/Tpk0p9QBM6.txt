@@ -1,0 +1,589 @@
+\title{Computing Low-Entropy Couplings for Large-Support Distributions}
+
+\begin{abstract}
+Minimum-entropy coupling (MEC)---the process of finding a joint distribution with minimum entropy for given marginals---has applications in areas such as causality and steganography. 
+However, existing algorithms are either computationally intractable for large-support distributions or limited to specific distribution types and sensitive to hyperparameter choices. This work addresses these limitations by unifying a prior family of iterative MEC (IMEC) approaches into a generalized partition-based formalism. From this framework, we derive a novel IMEC algorithm called ARIMEC, capable of handling arbitrary discrete distributions, and introduce a method to make IMEC robust to suboptimal hyperparameter settings.
+These innovations facilitate the application of IMEC to high-throughput steganography with language models, among other settings.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+\looseness=-1
+Given two marginal distributions, a coupling is a bivariate joint distribution with the given marginals.
+In general, there may be many couplings for a particular pair of marginals.
+The problem of computing a coupling with the minimum amount of joint entropy among all feasible couplings is called minimum-entropy coupling (MEC) \citep{KOVACEVIC2015369}.
+Further detailed in \citet{compton2023minimumentropy}, applications of MEC include causal inference \citep{Kocaoglu_Dimakis_Vishwanath_Hassibi_2017,compton2020entropic,Javidian:21,compton2022entropic}, communication \citep{pmlr-v162-sokota22a}, steganography \citep{witt2023perfectly}, random number generation \citep{li2021}, multimodal learning \citep{liang2023quantifying}, functional representations \citep{Cicalese2019MinimumEntropyCA}, and dimensionality reduction~\citep{Vidyasagar2012,Cicalese2016}.
+
+\looseness=-1
+While MEC is NP-hard \citep{KOVACEVIC2015369}, recent works have provided approaches that achieve provable approximations of MECs \citep{Kocaoglu_Dimakis_Vishwanath_Hassibi_2017,Cicalese2019MinimumEntropyCA,rossi2019,li2021,compton2022tighter,compton2023minimumentropy,shkel2023information} in log-linear time (i.e., $O(N \log N)$) in the cardinality of the support of the marginals.
+Unfortunately, the supports of many distributions of interest, such as those of generative AI models, are intractably large for these provable approximation algorithms.
+
+\looseness=-1
+To handle such cases, \citet{pmlr-v162-sokota22a} introduced a class of heuristic algorithms for producing low-entropy couplings.
+These algorithms work by iteratively coupling components of random vectors using provable MEC approximation algorithms in such a way that guarantees the aggregate joint distribution is a coupling.
+In practice, both \citet{pmlr-v162-sokota22a} and \citet{witt2023perfectly} find that these iterative minimum-entropy coupling (IMEC) approaches produce low-entropy couplings for distributions with very large supports---binary images and trajectories of Atari games~\citep{ale} in the work of \citet{pmlr-v162-sokota22a} and binary strings and generative models (including GPT-2~\citep{Radford2019LanguageMA}, WaveRNN~\citep{kalchbrenner_efficient_2018}, and Image Transformer~\citep{image_transformer}) in the work of \citet{witt2023perfectly}.
+Unfortunately, the applicability of the IMEC algorithms \citet{pmlr-v162-sokota22a} introduced is limited to problems in which one distribution either has small support or is factorable. 
+Moreover, these algorithms can be sensitive to hyperparameter choices, requiring careful tuning for optimal performance. 
+\emph{As a result, at the time of writing, there exist no techniques for producing low-entropy couplings of general large-support distributions}, let alone any that are also robust to hyperparameter settings.
+
+\looseness=-1
+In this work, we make multiple contributions regarding the IMEC line of research.
+First, we unify existing IMEC algorithms under a single formalism using \emph{sets of partitions}, where each partition is over the sample space of one of the given marginals.
+IMEC couples distributions by iteratively performing (approximate) MECs between a conditional distribution of one marginal and the posterior over the blocks of a partition associated with the other marginal.
+In particular, at each iteration, IMEC uses a partition whose associated posterior maximizes entropy.
+
+Leveraging this formalism, we derive the first algorithm for computing low-entropy couplings for arbitrary large-support distributions, which we call autoregressive IMEC (ARIMEC).
+ARIMEC uses a set of partitions, which we call the prefix tree partition set, in which each partition corresponds to a node of the prefix tree of one of the sample spaces.
+These prefix trees can have large numbers of nodes (and thereby induce large numbers of partitions).
+Thus, to facilitate an efficient implementation, we introduce techniques to 1) lazily update the posterior over different blocks and 2) quickly search over partitions using pruning.
+
+Finally, recognizing IMEC's general brittleness to partition set choice, we introduce a technique, called merging, to improve its robustness. At each iteration, this technique merges sample realizations into groups with identical posterior updates. Merging uses these groupings to perform additional MECs when entropy would otherwise be wasted due to suboptimal partition sets or other factors.
+
+We empirically validate the utility of our innovations in two settings: Markov coding games \citep{pmlr-v162-sokota22a} and steganography \citep{cachin_perfect}. In Markov coding games, the objective is to encode messages into the trajectories of a Markov decision process while achieving a high expected return. In steganography, the goal is to embed sensitive information into innocuous content such that an adversary cannot detect the hidden information. Our results show that ARIMEC achieves substantially improved communication rates in both settings, illustrating its ability to use autoregressive prior information about realistic messages. Additionally, we demonstrate that merging significantly enhances IMEC's robustness to suboptimal partition set choices, thereby facilitating easier out-of-the-box application. Overall, our results suggest ARIMEC with merging as a practical approach to applications involving computing low-entropy couplings for large-support distributions, such as high-throughput steganography with language models.
+
+
+
+\section{Background and Notation}
+
+
+For our background, we formally introduce minimum-entropy coupling and discuss existing techniques for computing and (heuristically) approximating minimum-entropy couplings.
+Thereafter, we introduce notation for partitions of sets, which we will later use to unify existing methods in one general framework.
+
+\subsection{Minimum-Entropy Coupling}
+
+We begin by formalizing the ideas of couplings and minimum-entropy couplings.
+
+\begin{definition}[Coupling]
+Let $\mathcal{\mu} \colon \mathbb{X} \to [0, 1]$ be a probability distribution over a finite set $\mathbb{X}$ and let $\mathcal{\nu} \colon \mathbb{Y} \to [0, 1]$ be a probability distribution over a finite set $\mathbb{Y}$.
+A coupling of $\mathcal{\mu}$ and $\mathcal{\nu}$ is a bivariate joint probability distribution $\gamma \colon \mathbb{X} \times \mathbb{Y} \to [0, 1]$ that marginalizes to $\mu$ and $\nu$.
+In other words, $\gamma$ satisfies
+\begin{align} \label{cond:coupling1}
+\sum_{x' \in \mathbb{X}} \gamma(x', y) &= \nu(y), \text{ for all } y \in \mathbb{Y},\\ 
+\sum_{y' \in \mathbb{Y}} \gamma(x, y') &= \mu(x), \text{ for all } x \in \mathbb{X}.\label{cond:coupling2}
+\end{align} 
+We use $\Gamma(\mu, \nu) = \{\gamma \mid \gamma \text{ satisfies  (\ref{cond:coupling1}) \& (\ref{cond:coupling2})}\}$ 
+to denote the set of all couplings for $\mu$ and $\nu$.
+\end{definition}
+
+\begin{definition}[Joint Entropy]
+Given a coupling $\gamma$, the joint entropy is defined as \[\mathcal{H}(\gamma) = - \mathbb{E}_{(X, Y) \sim \gamma} \log \gamma(X, Y).\]
+\end{definition}
+
+Throughout the paper, we will use capital letters to denote random variables, as is done in the definition above.
+
+\begin{definition}[Minimum-Entropy Coupling]
+Given two marginal distributions $\mu, \nu$, a \textbf{minimum-entropy coupling} is a coupling $\gamma \in \Gamma(\mu, \nu)$ such that 
+\[\mathcal{H}(\gamma) = \min \{\mathcal{H}(\gamma') \mid \gamma' \in \Gamma(\mu, \nu)\}.\]
+\end{definition}
+\subsection{Computing and Approximating Minimum-Entropy Couplings} \label{sec:amec}
+
+\looseness=-1
+While computing an exact minimum-entropy coupling is NP-hard \citep{KOVACEVIC2015369}, there has been a series of recent works that construct $O(N \log N)$ approximation algorithms, where $N$ is the size of the sample space.
+\citet{Cicalese2019MinimumEntropyCA} introduce an approximation algorithm that they show guarantees a coupling within 1 bit of minimum entropy.
+\citet{rossi2019} show that \citet{Kocaoglu_Dimakis_Vishwanath_Hassibi_2017}'s greedy approach guarantees a coupling within 1 bit of minimum entropy.
+\citet{li2021} introduce a third approach for which he also proved a 1 bit approximation guarantee.
+Most recently, \citet{compton2023minimumentropy} show an improved guarantee for \citet{Kocaoglu_Dimakis_Vishwanath_Hassibi_2017}'s greedy approach of about 0.53 bits, while also showing that \citet{Cicalese2019MinimumEntropyCA} and \citet{li2021}'s algorithms cannot match this guarantee.
+\citet{compton2023minimumentropy} also give approaches that guarantee exact MECs, though they require exponential time.
+
+\subsection{Iterative Minimum-Entropy Coupling with a Tabular Posterior}
+
+In some settings, it is desirable to (non-provably) approximate minimum-entropy couplings where one random variable is a vector that ranging over such a large number of possible outcomes that the approaches described in \Cref{sec:amec} are inapplicable.
+\citet{pmlr-v162-sokota22a} propose an iterative approach to such settings that assumes that this random vector is autoregressively specified.
+In this work, we refer to \citet{pmlr-v162-sokota22a}'s algorithm as tabular IMEC (TIMEC).
+TIMEC guarantees that the resulting joint distribution is a coupling, supports conditional sampling and likelihood queries for both $X \mid Y$ and $Y \mid X$, where $Y$ is the random vector, and heuristically achieves low entropy.
+It can either be defined using the conditional generative process for sampling $Y \mid X$ or the conditional generative process for sampling $X \mid Y$, as both induce the same joint distribution.
+We focus on the process for generating $Y \mid X$, which is formalized in \Cref{alg:timec1}, in the main body but include the process for generating $X \mid Y$ in \Cref{alg:timec2} in \Cref{app:inverse}.
+\Cref{alg:timec1} works iteratively in two steps: 
+\begin{enumerate}[leftmargin=*]
+    \item First, it performs an (approximate) MEC between the posterior over $X$ given $Y_{1:j-1}$ (inductively defined via Bayes' Theorem) and the conditional distribution $\nu(Y_j \mid Y_{1:j-1})$.\footnote{Note that we use upper-bound-inclusive indexing, so $Y_{1:0}=()$, $Y_{1:1}=(Y_1)$, $Y_{1:2}=(Y_1, Y_2)$, etc.}
+    The joint posterior over $X$ and $Y_j$ given $Y_{1:j-1}$ is assigned to the output of this coupling.
+    \item Second, it samples $Y_j$ from the posterior over $Y_j$ given both $X=x$ and $Y_{1:j-1}$ (also inductively defined via Bayes' Theorem). 
+\end{enumerate}
+
+\begin{algorithm}[t]
+    \caption{Tabular IMEC: $Y \mid X=x$} \label{alg:timec1}
+    \begin{algorithmic}
+        \Procedure{TIMEC}{$\mu$, $\nu$, $x$}
+        \State $\gamma(X) \gets \mu(X)$
+            \For{$j=1, \dots,  m$}
+                \State $\gamma(X, Y_j \mid Y_{1:j-1}) \gets \text{MEC}(\gamma(X \mid Y_{1:j-1}),$ \State \hspace{38.35mm} $\nu(Y_j \mid Y_{1:j-1}))$
+                \State $Y_j \sim \gamma(Y_j \mid x, Y_{1:j-1})$
+            \EndFor
+            \State return $Y$
+        \EndProcedure
+    \end{algorithmic}
+\end{algorithm}
+
+\subsection{Iterative Minimum-Entropy Coupling with a Factored Posterior}
+
+Unfortunately, requiring approximate MECs over distributions of size $|\mathbb{X}|$ makes TIMEC inapplicable to many settings, such as steganography with large message sizes \citep{witt2023perfectly}.
+To ameliorate this issue, \citet{pmlr-v162-sokota22a} also proposed a second approach, which we refer to as factored IMEC (FIMEC)\footnote{\citet{witt2023perfectly} use the name iMEC for this approach.}, in which $X$ is also assumed to be a random vector.
+Furthermore, crucially, it is assumed to be factorable.
+
+\begin{assumption}[Factorability] \label{ass:fact}
+$X=(X_1, \dots, X_n)$ is a random vector with $\mu(x) = \prod_i \mu(x_i)$ for all $x \in \mathbb{X}$.
+\end{assumption}
+
+As with TIMEC, FIMEC guarantees that the resulting distribution is a coupling, supports likelihood queries to both conditionals and the joint distribution, and heuristically achieves low entropy.
+It can similarly be defined in terms of either conditional generative process ($X \mid Y$ or $Y \mid X$).
+We again focus on the $Y \mid X$ case (\Cref{alg:fimec1}), and defer the $X \mid Y$ case to \Cref{app:inverse}.
+The basic structure of \Cref{alg:fimec1} is analogous to that of \Cref{alg:timec1}.
+However, rather than performing MECs using $\gamma(X \mid Y_{1:j-1})$, FIMEC uses $\gamma(X_{i^{\ast}} \mid Y_{1:j-1})$, where $X_{i^{\ast}}$ is a component of $X$ with maximum posterior entropy.
+The other components $X_i$ for $i \neq i^{\ast}$ are left independent of $Y_j \mid Y_{1:j-1}$.
+\begin{algorithm}[t]
+    \caption{Factored IMEC: $Y \mid X{=}x$} 
+    \begin{algorithmic}
+        \Procedure{FIMEC}{$\mu$, $\nu$, $x$}
+        \State $\gamma(X) \gets \mu(X)$
+            \For{$j=1, \dots,  m$}
+                \State $i^{\ast} \gets \text{argmax}_i \mathcal{H}(\gamma(X_i \mid Y_{1:j-1}))$
+                \State $\gamma(X_{i^{\ast}}, Y_j \mid Y_{1:j-1}) \gets \text{MEC}(\gamma(X_{i^{\ast}} \mid Y_{1:j-1}),$
+                \hspace{44.16mm}$\nu(Y_j \mid Y_{1:j-1}))$
+                \State $\gamma(X, Y_j \mid Y_{1:j-1}) \gets \gamma(X_{i^{\ast}}, Y_j \mid Y_{1:j-1}) \cdot$ \State
+                \hspace{26.52mm} $\prod_{i \neq i^{\ast}} \gamma(X_i \mid Y_{1:j-1})$
+                \State $Y_j \sim \gamma(Y_j \mid x, Y_{1:j-1})$
+            \EndFor
+            \State return $Y$
+        \EndProcedure
+    \end{algorithmic}
+    \label{alg:fimec1}
+\end{algorithm}
+
+\subsection{Partitions of Sets}
+
+As discussed in the introduction, we will show the IMEC algorithms discussed in the previous two sections can be unified into a single algorithm using partitions over $\mathbb{X}$. We use the following definitions and notation for partitions.
+\begin{definition}[Partition]
+A partition $\mathcal{P}$ of a set $\mathbb{X}$ is a collection of blocks $\{\mathbb{B}_1, \dots, \mathbb{B}_{\ell}\}$ where: 
+\begin{enumerate}[nosep,leftmargin=*]
+    \item Each block is a subset of $\mathbb{X}$.
+    \item Each pair of distinct blocks has an empty intersection.
+    \item The union of blocks is equal to $\mathbb{X}$.
+\end{enumerate}
+\end{definition}
+
+\begin{definition}[Block Function]
+For a partition $\mathcal{P}$ of a set $\mathbb{X}$, the block function $\mathcal{B}_{\mathcal{P}} \colon \mathbb{X} \to \mathcal{P}$ maps $x$ to the block of the partition of which it is an element.
+When $X$ is a random variable, we use $B_{\mathcal{P}} = \mathcal{B}_{\mathcal{P}}(X)$ to denote the block of $\mathcal{P}$, as a random variable, to which $X$ belongs.
+\end{definition}
+
+Note that the probability distribution of $B_{\mathcal{P}}$ is defined by \[\mu(B_{\mathcal{P}}=\mathbb{B}) = \mu(X \in \mathbb{B}) = \sum_{x \in \mathbb{B}}\mu(X=x).\]
+
+
+
+\section{A Unification of Iterative Minimum-Entropy Coupling}
+
+
+We are now ready to describe our unification of existing IMEC algorithms.
+In this unification, different instances of IMEC are specified using different sets of partitions 
+\[\mathfrak{P} \subset \{\mathcal{P} \mid \mathcal{P} \text{ is a partition of } \mathbb{X}\}.\]
+Instances of this unified perspective guarantee that the resulting distribution is a coupling, support conditional and likelihood queries for both $X \mid Y$ and $Y \mid X$, and heuristically produce low entropy.
+We define this unified perspective to IMEC using the conditional generative process given in \Cref{alg:imec1}, which samples from $Y|X$.
+(Equivalently, it is defined by the generative process given in \Cref{alg:imec2} in \Cref{app:inverse}, which samples from $X|Y$).
+\Cref{alg:imec1} works iteratively in three~steps:
+\begin{enumerate}[leftmargin=*]
+    \item First, it computes a partition $\mathcal{P} \in \mathfrak{P}$ inducing a maximum-entropy posterior. The entropy induced by a partition $\mathcal{P}$ at iteration $j$ is defined in terms of the probabilities over the blocks of the partition under $\gamma$, given $Y_{1:j-1}$.
+    That is,
+    \begin{align*}
+    &\mathcal{H}(\gamma(B_{\mathcal{P}} \mid Y_{1:j-1}))\\ 
+    &= - \sum_{\mathbb{B} \in \mathcal{P}} \gamma(X \in \mathbb{B} \mid Y_{1:j-1}) \log \gamma(X \in \mathbb{B} \mid Y_{1:j-1}).
+    \end{align*}
+    The intuition behind selecting the maximum-entropy partition is that it heuristically offers the opportunity to reduce the joint entropy by the largest amount.\footnote{A justification is as follows. Recall that \[\max(\mathcal{H}(C), \mathcal{H}(D)) \leq \mathcal{H}(C, D) \leq \mathcal{H}(C) + \mathcal{H}(D),\] where $\mathcal{H}(C, D)$ achieves its upper bound when $C$ and $D$ are independent. Thus, the maximum reduction in joint entropy achievable by performing a coupling is upper bounded by \[\mathcal{H}(C) + \mathcal{H}(D) - \max(\mathcal{H}(C), \mathcal{H}(D)) = \min(\mathcal{H}(C), \mathcal{H}(D)).\]
+    Therefore, maximizing $\mathcal{H}(C)$ maximizes an upper bound on the joint entropy reduction.}
+    \item Second, it performs an (approximate) MEC between the posterior over the blocks of the chosen partition $\mathcal{P}$ and the conditional distribution $\nu(Y_j \mid Y_{1:j-1})$.
+    The joint posterior over the block $B_{\mathcal{P}}$ and $Y_j$ given $Y_{1:j-1}$ is assigned to the output of this coupling.
+    \item  Third, it samples $Y_j$ from the posterior over $Y_j$ given both the block $\mathcal{B}_{\mathcal{P}}(x)$ and $Y_{1:j-1}$. 
+\end{enumerate}
+
+\begin{algorithm}[t]
+    \caption{IMEC (Generic Form): $Y \mid X=x$} \label{alg:imec1}
+    \begin{algorithmic}
+        \Procedure{IMEC}{$\mu$, $\nu$, $x$, $\mathfrak{P}$}
+        \State $\gamma(X) \gets \mu(X)$
+            \For{$j=1, \dots,  m$}
+                \State $\mathcal{P} \gets \arg\max_{\mathcal{P} \in \mathfrak{P}} \mathcal{H}(\gamma(B_{\mathcal{P}} \mid Y_{1:j-1}))$
+                \State $\gamma(B_{\mathcal{P}}, Y_j \mid Y_{1:j-1}) \gets \text{MEC}(\gamma(B_{\mathcal{P}} \mid Y_{1:j-1}),$
+                \State \hspace{42.25mm} $\nu(Y_j \mid Y_{1:j-1}))$
+                \State $Y_j \sim \gamma(Y_j \mid \mathcal{B}_{\mathcal{P}}(x), Y_{1:j-1})$
+            \EndFor
+            \State return $Y$
+        \EndProcedure
+    \end{algorithmic}
+\end{algorithm}
+
+\subsection{Theory}
+
+The general form of IMEC possesses the following two properties, which reduce to the results of \citet{pmlr-v162-sokota22a} as a special case.
+\begin{restatable}[Coupling]{proposition}{coupling}
+IMEC induces a coupling of $\mu$ and $\nu$. 
+\label{prop:coupling}
+\end{restatable}
+
+\begin{restatable}[Greediness]{proposition}{greediness}  
+If the partition of singletons is in $\mathfrak{P}$, IMEC approximately minimizes $\mathcal{H}(X, Y_{1:j})$ subject to $\mu, \nu, \gamma(X, Y_{1:j-1})$ on the $j$th iteration, for each $j$. 
+\label{prop:greediness}
+\end{restatable}
+Proofs for these statements are provided in \Cref{app:coupling} and \Cref{app:greediness}, respectively.
+
+The general form of IMEC also possesses the following runtime guarantee, which says that IMEC can be implemented efficiently whenever maximum-entropy posterior partition computation is efficient.
+\begin{restatable}[IMEC Runtime]{proposition}{imec} \label{prop:imec}
+Given a polynomial-time function for computing the maximum-entropy posterior partition, IMEC can be implemented in polynomial time in $\max_j |\mathbb{Y}_j|, \max_i |\mathbb{X}_i|, m, n$.
+\end{restatable}
+We prove \Cref{prop:imec} in \Cref{app:complexity}.
+
+\subsection{Special Cases}
+
+\paragraph{Tabular Posterior} To implement TIMEC using \Cref{alg:imec1}, we can select the partition set $\mathfrak{P}$ to be the set of all partitions of $\mathbb{X}$.
+As per \Cref{lemma:trivial-partition}, which is stated and derived in \Cref{app:remarks}, the partition of singletons (or a partition that is equivalent up to measure zero) will always be selected, as it achieves maximum entropy.
+Coupling with the partition of singletons is equivalent to coupling over the whole set, which is exactly what TIMEC does.
+
+Using \Cref{prop:imec}, we derive the following runtime guarantee for TIMEC in \Cref{app:complexity}.
+\begin{restatable}[TIMEC Runtime]{corollary}{timec} \label{prop:timec}
+TIMEC can be implemented in polynomial time in $\max_j |\mathbb{Y}_j|, |\mathbb{X}|, m$.
+\end{restatable}
+
+Note that TIMEC's polynomial time guarantee is in contrast to a direct application of an approximate MEC algorithm, which would require exponential time as a function of the same quantities.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/factored.pdf}
+    \caption{(Left) A set $\mathbb{X}$ of sequences  of length 3; (right) a partition $\mathcal{P}_2$ used by FIMEC.}
+    \label{fig:factored-vis}
+\end{figure}
+
+\paragraph{Factored Posterior} To implement FIMEC using \Cref{alg:imec1}, we can select the partition set as $\mathfrak{P} = \{\mathcal{P}_1, \dots, \mathcal{P}_n\}$, where for each $i$, 
+\[\mathcal{P}_i = \{\mathbb{X}_1 \times \dots \times \mathbb{X}_{i-1} \times \{x_i\}  \times \mathbb{X}_{i+1} \times \dots \times \mathbb{X}_n \mid x_i \in \mathbb{X}_i\}\]
+and where $\mathbb{X}_i$ denotes the sample space for $X_i$.
+An example is shown in Figure \ref{fig:factored-vis}.
+From this perspective, selecting $\mathcal{P}_i$ on a particular iteration is equivalent to selecting $X_i$ as the component with which to couple.
+
+Using \Cref{prop:imec}, we derive the following runtime guarantee for FIMEC in \Cref{app:complexity}.
+\begin{restatable}[FIMEC Runtime]{corollary}{fimec} \label{prop:fimec}
+Let \Cref{ass:fact} hold. Then FIMEC can be implemented in polynomial time in $\max_j |\mathbb{Y}_j|, \max_i | \mathbb{X}_i|, m, n$.
+\end{restatable}
+
+Note that FIMEC's polynomial-time guarantee is in contrast to a direct application of both an approximate MEC algorithm and TIMEC, which would each require exponential time in the same quantities.
+
+
+
+\section{Iterative Minimum-Entropy Coupling with an Autoregressive Posterior}
+
+
+Building on our unified framework, we now derive a new IMEC algorithm, which we call autoregressive IMEC (ARIMEC).
+ARIMEC improves upon the applicability of FIMEC by eliminating the factorability assumption.
+We present ARIMEC in two parts.
+First, we introduce the \textit{prefix tree partition set}, which allows us to formally define ARIMEC using \Cref{alg:imec1}.
+Second, we detail insights to make a practical implementation of ARIMEC.
+
+\subsection{Mathematical Formalization}
+
+\looseness=-1
+In the framing of \Cref{alg:imec1}, the defining characteristic of IMEC algorithms is their partition sets. 
+Therefore, to develop an IMEC algorithm of maximal applicability, it is essential to choose a partition set compatible with a universal model of distributions (i.e., one capable of representing any distribution). 
+The autoregressive model, which decomposes a distribution over vectors into component-wise conditional distributions via the chain rule of probability, is one such universal model.
+This section formalizes ARIMEC using a partition set specifically tailored to align with the tree-like output structure inherent in autoregressive models.
+In order to define this partition set, which we call the prefix tree partition set, we first define prefixes.
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=.9\linewidth]{figures/ar3.pdf}
+    \caption{(Left) A set $\mathbb{X}$ of sequences of length 2; (middle) the prefix tree for $\mathbb{X}$; (right) the partition induced by the left-most depth one node of the prefix tree.}
+    \label{fig:ar-vis}
+\end{figure*}
+\begin{definition}[Prefix/Extension]
+We write $v \sqsubset v'$ to mean that $v$ is a prefix of $v'$ in the substring sense and, equivalently, that $v'$ is an extension of $v$ in the substring sense.
+\end{definition}
+\begin{definition}[Immediate Prefix/Extension]
+We say $v$ is the immediate prefix of $v'$ and, equivalently, that $v'$ is the immediate extension of $v$, if $v \sqsubset v'$ and $v'$ is one character longer than $v$.
+\end{definition}
+
+Next, we define the \textit{prefix tree} of a set of vectors.
+The prefix tree is a directed graph over prefixes of vectors with edges pointing to immediate extensions, as stated below.
+(Note that our usage of the term is graph theoretic and does not pertain to the trie data structure.)
+
+\begin{definition}[Prefix Tree]
+The prefix tree for a set of vectors $\mathbb{X}$ is a directed graph $(\mathbb{V}, \mathbb{E})$, where
+the vertex set 
+\[\mathbb{V}= \{v \sqsubset x \mid x \in \mathbb{X}\}\] is the set of prefixes of elements of $\mathbb{X}$ and the set of edges 
+\[\mathbb{E}=\{(v, c) \mid v, c \in \mathbb{V}, c \text{ is an immediate extension of } v\}\] is the set of pairs of vertices and their immediate extensions.
+For distinct vertices $v, u$, we use the notation $\mathbb{V}_{v \to u}$ to mean the subset of $\mathbb{V} \setminus \{v\}$ touchable by paths that start from $v$ and contain $u$.
+\end{definition}
+We can view each vertex $v$ in the prefix tree as partitioning $\mathbb{X}$ in a manner that aligns with the sampling paths of autoregressive models.
+This perspective naturally induces what we call the prefix tree partition set, where each partition corresponds to a prefix upon which an autoregressive model could be conditioned.
+
+\begin{definition}[Prefix Tree Partition Set]
+Let $(\mathbb{V}, \mathbb{E})$ be the prefix tree for $\mathbb{X}$.
+Then the \textbf{prefix tree partition set} is defined as $\mathfrak{P} = \{\mathcal{P}_v \mid v \in \mathbb{V}\}$,
+where
+\[\mathcal{P}_v = \{\mathbb{B}_{c \sqsubset} \mid (v, c) \in \mathbb{E}\} \cup \{\mathbb{B}_{v \not \sqsubset}\} \cup \{ \mathbb{B}_{v =}\},\]
+and where
+\begin{itemize}[nosep,leftmargin=*]
+    \item $\mathbb{B}_{c\sqsubset}= \{x \in \mathbb{X} \mid c \sqsubset x\}$ denotes the subset of $\mathbb{X}$ that is an extension of the child $c$;
+    \item $\mathbb{B}_{v \not \sqsubset}= \{x \in \mathbb{X} \mid v \not \sqsubset x\}$ denotes the subset of $\mathbb{X}$ that does not extend $v$;
+    \item $\mathbb{B}_{v =} = \{x \in \mathbb{X} \mid v = x\}$ denotes the (either singleton or empty) subset of $\mathbb{X}$ equal to $v$.
+\end{itemize}
+For distinct vertices $v, u$, we use the notation $\mathbb{B}_{v \to u}$ to mean the subset of $\mathcal{P}_v \setminus \{\mathbb{B}_{v =}\}$ touchable by paths that start from $v$ and contain $u$.
+\end{definition}
+A visualization of the prefix tree and one partition that it induces is shown in Figure \ref{fig:ar-vis}.
+
+Having defined the prefix tree partition set, ARIMEC's formalization is immediate.
+
+\begin{definition}[ARIMEC] \label{def:arimec}
+\textbf{ARIMEC} is the instance of \Cref{alg:imec1} in which the set of partitions $\mathfrak{P}$ is selected to be the prefix tree partition set.
+\end{definition}
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/arimec_vis.pdf}
+    \caption{Visualization of two iterations of ARIMEC.}
+    \label{fig:vis_arimec}
+\end{figure*}
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=0.3\textwidth]{figures/tree.pdf}
+    \caption{Path shown down the prefix tree corresponding to the procedure in \Cref{fig:vis_arimec}.}
+    \label{fig:arimec_tree}
+\end{figure*}
+
+ARIMEC can be thought of as, at each iteration, operating at a working prefix $v$ whose associated partition $\mathcal{P}_v$ maximizes posterior entropy.
+As information is gained, the likelihood of one the blocks (such as some $\mathbb{B}_{c \sqsubset}$) will become large.
+As a result, the entropy associated with the working prefix's partition $\mathcal{P}_v$ will become small, causing the (entropy-maximizing) working prefix to change---often to a child of the existing working prefix.
+Over iterations, the working prefix will tend to traverse downward in the prefix tree toward the true value of $X$.
+However, it is also possible for it to move upward if the probability of $\mathbb{B}_{\not \sqsubset v}$ (for working prefix $v$) becomes large.
+This backtracking mechanism allows ARIMEC to recover from cases in which the working prefix deviates from prefixes of $X$.
+We provide visual intuition for ARIMEC in \Cref{fig:vis_arimec}, showing example iterations for marginals of length two and its corresponding path down the tree in \Cref{fig:arimec_tree}.
+
+\subsection{Efficient Implementation}
+
+While \Cref{def:arimec} formalizes ARIMEC at a mathematical level, constructing a practical implementation is challenging due to the exponentially large number of nodes in the prefix tree, which makes naive maximum-entropy posterior partition computations intractable.
+To address this challenge, we propose a procedure that seeks to prove a maximum-entropy partition by searching over as few partitions as possible, while lazily and (provably) efficiently computing the posterior (and posterior entropy) of each partition that it does search.
+This procedure has two components.
+The first is a polynomial time algorithm for lazily computing posteriors (and posterior entropies) for particular partitions.
+The second is a search procedure for finding a maximum-entropy partition that prunes partitions that are provably not maximum entropy.
+In practice, we observe that the procedure is highly efficient, often only requiring the evaluation of one or two nodes to prove a maximum-entropy partition, though we do not formally prove its runtime complexity; see \Cref{app:search} for further details.
+
+\paragraph{Posterior Updates}
+
+The core idea behind our approach to posterior updates is that, given an updated posterior for the partition associated to node $v$, we can immediately derive the posterior of the partition for any adjacent node $u$.
+The posterior over $\mathcal{P}_u$ is dictated by two rules.
+First, that \[\gamma(\mathbb{B}_{u \to v} \mid Y_{1:j}) = 1 - \gamma(\mathbb{B}_{v \to u} \mid Y_{1:j}),\] by the complement law of probability.
+Second, that \[\gamma(\mathbb{B} \mid Y_{1:j}) \propto \gamma(\mathbb{B} \mid Y_{1:j-1})\] for $\mathbb{B} \in \mathcal{P}_u \setminus \mathbb{B}_{u \to v}$, as direct evidence about $B_{\mathcal{P}_v}$ does not differentiate between the elements of $\mathcal{P}_u \setminus \mathbb{B}_{u \to v}$.
+These ideas are formalized in \Cref{lem:bayes}.
+
+We can compute the posterior for any partition $\mathcal{P}_u$ in polynomial time by iteratively applying \Cref{lem:bayes} to the partitions along the undirected path from $v$ to $u$, as is stated below and proven in \Cref{app:post}.
+\begin{restatable}[Posterior Updates]{proposition}{posterior} \label{prop:posterior}
+Assume that the posterior over a partition is updated if and only if its corresponding node is touched and that nodes are touched by traversing edges of the tree (i.e., without jumps).
+Let $\mathcal{P}_v$ be a partition whose posterior was updated on iteration $j$.
+If $v, u$ are neighbors and $u$ was last visited on iteration $j' \leq j$, then the iteration $j$ posterior for any partition $\mathcal{P}_u$ can be computed in polynomial time in $\max_i |\mathbb{X}_i|, n$.
+\end{restatable}
+
+ \paragraph{Maximum-Entropy Posterior Partition Search}
+
+The core idea behind our search procedure is to prune nodes of the prefix tree whose partitions provably cannot be maximal entropy.
+To prune nodes, we make use of an upper bound on entropy.
+This upper bound---stated formally in \Cref{lemma:ent_ub}---shows, roughly speaking, that the entropy of any distribution with one sufficiently probable element cannot exceed the entropy of the distribution that would divide the remaining mass uniformly.
+
+We can apply this upper bound on large numbers of nodes simultaneously:
+If a prefix $v$ is unlikely, then $\gamma(\mathbb{B}_{u \to v} \mid Y_{1:j})$ will be large for every $u$ in the subtree rooted at $v$.
+On the other hand, if a prefix $v$ is likely, then $\gamma(\mathbb{B}_{u \to v} \mid Y_{1:j})$ will be large for every $u$ in complement of the subtree rooted at $v$.
+We prove this result, stated in \Cref{prop:maxent} below, in \Cref{app:ent}.
+
+ \begin{restatable}[Maximum-Entropy Partition]{proposition}{maxent} \label{prop:maxent}
+Let 
+\[\kappa \geq \max_{\mathcal{P} \in \mathfrak{P}} |\{\mathbb{B} \in \mathcal{P} \mid \mu(\mathbb{B}) > 0\}|\] be an upper bound on the number of blocks with positive probability.
+Define 
+\[\mathcal{U} \colon q \mapsto - q \log q - (1 - q) \log \frac{1 - q}{\kappa - 1}.\]
+For any neighbor $u$ of $v$, if 
+\[\gamma(\mathbb{B}_{v \to u} \mid y_{1:j}) < 1-1/ \kappa,\]
+then, for all $u' \in \mathbb{V}_{v \to u}$, \[\mathcal{H}(\gamma(B_{\mathcal{P}_{u'}} \mid y_{1:j})) \leq \mathcal{U}(\gamma(\mathbb{B}_{u \to v} \mid y_{1:j})).\]
+\end{restatable}
+
+Using \Cref{prop:maxent}, we can prove a maximum-entropy partition by searching only over the nodes for which we cannot prove an upper bound that is smaller than a previously observed entropy, as is described in \Cref{alg:maxentpartition}.
+
+\begin{algorithm}[t]
+    \caption{Maximum-Entropy Partition Search} \label{alg:maxentpartition}
+    \begin{algorithmic}
+        \Procedure{MaxEntPartition}{$v, \gamma(\cdot \mid Y_{1:j})$}
+        \State $\text{queue} \gets [\mathcal{P}_v]$
+        \While{$\text{queue non-empty}$}
+        \State $\mathcal{P}_{u} \gets \text{queue.pop}()$
+        \If{$\mathcal{H}(\gamma(B_{\mathcal{P}_{u}} \mid Y_{1:j}))$ is max ent so far}
+        \State $\text{max ent partition} \gets \mathcal{P}_{u}$
+        \EndIf
+        \For{each node $u'$ adjacent to $u$}
+        \State $q \gets \gamma(\mathbb{B}_{u \to u'} \mid Y_{1:j})$
+        \If{$q > 1 - \frac{1}{ \kappa}$ \text{or} $\mathcal{U}(q)  > \text{max ent so far}$}
+        \State $\text{queue.append($\mathcal{P}_{u'}$)}$
+        \EndIf
+        \EndFor
+        \EndWhile
+        \State return $\text{max ent partition}$
+        \EndProcedure
+    \end{algorithmic}
+\end{algorithm}
+
+
+
+\section{Mitigating Entropy Waste via Merging}
+
+
+One suboptimality of ARIMEC, and more generally of all IMEC algorithms, results from the fact that, on a particular iteration, it may be the case that 
+\[\mathcal{H}(\nu(Y_j \mid Y_{1:j-1})) - \mathcal{H}(\gamma(B_{\mathcal{P}} \mid Y_{1:j-1})) > 0.\]
+In such a case, IMEC necessarily wastes at least $\mathcal{H}(\nu(Y_j \mid Y_{1:j-1})) - \mathcal{H}(\gamma(B_{\mathcal{P}} \mid Y_{1:j-1}))$ bits of information because $Y_j$ possesses more information than is necessary to encode $B_{\mathcal{P}}$.
+This waste can stem from bad hyperparameter selection (i.e., the partitions in $\mathfrak{P}$ are low entropy) or reduced uncertainty about $X$ due to previous approximate MECs.
+While the latter is typically desirable (as it indicates we've achieved low conditional entropy), the former can negatively impact performance \citep{witt2023perfectly}. 
+
+To address this, we introduce a technique that we call merging.
+At each iteration $j$, after performing a coupling, merging groups the possible realizations of $Y_j$ by the posterior update over $B_{\mathcal{P}}$ they induce.
+Instead of sampling a realization of $Y_j$, merging samples one of these groups. If the sampled group contains multiple elements, merging performs an additional coupling between the posterior over that group and the new maximum-entropy partition. This process repeats until the sampled group consists of a single element, at which point iteration $j+1$ begins.
+
+\paragraph{An Example of Merging} To illustrate this process, consider a case in which 
+\[\nu(Y_j \mid Y_{1:j-1}) = [1/4, 1/4, 1/2],\] \[\gamma(B_{\mathcal{P}} \mid Y_{1:j-1}) = [1/2, 1/2].\]
+Then the following is a minimum-entropy coupling:
+\begin{center}
+\begin{tabular}{| c | c | c | c|}
+\hline
+ & $y_1$ & $y_2$ & $y_3$\\
+\hline
+$b_1$ & 1/4 & 1/4 & 0\\
+$b_2$ & 0 & 0 & 1/2\\
+\hline
+\end{tabular}.
+\end{center}
+In this coupling, the posterior over $B_{\mathcal{P}}$ remains the same whether $Y_j$ is realized as $y_1$ or $y_2$ (specifically, the probability of $b_1$ is one), indicating wasted entropy over ${y_1, y_2}$. Merging post-processes such couplings to yield:
+\begin{center}
+\begin{tabular}{| c | c | c |}
+\hline
+ & $\{y_1, y_2\}$ & $\{y_3\}$\\
+\hline
+$b_1$ & 1/2 & 0\\
+$b_2$ & 0 & 1/2\\
+\hline
+\end{tabular}.
+\end{center}
+Under merging, if the group $\{y_1, y_2\}$ is sampled, the subsequent coupling is performed between the new maximum-entropy partition and
+\[\nu(Y_j \mid Y_{1:j-1}, Y_j \in \{y_1, y_2\}).\] 
+If the sampled group has more than two elements, this process may repeat multiple times before proceeding to iteration $j+1$.
+
+
+
+\section{Experiments}
+
+
+To demonstrate the effectiveness of ARIMEC and merging, we perform experiments in two settings: Markov coding games \citep{pmlr-v162-sokota22a} and steganography~\citep{cachin_perfect}.
+
+\subsection{Markov Coding Games}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/mcg2.pdf}
+    \caption{Results for the Markov coding games CodeCart and CodePong using MaxEntRL policies with different temperatures with 95\% bootstrap confidence intervals drawn from 100 games.}
+    \label{fig:mcg}
+\end{figure}
+
+In a Markov coding game (MCG) \citep{pmlr-v162-sokota22a}, the goal is to communicate messages via the trajectories of a Markov decision process (MDP), while simultaneously achieving a high expected return in the MDP.
+Messages are sampled independently from a distribution known to both the player sending them and the player receiving them.
+For a more complete description, see \Cref{app:mcg}.
+
+\citet{pmlr-v162-sokota22a} give a principled approach to this setting called MEME that works in two steps.
+First, MEME trains a maximum-entropy reinforcement learning (MaxEntRL) \citep{maxentrl} policy for the MDP.
+(The intuition is that this policy balances between performing well in the MDP and having high bandwidth through which information can be communicated.)
+Second, MEME computes (or approximates) a minimum-entropy coupling between the distribution over messages and, roughly speaking, the distribution over trajectories induced by the MaxEntRL policy.\footnote{To be more precise about the latter distribution requires nuance since environment transitions cannot be correlated with the message. See \citet{pmlr-v162-sokota22a} for details.}
+MEME guarantees that the expected return in the MCG is the same as in the MDP; furthermore, at each time step, MEME greedily maximizes the amount of information encoded into the trajectory.
+For a more complete description, see 
+ \Cref{app:meme}.
+
+Because the second step of MEME requires computing or approximating a MEC, prior to this work, it was only applicable to MCGs whose message distributions had small or factorable supports.
+Thus our extension of IMEC to arbitrary distributions also serves as an extension of MEME to arbitrary MCGs.
+
+To illustrate the benefits of MEME's extended applicability, we perform experiments in two MCGs based on Cartpole and Pong \citep{ale}, which we call CodeCart and CodePong, that were previously beyond MEME's applicability.
+For these MCGs, the distribution over messages is dictated by GPT-2 \citep{Radford2019LanguageMA} with top-50 sampling.
+For each game, we trained two policies with using different entropy bonus temperatures that each achieved perfect scores in 100 of 100 games.
+As a baseline, we compare against a naive version of MEME that assumes that the message was sampled from a uniform distribution over tokens and uses FIMEC.
+Note that this baseline sacrifices MEME's expected return guarantee.
+
+We show the rate at which trajectories are decoded incorrectly for each variant of IMEC in these settings (Figure \ref{fig:mcg}).
+While both FIMEC and ARIMEC maintain perfect expected return in the MDP, ARIMEC produces substantially more efficient encodings.
+
+\subsection{Steganography}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/stego3.pdf}
+    \caption{Results for information-theoretic steganography with 95\% bootstrap confidence intervals drawn from 100 samples.}
+    \label{fig:stego}
+\end{figure}
+
+In steganography, the goal is to encode information (called plaintext) into innocuous-seeming content (called stegotext), such that an adversary would not realize that the innocuous-seeming content contains hidden information.
+We consider two kinds of steganography for our experiments.
+
+\paragraph{Information-Theoretic Steganography} The first is information-theoretic steganography \citep{cachin_perfect}, which seeks formal security guarantees.
+\citet{witt2023perfectly} proved that this problem can be reduced to minimum-entropy coupling distributions of ciphertext (random bitstrings generated using shared private keys) with distributions of covertext (innocuous content).
+For a more complete description, see \Cref{app:its}.
+
+In this setting, \Cref{ass:fact}  holds; thus, we would expect FIMEC to perform well relative to the ARIMEC.
+We show both the resulting joint entropy and the rate at which the ciphertext is decoded incorrectly in Figure \ref{fig:stego}, using 100 tokens sampled from GPT-2 as the covertext.
+This error rate can be written as 
+$\mathbb{E}_{X \sim \mathcal{X}} \mathbb{E}_{Y \sim \gamma(Y \mid X)} I[X \neq \arg \max_{x} \gamma(x \mid Y)]$.
+Interestingly, while FIMEC produces lower joint entropy than ARIMEC, ARIMEC appears to produce a lower error rate.
+This could be because the ARIMEC focuses on maximizing the certainty of the bytes earlier in the string, while FIMEC focuses on reducing the uncertainty about the most uncertain bytes.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=.8\linewidth]{figures/encoding.pdf}
+    \caption{Results for unencrypted steganography with 95\% bootstrap confidence intervals drawn from 100 samples.}
+    \label{fig:encoding}
+\end{figure}
+
+\paragraph{Linguistic Steganography} 
+The second setting is linguistic steganography, a broader concept than language-based information-theoretic steganography. Unlike the latter, linguistic steganography does not necessarily involve shared private keys. While not using private keys results in less robust security guarantees, it offers two significant advantages. First, applicability is widened to settings in which a private key exchange is not possible. Second, potential information throughput is much higher, as the sender can use realistic priors about plaintext messages, which have significantly lower entropy compared to the uniform distribution of ciphertexts in information-theoretic steganography.
+
+In the specific setting we consider, we aim to encode the output of one language model into that of another language model. The first language model acts as a prior on the plaintext messages that the sender may send, while the second language model serves as an approximate covertext distribution. In practice, one could achieve high throughput by first constructing a desired plaintext message and then translating it into a semantically equivalent message with a high likelihood under the prior.
+
+For our experiments, the covertext distribution is generated by sampling 100 tokens from GPT-2 with the prompt ``Here's an innocuous message:'' and the plaintext message distribution is generated by GPT-2 with the prompt ``Here's a secret message:''. We compared ARIMEC with the correct prior against FIMEC under an assumed uniform prior over tokens. The results of this experiment are shown in \Cref{fig:encoding}. Our findings indicate that ARIMEC substantially outperforms FIMEC in terms of information throughput, reflecting its ability to leverage the prior.
+
+\subsection{Merging}
+
+To evaluate the performance of our merging technique, we consider a setting in which the objective is to transmit 10 bytes of ciphertext via GPT-2 stegotext.
+The results of this experiment, which we conducted using FIMEC, are depicted in \Cref{fig:raw_vals}. 
+The y-axis represents the joint entropy in bits, while the x-axis shows the dimension of the random vector $X$---i.e., $n$ in our notation.
+
+As discussed in \Cref{sec:waste}, poor choices of partition sets can negatively impact the performance of IMEC. 
+In this case, FIMEC's performance significantly decreases (i.e., joint entropy increases) with the number of components, even though the entropy of $X$ is held constant. However, our merging technique substantially reduces IMEC's vulnerability to this issue, as desired.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth]{figures/raw_vals.pdf}
+    \caption{Comparing merging and not merging with 95\% bootstrap confidence intervals drawn from 1000 samples.}
+    \label{fig:raw_vals}
+\end{figure}
+
+
+
+\section{Conclusion and Future Work}
+
+
+In this work, we investigated the problem of computing low-entropy couplings for large-support distributions, making four main contributions.
+First, we unify existing algorithms under the formalism of partition sets.
+Second, using this unified perspective, we introduce ARIMEC---the first approach to computing low-entropy couplings for large-support distributions that can be applied to arbitrary distributions.
+Third, we increase the robustness of IMEC algorithms to the choice of partition set by introducing a merging technique.
+Finally, we empirically show the utility of these innovations in MCG and steganography applications.
+
+For future work, there are at least two application directions in which it would be interesting to push further with ARIMEC and merging.
+First is linguistic steganography.
+This direction is promising because ARIMEC can achieve high throughput rates, as we observed in \Cref{fig:encoding}, and because of the recent proliferation of effective language models.
+Thus, there may be real-world settings in which it is applicable.
+Second, because ARIMEC is the first IMEC algorithm capable of handling arbitrary discrete distributions, it potentially opens the door to using large-support distributions for other minimum-entropy coupling applications in which the distributions may not be factorable, such as entropic causal inference, random number generation, functional representations, and dimensionality reduction.
+
+
+
+\section{Acknowledgements}
+
+
+This work was supported by ONR grant \#N000142212121.
+
+
+
+
+

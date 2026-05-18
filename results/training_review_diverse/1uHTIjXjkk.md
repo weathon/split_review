@@ -1,57 +1,76 @@
-Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
+Here is my consolidated final review, written after verifying each claim directly against the paper.
+
+---
 
 ## Summary
-The paper presents a motion planning approach that trains an energy-based model (EBM) via a diffusion objective to serve as a learned "potential function" over trajectories. The method frames trajectory generation as following the gradient of this learned potential with Langevin noise. A key claimed benefit is compositionality: multiple diffusion potential models, each trained on different obstacle subsets or constraint types, can be summed at test time to handle more obstacles or novel constraint combinations than seen during training. Experiments span 2D (Maze2D), 7D (KUKA arm), and 14D (Dual KUKA) environments, with comparisons to classical sampling-based planners (RRT*, BIT*, SIPP) and learning-based planners (MPNet, MπNet, AMP-LS).
+
+This paper introduces a potential-based motion planning approach using diffusion models. The key idea is to learn energy-based potential functions over trajectories via the denoising diffusion objective, such that the gradient of the learned energy can be followed during sampling to produce collision-free motion plans. The approach is evaluated in 2D, 7D, and 14D configuration spaces, showing competitive performance against both classical (RRT*, BIT*) and learned (MPNet, MπNet, AMP-LS) baselines. A central claimed advantage is **compositionality**: separately trained diffusion potentials can be summed at test time to handle new combinations of constraints without retraining.
 
 ## Strengths
-- **Strong empirical results across diverse configuration-space dimensions.** On base environments from 2D to 14D, the method achieves >99% success in Maze2D and KUKA, and leads MπNet by ~35% on Dual KUKA (14D) while requiring less than 40% of its planning time and 7× fewer collision checks (Figure 3, Section 4.2). The method also beats BIT* in planning time while matching success on concave obstacles (Table 3).
-- **Composition enables graceful degradation with more obstacles and novel constraint combinations.** By composing models trained on 6 obstacles, the method maintains viable performance up to 11 obstacles while baselines degrade sharply (Figure 4 scatter plot). Composition of models separately trained on static and dynamic obstacles achieves >96% success in mixed environments versus SIPP's ~70% (Table 4).
-- **Avoids local minima that trap traditional potential-based planners.** On Maze2D with concave obstacles, the method achieves 100% success versus RMP's 28% (Table 3, Figure 4), demonstrating that the annealed diffusion optimization over the learned energy landscape provides practical benefits over classical potential-based gradient descent.
-- **Refining scheme consistently boosts success rates.** After up to 10 refining attempts, success on Dual KUKA rises from ~47% to 80.8% and on KUKA from ~70% to 94.8% (Table 1), providing a practical mechanism to repair imperfect generated plans.
+
+1. **Strong empirical results across multiple environments and dimensions.** The method achieves the highest success rates while requiring the fewest collision checks and competitive planning times across Maze2D (2D), KUKA (7D), and Dual KUKA (14D) (Figure 3). In Dual KUKA, it surpasses MπNet by ~35% in success rate with less than 40% of its planning time and 7× fewer collision checks.
+
+2. **Compositionality enables generalization to unseen obstacle counts.** By summing potentials from a model trained on 6 obstacles, the method maintains near-100% success on environments with up to 11 obstacles, while all baselines degrade sharply beyond their training distribution (Figure 5). This is the paper's most distinctive result and directly supports the compositionality claim.
+
+3. **Effective mitigation of local minima, a classic limitation of potential-based planning.** On environments with concave obstacles, where traditional RMP achieves only 28% success, the proposed method achieves 100% success while requiring 3× less planning time than BIT* (Table 2, Figure 6). This concretely demonstrates that the diffusion-based annealing avoids the local minima trap that plagues gradient-based potential methods.
+
+4. **Motion refining scheme boosts success in high dimensions.** The local-perturbation-and-denoise strategy increases success on Dual KUKA from ~47% to 80.8% after 10 refining attempts (Table 1), providing a practical mechanism to improve plan quality without full resampling.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-- **The probabilistic completeness proof (Section 3.5) is insufficiently justified.** The proof assumes the learned density assigns positive probability to an interval around any valid trajectory. While the Gaussian prior in diffusion gives full support in a measure-theoretic sense, the proof does not establish that the *conditional* distribution (conditioned on obstacle set C, via classifier-free guidance) retains this property for out-of-distribution environments. The proof also conflates "the model assigns positive density everywhere" with "the conditional distribution concentrates measurable probability on valid trajectories for specific novel obstacle configurations." This does not invalidate the empirical contribution, but the paper should remove or substantially revise this claim — an empirical characterization (success rate vs. number of samples) would be more informative and honest.
-- **The real-world evaluation (Section 4.4, ETH/UCY) is purely qualitative.** Figures 10 and 11 show anecdotal trajectory visualizations but provide no quantitative metrics: no collision rate, displacement error, or comparison to any baseline (e.g., constant-velocity extrapolation, social LSTM, or an ablated version of the method without composition). For a paper that highlights real-world validation as a strength, this is a significant gap.
+
+1. **Compositionality evaluation lacks comparison to a jointly trained model.** The paper claims that composition enables handling novel constraint combinations that "a single model cannot handle" (lines 31–33, 181). Yet the composition experiments compare only against the *uncomposed* base model (trained on 6 obstacles, tested on 7–11) or against methods designed for different settings (SIPP). A baseline trained directly on the test distribution (e.g., 11 obstacles, or static+dynamic jointly) is never included. Without this comparison, the reader cannot assess whether composition actually provides benefits over standard training, or whether the advantage is simply that composition avoids retraining — a meaningful but different claim. The test environments for static+dynamic composition (Table 4) involve combining obstacle types seen separately during training, making a jointly trained model a natural and feasible baseline. This is the single most impactful missing experiment.
+
+2. **Real-world evaluation is qualitative only.** Section 6.5 (lines 558–565) presents results on the ETH/UCY dataset with only anecdotal visual comparisons (Figures 10, 11). No quantitative metrics — success rate, collision rate, or comparison to any trajectory prediction/motion planning baseline — are reported. Given that the simulated experiments are thorough, the omission is conspicuous and substantially weakens the real-world claims.
 
 ### Minor
-- **Composition experiments lack sampling-based planner baselines on the composite tasks.** The paper compares composition against MPNet and MπNet (learning-based planners that cannot handle more obstacles) and SIPP (for dynamic). It does not report RRT* or BIT* on the same composite obstacle environments (7–11 obstacles). Since sampling-based planners inherently handle any obstacle count via collision checking, the composition experiments demonstrate only that the method degrades more gracefully than other *learned* planners — not that it is competitive with general-purpose planners on harder tasks. The base environment comparisons (Figure 3, Table 3) partially address this by showing the method matches/beats BIT* in base settings, but the composite setting is where the composition claim matters most.
-- **Inconsistent "Before" values in Table 1 and missing error bars.** The "Before" success rates for the same environment differ across columns (Maze2D: 96.3 vs. 95.3 vs. 95.8 for R=3,5,10), suggesting different random seeds or sample sets without explanation. No confidence intervals or standard deviations are reported for any table (only the scatter plot in Figure 4 shows error bars). This makes it hard to assess the statistical significance of reported improvements.
-- **The obstacle splitting strategy for composition is presented but not ablated.** The paper uses overlapping obstacle groups (e.g., splitting 6 obstacles into subsets of 4 with overlap for 6→11 obstacle generalization) but does not ablate whether overlapping groupings bias results (e.g., double-counting makes the trajectory overly conservative) or provide a general rule for partitioning when test-time obstacle count far exceeds training-time count.
-- **Reproducibility details are incomplete.** The paper does not specify the network architecture (transformer? U-Net? MLP?), number of parameters, learning rate, batch size, or optimizer. These are needed for reproduction and could be deferred to an appendix (which the parser may have stripped), but the main text should at least reference where these details can be found.
+
+3. **Planning time comparisons do not clarify handling of failed trials.** The paper reports average planning time (e.g., "less than 11% of BIT*'s planning time" at line 365, and Table values) but does not specify whether this includes failed trials that terminated due to timeout or only successful plans. For sampling-based methods with a 5s timeout, including failed trials would inflate their averages relative to the diffusion method (which always runs all denoising steps). A fair comparison would report median time on successful plans, or success-rate-vs-time tradeoff curves.
+
+4. **Motion refining procedure is under-specified.** Algorithm 2 uses a noise scale \( k \) that is listed as a hyperparameter but never assigned a concrete value. The denoiser \( f_\theta \) is described as "an iterative diffusion potential denoiser that outputs a clean trajectory" (line 259) — suggesting it runs the full reverse process from step \( k \) to 0 — but this is not explicitly stated, nor is the computational cost of refining compared to full resampling from pure noise.
+
+5. **Probabilistic completeness argument (Section 3.5) is trivial.** The argument relies only on the property that the model assigns positive density to all trajectories (line 269: \( \forall q, f_\theta(q) > 0 \)) combined with the existence of an \( \epsilon \)-ball around any valid trajectory. This reasoning holds for *any* distribution with full support on configuration space — including uniform random sampling. It says nothing specific about the diffusion model or the learned potentials. The paper does not claim this as a core contribution, but presenting it as a formal result is misleading; it should be removed or explicitly reframed as a trivial observation.
+
+6. **MPD (Carvalho et al., 2023) — a related diffusion-based motion planner — appears only in the concave-obstacle comparison (Table 2) but not in the main multi-environment evaluation (Figure 3).** Since MPD is the most directly comparable diffusion-based method, its omission from the primary evaluation weakens the claim of advancing the state of the art. Including it in the main comparison would strengthen the evidence.
 
 ### Trivial
-- None.
+
+7. **No sensitivity analysis for the classifier-free guidance scale** (set to 2.0, line 129). This parameter controls how strongly the model conditions on obstacles; its effect on success rate vs. diversity is not examined.
+
+8. **Dynamic obstacles are simulated with linear trajectories only** (line 331). This is a very simple motion model; real-world dynamic obstacles exhibit complex interaction patterns. The paper acknowledges this implicitly but does not discuss how the method would scale to non-linear obstacle motion.
 
 ## Nice-to-Haves
-- An empirical characterization of success rate vs. number of samples (as a practical replacement for the flawed completeness proof).
-- A comparison against RRT*/BIT* on the specific composite obstacle environments (7–11 obstacles) to show whether composition provides a practical advantage over general-purpose planners on harder tasks.
-- Ablation of the overlapping obstacle grouping strategy.
-- Quantitative real-world results (collision rate, displacement error) on the ETH/UCY dataset.
+
+- A comparison between composed potentials and a single model jointly trained on the union of the same data (both obstacle-count scaling and static+dynamic) would directly test whether composition provides advantages beyond simply training on more data.
+- Quantitative metrics (success rate, collision rate) on the ETH/UCY real-world dataset, even against simple baselines, would substantially strengthen the real-world claims.
+- Reporting median planning time for successful plans only, rather than (or in addition to) average times that may include failed/timeout trials.
+- An ablation of the guidance scale to show the sensitivity of success rate to this parameter.
 
 ## Removed Points
-- **Criticism that "potential-based framing misrepresents the method."** The paper explicitly uses the energy-based diffusion training objective from Du et al. (2023), where a scalar energy function *E_θ* is trained such that *∇E_θ* approximates the score. This is not standard DDPM (which directly predicts noise); the EBM formulation genuinely learns an energy landscape whose gradient is followed during sampling. The paper clearly states it is using diffusion models ("Potential Based Diffusion Motion Planning") and cites the relevant EBM-diffusion work. The connection to classical potential-based motion planning is a legitimate framing choice, not a misrepresentation.
-- **Criticism that "score composition is widely used" implies the paper overclaims.** The paper's contribution (3) states "we illustrate the compositionality of [the] motion planner" — it claims the *application* to motion planning with systematic evaluation, not the invention of score composition. This criticism conflates methodological novelty with application novelty.
-- **Criticism about "Before" values suggesting "different test set."** This is a valid observation but belongs under minor issues about consistency/error bars, not a structural problem.
-- **Strength about "probabilistic completeness is formally proven."** This strength conflicts with the verified weakness that the proof is insufficient. Per rules, the weakness wins; this strength is removed.
-- **Various formatting/style nitpicks and complaints about missing appendix content** (which the parser may have stripped).
+
+- **"The paper does not compare to MPD in the main multi-env evaluation" (as a fatal omission):** The reviewer presents this as a major gap, but MPD *is* compared in Table 2 (concave obstacles), and the paper's main evaluation uses a different set of baselines. This belongs at Minor severity, not Major.
+- **"The composition experiments do not rule out that joint training would perform equally well" (as a structural flaw):** The reviewer frames this as fatal to the composition claim, but the paper's claim is specifically about generalization to combinations not seen together during training. A jointly trained model on 11 obstacles would *have* seen 11 obstacles during training, making it a test of different capability. The missing comparison would be informative but does not invalidate the existing results. Downgraded from Fatal/Major to Major.
+- **"The noise schedule mismatch between independently trained models" (Other Observations):** Both models use the identical diffusion process (same S=100, same schedule), so there is no schedule mismatch. The concern about the composed score deviating from the true product distribution is a known theoretical property of energy-based composition, not a flaw specific to this paper. The paper shows empirical success; a theoretical analysis of when composition would fail is a reasonable suggestion but not a weakness. Moved to Nice-to-Haves.
+- **Strength from Strength Finder about probabilistic completeness:** Conflicting with verified weakness #5, this strength is removed per instructions.
 
 ## Novel Insights
-The reviews surface one genuine insight beyond the paper's own contributions: the paper's most compelling result is not the base environment performance (where sampling-based planners like BIT* also achieve 100% success) but the compositionality experiments showing that a learned planner can handle more obstacles/constraints than it was trained on by composing multiple instances of itself. This is a practically useful capability for robotics, where robots encounter novel environments with varying obstacle densities. The paper would be significantly strengthened by explicitly reframing around this result — de-emphasizing the problematic completeness proof and the strained "potential" analogy, and instead treating the work as an empirical demonstration that diffusion-based planners can be composed for generalization in motion planning.
+
+Beyond the paper's own contributions, the reviews surface an interesting tension: the diffusion-based composition approach provides a practical way to handle *emergent combinations* of constraints at test time without retraining, but the paper does not adequately disentangle whether the performance gain comes from composition *per se* versus simply having more total model capacity or from the repeated application of the same model to different obstacle subsets. The distinction between "composition of distinct specialized models" (static + dynamic) and "composition via repeated application of one model to different subsets" (more obstacles via overlapping subsets) is a design choice with different implications for generalization that the paper does not analyze.
 
 ## Suggestions
-1. Remove or substantially rewrite the probabilistic completeness proof as an informal discussion of why diffusion models have full-support priors, and replace it with an empirical plot of success rate vs. number of samples across environments.
-2. Add RRT* and BIT* baselines to the composition experiments (Figure 4 scatter plot) or at minimum discuss why they are omitted and how the base results inform the comparison.
-3. Add quantitative metrics (collision rate, displacement error) for the real-world experiments.
-4. Add error bars / confidence intervals to all tables, and standardize the evaluation protocol so "Before" values in Table 1 are consistent across columns for the same environment.
-5. Ablate the overlapping obstacle grouping strategy for composition to show that the approach is not artifactually helped or harmed by particular splits.
+
+1. **Add a joint training baseline to the composition experiments.** Train a single model on the full set of 11 obstacles (for the scaling experiment) and on the union of static+dynamic data (for the composition experiment), and compare its performance to the composed model on the same test sets. This is the single highest-leverage experiment to substantiate the compositionality claim.
+
+2. **Report quantitative metrics on the ETH/UCY dataset.** Even basic numbers — success rate, collision rate, average deviation from ground-truth trajectories — would turn the real-world section from an illustration into evidence.
+
+3. **Clarify the planning time reporting.** Specify whether averages include failed trials, and ideally report median time on successful plans.
+
+4. **Specify the value of \( k \)** in Algorithm 2 and explicitly state whether \( f_\theta \) runs the full reverse process from step \( k \) to 0, with a cost comparison to full resampling.
+
+5. **Remove or reframe the probabilistic completeness argument** (Section 3.5) as a trivial observation rather than a formal result.
 
 ## Score and Decision
-The paper makes a real empirical contribution: demonstrating that EBM-diffusion models, when applied to motion planning, can be composed at test time to handle more obstacles and novel constraint combinations than seen during training, with strong results across 2D–14D environments. However, three issues hold it back: (1) the probabilistic completeness proof is not adequately justified and should be replaced with empirical analysis, (2) the composition evaluation lacks sampling-based baseline comparisons on the specific composite tasks, and (3) the real-world evaluation is purely qualitative. None of these is fatal — the core empirical contributions are sound — but they require substantive revision.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Weak Accept</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

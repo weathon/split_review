@@ -1,20 +1,20 @@
-I have thoroughly read and verified the paper against all reviewer claims. Let me now produce the final consolidated review.
+Now I have all the information needed. Let me construct the consolidated review.
 
 ---
 
 ## Summary
 
-iReVa proposes a method for traceable model editing by inserting explicit key-value adaptors into the MLP layers of Transformer models, where each edit is stored as an identifiable knowledge neuron. The method includes initialization of key-value pairs from cached hidden states, retrofitting with a multi-objective loss, and a max-pooling inference mechanism. Experiments on GPT2-XL (and several larger models) using zsRE-10K and PARAREL-10K benchmarks show iReVa achieving strong edit success and generalization with good specificity, plus a unique knowledge-withdrawal capability.
+The paper introduces iReVa, a model editing method that inserts explicit key-value adaptors into the MLP blocks of GPT-like Transformer models. Each edit corresponds to an inserted key-value neuron, enabling traceable storage and retrieval (each neuron can be located, inhibited, or removed). The method initializes knowledge neurons from cached hidden states and fine-tunes them with a multi-objective loss (edit success, reconstruction regularity, and irrelevance loss). During inference, a max-pooling mechanism activates only the best-matching neuron. Experiments on GPT2-XL, GPT2-Large, GPT-NEO-2.7B, and GPT-J-6B show strong edit success (ES), paraphrase generalization (PS), and specificity (NS), with margins of ~9% and ~6% average score improvement over baselines on zsRE-10K and PARAREL-10K respectively. The paper also demonstrates a knowledge withdrawal test where individual edits can be removed by inhibiting their corresponding neurons, achieving near-perfect retrieval success and consistency.
 
 ## Strengths
 
-- **Novel traceable editing mechanism with explicit per-edit storage.** Unlike prior methods (ROME, MEMIT, MEND) that distribute edits across model weights in an untraceable manner, iReVa inserts one key-value neuron per edit, making it possible to identify, inspect, and selectively withdraw individual edits. This is demonstrated by the withdrawal test (Section 6.2, Table 2) where RS=100% and Con=98.8% on zsRE-10K.
+- **Traceable knowledge withdrawal demonstrated empirically**: iReVa achieves Retrieve Success of 98.76 and Consistency of 99.13 on zsRE-10K (Table 2) by inhibiting specific inserted neurons. This capability is genuinely novel — most batch-editing methods cannot trace which parameters correspond to which edit, making withdrawal impossible or unreliable. The paper validates this with quantitative metrics rather than just claiming the ability.
 
-- **Comprehensive ablation study validating each design component.** Table 3 systematically removes the activation function, max-pooling, reconstruction loss, and irrelevance loss, quantifying each component's contribution. Removing the activation function drops NS from 83.9 to 69.5; removing max-pooling drops ES from 99.6 to 88.5. These results confirm the method's design choices are individually meaningful.
+- **Substantial and consistent performance gains across datasets and model scales**: On zsRE-10K, iReVa achieves average Score 96.95 vs. best baseline (FT) at 88.33; on PARAREL-10K, 93.95 vs. FT at 88.49 (Table 1). These margins derive from simultaneously achieving near-perfect Edit Success (~100%) and high Specificity (~99%), a combination no baseline matches. The advantage holds across GPT2-Large, GPT-NEO-2.7B, and GPT-J-6B (Table 4), and across edit quantities from 500 to 10,000 (Figure 3), where ROME degrades sharply and MEMIT underperforms throughout.
 
-- **Efficiency analysis with both theoretical and empirical backing.** Section 6.3 provides complexity analysis (O(l·d₁²·n) time) and shows 10K edits without fine-tuning takes 1.6 hours (vs. ROME's 9.16h, MEMIT's 5.4h) on a single A800 GPU, with only 0.08B additional parameters for 10K edits on a 1.5B model. This is competitive or faster than leading alternatives.
+- **Well-designed architectural components validated by ablation**: The activation function with margin θ (GeLU(x−θ)) and inference-time max-pooling are shown to be critical: removing the activation drops NS from 98.95 to 60.02, and removing max-pooling collapses all three metrics (Table 3). The ablations cleanly separate the contribution of each design choice and confirm that specificity is not coincidental.
 
-- **Robust generalization across layers, model sizes, and edit quantities.** The method is tested on GPT2-XL, GPT2-LARGE, GPT-Neo-2.7B, and GPT-J-6B (Table 4, Figure 2, Figure 3), showing consistent outperformance over baselines. Figure 3 shows iReVa maintains stable ES/PS/NS as edit count grows, while ROME's NS degrades sharply.
+- **Parameter-efficient design with clear practical costs**: For 10K edits on GPT2-XL (1.5B parameters), the adaptor adds only 0.08B parameters (~5% overhead). Training completes in 7.5 hours (fine-tuning) or 1.6 hours (without fine-tuning) on a single A800 GPU, compared to 9.16 hours for ROME. These numbers are reported transparently and support the method's practicality.
 
 ## Weaknesses
 
@@ -24,67 +24,62 @@ None.
 
 ### Major
 
-- **Uncontrolled baseline comparison undermines claimed SOTA margins.** The paper acknowledges preprocessing edit data "differently from previous studies" (line 178) by decomposing multi-token targets into multiple data pairs. It states baselines were "re-implemented using the same configuration reported in existing studies" — but does *not* confirm that baselines were evaluated on the *same preprocessed data* under the *same evaluation conditions*. If baselines were run on standard (undecomposed) data while iReVa benefited from a different task formulation, the reported ~9%/6% improvements over SOTA (Table 1) cannot be reliably attributed to the method's design rather than to data differences. This is the paper's most significant weakness, as the central claim of SOTA performance rests on this comparison.
+- **Unclear fairness of baseline comparison due to different data preprocessing.** The paper states (Section 5.4) that it "pre-process the edit input-output pairs differently from previous studies": multi-token targets are decomposed into multiple data pairs by greedily appending previous tokens. This fundamentally changes the task structure — what was one edit with a multi-token target becomes multiple consecutive sub-edits, each getting its own key-value neuron. The paper then says baselines are re-implemented "using the same configuration reported in existing studies," but does **not** state whether those baselines received the same preprocessed data or the original format. If baselines were evaluated in their standard single-update-per-example setting while iReVa effectively receives more neuron allocations per original edit, the comparison is asymmetric and the reported 9%/6% margins cannot be trusted. This is the single most important issue to resolve. The authors must clarify whether all methods received the same input data and, if not, re-run experiments under fair conditions.
 
 ### Minor
 
-- **No variance or multi-run statistics.** No standard deviations or results across random seeds are reported for any experiment. Given that some baselines (e.g., MEND) are known to be seed-sensitive, and iReVa's own results may vary with initialization, single-run reporting limits confidence in the numbers.
+- **Training-inference discrepancy in neuron activation is acknowledged but not analyzed.** During training, all inserted key-value neurons are active (subject to the activation margin), and gradients flow through all of them. During inference, a hard max-pooling/argmax selects only the single best-matching key. The paper acknowledges this mismatch (Section 4.3) and the ablation (Table 3) shows max-pooling is essential, but provides no analysis of how often the correct key is selected, how similarity scores are distributed, or what happens when two edits share similar hidden states (e.g., paraphrases). While the method works empirically, this design choice limits understanding of its robustness on noisier or more densely edited datasets. The ablation shows NS drops from ~99.96 to ~62.54 without max-pooling — a 37-point collapse — which suggests the training objective does not enforce that keys remain discriminative when operating simultaneously.
 
-- **No hyperparameter sensitivity analysis.** Key hyperparameters — the margin θ (0.75 for zsRE, 0.65 for PARAREL) and scaling factor α (0.2) — are set without any analysis of how varying these values affects ES/PS/NS. Since the activation function and max-pooling mechanism's behavior depends critically on θ, its sensitivity should be characterized.
+- **Withdrawal evaluation does not test cross-edit interference.** The withdrawal test (Section 6.2) checks whether removing a neuron reverts the edited input (Consistency) and whether outputs change (Retrieve Success). However, it does not test whether *other edits* remain intact after removal of one neuron. Because inference uses max-pooling over all inserted keys, removing one neuron changes the pool of candidates — potentially altering which key is selected for other inputs. The paper's claim of "almost perfect" withdrawal is only validated on the narrowest possible metrics and does not verify that the remaining edits are unaffected.
 
-- **"Interpretability" claim conflated with traceability.** The paper claims "better interpretability" (abstract) but the evidence is limited to identifying which neuron encodes which edit (traceability). There is no analysis of whether the learned key vectors encode semantically meaningful patterns (e.g., whether similar edit inputs cluster in key space). The interpretability claim would be stronger with such analysis; in its absence, the framing overstates what is demonstrated.
+- **Contradiction between claimed scope and stated limitation.** The introduction (Contribution 1) claims iReVa is "compatible with most LMs," but the Limitation section (Section 7.b) states "iReVa can be only applied on GPT-like models and generation task." These statements are contradictory and the paper should correct the overclaim in the introduction.
 
-- **Knowledge withdrawal novelty is slightly overstated.** The paper's withdrawal test is a meaningful validation of non-interference (Con=98.8% is informative), but RS=100% is expected by construction since each edit occupies its own neuron, and removing it necessarily changes the prediction. The framing as a "first attempt" and "breakthrough" could be tempered. Additionally, the paper does not test sequential edit/withdraw cycles or verify that withdrawal of one edit leaves other edits intact.
+- **Time complexity formula appears incorrect.** The paper claims inference complexity O(l·d₁²·n) (Section 6.3), but the adaptor computation (key lookup \hat{K}^T i, activation, value lookup \hat{V}^T · result) is O(l·d₁·n) per the stated dimensions (i ∈ ℝ^{1×d₁}, \hat{K} ∈ ℝ^{\dot{d}_1×n}, \hat{V} ∈ ℝ^{n×d₁}). The extra factor of d₁ appears to conflate the key-value lookup with a full matrix multiplication. This should be corrected.
 
-- **Limitations acknowledged but not quantified.** The paper notes (Section 7) that iReVa "performs poorly when the target prompt is a long sentence" and that ES/PS don't improve with model scale, but provides no quantitative characterization of when the method degrades or by how much.
+- **Key notation ambiguities hinder reproducibility.** Several dimension variables (d₁, d₂, \dot{d}_1, \bar{d}_1, \bar{n}, n) are introduced without clear relationships (Section 4, Section 4.3). The matrices appear as \bar{K}∈ℝ^{d₁×\bar{n}} and \bar{V}∈ℝ^{n×\bar{d}_1} in Section 4, then as \hat{K}∈ℝ^{\bar{d}_1×n} in Section 4.3 — these notational shifts make it difficult to verify parameter counts. In Equation 10, x_i (previously used for the edit input sequence) is used for a hidden state in \mathcal{L}_{irr}, which is inconsistent.
+
+- **"Gradient-free method" for GPT-NEO-2.7B is unexplained.** The paper says it "applies gradient-free method on GPT-NEO-2.7B" (Section 5.4) but never specifies what this method is, how it differs from the training procedure used for other models, or whether the results on that model (Table 4) are comparable to those from the full training procedure.
+
+- **Hyperparameters for non-GPT2-XL models are not reported.** Hyperparameters a, b, α, θ are given only for GPT2-XL. For GPT2-Large, GPT-NEO-2.7B, and GPT-J-6B, the paper does not state whether these were tuned separately or reused. The learning rate for GPT-J-6B is given, but not the other hyperparameters.
 
 ### Trivial
 
-- **Layer generalization analysis (Figure 2) could provide deeper insight.** The paper notes iReVa prefers higher layers but offers only a brief speculation ("LMs' final prediction primarily depends on the information retrieved from higher layers") without probing cached hidden states or analyzing why this pattern holds.
+- No standard deviations or confidence intervals are reported for main results (Table 1). Given that model editing methods can be sensitive to initialization and data ordering, single-run results are the norm in this field but variance reporting would strengthen the paper.
+- The PARAREL-10K construction selects only sentences ending with "[MASK]" — the paper should report what fraction of PARAREL was retained and discuss potential selection bias.
 
 ## Nice-to-Haves
 
-- A controlled re-evaluation where all baselines are confirmed to use the same preprocessed data, base model checkpoint, and evaluation splits would resolve the most serious concern and is the single highest-priority improvement.
-- An interpretability analysis showing nearest-neighbor structure among key vectors (e.g., do keys for similar edit inputs cluster?) would substantiate the interpretability claim.
-- Testing on larger edit scales (e.g., 50K–100K) would strengthen claims about scalability beyond 10K.
+- A histogram or analysis of key-matching scores for in-scope vs. out-of-scope inputs would strengthen the traceability claim and help understand the max-pooling behavior.
+- Testing withdrawal with verification that all other edits remain intact (not just the withdrawn one) would make the withdrawal evaluation complete.
+- Reporting results on the full zsRE dataset (19,086 examples) rather than a 10K subset would improve comparability with prior work.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+The following points from the reviewers were removed or downgraded per the filtering rules:
 
-1. **"Interaction between activation function and max-pooling is ambiguous during inference"** — The paper clearly specifies this in Section 4.3: the max-pooling selects the best-matching neuron (j = argmax_t(K̂_t^T i)), then the activation function with margin (GeLU(x−θ)) is applied to that neuron's score. This interaction is well-defined.
-
-2. **"'w/o activation function' ablation unclear"** — The paper defines it: "w/o activation function denotes that we remove the activation function proposed in Equation 6." Equation 6 is g_act(x) = GeLU(x−θ). The description is sufficiently clear.
-
-3. **"Other methods could also perform withdrawal"** — The paper explicitly states that other methods' edited parameters are untraceable (ROME/MEMIT distribute edits across weights; MELO trains batch-level adaptors). This claim is reasonable for the compared baselines.
-
-4. **"10K edits is not large enough"** — 10K is the standard scale in model editing research (matching ROME, MEMIT, MELO evaluations). Demanding 50K–100K is scope creep.
-
-5. **"Missing comparison to Memory Layers / Neural Turing Machines"** — The paper's baselines are the standard SOTA methods in model editing literature. Adding every possible memory-augmented architecture is not required.
-
-6. **"Missing related work"** — The hard rules prohibit me from confirming this; the related work coverage is adequate for the paper's focused contribution.
-
-7. **"The paper should discuss NS trade-off more"** — The paper presents all three metrics and uses average Score as summary. MEMIT's higher NS is evident from the table. The trade-off is implicitly acknowledged.
+- **Harsh Critic Point 3 ("first attempt" claim overstated)**: The paper qualifies its claim ("Most existing methods can't perform the withdrawal test... stream-fashion methods like GRACE may encounter the forgetting challenge") and is not asserting absolute novelty against all possible modular-editing methods — it is stating that no existing method *demonstrates* withdrawal quantitatively. This is defensible. The substantive part (missing cross-edit interference test) is kept in Minor.
+- **Criticism that T-Patcher was excluded**: The paper provides a valid architectural reason (T-Patcher is encoder-only, inapplicable to decoder-only GPT models). This is not a missing-baseline issue.
+- **Request for larger human studies or multi-seed runs at industrial scale**: These are impractically expensive for an academic submission. The single-run reporting at this scale is standard for the field.
+- **Generic formatting/style nitpicks and "typos"**: These are parser artifacts, not author errors.
+- **Missing related works / missing appendix content**: The parser strips supplementary material; the original submission likely contains it.
 
 ## Novel Insights
 
-The reviews collectively surface a tension inherent in the paper: the method's defining strength (traceable per-edit storage) is also the source of its most debated weaknesses. The withdrawal test is simultaneously the strongest evidence of the method's novelty and the most criticized claim as "trivial by construction." The key insight that emerges is that *traceable storage* and *state-of-the-art performance* are orthogonal contributions — the paper could more cleanly separate them. If the method were presented primarily as "the first traceable editing approach enabling targeted withdrawal," with the SOTA comparison as secondary (and caveated) evidence, the contribution would be less vulnerable to the baseline-comparison concern. The ablation study further reveals that the activation margin is the critical component for specificity, not the multi-objective loss — which suggests the paper's design is more about careful initialization + gating than about the fine-tuning objectives, contrary to the emphasis in Section 4.2.
+The most striking finding is how the interaction between the activation margin (θ) and inference-time max-pooling creates a functional "key routing" mechanism despite the training-inference mismatch. During training, all neurons receive gradient signal, enabling convergence; during inference, argmax selects the single best match, effectively implementing a sparse retrieval scheme. The ablation shows this design is not optional — both components are essential — which suggests the method's success relies on a carefully balanced tension between training all neurons jointly and picking only one at test time. This is an interesting architectural lesson for traceable editing beyond the specific results.
 
 ## Suggestions
 
-1. **Controlled baseline re-evaluation**: Rerun all baselines on the exact same preprocessed data splits, same base model checkpoint, and report whether the numbers change. This single fix would resolve the most serious credibility threat.
+1. **Clarify the data preprocessing fairness issue immediately.** State explicitly whether baselines received the same preprocessed (multi-token decomposed) data or the original format. If they did not, re-run experiments with matched preprocessing and update Table 1, or provide a controlled experiment where all methods use the same format.
 
-2. **Multi-run reporting**: Report means and standard deviations over at least 3 random seeds for all experiments.
+2. **Add cross-edit interference analysis after withdrawal.** Test whether removing one edit's neuron changes the model's predictions on other edited inputs (beyond simply verifying the removed edit is gone).
 
-3. **Θ sensitivity analysis**: Vary θ from 0.5 to 1.0 in steps of 0.05 and report ES/PS/NS to characterize the method's robustness.
+3. **Correct the time complexity formula** from O(l·d₁²·n) to O(l·d₁·n) and clean up the notation to use consistent dimension variables throughout.
 
-4. **Re-frame the contribution**: Separate the traceability/withdrawal capability (the unique contribution) from the SOTA claim (which requires controlled comparison). The paper is stronger if positioned as "a traceable editing method that achieves competitive performance" rather than "a method that outperforms SOTA by 9%."
+4. **Reconcile the abstract/intro's "compatible with most LMs" with the limitation section's "only applied on GPT-like models."**
 
-5. **Quantify limitations**: Add a small experiment or analysis showing at what target length iReVa's performance degrades, to substantiate the acknowledged limitation.
+5. **Describe the "gradient-free method" used for GPT-NEO-2.7B** and report whether all hyperparameters (a, b, α, θ) were reused from GPT2-XL or tuned separately for each model.
 
 ## Score and Decision
 
-This paper introduces a genuinely novel approach to model editing with traceable per-edit storage, and the core idea has clear merit. The ablation study and efficiency analysis are well-done. However, the central claim of SOTA performance rests on an uncontrolled baseline comparison where preprocessing differs and it is unclear whether baselines were run on equivalent data. Combined with missing variance reporting and sensitivity analysis, the experimental validation does not yet support acceptance at a top venue in its current form. The paper would benefit substantially from focused revisions.
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

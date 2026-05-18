@@ -1,20 +1,18 @@
-Now I have all the information I need. Let me compose the final consolidated review.
-
----
+Now I have all the information needed. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes Dynamic Neural Response Tuning (DNRT), a biologically-inspired mechanism consisting of two components: Response-Adaptive Activation (RAA), which applies a learned input-dependent offset to the CDF of GELU (and potentially other activations), and Aggregated Response Regularization (ARR), which pulls per-class aggregated feature responses toward their running averages via an L1 penalty. The method is evaluated across MLPs, Vision Transformers (5 variants), CNNs (5 architectures), node classification, and long-tailed classification, showing consistent accuracy improvements over standard activation baselines.
+The paper proposes Dynamic Neural Response Tuning (DNRT), a two-part mechanism comprising Response-Adaptive Activation (RAA) — which shifts the activation threshold per input via a learned linear mapping on top of a GELU base — and Aggregated Response Regularization (ARR) — which penalizes L1 distance between each sample's post-activation aggregated response and its class-specific historical moving mean. The goal is to align ANN response patterns more closely with biological neurons' dynamic response thresholds and category-specific aggregation. Experiments span MLP, five ViT variants, five CNN variants, GNN node classification, and long-tailed classification.
 
 ## Strengths
 
-1. **Consistent accuracy gains across a broad range of architectures and tasks.** DNRT improves top-1 accuracy over standard activations on MLPs (Table 1), five ViT variants (ViT, DeiT, CaiT, PVT, TNT — Table 2), five CNN architectures (AlexNet, VGG, ResNet, MobileNet, ShuffleNet — Table 3), node classification (GCN, GraphSAGE), and long-tailed CIFAR-10 (Table 4). This breadth of validation supports the paper's claim of versatility.
+- **Biologically grounded dynamic activation shows interpretable effects**: RAA (Eq. 4, x·Φ(x + w^T x + b)) introduces only one weight vector and one bias per activation layer. Figure 2a visually demonstrates that RAA yields sparser activation responses than GELU, suppressing irrelevant inputs that would otherwise mistakenly trigger under a static threshold. This directly addresses the paper's stated motivation and provides a clear internal mechanism.
 
-2. **Ablation study isolates the contribution of each component.** Table 5 reports DNRT, DNRT without RAA (ARR alone), and DNRT without ARR (RAA alone), showing that both components contribute independently and their combination yields the best performance. Combined with the baselines from Tables 1–3 (standard activation, no ARR), this provides evidence that each technique adds value.
+- **ARR yields more concentrated class-specific responses with visual evidence**: Figure 2b shows that ARR produces tighter per-category response distributions. Table 5's ablation confirms that ARR alone improves accuracy (79.28 → 79.99 on CIFAR-100) and that combining RAA + ARR yields further gains, supporting the claim that both components contribute.
 
-3. **Interpretability via neural response visualization.** Figure 2 provides side-by-side comparisons of activation patterns and aggregated response distributions with and without DNRT. RAA visibly produces sparser activations (suppressing irrelevant channels), and ARR produces more concentrated per-class response distributions. This qualitative evidence directly supports the paper's design motivation.
+- **Broad experimental coverage across architectures, tasks, and domains**: DNRT is evaluated on 11+ architecture variants (MLP, ViT/DeiT/CaiT/PVT/TNT, AlexNet/VGG/ResNet/MobileNet/ShuffleNet), on datasets from MNIST to ImageNet-1K, and on non-standard tasks (GNN node classification, long-tailed classification). The method shows consistent improvements over baseline activations in nearly every setting, providing evidence of generality.
 
-4. **Computational efficiency.** RAA introduces only a learned linear mapping per feature vector (one vector w and scalar b per channel group), and ARR maintains only K moving-mean vectors. ARR is applied only during training and does not affect inference speed. The overhead is minimal, which is a practical strength.
+- **Low overhead and practical deployability**: RAA adds negligible parameters (one d-dimensional vector and one scalar per activation layer). ARR is a training-only regularization that does not affect inference speed. The code is provided, enhancing practical reproducibility.
 
 ## Weaknesses
 
@@ -22,57 +20,53 @@ This paper proposes Dynamic Neural Response Tuning (DNRT), a biologically-inspir
 None.
 
 ### Major
-None.
+
+- **ARR is not compared to existing intra-class feature regularization methods (e.g., center loss)**: ARR explicitly reduces the variance of per-category aggregated responses by penalizing L1 distance to a class-specific moving mean. This is functionally and conceptually similar to center loss (Wen et al., 2016), which penalizes L2 distances of deep features to class centroids, and to other intra-class variance reduction techniques. The paper does not cite, discuss, or experimentally compare against any such method. Since ARR's individual contribution to the total gain is non-trivial (ablation suggests ARR contributes roughly half), the reader cannot assess whether ARR offers a practical advantage over existing approaches or is simply a re-expression of a known idea with L1 distance and moving-mean updates. This omission directly undermines the claimed novelty of the DNRT mechanism. The authors should at minimum include a direct comparison to center loss (and preferably other feature regularizers) under identical architectures and training setups.
 
 ### Minor
 
-1. **Missing hyperparameter value for \(\lambda\) (ARR loss weight).** The balanced parameter \(\lambda\) is introduced in Eq. 7 but its value is never reported in the experimental settings (Section 5) or anywhere else in the provided text. Without this value, the experimental setup cannot be faithfully reproduced, and the reader cannot assess how sensitive the results are to this choice.
+- **Single-run results with no error bars for small-margin gains**: All results in Tables 1–3 and 5 are reported as single numbers without standard deviations or confidence intervals. While this is common practice in large-benchmark vision papers, the language is strong ("remarkably outperforms," "consistently illustrate that DNRT remarkably outperforms"), and several ViT improvements are in the 0.5–2% range (e.g., ViT on CIFAR-100: 65.89 → 66.87; on ImageNet-100: 73.28 → 73.98). Without multiple seeds, it is difficult to distinguish genuine gains from training noise for these modest-margin cases. This does not invalidate the paper — the larger-margin results (e.g., MLP +4–6%, AlexNet +5–6%) are more convincing — but the authors should temper the strength of their claims or provide error bars for the key comparisons.
 
-2. **No statistical significance / error bars.** All results appear to be from single runs. For a method paper reporting moderate accuracy improvements (typically <1% on many benchmarks), it is important to show that gains are consistent across random seeds rather than artifacts of initialization. Mean and standard deviation over at least 3 runs should be reported.
+- **Missing hyperparameter specifications for λ and J**: Equation (7) introduces λ (balancing coefficient for ARR loss) and J (number of layers where ARR is applied). Neither value is reported anywhere in the experimental setup (Section 5). The momentum m of the moving mean is stated as "empirically set to 0.2" with no sensitivity study. These are core hyperparameters of the method, and their omission impairs reproducibility and makes it impossible to assess how sensitive the method is to these choices.
 
-3. **No comparison with existing per-class regularization techniques.** ARR is a regularization technique that compacts intra-class feature representations. The paper only compares against different *activation functions*, not against related regularizers that serve a similar purpose — such as center loss, contrastive losses, label smoothing, or mixup. Without such comparisons, it is unclear whether ARR's mechanism (L1 distance to a running per-class mean) offers advantages over simpler or more established alternatives.
+- **RAA is only demonstrated on a GELU base; generality claim for other activations is unsubstantiated**: The paper develops RAA specifically as x·Φ(x + f(x)) where Φ is the standard normal CDF (the GELU base). Section 4.1 claims RAA "can also be extended to other static activation forms such as ReLU etc.," but no experiment tests this. For CNN experiments (Table 3), the paper replaces ReLU with RAA (which is GELU-derived), so the comparison to ReLU baselines conflates activation function choice with the dynamic-shift effect. Although the paper also shows DNRT outperforming GELU baselines (partially isolating the benefit), a dedicated experiment with "RAA-ReLU" (i.e., ReLU(x + f(x))) would directly validate the claimed generality.
 
-4. **ARR application to GNNs is underspecified.** Section 5.4 states that DNRT is applied to GCN and GraphSAGE for node classification, but the paper does not describe how the ARR loss is computed — whether it is applied to per-node features after each layer, to a graph-level readout, or to some intermediate representation. This lack of detail undermines reproducibility of the GNN experiments.
-
-5. **Insufficient clarity in the ablation presentation.** The ablation study (Table 5) reports DNRT, w/o RAA, and w/o ARR but does not include the pure baseline (standard activation, no regularization) in the same table for direct comparison. While these numbers are available from Tables 1–3, placing them together would improve readability and make the additive contribution of each component immediately apparent without cross-referencing.
+- **Ablation study does not specify the architecture**: Table 5 reports ablation results on CIFAR-100 but does not state which model was used. This makes it difficult to interpret the magnitude of the ablation effects relative to the architecture's capacity and baseline performance.
 
 ### Trivial
 
-- The paper claims "channels with truncated distributions indicate irrelevant features" (Observation 1) and "high Gaussian variances" (Observation 2) without providing quantitative measurements (e.g., variance histograms, sparsity ratios) to substantiate these claims. They remain qualitative interpretations.
-- The caption for Figure 2 references footnote "4" which is not present in the provided text.
+- The "Observations" section (3.1, 3.2) makes qualitative claims about "truncated distributions" and "high Gaussian variances" with only visual evidence (Figure 2). No quantitative measurements (e.g., actual variance values, overlap metrics) are provided. While this is a motivation section and the visuals are informative, adding a simple quantitative measure would strengthen the claim.
+- No computational cost analysis (FLOPs or wall-clock time) is reported beyond the claim of "negligible parameters." While the overhead is indeed plausibly small, a concrete measurement would be useful.
 
 ## Nice-to-Haves
 
-- A sensitivity analysis over \(\lambda\) (e.g., \(\lambda \in \{0.01, 0.1, 1.0\}\)) and momentum \(m\) would strengthen the paper's robustness claims.
-- An ablation applying RAA to activations other than GELU (e.g., ReLU) would validate the paper's claim of generality, though the current scope focusing on GELU for Transformers is defensible.
-- Comparisons with parametric activations that also learn input-dependent behavior (e.g., PReLU, Swish with learnable beta, dynamic ReLU) would better position RAA within the activation function literature.
+- A sensitivity analysis on λ and momentum m on at least one dataset would help establish robustness.
+- Reporting FLOPs or wall-clock overhead per training step for RAA vs. baseline would be a clean addition.
+- Applying RAA to a non-GELU base (e.g., ReLU(x + f(x))) on a small CNN to validate the generality claim.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+The following points from the reviewer inputs were removed per the rules:
 
-- **"Uncontrolled evaluation conflating two contributions / cannot separate RAA and ARR contributions":** Overstated. The ablation study (Table 5) shows RAA alone (DNRT w/o ARR) and ARR alone (DNRT w/o RAA). Combined with baseline numbers from Tables 1–3, all four conditions (baseline, baseline+ARR, RAA alone, DNRT) are available, though not in a single table. The criticism is downgraded to a minor presentation issue (point 5 under Minor).
-- **"Weak biological grounding":** The paper frames its motivation as "inspired by" biology, which is standard practice. The critic's point that the biological analogy is "superficial" is a matter of opinion — the paper does not claim to model biological neurons mechanistically. Moved to Removed Points as it does not constitute a concrete flaw.
-- **"No comparison with parametric activations (PReLU, Swish, dynamic ReLU)":** The paper already compares against 7 activation families including ELU, SELU, and SiLU (which have learnable parameters). Scope-creep request — removed.
-- **"Tables 2 and 3: improvements declared 'remarkable' but we cannot see the numbers":** The tables are embedded as images in the paper; they are visible in the original submission. Parser artifact — removed.
-- **"Extension to other activations not evaluated":** The paper states RAA can be extended to ReLU etc., which is a forward-looking claim. The main evaluation uses GELU-based RAA, which is a reasonable scope. Moved to Nice-to-Haves.
-- Various formatting/style nitpicks and sentence-level pedantry removed per instructions.
+- **"No statistical reliability... gains often below 1%"** — The claim that gains are "often below 1%" is factually overstated. MLP gains are +4–6%, AlexNet gains are +5–6%, and many other comparisons show larger improvements. The single-run concern is kept (Minor tier) but stripped of the misleading quantitative characterization.
+- **Criticism questioning whether gains reflect "ordinary training noise" with no evidence** — This phrasing speculatively attributes the results to noise without supporting evidence, which is a reasoning gap, not a verified weakness. The single-run concern is addressed in Minor above.
+- **"The paper does not state the number of runs for any result"** — Already subsumed by the single-run/error-bars weakness above; redundant.
+- **Generic strength "addressed an important problem"** — Removed for lacking specific content.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface standard methodological concerns (missing hyperparameters, no error bars, incomplete comparisons) but do not reveal any fundamentally new perspective on the method itself.
+The two independent reviews converge on the same core tension: the paper's biological motivation and architectural breadth are genuine strengths, but its experimental validation has an asymmetry — extensive coverage across architectures yet thin coverage on baselines that would isolate the specific contribution of each component (especially ARR vs. existing feature regularizers, and RAA vs. non-GELU activations). A third dimension that neither review fully develops is that the ablation results (Table 5) suggest the combination RAA+ARR may not be strictly additive (ARR alone: 79.99 vs. DNRT: 79.82), raising a question about whether the two components interfere on this particular setting, which the paper does not discuss. This could be a productive direction for the authors to investigate.
 
 ## Suggestions
 
-1. **Report the value of \(\lambda\)** used across all experiments and add a small sensitivity study.
-2. **Add error bars** by running each experiment at least 3 times with different random seeds.
-3. **Add comparisons with related regularizers** (e.g., center loss, label smoothing) on a common backbone to demonstrate ARR's specific advantage.
-4. **Include the pure baseline** in the ablation table (Table 5) so all four conditions can be evaluated without cross-referencing.
-5. **Clarify the GNN implementation details** — specify how ARR is applied to node features in GCN/GraphSAGE.
+1. **Add a direct comparison to center loss (and possibly other intra-class feature regularizers)** under the same architectures and training settings. This is the single most important addition. If ARR proves comparable or better, the paper's novelty is substantiated; if not, the authors should discuss why their formulation is still valuable.
+2. **Report λ and J values** used in every experiment and run a sensitivity analysis on λ for at least one dataset. Specify the architecture used in the ablation study.
+3. **Add a small-scale experiment** applying the RAA concept (input-dependent shift) to a non-GELU base activation (e.g., "RAA-ReLU") on a small CNN to validate the generality claim made in Section 4.1.
+4. **Either provide standard deviations from 3+ runs for key comparisons or temper the language** — e.g., replace "remarkably outperforms" with fact-based descriptions, especially for results where margins are under 1–2%.
 
 ## Score and Decision
 
-This paper proposes a reasonable, well-motivated method and validates it across an impressively broad range of architectures and tasks. The core contributions (RAA and ARR) are clearly described and supported by both quantitative results and qualitative visualizations. However, the evaluation has several gaps that prevent full confidence in the results: the ARR weight \(\lambda\) is not specified, no error bars are reported, comparisons with related regularizations are absent, and the GNN application lacks implementation detail. These issues are all addressable in revision but are nontrivial omissions for a method paper.
+This paper's core ideas — dynamic activation thresholding via a learned input-dependent shift and category-specific response regularization — are sensibly motivated and yield consistent accuracy improvements across a wide range of architectures and tasks. The strengths are genuine: the method is simple, lightweight, and shows broad applicability. However, the paper has a significant gap in experimental validation: ARR is functionally similar to existing intra-class feature regularization methods (center loss, etc.) and the paper provides no comparison, discussion, or citation of these methods, making it difficult to assess novelty. Combined with missing hyperparameter specifications and the lack of error bars for modest-margin results, the experimental case for the claimed contributions is incomplete. The paper could become a solid contribution after addressing these gaps, but in its current form the evidence does not adequately support the claimed level of superiority.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

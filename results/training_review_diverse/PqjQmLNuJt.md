@@ -1,80 +1,172 @@
-Now I have a thorough understanding of the paper. Let me synthesize the final review.
+Now I have a thorough understanding of the paper and can verify each claim. Let me write the consolidated review.
+
+## Summary
+2-3 sentence summary of the paper's contribution.
+
+## Strengths
+- strength 1 with evidence
+- strength 2 with evidence
+
+## Weaknesses
+### Fatal
+### Major
+### Minor
+### Trivial
+
+## Nice-to-Haves
+
+## Removed Points
+
+## Novel Insights
+
+## Suggestions
+
+## Score and Decision
+
+Let me compose this now.
+
+---
+
+Let me carefully cross-check all the reviewer's specific claims one more time.
+
+**Claim 1 (Critical Issue 1): Eq. 14 is nonsensical.** 
+The paper says: E_r "extracts relations from the triplets." For a triplet t = (x,r,y), E_r(t) returns the relation(s). Since a triplet has one relation, E_r(t) returns {r}. Then r1 ∈ {r} ∧ r2 ∈ {r} means r1 = r and r2 = r, so r1 = r2 = r. So C(r1 ⇒ r2) = 1 if r1 = r2 and 0 otherwise. This is not the intended meaning. The intended meaning (co-occurrence at the entity level) is standard in KG rule mining but the formula is incorrectly written.
+
+The reviewer says "this is not a minor typo—it is a formal error that makes the core edge-denoising component undefined." This is an overstatement. The intended meaning is clear to anyone familiar with KG rule confidence (e.g., from AMIE+). It's a notational imprecision that should be fixed, but it doesn't make the component "undefined." I'll keep this as Minor.
+
+**Claim 2 (Critical Issue 2): Path scoring conflates path evaluation with node evaluation without justification.**
+The paper acknowledges this is an approximation (line 107: "Therefore, we approximate the evaluation of paths by evaluating the nodes"). The scoring function incorporates path information through current and remaining path scores. The reviewer says this is "precisely the same node-score strategy the paper criticizes" — this is inaccurate. The paper criticizes methods that evaluate nodes based on node-level features only. DDLR's scoring is path-aware (current + remaining path scores). I'll keep the concern about insufficient justification as Minor but reject the claim that it's the same as what's criticized.
+
+**Claim 3 (Critical Issue 3): No non-GNN baselines compared.**
+FALSE. The paper compares against RuleN, NeuralLP, and DRUM — all non-GNN methods. REMOVE this claim.
+
+**Claim 3: No confidence intervals.**
+True. Common in KGC but a valid minor weakness. Keep as Minor.
+
+**Other observations:**
+- "No analysis/case study showing difference from node-score approach" — Valid Minor concern.
+- "Remaining path score construction is unclear" — Valid Minor concern.
+- "No ablation on p_e and p_τ" — Valid Minor concern.
+
+**Missing parts:**
+- "Missing description of how negative triplets are generated" — The paper describes multi-class log-loss following Lacroix et al. (2018), which uses all entities as negatives in a softmax. This IS a description. REMOVE.
+- "No code release or reproducibility checklist" — REMOVE per hard rules about reproducibility nitpicks.
+- "No analysis of computational cost" — Valid Minor point.
+
+Now for the Strength Finder output - let me filter:
+
+1. "Dual denoising yields consistent SOTA across diverse inductive splits" — This is supported by Table 1 results. KEEP.
+
+2. "Path-scoring mechanism that jointly models current and remaining path scores" — This is a genuine contribution supported by ablation. KEEP.
+
+3. "Triplet-level single rules for edge sampling with Bernoulli distribution" — This is a valid contribution supported by Table 4. KEEP.
+
+Supporting strength about ablation studies — KEEP, since these isolate contributions.
+
+Now let me write the review.Now I have thoroughly verified every claim against the paper. Let me produce the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes DDLR, a dual-denoising framework for inductive knowledge graph completion that combines path-level sampling (via a path-scoring mechanism with current and remaining-path components) and edge-level sampling (via Bernoulli sampling guided by relation-rule confidence). Experiments on WN18RR, FB15k-237, and Nell-995 show SOTA or near-SOTA results across all 12 inductive splits, and ablation studies confirm both denoising components contribute meaningfully.
+This paper proposes DDLR, a dual denoising framework for inductive knowledge graph completion that combines (1) path-based sampling using a path-scoring mechanism that considers both current and remaining path scores, and (2) edge-based sampling using single-rule confidence with Bernoulli-distributed sampling. Experiments on WN18RR, FB15k-237, and Nell-995 across 12 inductive splits show consistent improvements over eight baselines. Ablation studies confirm the contribution of each component.
 
 ## Strengths
 
-1. **Novel dual-denoising framework validated by ablation.** The paper identifies a genuine limitation in existing node-based sampling methods (which ignore both path quality and edge relevance) and addresses it with two complementary mechanisms. Table 2 shows that removing either the path-sampling or edge-sampling module consistently degrades performance across all datasets, demonstrating that both components are necessary and their combination is beneficial.
+- **Consistent empirical gains across diverse inductive splits.** DDLR achieves the best or second-best filtered MRR and Hits@10 on all 12 inductive splits (v1–v4 for WN18RR, FB15k-237, Nell-995) against six strong GNN-based baselines (GraIL, NBFNet, RED-GNN, Adaprop, GraPE) and three non-GNN rule-based methods (RuleN, NeuralLP, DRUM), as shown in Table 1. This directly supports the core claim that dual denoising improves inductive KGC.
 
-2. **Path-scoring mechanism with explicit current/remaining-path decomposition.** The scoring function \(s_{uq}^{(t)}(x)\) decomposes path importance into an accumulated current-path score and an approximated remaining-path score. Table 3 shows that ablating either subcomponent ("DDLR-w.o.-current" or "DDLR-w.o.-remain") reduces performance, confirming the design's value. The paper acknowledges the approximation challenge for the remaining path (since the answer entity is unknown) and motivates the query-relation-based proxy.
+- **Novel path-scoring mechanism combining current and remaining path scores.** The scoring function (Eqs. 8–10) jointly models the path score from the source to an intermediate node and the estimated remaining path score. Ablation in Table 3 shows that removing either component degrades performance across all datasets, confirming this joint evaluation is more effective than prior node-score-only approaches.
 
-3. **Triplet-level rule confidence for edge sampling.** Using ordered relation-pair confidence (Eq. 14) to guide Bernoulli edge sampling is a principled approach to filtering irrelevant edges. Table 4 shows this triplet-level rule formulation outperforms relation-relevance alternatives (cosine similarity, KL divergence, JS divergence), and Table 2 shows that switching from triplet-level to entity-level rules (DDLR-w.o.-triplet) hurts performance.
+- **Principled edge-level denoising via triplet-level rule confidence with Bernoulli sampling.** Rather than deterministic top-K or entity-level relevance measures, DDLR extracts single rules at the triplet level (Eq. 14) and samples edges using a Bernoulli distribution derived from rule confidence. Table 4 shows this outperforms cosine similarity, KL divergence, and JS divergence for measuring relation relevance, providing a principled alternative to prior node-only sampling methods.
 
-4. **Consistent SOTA or near-SOTA empirical results.** On three standard inductive KGC benchmarks with four splits each (12 settings total), DDLR achieves best or second-best MRR and Hits@10 on every split (Table 1), outperforming strong baselines including NBFNet, RED-GNN, Adaprop, and GraPE.
+- **Systematic ablation isolating each component.** Table 2 separately ablates edge sampling, path sampling, and triplet-level granularity, with each removal causing a clear performance drop. This provides direct empirical evidence that both denoising modules and the triplet-level formulation are necessary.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Eq. 14 (single-rule confidence) is ambiguously specified.** The formula writes \(\mathcal{C}(r_{1}\Rightarrow r_{2}) = \frac{\sum_{t\in\mathcal{E}}\mathbb{1}(r_{1}\in\mathbf{E}_{r}(t) \wedge r_{2}\in\mathbf{E}_{r}(t))}{\sum_{t\in\mathcal{E}}\mathbb{1}(r_{1}\in\mathbf{E}_{r}(t))}\), where \(\mathcal{E}\) is defined as the set of triplets/facts (each a single-relation edge). If \(t\) iterates over individual triplets, then each \(t\) has exactly one relation, making the numerator zero for any distinct \(r_{1}\neq r_{2}\). The text clarifies the intended meaning ("more triplets with relation \(r_{1}\) also have \(r_{2}\)" — standard entity-pair co-occurrence counting), but the formal definition does not match this description. This is not a fatal error: the ablation studies (Tables 2, 4) independently verify that the edge-sampling component improves performance, so the *implementation* clearly computes something meaningful. However, the formula as written is formally incorrect and must be corrected before the paper can be accepted. **(Structural notation error; requires a rewrite of Eq. 14 and surrounding text.)**
+None. The verified weaknesses are real but do not threaten the paper's core claims or conclusions.
 
 ### Minor
 
-2. **Missing variance/statistical significance.** No standard deviations, confidence intervals, or significance tests are reported. Many improvements over baselines are modest (e.g., +0.3–1.0 MRR points on several splits), making it unclear whether these gains are statistically reliable. This is a standard expectation for experimental ML papers.
+- **Imprecise notation in the rule confidence formula (Eq. 14).** The equation writes  
+  `C(r₁ ⇒ r₂) = Σ_{t∈E} 𝟙(r₁ ∈ E_r(t) ∧ r₂ ∈ E_r(t)) / Σ_{t∈E} 𝟙(r₁ ∈ E_r(t))`  
+  where E_r(t) extracts the relation from a single triplet. Since each triplet has exactly one relation, the condition r₁ ∈ E_r(t) ∧ r₂ ∈ E_r(t) is only satisfied when r₁ = r₂. The intended meaning — counting *entities* that appear in triplets with both relations — is standard in KG rule mining (cf. AMIE+) but is not correctly expressed by the formula as written. This does not invalidate the method (the intended computation is clear from context and downstream usage), but it should be corrected for precision.
 
-3. **Remaining-path approximation lacks deeper validation.** The paper uses \(\mathbf{r}_{q}^{(t)}(x,v) = \mathbf{h}_{q}^{(t)}(u,x) \otimes g([\mathbf{h}_{q}^{(t)}(u,x), \mathbf{q}])\) as an approximation for the path suffix (because the answer entity \(v\) is unknown). While the ablation in Table 3 confirms that removing this component hurts performance, this only validates that *some* signal from the remaining path helps — it does not validate that *this specific form* of approximation is reasonable or near-optimal. The paper would benefit from either a simpler baseline comparison (e.g., a learned bias per node) or a qualitative analysis showing how the approximation behaves on concrete examples like Fig. 1.
+- **The path-to-node approximation (Eq. 7) lacks rigorous justification.** The paper acknowledges that evaluating all paths is computationally prohibitive and therefore "approximate[s] the evaluation of paths by evaluating the nodes." The scoring function (Eq. 10) is path-aware (combining current and remaining path scores), so it is not the same as the simple node-score approach criticized in Section 1. However, the paper does not theoretically or empirically demonstrate that this approximation avoids the failure mode illustrated in Fig. 1 (where node-score top-K selects the wrong entity). A case study or analysis showing that the new scoring would select the correct path in that example would substantially strengthen the argument.
 
-4. **Top-K for paths vs. criticism of top-K.** The paper criticizes node-based top-K methods (e.g., Adaprop) for discarding information, then uses a top-K selection for path sampling (Eq. 11) while using Bernoulli sampling (non-hard) only for edges. The paper should justify why hard top-K is acceptable for paths when it was criticized for nodes — or acknowledge this as a design limitation.
+- **The "remaining path score" construction (Eq. 8) is under-explained.** The representation r_q^{(t)}(x,v) is computed using only h_q^{(t)}(u,x) and the query relation q, with no explicit dependence on the future entity v. The paper states it "utilize[s] the query relation q as an approximation," but does not clarify why this combination meaningfully represents the remainder of the path from x to an unknown answer. This is a reasonable design heuristic — and the empirical results support it — but the conceptual justification is thin.
 
-5. **Missing computational cost reporting.** The paper does not report training time, memory usage, or model size relative to baselines. Since DDLR adds two sampling steps per iteration, this information is needed for practitioners to assess practical trade-offs.
+- **No confidence intervals, standard deviations, or significance tests reported.** Many of the performance differences over baselines like NBFNet and Adaprop are within a few percentage points. Without measures of variance, it is difficult to assess whether these gains are statistically meaningful. While single-run evaluation is common in KGC, reporting variance (even over a few seeds) would strengthen the empirical claims.
+
+- **Missing sensitivity analysis for hyperparameters p_e and p_τ.** The edge sampling module has two hyperparameters (a probability multiplier p_e and a truncation probability p_τ) with ranges specified in the experimental setup, but no ablation or sensitivity study is provided to show how performance varies with these choices.
+
+- **No computational cost comparison.** Training and inference times relative to baselines are not reported, making it difficult to assess the efficiency cost of the dual sampling framework.
 
 ### Trivial
 
-6. **"KBGAT (Yang et al., 2015)"** — The commonly cited KBGAT paper is Nathani et al. (2019). The reference here may be a different work or a citation error, but it does not affect the paper's contributions.
-
-7. **Missing sensitivity analysis for \(p_{e}\) and \(p_{\tau}\).** These hyperparameters control edge sampling, listed in the search ranges but with no analysis of how performance varies with their values.
+- Minor presentation issues typical of conference submissions (e.g., "remain" where "retain" is intended in the caption of Fig. 2).
 
 ## Nice-to-Haves
 
-- A qualitative example (extending Fig. 1) showing where the remaining-path score correctly up-weights a correct answer and where omitting it fails would strengthen the path-scoring motivation.
-- Reporting results with standard deviations over 3–5 random seeds would address statistical-concern questions preemptively.
-- A comparison with a simpler remaining-path baseline (e.g., a learned scalar per node) would better validate the specific form of the approximation.
+- A case study or attention visualization demonstrating that DDLR's path-aware scoring correctly selects the entity overlooked by node-score top-K in the Fig. 1 example.
+- Sensitivity analysis for hyperparameters p_e and p_τ.
+- Confidence intervals or standard deviations for all main results.
+- Computational cost (training/inference time) comparison with baselines.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed; treat them with caution. They were not included in the Weaknesses above because they are factually incorrect, parser artifacts, or violate the review guidelines.
 
-- *"Cannot be independently verified / not yet released"* — Removed per hard rules: cited models and datasets are assumed to exist.
-- *"Pure formatting/typo nitpicks"* (e.g., "typos, garbled text") — Removed; these are parser artifacts.
-- *"Missing related work on X"* — Removed; I cannot verify existence of missing references without external sources.
-- *"The paper should also cover multi-hop queries"* — Removed as scope creep; the paper explicitly scopes out multi-hop queries as future work in the conclusion.
-- *The harsh critic's characterization of Eq. 14 as "structural error that prevents acceptance" / "fatal"* — Downgraded to Major. The empirical evidence (ablation studies) shows the edge-sampling component works; the issue is a notation/specification error, not a methodological invalidation. The intended meaning (entity-pair co-occurrence) is standard in KG rule mining and recoverable from context.
-- *"The paper should add more methods/baselines the reviewer prefers"* — Removed; the paper's baseline selection is defensible.
+1. **"The paper does not compare against any non-GNN inductive methods (e.g., TLogic or RLogic)."** — Factually incorrect. The paper explicitly compares against RuleN, NeuralLP, and DRUM, which are non-GNN rule-learning methods (Section 5.1). Removed.
+
+2. **"Missing description of how negative triplets are generated for the loss function."** — The paper specifies a multi-class log-loss following Lacroix et al. (2018), which is a standard approach where all entities serve as implicit negatives via softmax normalization (Eq. 18, Section 4.4). Removed.
+
+3. **"Table 1 appears garbled in the parsed text"** — This is a PDF parsing artifact, not an error in the original submission. Removed.
+
+4. **"No code release or reproducibility checklist."** — Code release is not a requirement for review; hyperparameters are extensively documented (Section 5.1). Removed per reproducibility-nitpick guidelines.
+
+5. **"The path scoring mechanism is precisely the same node-score strategy the paper criticizes."** — Inaccurate. The paper's scoring function (Eq. 10) explicitly incorporates path information through current and remaining path scores, which is fundamentally different from the simple node-level scores it criticizes. The concern about insufficient justification is kept as a Minor weakness above; the claim of equivalence is removed.
+
+6. **Characterization of Eq. 14 as making the "core edge-denoising component undefined" and "the claimed contribution of edge-based sampling has no foundation."** — Overstatement. The intended computation is standard in KG rule mining; the formula has a notational imprecision that should be fixed but does not invalidate the method. The notational issue is retained as Minor; the fatal characterization is removed.
 
 ## Novel Insights
 
-The reviews surface one insight that goes beyond the paper's own framing: the tension between criticizing top-K node scoring and then applying top-K path scoring is not merely a presentation issue — it highlights an underexplored design space. The paper's real advance may not be "avoiding top-K" (since paths still use top-K) but rather improving the *quality* of the scoring function that top-K operates on, and adding a separate edge-level filter that operates via probabilistic (Bernoulli) sampling. This suggests that the contribution is better described as "better scoring + complementary edge filtering" rather than "overcoming top-K limitations."
+None beyond the paper's own contributions. The dual denoising perspective — combining path-level scoring with edge-level rule-based sampling — is the paper's own novel framing, and the reviews do not surface a fundamentally different insight about the work.
 
 ## Suggestions
 
-1. **Fix Eq. 14.** Rewrite the confidence definition to explicitly operate at the entity-pair level, e.g., \(\mathcal{C}(r_1 \Rightarrow r_2) = \frac{|\{(h,t): (h,r_1,t) \in \mathcal{G} \land (h,r_2,t) \in \mathcal{G}\}|}{|\{(h,t): (h,r_1,t) \in \mathcal{G}\}|}\), and clearly define \(\mathbf{E}_r\) as the set of relations for a given entity pair. The current sum-over-triplets notation is formally incorrect.
+- **Fix Eq. 14** to clearly express the intended entity-level co-occurrence counting. For example:  
+  `C(r₁ ⇒ r₂) = |{e ∈ V | ∃x,y: (e,r₁,x) ∈ E ∧ (e,r₂,y) ∈ E}| / |{e ∈ V | ∃x: (e,r₁,x) ∈ E}|`  
+  (or the symmetric version for object entities, depending on directionality).
 
-2. **Report standard deviations** for main results (Table 1) over at least 3 random seeds. Also clarify whether hyperparameters were chosen on a validation set.
+- **Add a brief analysis or case study** showing that the proposed path-aware scoring function (Eq. 10) selects the correct entity in the Fig. 1 example, where simple node-score top-K fails. Even a small illustrative computation would bridge the gap between motivation and method.
 
-3. **Acknowledge the top-K tension.** Add a sentence justifying why top-K is used for path selection while Bernoulli sampling is used for edges (e.g., "path scoring is more reliable due to the learned scoring function, while edges benefit from probabilistic selection to avoid hard loss of rare relations").
+- **Report confidence intervals or standard deviations** over at least 3–5 runs for the main results (Table 1) and key ablation studies.
 
-4. **Add a simple remaining-path baseline.** Compare the current remaining-path approximation against a per-node learned bias or a fixed scalar to strengthen the validation of the specific design.
+- **Include a sensitivity study** for p_e and p_τ, or at minimum state how they were chosen.
+
+- **Clarify the "remaining path score" construction** (Eq. 8): since there is no explicit v-dependence, the paper should explain more concretely how h_q^{(t)}(u,x) combined with q yields a representation relevant to the future path.
 
 ## Score and Decision
 
-This paper makes a clear contribution — a dual-denoising framework with two well-motivated components, supported by comprehensive ablation studies and strong empirical results across 12 inductive KGC settings. The main concern (Eq. 14 notation) is a specification error that requires correction but does not invalidate the method or the empirical conclusions. The remaining issues (missing variance, approximation validation depth) are addressable. The paper merits acceptance after the notational fix to Eq. 14.
+This paper addresses a genuine problem in inductive KGC (noise accumulation during multi-hop reasoning) with a well-motivated dual denoising framework. The core technical contributions are sound, the empirical evaluation is reasonably thorough (12 inductive splits, 8 baselines, component-level ablations), and the results are consistently positive. The main weaknesses are (a) imprecise notation in one equation, (b) under-explained approximations in the path-scoring design, and (c) missing experimental rigor elements (confidence intervals, hyperparameter sensitivity). None of these are fatal — they are addressable in revision. The paper represents a solid contribution to the inductive KGC literature.
+
+**Originality:** Moderate. The dual denoising framing is novel, though it builds on established techniques (NBFNet-style path propagation, Adaprop-style sampling, AMIE-style rule confidence).
+
+**Importance of question:** High. Inductive KGC is practically important, and noise management in multi-hop reasoning is a recognized bottleneck.
+
+**Claims support:** Reasonable. Core claims are supported by consistent empirical results and ablations, though the path-scoring justification could be more rigorous.
+
+**Soundness:** Good. The method is well-designed; the one notational issue (Eq. 14) does not undermine the framework.
+
+**Clarity:** Moderate. Generally clear but Eq. 14 is imprecise and some design choices (remaining path score) could use better explanation.
+
+**Value to community:** Moderate. The dual denoising approach and the ablation results are useful reference points for future work.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,74 +1,72 @@
-Now I have a thorough understanding of the paper. Let me construct the consolidated review.
+Now I have all the information needed. Let me construct the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes MoFO (Momentum-Filtered Optimizer), a fine-tuning algorithm that updates only the parameters with the largest momentum magnitudes at each iteration, operating as a form of block coordinate descent (BCD) built on top of Adam. The key idea is that keeping parameters closer to the pretrained model during fine-tuning mitigates forgetting, and MoFO achieves this by selectively updating the most impactful parameters. The paper presents a convergence analysis of a simplified GD variant, and evaluates on instruction fine-tuning (MetaMathQA, Code-Alpaca with Llama-2-7B) and continual fine-tuning (TRACE with TinyLlama-1.1B), comparing against Full FT, HFT, L1/L2 regularization, GEM, and Replay.
+This paper proposes MoFO (Momentum-Filtered Optimizer), a fine-tuning algorithm for LLMs that selects and updates only the parameters with the largest momentum magnitudes at each iteration. By reducing parameter movement through selective updating, MoFO converges closer to the pre-trained initialization than full-parameter fine-tuning, thereby mitigating forgetting of pre-training knowledge. The method requires neither pre-training data (unlike replay) nor loss function modification (unlike regularization), giving it practical appeal. Experiments on Llama-2-7B and TinyLlama-1.1B across instruction fine-tuning and continual fine-tuning show MoFO achieves comparable task performance with substantially less degradation on general capability benchmarks.
 
 ## Strengths
 
-1. **Novel and well-motivated optimization approach.** The idea of using momentum magnitude as a selection criterion for BCD is clean and non-obvious. The motivation—connecting the distance the model travels in parameter space to forgetting severity—is supported by an initial experiment comparing Adam vs. Lion on Pythia-160m, and the paper carries this thread through to the algorithm design.
+1. **Momentum-based parameter selection is empirically validated over alternatives.** Table 5 provides a controlled comparison at α=10% where MoFO (momentum-filtered BCD, GSM8K=45.4) significantly outperforms Gradient-filtered BCD (40.2) and Randomized BCD (35.0), all while maintaining comparable general-capability retention. This directly validates that momentum magnitude is a more effective selection signal than raw gradients for coordinating with Adam's update structure.
 
-2. **Ablation study convincingly validates momentum-based selection.** Table 3 (Table 6 in the critic's numbering) is the strongest empirical contribution: MoFO (momentum-filtered BCD) achieves GSM8K 45.4, substantially outperforming gradient-filtered BCD (40.2) and randomized BCD (35.0), while all three methods maintain comparable forgetting levels. This directly shows that momentum magnitude is a better selection criterion than the more naive gradient-based alternative.
+2. **Direct geometric evidence that MoFO stays closer to the pre-trained model.** Figure 2 shows that on Pythia-160m, MoFO's final point is approximately 20% as far from the pre-trained model as Adam's final point, while both achieve similar fine-tuning loss. The same figure shows MoFO has lower pre-training loss (Pile), providing direct evidence of knowledge retention for the smaller model. Table 1 then links this reduced distance to better common-sense accuracy retention (MoFO: 31.6 avg vs. Adam: 29.3).
 
-3. **Consistent performance across diverse settings.** MoFO demonstrates competitive fine-tuning performance while better preserving general capabilities across two different base models (Llama-2-7B, TinyLlama-1.1B), two fine-tuning paradigms (instruction and continual), and multiple datasets. The continual learning results (Table 4) are particularly clean: MoFO improves OP from 38.4→41.3 and BWT from -10.3→-5.4 over Full FT, and combines well with Replay and GEM.
+3. **Replay-free and regularization-free design is a practical strength.** MoFO requires neither access to pre-training data (which many open-source LLMs do not release) nor modifications to the loss function (which can impair fine-tuning task performance). Tables 2–3 show MoFO improving or maintaining general capability metrics (e.g., +0.4% average on MetaMathQA) while regularized methods such as L2 still degrade (-0.4% average, with a much larger GSM8K drop of 44.5 vs. MoFO's 47.7).
 
-4. **Replay-free and regularization-free.** MoFO achieves forgetting mitigation without requiring access to pre-training data (addressing a practical limitation of many methods) and without modifying the loss function. This is a meaningful combination of advantages not jointly offered by most existing approaches.
+4. **Consistent benefit across diverse settings.** MoFO's advantage holds across two base models (Llama-2-7B, TinyLlama-1.1B), two instruction fine-tuning datasets (MetaMathQA, Code-Alpaca), and a continual fine-tuning benchmark (TRACE). In TRACE, MoFO achieves OP=41.3 vs. Full FT's 38.4 and combines well with replay (Replay+MoFO: OP=47.0 vs. Replay alone: 45.5).
+
+5. **Ablation study identifies the trade-off clearly.** Figure 4 shows that up to α=20% update fraction, MoFO achieves near-zero forgetting on general capabilities while reaching ~90% of Full FT's GSM8K score, giving practitioners actionable guidance for hyperparameter selection.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **Missing EWC baseline weakens the comparative claim.** The paper claims "superiority over existing methods" and argues that modifying the loss function "may impair the model's performance on the fine-tuning task." Yet the only regularization-based baselines evaluated are simple L1 and L2 penalties. Elastic Weight Consolidation (EWC) is a standard regularization baseline in the forgetting literature (cited in the paper's related work) and is a natural competitor for testing whether the claimed advantage of MoFO over loss-modification methods holds against a stronger regularization approach than L2. Without this comparison, the paper's broader "superiority" claim is incompletely supported. The paper compares against Full FT, HFT, L1, L2, GEM, and Replay, which is a reasonable set, but EWC is a noticeable omission given the paper's positioning against regularization-based methods.
+1. **The comparison to Half Fine-Tuning (HFT) is confounded by different update fractions.** In Tables 2 and 3, MoFO uses α=10–15% of parameters per iteration while HFT updates ~50%. The paper's own ablation (Fig. 4) shows that increasing the update fraction gradually worsens forgetting — at 40% MoFO's forgetting is significant. Therefore, MoFO's advantages over HFT in the main tables conflate the benefit of momentum-based selection with the benefit of simply updating fewer parameters. The controlled comparison in Table 5 (at matched 10% fraction) does show momentum selection beating random and gradient-based selection, but it compares against Randomized BCD and Gradient-filtered BCD, not HFT specifically. The paper should either (a) add a row to Tables 2–3 with HFT restricted to α% parameters, or (b) explicitly acknowledge this confound and reframe the comparison.
+
+2. **LoRA, a widely-used parameter-efficient fine-tuning method and natural competitor for forgetting mitigation, is absent from the experimental comparison.** The related work (Section 6) mentions LoRA and notes that it "forgets less but learns less," yet no LoRA baseline appears in any experiment. This omission is significant because LoRA is arguably the most common practical alternative that also limits parameter changes during fine-tuning. Including LoRA at multiple ranks would allow readers to assess where MoFO's trade-offs lie relative to this widely-adopted method.
 
 ### Minor
 
-1. **No variance or significance reporting.** All experimental results appear to be from single runs. While single runs are common for 7B-scale models due to computational cost, several key comparisons involve small margins (e.g., MoFO average +0.4% vs. HFT -0.1% in Table 1; MoFO -1.1% vs. HFT -1.8% in Table 2). Without any indication of variance, the reader cannot assess whether these differences are meaningful or within the noise of benchmark evaluation. The paper should at minimum acknowledge this limitation.
+1. **The motivation for the momentum-based selection criterion is conceptually simplified.** The paper argues (§2.1) that "momentum directly affects parameter updates, while gradients influence parameter updates indirectly by affecting the momentum." While not incorrect, this framing understates the role of the second-moment normalization in Adam: the actual update is \(\hat{m}_t/(\sqrt{\hat{v}_t}+\epsilon)\), so momentum magnitude alone does not determine update size. A parameter with large momentum but also large variance may receive a smaller update than one with moderate momentum but small variance. The empirical results (Table 5) support the momentum-based rule regardless, but the stated rationale would be stronger if it acknowledged this nuance or adopted a selection criterion based on the full Adam update magnitude.
 
-2. **The α% selection procedure is not documented.** The update fraction α% is a critical hyperparameter with a sharp performance-forgetting trade-off revealed by the ablation study (Figure 3). The paper uses different values across experiments (15% for MetaMathQA, 10% for Code-Alpaca, 5% for continual) without explaining how these were chosen. Was a validation set used? Was a combined metric optimized? Without a stated selection criterion, the results could reflect cherry-picking.
+2. **Pre-training perplexity/loss is not reported for the main Llama-2-7B experiments.** The paper convincingly shows pre-training loss for Pythia-160m (Figure 2b), establishing the mechanism. But for the central Llama-2-7B results (Tables 2–3), forgetting is measured only via general capability benchmarks (MMLU, Commonsense, etc.). While these are reasonable proxies, they are not direct measures of pre-training knowledge retention, and the alternative interpretation that MoFO produces higher benchmark scores partly because it learns less of the fine-tuning task (GSM8K: 47.7 vs. Full FT's 49.4) is not fully ruled out. Reporting perplexity on a held-out pre-training corpus (e.g., a subset of C4 or The Pile) for the main experiments would directly substantiate the core claim.
 
-3. **Key methodological details for reproducibility are missing.** The distance metric used to claim "MoFO converges to a point 20% of the Adam travel distance" is not specified (Euclidean? per-layer? over all parameters?). The method for generating the 2D loss landscapes (Figure 1 and 2) is not described—what interpolation direction, step size, or projection method was used? These omissions hinder reproducibility.
+3. **The convergence analysis addresses a different algorithm than the one proposed.** Theorem 1 proves convergence for a GD version of MoFO that uses gradient magnitude for selection (Algorithm 2), not the momentum-based selection with Adam used in practice. The paper acknowledges this gap ("it seems rather non-trivial to prove the convergence of the original version of MoFO"), which is honest, but it means the theoretical contribution does not directly support the proposed algorithm. A more relevant analysis — e.g., bounds on the distance to the pre-trained solution — would better serve the paper's claims about forgetting mitigation.
 
-4. **The convergence theorem covers a simplified variant, not the actual algorithm.** Theorem 1 proves convergence for a gradient-descent version of MoFO (no momentum) at rate O(T^{-1/2}) under an ∞-norm clipping assumption. The paper acknowledges this gap, but the theoretical contribution remains modest and does not provide insight into the distinctive behavior of the momentum-based selection rule.
-
-5. **The mechanistic explanation (Section 5) is an intuition, not a rigorous explanation.** The 2D toy example illustrates attractor interference in a highly constructed setting. The section title "Why MoFO Converges to a Closer Point" overpromises. The paper should more clearly frame this as illustrative intuition rather than a definitive explanation for behavior in deep LLMs.
+4. **No discussion of computational overhead.** Top-k selection per parameter block requires sorting, which has non-negligible cost for large models. The paper states the method partitions parameters "to reduce computational complexity" but provides no wall-time comparison or complexity analysis. Given that MoFO's advantage over Full FT or HFT includes both forgetting mitigation and potential computational savings (fewer parameters updated), a timing comparison would be valuable for practitioners.
 
 ### Trivial
-None.
+
+- The toy example (Section 5) is too simple (a factorized loss with orthogonal attractors) to provide genuine insight into LLM fine-tuning dynamics. It illustrates a possible mechanism but is disconnected from the complexity of real LLM loss landscapes. The paper would not be weakened if this section were shortened or removed.
+- Algorithm 1's pseudocode nests gradient computation inside a partition loop, which mathematically describes obtaining gradients per partition but does not reflect that all gradients come from a single backward pass in implementation. This is a common convention in optimization papers but could be clarified.
 
 ## Nice-to-Haves
 
-- Report wall-clock time or training cost compared to Full FT and HFT. MoFO adds a top-k selection per block per iteration, and readers would benefit from knowing the practical overhead.
-- Discuss the per-partition vs. global filtering trade-off: partitioning by weight matrices means some blocks with uniformly small momentum magnitudes may rarely receive updates—whether this matters in practice is worth commenting on.
-- Include a discussion of cases where MoFO still shows negative forgetting (e.g., Code-Alpaca: -1.1% average) to give a more complete picture of the method's limitations.
+- Pre-training perplexity for the Llama-2-7B experiments (MetaMathQA and Code-Alpaca) would directly substantiate the forgetting-mitigation claim.
+- A controlled comparison where HFT is restricted to α=10–15% update fraction, added to Tables 2–3.
+- Wall-time comparison against Full FT, HFT, and LoRA.
+- A simple heuristic or sensitivity analysis for choosing the update fraction α (e.g., "start at 10%, increase if fine-tuning performance is low"), rather than reporting task-specific tuned values (15%, 10%, 5%) without explanation.
+- An empirical analysis (e.g., a scatter plot) showing the correlation between momentum magnitude and actual Adam update magnitude, to strengthen the motivation.
 
 ## Removed Points
 
-- **"Missing LoRA and SI baselines"**: LoRA is an architecture-based PEFT method (not an optimizer) with a fundamentally different parameter budget; comparing a 7B full-parameter optimizer against a low-rank adapter is comparing apples to oranges. SI is a less common baseline and its absence is not a structural gap given that L1 and L2 regularization are already included. These are disagreements about baseline preference, not genuine experimental gaps.
-- **"Per-partition rather than global filtering is a concern"**: The paper explicitly states this design choice is made for computational efficiency. This is a valid engineering decision, not a weakness.
-- **"The motivating experiment does not directly motivate MoFO"**: The paper first shows different optimizers yield different distances (Section 3.1), then shows MoFO achieves a closer distance than Adam (Section 3.3). The causal chain is: (a) closer distance → less forgetting, (b) MoFO → closer distance. The motivation is coherent.
-- **"Computational cost discussion missing"**: Moved to Nice-to-Haves.
-- **Formatting and style nitpicks**: Removed per instructions.
+- **Criticism about Algorithm 1's backward-pass loop being "not how backpropagation works."** This is a standard notational convention in optimization papers — the mathematical expression of per-partition gradients does not imply separate backward passes. The pseudocode is not misleading within the norms of the field.
+- **Criticism that the term "catastrophic forgetting" may overstate the phenomenon.** The term is standard in the literature and the paper's usage is appropriate for its context.
+- **Criticism about missing training epochs for main experiments.** The paper references `sec_training_detail` for implementation details; these were in the appendix, which the parser stripped.
+- **Generalizability/demands for Y/domain Z coverage that would make the paper a different, broader paper.** The paper is scoped to single-task and continual fine-tuning of LLMs, which is a well-defined scope.
 
 ## Novel Insights
 
-The reviewer discussion surfaces an interesting subtlety: the paper's strongest evidence for the momentum-based selection mechanism (the ablation in Table 3) and its weakest evidence (the missing EWC baseline) point in opposite directions for evaluating the paper. The ablation is genuinely compelling—it shows a 5-10 point gap over alternatives—but the small-margin comparisons against HFT in the main tables raise questions about how much of the reported benefit is due to the selection mechanism vs. simply the BCD framework. A productive future direction would be to isolate the "BCD effect" (any sparse update method helps forgetting) from the "momentum filtering effect" (momentum-based selection helps fine-tuning performance), which the ablation partially does. The paper could strengthen its framing by leaning more on this distinction.
+The key insight from the reviews is the tension between the paper's simplified conceptual framing (momentum > gradients because it "directly affects updates") and the more complex reality of Adam's per-coordinate normalization. The empirical results in Table 5 resolve this tension in MoFO's favor, but the paper would benefit from either adopting the more principled selection criterion (full Adam update magnitude) or providing empirical evidence (e.g., correlation plots) that momentum magnitude is a sufficient proxy. Additionally, the HFT comparison confound highlights a common weakness in papers comparing sparsity-based methods: claims about "better selection strategy" must be disentangled from claims about "fewer updates being helpful" through controlled experiments.
 
 ## Suggestions
 
-1. Add EWC as a baseline in the instruction fine-tuning experiments. This directly tests the paper's claim that loss-modification methods impair fine-tuning performance and would substantially strengthen the comparative claims.
-2. Report results over multiple seeds (at least 3) for the main experiments, or at minimum acknowledge the single-run limitation and provide estimated variance from the literature.
-3. Document the α% selection procedure for each experiment (e.g., "chosen by maximizing GSM8K on a held-out validation set") or demonstrate robustness by showing results for multiple α values.
-4. Specify the distance metric and landscape-generation method in the main text or appendix.
-5. Soften the "superiority" language in the abstract and conclusion to match the scope of the experimental comparison ("outperforms Full FT, HFT, and L1/L2 regularization in mitigating forgetting").
-
-## Score and Decision
-
-The paper makes a genuine contribution: MoFO is a novel, well-motivated optimization method, and the ablation validating momentum-based selection over gradient-based and random BCD is clean and convincing. The method is simple, practical (replay-free, regularization-free), and the experiments consistently show benefits across multiple settings. However, the evaluation has meaningful gaps—most notably the missing EWC baseline and the lack of variance reporting—that prevent the paper from fully substantiating its broader claims of superiority. These are addressable gaps, not fatal flaws.
-
-The paper is a solid contribution that would benefit from a stronger experimental section. It should not be rejected, but it also cannot be accepted in its current form without addressing the major weakness. A revision adding the EWC baseline and tempering the claims would make this a strong paper.
+1. In the main tables, add a controlled HFT variant that updates α% of parameters, or at minimum explicitly acknowledge the update-fraction confound.
+2. Add pre-training perplexity measurements for the Llama-2-7B experiments to directly support the forgetting-mitigation claim.
+3. Include LoRA as a baseline in the experiments (at ranks 8, 16, 32) to provide a complete picture of MoFO's position relative to existing PEFT methods.
+4. Provide a wall-time comparison or complexity analysis of the top-k selection overhead.
+5. Strengthen the motivation by either (a) replacing the selection criterion with |m̂/(√v̂+ε)| and comparing empirically, or (b) showing a scatter plot that momentum magnitude strongly correlates with update magnitude in practice.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

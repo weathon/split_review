@@ -1,18 +1,22 @@
-Now I have thoroughly read the paper and cross-checked every claim. Here is my consolidated review:
+Now I have all the information I need. Let me compose the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes ε-VAE, which replaces the standard deterministic decoder in a visual autoencoder (e.g., VQGAN) with a conditional diffusion process, reframing reconstruction as iterative denoising from noise guided by the latent code. Through systematic ablation of architecture (UNet/DiT), objectives (score-matching, LPIPS, adversarial trajectory matching), and scheduling (noise scaling, logit-normal time sampling, reversed-log inference steps), the method reduces NFE from 1,000 to 3 while substantially improving reconstruction rFID and downstream generation FID relative to the VQGAN baseline across model scales, compression rates, and resolutions.
+This paper proposes ε-VAE, a visual autoencoding framework that replaces the deterministic decoder of a standard VAE/VQGAN with a diffusion process, turning single-step reconstruction into iterative denoising. The method uses a conditional diffusion decoder (ADM U-Net) with rectified flow parameterization, and systematically explores design choices in objectives (velocity prediction, LPIPS matching, adversarial trajectory matching) and scheduling (logit-normal training, reversed-log inference spacing). The approach achieves substantial improvements over the VQGAN baseline (e.g., rFID 6.24 vs. 11.15 at 128×128 for base-scale models), operates in as few as 3 sampling steps, and generalizes to higher resolutions without retraining.
 
 ## Strengths
 
-1. **Novel conceptual framing**: Replacing deterministic single-step decoding with conditional iterative denoising is a clean, well-motivated departure from the standard VQGAN-style autoencoder. The paper clearly articulates this perspective shift (Section 3, Figure 1) and connects it to the rate-distortion-perception trade-off in the discussion.
+1. **Conceptually novel paradigm**: Reframing visual decoding as iterative denoising rather than single-step reconstruction is a genuine conceptual departure from the standard VAE/VQGAN formulation. The method is concretely operationalized through conditional denoising (Eq. 4), velocity prediction (Eq. 5), and trajectory matching losses (Eq. 8).
 
-2. **Systematic ablation that decomposes the gains**: Table 3 traces a clear trajectory from a naive DDPM decoder (rFID 28.22, 1,000 NFE) to the full ε-VAE (rFID 6.24, 3 NFE). Each component — rectified flow, logit-normal sampling, improved UNet, perceptual matching, adversarial trajectory matching, noise scaling, and reversed log-time spacing — yields measurable, interpretable improvements. This is the paper's strongest empirical contribution.
+2. **Consistent and large improvements across scales**: ε-VAE achieves substantially lower rFID and better generation FID than the VQGAN baseline at every model scale, compression rate, and resolution tested. Notably, ε-VAE (B) at 20.63M parameters (rFID 6.24) surpasses VQGAN (H) at 161.81M parameters (rFID 7.12) — a >40% relative improvement despite roughly 8× fewer parameters (Table 1).
 
-3. **Consistent, large-margin outperformance across conditions**: ε-VAE beats VQGAN on reconstruction rFID (Table 1) and generation FID/IS/Precision/Recall (Table 2) at every model scale (B–H), across latent dimensions (4–32) and downsampling factors (4–32), and at higher resolutions (256×256 and 512×256) without retraining. Notably, the smallest ε-VAE (20.63M params) outperforms the largest VQGAN (161.81M params) on both reconstruction and generation — a result that survives grouping by comparable parameter counts.
+3. **Practical few-step decoding**: Through systematic ablation (Table 3), the paper drives NFE from 1,000 (rFID 28.22) down to 3 (rFID 6.24), making iterative decoding practically viable. The ablation cleanly decomposes the contribution of rectified flow, logit-normal sampling, architecture upgrades, perceptual/adversarial losses, noise scaling, and inference spacing.
 
-4. **Practical efficiency**: Despite being an iterative process, the full model achieves its best rFID with only 3 NFE, and supports single-step decoding (62.94 img/s), making the approach viable for downstream use.
+4. **Resolution generalization**: Models trained at 128×128 generalize to 256×256 and 512×512 while preserving their advantage over the baseline (e.g., rFID 2.31 vs. 4.29 at 512×512 for H variants, Table 1) — a practical property inherited from standard autoencoders and crucial for latent diffusion model training.
+
+5. **Controlled empirical methodology**: The paper systematically isolates the effect of architecture (ADM vs. DiT, Fig. 2 left), compression axes (latent channels and downsampling factor, Fig. 2 middle/right), and training objectives (Table 3), clearly attributing performance to specific design choices.
 
 ## Weaknesses
 
@@ -20,66 +24,43 @@ This paper proposes ε-VAE, which replaces the standard deterministic decoder in
 None.
 
 ### Major
-None.
+
+1. **Architecture confound between decoding paradigm and decoder architecture.** The central claim — that replacing deterministic decoding with a diffusion process improves autoencoding — is confounded by the fact that the two decoders compared (BigGAN for COMP, ADM U-Net for OURS) differ in architecture, not just decoding paradigm. As acknowledged (lines 253–254), the baseline uses a BigGAN feedforward decoder while the proposed method uses an ADM U-Net with skip connections, which has different inductive biases for reconstruction tasks regardless of whether the prediction target is velocity or pixels. The paper attempts to control for parameter count via color-coded groupings in Table 1, but parameter count is a coarse proxy: two architectures with similar parameter counts can have substantially different representational power. **The paper lacks a critical control experiment: training an ADM U-Net as a *deterministic* decoder (predicting pixels directly with L1 + LPIPS + adversarial losses, without any diffusion process) and comparing its performance to the diffusion variant at matched capacity.** Without this, the reader cannot determine how much of the observed gain comes from the U-Net architecture versus the diffusion paradigm itself. The ablation study (Table 3) partially mitigates this by showing that diffusion-specific components (losses, scheduling) account for the largest improvements, but it does not isolate the core claim.
 
 ### Minor
 
-1. **Missing loss weights for ε-VAE (reproducibility gap)**: The paper reports λ<sub>LPIPS</sub> = 0.5 and λ<sub>adv</sub> = 0.5 for the VQGAN baseline (line 259), but for ε-VAE states only "empirically adjusted weights" (line 218) without reporting the actual coefficients. Since the losses have different scales and the final objective combines three terms (score-matching, LPIPS on ẋ₀ᵗ, and adversarial trajectory matching), the missing weights are a genuine barrier to reproduction and disentangling the contribution of each term. This needs to be filled.
+2. **Reconstruction evaluation relies solely on rFID, a distribution-level metric, without per-instance fidelity measures.** The paper reports only rFID (which compares distributions of reconstructions vs. real images) as its reconstruction metric, without PSNR, SSIM, or per-image LPIPS. Because the diffusion decoder is stochastic — starting from random noise — rFID could in principle be improved by producing perceptually plausible but unfaithful outputs. The paper acknowledges this "hallucination" risk qualitatively (Discussion, lines 480–483) and provides diversity visualizations (Figure 5), but quantitative per-instance metrics would strengthen the claim that improved rFID reflects genuine reconstruction fidelity rather than a distribution-matching artifact. This is exacerbated at high compression ratios, where the paper itself shows the decoder becomes more stochastic (Figure 5).
 
-2. **Stochastic reconstruction evaluation not characterized**: The ε-VAE decoder is inherently stochastic (line 167: "the decoder is no longer deterministic, as the process starts from random noise"), yet reconstruction rFID is reported from a single evaluation pass. While the paper argues stochasticity is a feature (Fig. 5, Section 5), and the performance margins are very large (40%+), the evaluation would be more rigorous with either multiple seeds (mean ± std) or a fixed-noise evaluation protocol to verify that the improvement is statistically significant. As written, a reader cannot rule out seed-sensitivity artifacts, even if unlikely given the gap size.
-
-3. **Architecture confound between decoders**: The VQGAN baseline uses a BigGAN-based decoder while ε-VAE uses a UNet (ADM) decoder (line 253). Since UNets generally have different inductive biases for pixel-level tasks, some of the improvement could stem from architecture rather than the diffusion process itself. This is partially mitigated by the ablation (Table 3: the ADM UNet alone at step 3, rFID 22.04, is far worse than VQGAN-B at 11.15, so architecture alone does not explain the gains). Still, a deterministic-UNet decoder control (same architecture as ε-VAE but without iterative denoising) would cleanly isolate the contribution of iterative refinement from architecture. This would strengthen the claim that the gains come from *denoising as decoding* specifically.
-
-4. **Overstated claim about tokenizer evolution**: The introduction states tokenizers "have remained largely unchanged since their initial introduction" (line 30). While VQGAN-style autoencoders remain the dominant paradigm, recent works (MAGVIT v2, FSQ, ViT-VQGAN) do propose non-trivial modifications. This framing over-claims the gap and invites unnecessary pushback without affecting the paper's actual contribution.
+3. **The runtime comparison uses mismatched architectures and model sizes.** The paper reports OURS (B) at 20.63 img/s (3-step) vs. COMP (M) at 114.13 img/s, attributing the 5× slowdown to the U-Net design. But different model sizes (B vs. M) and fundamentally different architectures make this comparison hard to interpret as a clean measure of slowdown from the iterative decoding process itself. The 1-NFE throughput (62.94 img/s) is closer but still slower, suggesting architecture rather than iteration count is the main bottleneck. This is partially acknowledged as a limitation, but the comparison would be cleaner with a matched-architecture deterministic baseline.
 
 ### Trivial
-
-1. **"ε-VAE" name not explained in the body**: The title uses "ε-VAE" but the body exclusively uses \OURS (presumably a macro). The paper never explicitly states what ε-VAE stands for or why the epsilon symbol is used (beyond the general use of ε for noise in diffusion). A brief justification of the name would help.
-
-2. **AdaGN conditioning comparison without quantitative support**: The paper mentions experimenting with AdaGN conditioning that "did not yield significant improvement" (line 172) but provides no numbers or figure. A small quantitative comparison would make this design decision more transparent.
+4. The name "ε-VAE" is imprecise: there is no variational objective or KL regularization on the latent, which may confuse readers about the paper's relationship to the VAE family.
+5. Some figure captions are dense and could benefit from clearer visual callouts (e.g., Figure 5's diversity visualization).
 
 ## Nice-to-Haves
-
-- **Ordering sensitivity in ablation**: The perceptual matching (step 4) and adversarial trajectory matching (step 5) are applied in a fixed order. Testing the reverse order would check for interaction effects.
-- **Discriminator training dynamics**: The time-dependent discriminator (Eq. 7) presents known training challenges; reporting discriminator loss curves would build confidence in training stability.
-- **NFE vs. rFID table for all model variants**: Figure 3 (left) hints at this, but a full table for every model size would strengthen the practical utility message.
-- **Class-conditional generation**: The unconditional setting yields high absolute FID values (24.9–46.6 at 128×128). While the paper appropriately disclaims SOTA status, a class-conditional experiment would provide a more standard benchmark consistent with common practice.
-- **Qualitative reconstruction of the same image with different seeds at moderate compression**: Figure 5 shows diversity at high compression, but a row at moderate compression (where stochasticity is said to be minimal) would concretely illustrate that variance is low when the latent is informative.
+- A deterministic ADM U-Net decoder baseline (see Major weakness 1) would cleanly resolve the architecture confound.
+- Per-instance reconstruction metrics (PSNR, SSIM, LPIPS) across all model scales and compression rates would clarify whether improved rFID reflects genuine per-sample fidelity (see Minor weakness 2).
+- Analysis of latent space properties (e.g., reconstruction consistency across noise seeds, latent interpolation smoothness) would strengthen the connection between the proposed tokenization and downstream generation quality.
+- A comparison against more recent tokenizers (e.g., from Stable Diffusion 3, Kang et al. 2023, or the VAE used in DiT) would help calibrate absolute quality, though the paper's focus on controlled comparison partially justifies the VQGAN baseline.
 
 ## Removed Points
-
-These points are flagged to be removed, treat them with caution:
-
-- **"Baseline reconstruction quality is surprisingly poor" (Harsh Critic Critical Issue 4)**: The reviewer faults the DDPM baseline (rFID 28.22) as too weak. But this is the *intentional starting point* of the ablation study, clearly described as "the vanilla diffusion setup from Ho et al. 2020" (lines 404–406). The paper does not claim this naive baseline is competitive; it is the baseline from which improvements are measured. This criticism misunderstands the role of a controlled ablation.
-- **Missing appendix content / time-dependent discriminator architecture**: The reviewer faults the paper for not describing the discriminator architecture in the main text. But as per instructions, appendix sections are stripped by the parser; they exist in the original submission.
-- **Baseline choice question (VQGAN vs. FSQ/MAGVIT v2)**: The reviewer asks why VQGAN (2021) is the baseline rather than more recent tokenizers. The paper explicitly justifies VQGAN as "a strong baseline due to its widespread use in modern image generative models" (line 249). This is a defensible scope choice.
-- **"ε-VAE not used in the body" formatting**: The reviewer claims the term is not explained or used. The paper uses \OURS as a macro throughout; this is a LaTeX formatting convention, not a substantive omission.
-- **Generic "add more models / larger dataset"**: Not applicable; the model zoo and scale experiments are thorough.
+- *"The paper's FID values are far from state-of-the-art for ImageNet generation"* — The paper explicitly states this is not its goal (line 397) and the experiments are designed for controlled comparison, not SOTA chasing.
+- *"Missing related works"* — Cannot verify without external sources; the paper provides a background section and defers broader related work to the appendix.
+- *Formatting/style nitpicks* — These are parser artifacts, not author errors.
+- *Typo/grammar-based criticisms* — These reflect PDF extraction artifacts, not the original submission.
+- *"Cannot be independently verified"* — All cited models, benchmarks, and datasets are assumed to exist and be released as of the submission date.
 
 ## Novel Insights
-
-The most valuable insight from this set of reviews is that the paper's comparison is fairly strong overall, but the architecture confound (UNet vs. BigGAN) is the one issue that a skeptical reader will latch onto. The reviewer's suggestion of a deterministic-UNet decoder control is the single most impactful addition the authors could make, as it would cleanly separate the contribution of the diffusion process from architectural inductive biases. The ablation data already partially addresses this (ADM UNet alone at step 3: rFID 22.04 is much worse than VQGAN-B at 11.15), but an explicit control experiment would be more convincing.
+Both the strengths and weaknesses center on a single tension: the paper proposes a genuinely novel framing (denoising as decoding) and executes a thorough design-space exploration, but the one comparison the community would most want to see — a deterministic U-Net decoder at matched architecture — is absent. The ablation study's structure (Table 3) is the paper's strongest internal evidence: it decomposes the gain from pure diffusion baseline (rFID 28.22) to final system (rFID 6.24) and shows that ~75% of the improvement comes from diffusion-specific losses and scheduling, not architecture alone. This suggests the confound is real but likely not dominant. The paper would be substantially strengthened by closing this gap rather than by expanding to more baselines or metrics.
 
 ## Suggestions
-
-1. **Report the exact loss weights for ε-VAE** — the coefficients λ<sub>score</sub>, λ<sub>LPIPS</sub>, and λ<sub>adv</sub> used in the final objective. This is the single most important fix for reproducibility.
-2. **Either evaluate reconstruction rFID over multiple seeds (report mean ± std) or use fixed random noise** for the reconstruction evaluation to demonstrate that the improvement is robust to stochasticity.
-3. **Add a control experiment: train a deterministic UNet decoder** (same ADM architecture as ε-VAE, trained with reconstruction + LPIPS + adversarial losses, no diffusion) at comparable parameter count to isolate the benefit of iterative denoising from the UNet architecture.
-4. **Tone down the "tokenizers unchanged" claim** (line 30) or cite the works that challenge this narrative — the paper's contribution is strong enough without over-claiming the gap.
+1. **Add a deterministic U-Net decoder control**: Train an ADM U-Net decoder to predict pixels directly (no diffusion process) using the same LPIPS and adversarial losses as the baseline, at matched scales. If the diffusion variant still wins, the core claim stands. If the deterministic U-Net matches it, the contribution should be reframed as "U-Net-based decoding for tokenization" with diffusion as a component.
+2. **Report per-instance metrics**: Add PSNR, SSIM, and/or per-image LPIPS alongside rFID for reconstruction experiments. Even reporting these for a representative subset of models (B, M, H) would clarify whether the rFID gains reflect genuine fidelity improvement.
+3. **Clarify the runtime comparison**: Report throughput with a matched-architecture deterministic decoder, or at minimum with the same model size (B vs. B) to disentangle architecture cost from iteration cost.
 
 ## Score and Decision
 
-**Originality**: 7/10 — The idea of reframing decoding as denoising is novel, though the individual components (diffusion, rectified flow, LPIPS, adversarial training) are established. The combination and systematic study are the contribution.
+The paper makes a genuine conceptual contribution with thorough empirical support. The core confound — architecture vs. decoding paradigm — is real and prevents full substantiation of the central claim, but it is addressable in revision and does not invalidate the overall contribution. The ablation study provides strong indirect evidence that diffusion-specific components, not architecture alone, drive the gains. For these reasons, the paper is at the borderline but leans toward acceptance given the novelty and thoroughness of the design exploration.
 
-**Importance**: 8/10 — Visual tokenization is a bottleneck for generative models; improving it has broad impact. The 40%+ rFID improvement at matched parameter counts is practically significant.
-
-**Claims support**: 7/10 — The empirical evidence is strong and systematic, but the architecture confound and missing loss weights leave some ambiguity in attribution and reproducibility.
-
-**Soundness**: 7/10 — Experiments are well-controlled across model scales, compression rates, and resolutions. The ablation is the gold standard. Minor gaps: single-seed evaluation for a stochastic system, architecture confound.
-
-**Clarity**: 8/10 — Well-written, clear motivation, clean figures.
-
-**Community value**: 8/10 — The approach is immediately applicable to latent diffusion pipelines and the ablation provides a recipe for future work.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,87 +1,79 @@
-Now I have all the information I need. Let me compose the final consolidated review.
+Now I have all the information needed. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes PAST (Privacy-Aware Sparsity Tuning), an adaptive ℓ₁ regularization method for defending against membership inference attacks (MIAs). The core idea is to assign per-parameter weights to the ℓ₁ penalty based on each parameter's "privacy sensitivity"—defined as the gradient of the loss gap between members and non-members with respect to that parameter. PAST is applied as a post-convergence tuning stage and is designed to focus regularization on the small fraction of parameters that most affect privacy leakage. Experiments on five datasets (Texas100, Purchase100, CIFAR-10/100, ImageNet) against multiple attack types show improved privacy-utility trade-offs compared to eight non-DP defense baselines.
+This paper introduces Privacy-Aware Sparsity Tuning (PAST), a weighted ℓ₁ regularization method that adaptively penalizes model parameters based on their privacy sensitivity—defined as the gradient of the loss gap between members and non-members—to defend against membership inference attacks (MIAs). The key insight is that only a small fraction of parameters dominate privacy leakage, so PAST applies stronger regularization to privacy-sensitive parameters while sparing less sensitive ones, aiming to achieve a better privacy–utility trade-off than uniform regularization. Experiments across five datasets (Texas100, Purchase100, CIFAR-10/100, ImageNet) and eight attack methods show improved P1 scores and favorable trade-off curves compared to several baselines.
 
 ## Strengths
 
-1. **Novel and well-motivated proxy for privacy sensitivity.** The gradient of the loss gap between members and non-members is a conceptually clean way to measure each parameter's contribution to privacy leakage. The paper validates this proxy by showing (Figure 1a) that the loss gap and attack advantage rise synchronously during standard training.
+1. **Novel and well-motivated core idea**: The paper demonstrates empirically (Figure 1b) that the cumulative sensitivity of the top 20% of parameters exceeds 89.27% of the total, and 97% of parameters have sensitivity below 0.1. This motivates a departure from uniform regularization toward adaptive per-parameter penalties—a clean and intuitive contribution (Section 3.1).
 
-2. **Computational efficiency and simplicity.** PAST adds only one extra gradient backpropagation per tuning epoch, increasing training time by 10.4% relative to standard training (Figure 5c). This makes it practical for deployment.
+2. **Consistent P1 score improvements across five diverse datasets**: With a fixed α = 2.5, PAST improves P1 over the undefended baseline on Texas100 (0.572 vs 0.557), Purchase100 (0.812 vs 0.792), CIFAR-10 (0.784 vs 0.638), CIFAR-100 (0.575 vs 0.360), and ImageNet (0.438 vs 0.350) (Table 1), demonstrating broad applicability across tabular and vision datasets.
 
-3. **Compatibility with existing defense methods.** Because PAST operates as a post-convergence tuning phase, it can be stacked on top of pre-existing defenses. Table 2 shows that applying PAST to five different pretrained defenses (AdvReg, CCL, LabelSmoothing, MixupMMD, RelaxLoss) consistently improves the P₁ score (e.g., from 0.720 to 0.784 for AdvReg), demonstrating plug-and-play integration.
+3. **Ablation isolating the adaptive-weight mechanism**: Comparison of L1+Ours (PAST) vs L1, L2, and L2+Ours on CIFAR-100 shows PAST outperforms all fixed-weight alternatives (Figure 4a), confirming that the adaptive weighting, not just sparsity, drives the improvement (Section 4.2).
 
-4. **Thorough ablation studies on hyperparameters.** The paper systematically analyzes the effect of the focusing parameter α (Figure 5a), the base regularization strength λ (Figure 5b), and the number of tuning epochs (Figure 5c), providing practical guidance for selecting hyperparameters.
+4. **Compatibility with existing defenses**: Tuning with PAST on top of five pre-trained defense methods (AdvReg, CCL, LabelSmoothing, MixupMMD, RelaxLoss) consistently increases P1 scores (e.g., MixupMMD from 0.755 to 0.825 in Table 2), showing it can serve as a plug-in post-processing module.
 
-5. **Consistent empirical improvements across diverse settings.** PAST shows gains over eight non-DP baselines across five datasets, multiple attack types (NN-based, metric-based, augmentation-based), and multiple architectures (ResNet, DenseNet, MLP), under the strongest black-box adaptive attack setting.
+5. **Low computational overhead**: PAST adds only 10.4% to standard training time (1374s vs 1245s on CIFAR-100 with DenseNet121), making it practical (Figure 4c).
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **Missing DP baselines combined with unsupported "state-of-the-art" claim.** The paper claims "state-of-the-art balance in the privacy-utility trade-off" (Abstract, Conclusion) but does not compare against any differential privacy (DP) training method (e.g., DP-SGD). DP methods are the standard rigorous defense against MIAs, operate under the same black-box threat model, and are directly comparable. The related work section also omits DP entirely. The paper's results are credibly superior to the non-DP baselines tested, but the "state-of-the-art" claim is unsubstantiated without engaging with the dominant paradigm for provable MIA defense. The authors should either (a) add DP-SGD baselines at comparable utility levels, or (b) temper the SOTA claim to reflect the scope of comparison (e.g., "among empirical, non-DP regularization-based defenses").
+1. **The central SOTA claim is not backed by a quantitative per-dataset comparison against baselines.** Table 1 only compares PAST to an *undefended* model on P1 score—none of the eight defense baselines appear in the table. The trade-off curves in Figures 2 and 3 provide visual comparison, which is helpful, but (a) no summary table aggregates P1 or advantage at fixed accuracy points across all datasets and baselines, (b) the curves lack error bars or statistical significance measures, and (c) the paper makes the strong claim that "the privacy-utility curves of our methods are always below those of others" for points exceeding vanilla utility—a claim the reviewer disputes based on examination of certain subfigures (e.g., NN attack on CIFAR-100). Without a quantitative summary table and error analysis, the reader cannot independently verify the SOTA assertion. This is the most significant weakness because it directly affects the paper's central contribution claim.
 
 ### Minor
 
-1. **Core motivational claim rests on a single observation.** The paper's entire motivation—that "only a small fraction of parameters substantially impact the privacy risk" (Section 3.1)—is supported by a single figure (Figure 1b) from one dataset (CIFAR-10) and one architecture (ResNet-18). No evidence is provided for different datasets, model sizes, or training stages. While the method itself is validated across diverse settings, the generality of the driving observation remains unclear. Showing this distribution for at least one more dataset or architecture would significantly strengthen the motivation.
+2. **The update schedule for the adaptive weights γᵢ is never specified.** The paper defines γᵢ in terms of ∇_{θᵢ} 𝒢̃_θ (Section 3.2) and states it is "detached from the computational graph," but never states whether γᵢ is computed once at the start of tuning, recomputed each epoch, or updated every iteration. Since the model changes during tuning, the loss gap gradient will also change, making the schedule potentially consequential for behavior and reproducibility. This is not a trivial implementation detail—it affects both the method's practical behavior and the ability to reproduce it.
 
-2. **No reported variance or statistical significance.** All experimental results (trade-off curves, tables) appear to come from single runs. There are no error bars, confidence intervals, or statements about multiple seeds. Privacy-utility trade-offs can vary across runs due to stochasticity in training, attack simulation, and data splits, making it impossible to assess whether the observed improvements (e.g., Table 1: 0.572 vs. 0.557 on Texas100) are statistically meaningful. This is a standard expectation for empirical papers in this field.
+3. **No analysis of sensitivity to the inference (non-member) set size or quality.** PAST requires a held-out set of non-members drawn from the same distribution as the training data to compute the loss gap and its gradients. The paper acknowledges this set is used (Section 4.1, Datasets paragraph) but does not study how the privacy–utility trade-off degrades when the inference set is small, noisy, or drawn from a shifted distribution. The Limitations section (end of paper) does not mention this requirement at all. While many competing defenses (Mixup+MMD, AdvReg) share this requirement, a practical assessment of robustness to inference set quality is needed to understand deployment viability.
 
-3. **Reliance on non-member data insufficiently discussed.** PAST requires an inference set of non-member examples to compute the loss gap and its gradient (Section 3.2). In many real-world deployments, obtaining a representative set of non-members from a sensitive distribution is impractical. While the paper notes that other methods (Mixup+MMD, AdvReg) share this requirement, it does not address how a practitioner might obtain such data (e.g., public proxy data, held-out data, synthetic data) or analyze sensitivity to the composition of the non-member set. The limitations section (Conclusion) only discusses label-only and white-box attacks, missing this practical constraint.
+4. **The "average attack advantage" used in ablation figures (Figures 4a, 5a, 5b) is not defined.** The paper defines Adv(A) for a single attack (Definition 1 in Section 4.1), but the ablation figures plot "average attack advantage" without specifying which attacks are averaged. If it includes all eight attacks, some are much easier than others and averaging could mask important differences. This makes the ablation results harder to interpret.
 
-4. **Lack of comparison between tuning and training from scratch.** PAST is applied as a post-convergence tuning stage. The paper claims this is beneficial because "the loss gap can more accurately reflect member information in a roughly converged model," but provides no empirical comparison against applying PAST from the beginning of training. This comparison would clarify whether the tuning stage design is necessary or merely convenient.
+5. **The motivational privacy-sensitivity analysis (Figure 1b) is only shown for one configuration (ResNet-18 on CIFAR-10).** While this is sufficient to motivate the approach, the paper would be strengthened by showing at least one additional architecture/dataset combination (e.g., DenseNet on CIFAR-100) to demonstrate the sparsity pattern is not an artifact of a particular model choice.
 
-5. **Normalization within modules not justified.** The privacy sensitivity weights are normalized within each associated module (e.g., linear layer) rather than globally (Equation in Section 3.2). The choice of within-module normalization is not explained or ablated. This could have implications for layers with very few parameters or for the relative emphasis across layers.
-
-6. **P₁ score construction not justified.** The P₁ score (Table 1) is computed using the *highest* attack advantage across all attack methods. This conservative/worst-case choice is stated but not justified, and it contrasts with the trade-off curves which appear to use per-attack advantage. A brief justification would improve clarity.
+6. **Hyperparameter tuning procedure for baselines is not described.** The paper states it "aligns with protocols established by previous work" (Section 4.1) but does not specify whether each baseline underwent its own hyperparameter search. Without this detail, the reader cannot assess whether comparisons might be biased by suboptimal baseline tuning.
 
 ### Trivial
-None.
+
+7. **The notation \widetilde{𝒢}_θ (with tilde) is used in Equation (5) but never defined.** The paper defines 𝒢_θ (the loss gap), but the tilde variant appears without explanation. Context suggests it is the loss gap used for normalization within a module, but this should be stated explicitly.
+
+8. **The heading "w/o" in Table 1 is ambiguous**—the caption clarifies it means undefended, but "Vanilla" or "None" would be clearer.
 
 ## Nice-to-Haves
 
-- **DP-SGD baseline** (as discussed above) would either validate or bound the method's SOTA claim.
-- **Broader validation of the sparsity claim** across at least one additional dataset/architecture.
-- **Variance reporting** with 3–5 random seeds.
-- **Sensitivity analysis** of PAST's weights to different samples of the inference set (e.g., bootstrap resampling).
+- **Comparison with differential privacy (DP-SGD)** would contextualize PAST against the dominant paradigm for formal privacy guarantees. This is not a required baseline (DP is a fundamentally different class of defense, and many MIA defense papers omit it), but including it would strengthen the SOTA claim.
+- **An ablation varying the inference set size** (number of non-member examples used to compute privacy sensitivity gradients) would directly address the practical concern about reliance on non-member data.
+- **Showing PAST can be separately tuned (not just fixed at 50 epochs, α=1.5) for each pre-trained defense** in Table 2 would strengthen the compatibility experiment, though the fixed-setting result already demonstrates robustness.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-1. *"The trade-off curves (Figs. 2, 3) are dense and hard to parse"* — This is a figure-formatting/readability nitpick. Removed per hard rules on formatting/style nitpicks.
-
-2. *"The absence of DP is especially notable because the paper's own related work section discusses overparameterization and MIA defenses but omits DP entirely"* — While the overall DP-baseline criticism is kept as Major, this specific sub-point about the related work section is too close to a "missing related work" complaint. The core criticism (missing DP baseline for SOTA claim) stands independently.
-
-3. *"Broader impacts: The paper focuses on a positive application... but does not discuss potential negative uses"* — This is a generic expectation that exceeds standard practice for a methods paper. Nice-to-have at most, not a weakness.
-
-4. *"The loss gap itself is a proxy; the paper shows correlation in Fig. 1a but does not discuss whether this gradient is stable or noisy"* — The paper provides a reasonable validation (synchronous rise of loss gap and attack advantage) for using the loss gap as a proxy. Demanding a stability/noise analysis of the gradient is a methodological stretch beyond what is typical for a paper of this type.
-
-5. *"Statistical significance tests" and "Ablation on training from scratch vs. tuning" and "Sensitivity of weight assignment to inference set composition"* — Some of these appear in the "Strengthening the Paper on Its Own Terms" section. The significant ones (tuning vs. from-scratch) are already in the Minor weaknesses. The others are Nice-to-Haves that don't affect the core validity.
+- **Criticism about missing DP comparison as a "Critical Issue"** — downgraded to Nice-to-Have. DP is a different class of defense (provable guarantees vs. empirical regularization), and many MIA defense papers do not include it. The paper compares against eight baselines appropriate to the empirical regularization setting.
+- **Criticism about sensitivity analysis only on one architecture** — downgraded from a critical issue to a minor weakness. The motivational figure is sufficient to illustrate the insight; the core effectiveness claims are validated across multiple datasets and architectures in the main experiments.
+- **The criticism that the tilde is "likely a typo"** — kept as a minor clarity issue but not a typo; it's a missing definition.
+- **Strength Finder's generic strength about "addressing an important problem"** — this is too generic and doesn't add information; removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews identify standard methodological gaps (missing DP baselines, no variance reporting, limited generality of the motivational claim) rather than offering novel technical insights about the method or problem. The most useful observation is the meta-level point that the paper's strongest claim ("state-of-the-art") overreaches relative to the scope of baselines tested, which is a framing issue the authors should resolve.
+None beyond the paper's own contributions. The reviews do not surface a perspective that the paper itself does not already articulate.
 
 ## Suggestions
 
-1. **Add DP-SGD as a baseline** at several privacy budgets that yield comparable utility levels, and plot the privacy-utility trade-off curves. This is the single most impactful change: it either validates the SOTA claim or honestly contextualizes PAST's performance.
+1. **Provide a clear algorithm box** specifying the update schedule for γᵢ (how often recomputed, whether accumulated across iterations, whether detached from the computational graph at each step). This would resolve the main reproducibility concern.
 
-2. **If DP baselines cannot be added**, revise all instances of "state-of-the-art" to accurately reflect the comparison scope (e.g., "state-of-the-art among non-DP regularization defenses" or "superior privacy-utility trade-offs compared to existing empirical defenses").
+2. **Add a quantitative summary table** directly comparing PAST to all baselines on P1 score (or advantage at a fixed accuracy point) across datasets, ideally with variance estimates. The curves are informative but a table would definitively support the SOTA claim.
 
-3. **Report all key results with variance** (mean ± std over 3–5 random seeds), including error bars on trade-off curves and confidence intervals on P₁ scores in Table 1.
+3. **Include an ablation on inference set robustness**—vary the number of non-member examples used and report how the trade-off changes. Even a simple experiment (100%, 50%, 10% of the inference set) would substantially strengthen the practical contribution.
 
-4. **Strengthen the motivational claim**: show privacy sensitivity distributions for at least one more dataset (e.g., CIFAR-100 or Purchase100) to demonstrate the sparsity phenomenon is not an artifact of a single setting.
+4. **Define "average attack advantage"** by explicitly listing which attacks are averaged and consider reporting per-attack results alongside the average.
 
-5. **Acknowledge and discuss the non-member data requirement** more directly in the limitations section, and if possible, analyze sensitivity to the choice and size of the non-member set.
+5. **State the tuning schedule for γᵢ explicitly** in the method section and clarify that the gradient of the loss gap is taken before the regularization term is added (i.e., it is not a gradient of the regularized objective).
 
 ## Score and Decision
 
-The paper presents an interesting and intuitive method with clear empirical support across a wide range of settings. The core idea (adaptive ℓ₁ regularization based on privacy sensitivity) is novel, computationally lightweight, and compatible with other defenses. However, the paper overclaims by asserting "state-of-the-art" without engaging with DP methods, and it lacks basic variance reporting that is standard for empirical work. These are fixable issues that do not invalidate the core contribution but do reduce confidence in the current presentation. The paper would be competitive after addressing the major weakness (DP comparison or claim tempering) and the variance issue.
+This paper presents a genuinely interesting and well-motivated idea — adaptive per-parameter regularization based on a simple privacy-sensitivity proxy. The core insight (privacy risk is concentrated in a small fraction of parameters) is clean, and the experiments demonstrate consistent improvements across five datasets and compatibility with existing defenses. The low computational overhead is a practical advantage.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+However, the paper has significant presentation gaps that prevent it from being accepted in its current form. Most importantly, the central SOTA claim lacks a quantitative summary table comparing PAST against baselines on a common metric — the reader is asked to rely entirely on trade-off curves without error bars. Additionally, the method's key implementation detail (γᵢ update schedule) is underspecified, the average attack advantage metric used in ablations is undefined, and the practical sensitivity to inference set quality is unexamined. These are not fatal flaws — they are gaps in presentation and analysis that can be addressed — but they are substantial enough that the paper needs revisions before it meets the bar for acceptance.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

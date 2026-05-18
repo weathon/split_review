@@ -1,18 +1,22 @@
-Now I have all the information I need. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and can verify each reviewer claim against the actual text. Let me compose the final review.
+
+---
 
 ## Summary
 
-This paper proposes MARS, a backdoor defense for federated learning that replaces empirical, loosely-coupled statistical measures (norms, OOD scores, consistency) with a *malignity-aware* metric called Backdoor Energy (BE), defined as the Lipschitz constant of individual neurons. The method extracts the top BE values per layer to form concentrated backdoor energies (CBEs), then uses Wasserstein-distance-based K-Means clustering (K-WMeans) to separate benign from backdoored models. Experiments across three datasets, three SOTA attacks, and eight SOTA defenses show that MARS consistently outperforms existing methods, often achieving near-perfect detection (100% TPR, 0% FPR).
+This paper proposes MARS, a backdoor defense for Federated Learning that introduces "backdoor energy" (BE) as a per-neuron measure of maliciousness, approximated by the per-neuron Lipschitz constant computed from model parameters alone (no clean data or trigger needed). MARS extracts the top-κ% BE values per layer into a "concentrated backdoor energy" (CBE) vector, then uses Wasserstein distance-based K-Means (K-WMeans) to separate backdoor from benign models, selecting the trusted cluster via center-norm rather than majority size. Experiments across three datasets, three SOTA attacks, and eight SOTA defenses show MARS consistently outperforms existing defenses, handles attacker ratios from 0% to 95%, and shows resilience to an adaptive attack.
 
 ## Strengths
 
-1. **Novel, theoretically motivated malignity measure.** The paper derives an upper bound for BE (Theorem 1) linking backdoor relevance to the Lipschitz constant of each neuron, then shows that for neurons in the same layer, BE ordering depends only on the neuron-level Lipschitz constant. This provides a principled alternative to the ad-hoc statistical heuristics used by prior defenses, and does not require access to clean data or the attacker's trigger.
+- **Well-motivated diagnosis of why existing defenses fail**: The paper provides concrete experimental evidence (Figure 2) that norm constraint, OOD detection, and consistency detection are all bypassed by 3DFed — backdoor updates have smaller norms than benign ones, indistinguishable PCA projections, and cosine similarity lower than some benign pairs. This is a clear, empirically grounded motivation (Section 4.1).
 
-2. **Wasserstein distance-based clustering that handles order sensitivity.** The paper identifies a genuine failure mode of Euclidean and cosine distances when clustering CBEs: these metrics are sensitive to which specific neurons have high BE, causing backdoor models that differ in ordering to appear dissimilar. The toy example (Table 1) clearly demonstrates that Wasserstein distance correctly groups backdoor models together. This is a clean, well-motivated technical contribution.
+- **Novel and principled BE formulation that avoids data/trigger access**: Theorem 1 derives an upper bound on backdoor energy via Lipschitz constants, and Equation 3 reduces to the per-neuron Lipschitz constant alone — a quantity computable purely from model parameters. This is a genuinely new way to measure malignity without requiring client data, shadow datasets, or trigger reconstruction (Section 4.3).
 
-3. **Strong experimental results across diverse settings.** In Table 2, MARS achieves the highest CAD and ACC while maintaining near-zero ASR and low FPR across three SOTA attacks (MRA, CerP, 3DFed), three datasets (MNIST, CIFAR-10, CIFAR-100), and against eight SOTA defenses. The resilience to extreme attacker ratios (0%–95% in Table 5) and the adaptive attack analysis (Table 3) further demonstrate the method's robustness.
+- **Strong empirical results across diverse settings**: MARS consistently achieves the highest CAD and lowest ASR against 3 SOTA attacks (MRA, CerP, 3DFed) across 3 datasets, outperforming 8 existing defenses (Table 2), including the recent BackdoorIndicator from USENIX Security 2024 (Table 4). The comparison is comprehensive and the advantage is clear.
 
-4. **Clear motivation backed by empirical evidence.** Figure 2 provides a compelling visual demonstration of why existing defenses fail against 3DFed — showing that backdoor updates have norms, PCA projections, and cosine similarities that are indistinguishable from benign ones. This grounds the paper's central claim that loosely-coupled statistical measures are fundamentally insufficient.
+- **Robustness across extreme attacker proportions**: MARS achieves 100% TPR and 0% FPR for attacker ratios from 0% to 95% (Table 5), demonstrating both fidelity (no false exclusion when benign-only) and practicability (works even when attackers are a large majority).
+
+- **Transparent handling of adaptive attacks**: The paper designs a custom adaptive attack that minimizes BE via a regularization term, shows where the primary norm-based selection fails, and presents MARS* (majority-based fallback) that consistently defends across all λ values (Table 3). The limitation is acknowledged rather than hidden.
 
 ## Weaknesses
 
@@ -21,57 +25,67 @@ None.
 
 ### Major
 
-1. **The computation of per-neuron Lipschitz constants is completely unspecified, undermining reproducibility.** The paper's entire detection pipeline hinges on computing ∥f_k^(l)∥_{Lip} for every neuron (Eq. 3), yet it never explains how this is done. Exact Lipschitz computation for neural networks is NP-hard; standard practice uses spectral norm bounds or per-layer estimates. The paper provides no algorithm, no reference to a specific estimation method, and no discussion of computational cost. A reader cannot reproduce the core metric without guessing how it is computed. Given that the method's validity depends entirely on these values, this is a serious gap.
-
-2. **The leap from BE upper bound to the Lipschitz-only approximation is not empirically validated.** The paper's key move is to replace the full BE (expected activation difference) with the neuron-level Lipschitz constant alone. The theoretical argument (Theorem 1 → same-layer comparison → Lipschitz-only) is mathematically sound but rests on the unsubstantiated claim that "the upper bound of backdoor energy reasonably reflects the distribution of BE." The paper provides no targeted experiment showing that the Lipschitz constant of individual neurons actually correlates with backdoor relevance (e.g., by comparing BE values for neurons known to be backdoor-related against benign neurons). While the overall detection results are strong, they do not specifically validate this intermediate claim — the method could succeed for reasons other than the BE metric being meaningful, and the approach may not generalize to attacks that do not produce a Lipschitz-signal discrepancy.
-
-3. **Experimental results lack any measure of statistical variance.** Across all tables, only single values are reported with no standard deviations, confidence intervals, or indication of how many random seeds/runs were averaged. This is especially concerning given the near-perfect results (100% TPR, 0% FPR across many settings in Tables 2 and 5). In FL, client selection and data partitioning introduce considerable stochasticity, and the absence of variance reporting makes it impossible to assess whether these results are robust or artifacts of a specific configuration.
+- **The core BE-to-Lipschitz approximation is not empirically validated.** The paper introduces BE as the expected activation difference between clean and backdoor inputs, derives an upper bound via Lipschitz constants, drops the product terms (same-layer neurons share all preceding-layer Lipschitz factors), and equates BE to the per-neuron Lipschitz constant alone (Eq. 3 → Eq. 3). The paper states "the upper bound of backdoor energy reasonably reflects the distribution of BE" and "we do not need the exact value of BE ... but only the relative magnitudes" — but provides no direct evidence for either claim. Without showing that per-neuron Lipschitz constants are actually higher in backdoor models than benign models for the attacks considered, the "malignity-aware" label rests on an unverified premise. The paper's overall empirical success could stem from BE capturing backdoor information, but it could also stem from some other property of the CBE feature. A simple plot of CBE values for backdoor vs. benign models, or an ablation replacing BE with a different per-neuron measure (e.g., weight norm, activation norm), would substantiate the core claim.
 
 ### Minor
 
-4. **Baseline hyperparameter tuning is not described.** The paper evaluates eight SOTA defenses but does not explain how they were configured or tuned for fair comparison. Several baselines (Multi-Krum, FLAME, DeepSight) have tunable parameters (e.g., number of trimmed updates, clipping thresholds) that significantly affect performance. Without this information, it is unclear whether the comparisons are equitable.
+- **The claimed advantage of Wasserstein distance over Euclidean/cosine distance lacks empirical support beyond a toy example.** The toy example (Table 1) demonstrates the order-sensitivity issue in principle, but no experiment compares K-WMeans with standard K-Means (Euclidean or cosine) on actual CBE vectors. The paper does not specify whether the top-κ% values per layer are sorted before concatenation; if they are (as TopK naturally does within each layer), the order-sensitivity argument weakens. A direct comparison on TPR/FPR/ASR would confirm whether Wasserstein distance is empirically superior or whether Euclidean distance on sorted values would suffice.
 
-5. **The norm-based cluster selection heuristic has known failure modes that are addressed only post-hoc.** The adaptive attack section shows that when backdoor energy is sufficiently constrained (λ ≥ 0.05), the norm-based selection fails entirely (0% TPR, ~100% FPR). The paper switches to majority voting (MARS*) to recover, but this contingency reveals that the primary heuristic is not robust to informed adversaries who optimize against BE. While the fix works, it is an ad-hoc adjustment rather than a principled component of the defense.
+- **No standard deviations or confidence intervals are reported.** FL experiments involve stochasticity from client selection, data sampling, and training dynamics. Key results (Tables 2–5) are reported as single values without multiple runs. While single-run reporting is common in some FL papers given computational costs, the lack of variance information makes it impossible to assess the stability of the reported advantages.
 
-6. **No ablation or sensitivity analysis for key hyperparameters.** The top-κ percentage (5%) and cluster-merging threshold ϵ (0.03) are set to fixed defaults with no exploration of their impact. The performance could be sensitive to these choices, particularly under different attack scenarios, data heterogeneity levels, or model architectures.
+- **Table 5 (attacker ratio experiment) omits the attack used and does not report ASR or ACC.** Only TPR and FPR are shown. Without ASR (to confirm backdoor mitigation) and ACC (to confirm model utility), it is unclear whether the defense's detection success translates to actual protection, especially at extreme ratios like 95% attackers where filtered aggregation could still be compromised.
+
+- **No sensitivity analysis for hyperparameters κ (default 5%) and ε (default 0.03).** These control the amount of BE information retained and the cluster-merging threshold, respectively. Their values could significantly affect performance, and the paper provides no ablation.
+
+- **The adaptive attack fallback (MARS*) reintroduces the majority assumption that norm-based selection was designed to avoid.** When the adaptive attack suppresses BE below benign levels (λ ≥ 0.05), norm-based selection inverts (picks the wrong cluster). The fallback switches to majority-based selection, which works — but this undercuts the paper's narrative of not relying on the majority assumption. While the paper is transparent about this, a more principled fallback (e.g., analyzing inter-cluster distance or distribution shape to detect role reversal) would strengthen the method.
+
+- **Edge case of colluding attackers sending identical models is not discussed.** If all colluding attackers send the exact same backdoor model (fully collusive), their CBEs would be identical, yielding Wasserstein distance of zero between them. The paper does not analyze whether this scenario would preserve the separation between clusters or break the norm-based selection logic.
 
 ### Trivial
-None.
+
+- Footnote references in the main text (e.g., "4" after "defense" on line 191) defer CAD definition to the appendix, which is stripped by the parser. This is standard practice but worth noting the main text is slightly incomplete without it.
 
 ## Nice-to-Haves
 
-- An ablation comparing BE (Lipschitz constant) against direct activation differences on a small shadow dataset would strengthen the core claim.
-- Reporting ImageNet-scale results (referenced in §7 of the original submission, stripped by parser) would improve confidence in scalability.
-- A discussion of the computational overhead of computing per-neuron Lipschitz constants for deeper models (e.g., ResNet-152).
+- A direct comparison of K-WMeans vs. Euclidean/cosine K-Means on CBE vectors for at least one attack/dataset pair, with and without sorting.
+- Sensitivity analysis varying κ (1%, 10%, 20%) and ε (0.01, 0.05, 0.1) on CIFAR-10 with 3DFed.
+- Standard deviations over 3 runs for key results (Tables 2, 3, 5).
 
 ## Removed Points
 
-These points were removed or downgraded from the original reviews after cross-checking against the paper; keep them only with caution:
+These points are flagged to be removed — treat them with caution.
 
-- **"BE has no theoretical or empirical evidence"** — Removed as overstatement. The paper provides a theoretical argument (Theorem 1 → upper bound → same-layer comparison), though the key step from upper bound to pure Lipschitz is not validated. Replaced with a more precise weakness (#2 above).
-- **"Table 4 does not show non-MARS values"** — Removed as unverifiable (table is an image). The accompanying text discusses comparative results.
-- **"Missing appendix sections"** — Removed per instruction: the parser strips these; they exist in the original submission.
-- **"Missing related work"** — Removed per instruction.
-- **"Formatting/typo concerns"** — Removed per instruction (parser artifacts).
-- **"Should evaluate on 500 clients"** — Removed as scope creep.
-- **"Demand for methods the reviewer prefers"** — Removed where the paper's choices are defensible for its class.
+- **Criticism that CAD is not defined in the main text (from Harsh Critic Point 4).** The paper's footnote defers the formal definition to the appendix. Per the review rules, weaknesses about content deferred to the appendix (which is stripped by the parser) are removed — the definition exists in the original submission.
+- **Criticism that the Lipschitz approximation "is not validated" framed as if no theoretical justification exists.** The paper does provide theoretical motivation (Theorem 1, the observation that same-layer neurons differ only in the per-neuron Lipschitz term, and the explicit statement that only relative magnitudes matter). The retained weakness is narrowed to: direct empirical validation of the approximation is missing, not that it lacks any justification.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews confirm the paper's own identification of the core problem (loosely-coupled statistical measures) and the proposed solution (malignity-aware BE + Wasserstein clustering), while highlighting specific gaps in validation and reproducibility that the authors need to address.
+None beyond the paper's own contributions. The reviews do not surface an unexpected connection or cross-cutting observation not already present in the paper.
 
 ## Suggestions
 
-1. **Specify the Lipschitz computation** — Provide a concrete algorithm for computing per-neuron Lipschitz constants (e.g., using spectral norm of the incoming weight matrix for ReLU-activated neurons, or a standard estimation method), and report the computational overhead.
-2. **Validate BE empirically** — Conduct a targeted experiment comparing the Lipschitz constant of each neuron against the true activation difference (on a small available dataset or synthetic trigger) to show that BE correlates with backdoor relevance.
-3. **Report variance** — Run all experiments with at least 5 random seeds and report mean ± std for ACC, ASR, TPR, FPR, and CAD.
-4. **Add ablation studies** — Show sensitivity of results to κ (top-K percentage), ϵ (cluster-merging threshold), and choice of Wasserstein vs. other distributional distances.
-5. **Describe baseline configuration** — Clarify how each baseline defense was tuned and whether hyperparameters were set to the defaults recommended by the original papers.
-6. **Evaluate against semantic/edge-case backdoors** — Add attacks that do not rely on the constrained optimization style of CerP/3DFed to test whether BE generalizes beyond the Lipschitz-signal scenario.
+1. **Add direct empirical validation of the BE approximation.** A simple figure showing CBE (or top-κ BE values) for benign vs. backdoor models across the evaluated attacks (3DFed, CerP, MRA) would directly test the core claim. An ablation replacing BE with an alternative per-neuron statistic (weight L2 norm, activation variance on random inputs) would show whether the specific Lipschitz-based measure is responsible for the separation.
+
+2. **Add a clustering-metric comparison.** Compare K-WMeans against standard K-Means with Euclidean distance (on both sorted and unsorted CBE vectors) for at least one dataset/attack pair, reporting clustering accuracy or downstream TPR/FPR.
+
+3. **Report standard deviations for key results** (at least 3 runs) to establish statistical reliability.
+
+4. **Specify the attack used in Table 5** and include ASR and ACC columns alongside TPR/FPR.
+
+5. **Add a sensitivity analysis** for κ and ε, or at minimum state that the method is robust to moderate variation.
+
+6. **Discuss the identical-model collusion edge case** — whether the defense would still separate backdoor from benign models if all attackers send identical parameters, and whether the distance-threshold logic handles this gracefully.
 
 ## Score and Decision
 
-The paper introduces a genuinely novel idea (malignity-aware detection via neuron-level Lipschitz constants) and reports strong empirical results. However, it is held back by three major issues: (1) the per-neuron Lipschitz computation is completely unspecified, making the core method non-reproducible; (2) the key approximation (BE ≈ Lipschitz constant) is not empirically validated; and (3) the results lack any statistical variance, which is especially problematic given the near-perfect numbers. These are addressable but serious — the paper needs substantial additional detail and targeted validation before its contributions can be fully trusted.
+**Originality**: High — the concept of measuring "malignity" per neuron via a data/trigger-free Lipschitz-based measure is novel.  
+**Importance**: High — backdoor attacks in FL are a significant threat, and existing defenses demonstrably fail against SOTA attacks.  
+**Claims support**: Moderate — the empirical outcomes are clear, but the core mechanism (BE via Lipschitz constants lacks direct validation, and some experimental gaps (no std devs, no sensitivity analysis, missing details in Table 5) weaken the strength of the claims.  
+**Soundness**: Moderate-strong — the experiments are well-designed and cover extensive baselines, but missing variance information and the unvalidated central approximation reduce confidence.  
+**Clarity**: Good — the paper is well-structured and clearly written.  
+**Value to the community**: High — MARS could become a useful defense if the approximation is validated, and the diagnosis of existing defenses' failures is independently valuable.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+The weaknesses are real but addressable. None is fatal: the paper's strong empirical profile (consistent outperformance across 8 baselines, 3 attacks, 3 datasets, extreme attacker ratios) establishes genuine value even if some of the claimed novelties need tighter support. The paper would benefit from a major revision to address the validation gap for the BE approximation and the missing experiments, but the contribution is solid enough in its current form.
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

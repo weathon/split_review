@@ -1,20 +1,22 @@
-Now I have all the information I need. Let me compile the final review.
+I have thoroughly verified all claims against the paper. Here is the consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes SEIGNN, an implicit GNN designed to scale to large graphs by (1) a mini-batch training method that adds coarse-level nodes (representing graph partitions) to preserve long-range information that would otherwise be lost when sampling subgraphs, and (2) an unbiased stochastic solver (based on Russian roulette estimation of the Neumann series) that approximates the fixed-point equilibrium in far fewer iterations than standard iterative solvers. Experiments on six large graph datasets show SEIGNN achieves higher accuracy than both implicit GNN baselines (IGNN, MGNNI, USP) and traditional GNNs (GraphSAGE, ClusterGCN, GAT, GCN) while training significantly faster.
+SEIGNN addresses two key limitations of implicit GNNs on large graphs — full-batch memory costs and slow iterative solvers — by introducing (1) a mini-batch training method that augments sampled subgraphs with coarse-level nodes (representing graph partitions) to preserve long-range information flow, and (2) an unbiased stochastic Neumann-series solver that approximates the fixed-point equilibrium with far fewer iterations. Experiments on six large graph datasets show SEIGNN outperforming prior implicit GNNs (IGNN, MGNNI, USP) in both accuracy and training efficiency, with especially large gains on ogbn-arxiv (+5.1%) and ogbn-products (+2.7%) where MGNNI runs out of memory.
 
 ## Strengths
 
-- **Mini-batch training with coarse nodes is a novel and well-motivated solution to a real problem.** The paper correctly identifies that naively applying existing mini-batch methods to implicit GNNs blocks cross-subgraph information propagation, destroying their long-range modeling advantage. Adding coarse nodes that represent graph partitions and connecting them via coarse-coarse edges is a clean architectural fix. The ablation (Table 4) confirms that removing coarse nodes drops accuracy by 1–2%, and Table 5 shows that using ClusterGCN/GraphSAGE *without* coarse nodes within SEIGNN yields substantially worse performance (e.g., 62.5% and 61.56% on Yelp vs. 64.62% with coarse nodes).
+- **Effective mini-batch training with coarse nodes.** Tables 1 and 5 show SEIGNN outperforming existing mini-batch implicit GNNs (USP) by up to 1.5% absolute accuracy, and that naively applying standard mini-batch methods (ClusterGCN, GraphSAGE) to implicit GNNs causes large accuracy drops — confirming the coarse-node design is critical, not cosmetic.
 
-- **The stochastic solver delivers dramatic speedups with comparable accuracy.** Table 7 shows the stochastic solver (α=0.5) achieving 72.5% accuracy on ogbn-arxiv in 6.86 seconds total, while the original iterative solver needs 50 iterations for 72.6% accuracy in 171.99 seconds—a ~25× speedup for essentially identical accuracy. This is a practically meaningful advance.
+- **Unbiased stochastic solver reduces iterations without sacrificing accuracy.** Table 7 demonstrates that SEIGNN with just 3 solver iterations achieves higher accuracy than the original iterative solver at 50 iterations while using far less total time. Table 3 shows concrete speedups (6.21s/epoch on Reddit vs. 51.27s for USP).
 
-- **SEIGNN outperforms all baselines across six datasets while training faster.** On Reddit, SEIGNN scores 96.74% at 6.21 s/epoch vs. USP's 96.37% at 54.88 s/epoch (~8× faster). On ogbn-products, MGNNI runs out of memory while SEIGNN achieves 80.27%, demonstrating that SEIGNN is the first implicit GNN that scales to this dataset without sacrificing accuracy.
+- **Consistent SOTA accuracy across six large graphs.** Tables 1–2 show SEIGNN achieving the best test accuracy or micro-F1 on all datasets, with absolute improvements of 5.1% and 2.7% over prior implicit GNNs on the OGBN benchmarks. MGNNI runs OOM on ogbn-products, highlighting the scalability advantage.
 
-- **Per-degree analysis (Figure 3) provides mechanistic insight.** The finding that coarse nodes disproportionately help low-degree nodes (relative improvement ~6% for the lowest-degree group) directly supports the claim that coarse nodes supply global information to nodes that would otherwise be information-starved under mini-batch sampling. This goes beyond a simple ablation and strengthens the paper's causal story.
+- **Coarse-node idea generalizes beyond a single sampling strategy.** Table 6 shows that adding coarse nodes boosts accuracy when paired with ClusterGCN and GraphSAGE as the base sampler, indicating the method is not tied to Shadow-GNN specifically.
+
+- **Diagnostic analysis shows coarse nodes especially help low-degree nodes.** Figure 3 demonstrates that accuracy improvements concentrate on low-degree nodes, providing a clear mechanism story: coarse nodes act as high-connectivity bridges for nodes that otherwise receive limited information.
 
 ## Weaknesses
 
@@ -23,55 +25,50 @@ None.
 
 ### Major
 
-- **Preprocessing cost of graph partitioning is excluded from all efficiency comparisons.** The method requires partitioning the full graph to create coarse nodes. Table 3 reports training time per epoch, and Figure 2 shows accuracy vs. training time, but neither includes the partitioning time. On graphs with millions of nodes, partitioning (e.g., with METIS) can itself take minutes or hours. This is a one-time cost, but it still matters for the paper's central efficiency narrative. The paper also does not state the number of partitions \(k\) or the partitioning algorithm used, making it impossible to assess this overhead. The efficiency claims are incomplete without accounting for or at least reporting this preprocessing step.
-
-- **Ambiguity between the theoretical unbiasedness claim and the experimental configuration of the stochastic solver.** Proposition 1 proves the stochastic solver (Algorithm 1) is an unbiased estimator of the equilibrium. However, the paper states: "set maximum iterations as 3 for our solver with the continue probability α=0.5" (describing Table 7). It is unclear whether "max iter=3" refers to (a) the initial truncation point \(t=3\) in Algorithm 1 (after which the unbiased Bernoulli continuation begins—compatible with unbiasedness), or (b) a hard cap of 3 total iterations that truncates the stochastic process (which would introduce bias and contradict Proposition 1). The phrase "maximum iterations" is the same term used for the *original* solver's hard cap, inviting the interpretation that it is also a hard cap for the stochastic solver. This ambiguity undermines the central theoretical claim. The paper must clarify what is actually implemented and either verify that the implementation respects unbiasedness or reframe the claim as approximate.
+- **No variance analysis for the stochastic solver.** Proposition 1 proves unbiasedness, but the estimator multiplies tail terms by a factor of \(1/\alpha^{i-t}\) that grows rapidly with \(i\) (for \(\alpha < 1\)). The paper provides zero analysis of variance, no empirical variance diagnostics (e.g., std. deviation of \(\hat{Z}^*\) across repeated runs, loss-curve stability across random seeds), and no discussion of the bias-variance trade-off introduced by the Neumann truncation. Since the stochastic solver is a named contribution, the absence of any stability characterization is a significant methodological gap. Table 7 shows the solver *works*, but not whether it is *stable* — the observed accuracy could mask high variance that affects gradient quality or reproducibility across runs.
 
 ### Minor
 
-- **No analysis of the stochastic solver's variance.** The Russian roulette estimator involves a scaling factor \(1/\alpha^{k-t}\) that can amplify variance for small \(\alpha\). The paper proves unbiasedness but does not analyze variance or show empirically that the estimator's variance is low enough to not harm optimization. Table 7 uses a single \(\alpha=0.5\) without sensitivity analysis. If variance is high, the practical benefit of unbiasedness may be offset by noisy gradients.
+- **Mini-batch construction description could be more explicit.** The paper describes adding coarse nodes to the graph and then using standard sampling (Shadow-GNN with PPR) on the augmented graph, which is conceptually clear: coarse nodes are 1-hop neighbors of all nodes in their partition, so they naturally acquire high PPR relevance. However, the paper does not specify (a) which partitioning algorithm is used (e.g., METIS?), (b) how the number of partitions \(k\) is chosen, or (c) the top-k threshold for PPR auxiliary selection. These details would aid reproducibility and are expected for a method whose central novelty is the sampling procedure.
 
-- **No statistical significance / error bars reported.** Given that mini-batch training and stochastic solvers both introduce randomness, reporting results from a single run is insufficient. Standard deviations over multiple seeds would meaningfully strengthen the evidence.
+- **Linearity of the equilibrium equation is not discussed as a design choice.** The fixed-point equation follows MGNNI and is linear in \(Z^*\) (no activation function inside the equilibrium). The Neumann-series solver depends on this linearity. The paper never flags this as a scope limitation relative to nonlinear implicit GNNs (e.g., IGNN) or discusses what expressiveness is traded off. The framing as a general "implicit GNN" could mislead readers about the class of models SEIGNN applies to.
 
-- **"Total time" in Table 7 is not defined.** The column heading says "Accuracy and Total Time (second)" but it is unclear whether this is per-epoch time, time to convergence (if so, to what stopping criterion), or cumulative time over a fixed number of epochs. This should be clarified.
-
-- **The "cannot be directly used" claim about existing mini-batch methods is tested only within the SEIGNN architecture.** The paper argues that existing mini-batch methods (ClusterGCN, GraphSAGE) cannot be used for implicit GNNs generally. Table 5 demonstrates this within SEIGNN by comparing with/without coarse nodes—but SEIGNN is already a particular architecture. A direct test on a non-SEIGNN implicit GNN (e.g., IGNN or MGNNI with ClusterGCN sampling) would make the claim more bulletproof, though the argument that mini-batch sampling breaks cross-subgraph propagation is architecture-agnostic in principle.
-
-- **Coarse-coarse edge construction is potentially dense.** The rule "if there exists at least one edge connecting two different nodes between partitions" creates a coarse-coarse edge regardless of how many original edges cross the partition boundary. On densely connected graphs, this could produce a nearly complete coarse graph, diluting the information each coarse node carries. The paper does not discuss this or consider alternatives (e.g., weighting coarse-coarse edges).
-
-- **The use of phantom gradients (Geng et al., 2021) for the backward pass is not empirically justified.** Since the forward pass uses an approximate equilibrium from the stochastic solver, phantom gradients may interact with approximation error in ways that exact implicit differentiation would not. No comparison is provided.
+- **Missing hyperparameter sensitivity analysis for \(k\), \(t\), and \(\alpha\).** The number of partitions \(k\) is central to the coarse-node design, and the truncation step \(t\) and Bernoulli probability \(\alpha\) control the solver's behavior. Table 7 fixes \(\alpha=0.5\) and max_iter=3 implicitly determining \(t\), but no ablation explores how these choices affect accuracy or runtime. A small grid would suffice.
 
 ### Trivial
-- **Malformed figure reference in line 240.** The sentence begins with "3, showing that SEIGNN has significantly less GPU memory usage..." — this appears to be a broken reference to a figure (likely in the appendix) that was stripped by the parser.
+
+None.
 
 ## Nice-to-Haves
-- A sensitivity analysis of the stochastic solver's \(\alpha\) parameter (beyond \(\alpha=0.5\)).
-- A variance study of the stochastic solver's output across random seeds relative to the exact equilibrium.
-- An ablation showing how the number of partitions \(k\) affects the trade-off between accuracy and efficiency.
+
+- Add variance diagnostics for the stochastic solver: run the forward pass multiple times at a fixed checkpoint and report the standard deviation of \(\hat{Z}^*\) or of the resulting loss. This would immediately address the major weakness.
+- Add a sensitivity grid for \(\alpha \in \{0.3, 0.5, 0.7\}\) and \(k \in \{10, 50, 100\}\) (or dataset-relative values) on at least one dataset.
+- Explicitly state the linearity assumption in the method section (e.g., "SEIGNN follows MGNNI in using a linear equilibrium equation without per-iteration activations; this enables the Neumann-series solver but means the model cannot capture nonlinear interactions within the equilibrium").
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-- **Criticism about missing baseline hyperparameter details / implementation specifics.** These are typically in the appendix, which the parser strips from all papers. The original submission likely contains them.
-- **Criticism about missing dataset splits and preprocessing description.** Standard split usage is conventional, and details may reside in the appendix.
-- **Strength Finder's claim about the stochastic solver's theoretical "prowess" distinguishing it from truncated Neumann series.** While Proposition 1 is correct, this strength conflicts with the verified ambiguity about whether the implemented version is actually unbiased (see Major weakness above). Per protocol, the weakness prevails.
+
+These points from the harsh critic were verified against the paper and removed or downgraded:
+
+1. **"Mini-batch training mechanism is inadequately described to be reproducible (structural/fatal flaw)."** — The paper describes the process in adequate conceptual detail (lines 99–118): construct the augmented graph with coarse nodes and coarse-original/coarse-coarse edges, then apply standard minibatch sampling (Shadow-GNN with PPR) on the augmented graph. Since coarse nodes are 1-hop neighbors of every node in their partition, they naturally have high PPR relevance and will be selected as auxiliary nodes. The reviewer's concern that "what ensures coarse nodes are actually selected?" misunderstands that PPR is computed on the augmented graph. This is a clarity desideratum, not a fatal flaw, and is moved to Minor.
+
+2. **"Explanation (Section 4.1) is hand-wavy"** — The paper's explanation that mini-batches isolate subgraphs and prevent cross-subgraph propagation is a standard, clear intuitive argument. Not a weakness.
+
+3. **"USP comparison is uneven on Flickr"** — The paper explicitly acknowledges this ("Flickr being relatively small"). This is a fair description of a single data point, not a weakness.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviewers' analyses largely confirm and refine the paper's own claims rather than uncovering unexpected findings.
+
+None beyond the paper's own contributions. The reviews offer standard criticisms (missing analysis, clarity, ablation) but do not synthesize unexpected implications of the work.
 
 ## Suggestions
-1. **Clarify the stochastic solver's implementation.** State explicitly what "max iter=3" means: is it the initial truncation \(t\) in Algorithm 1, or a hard cap on total iterations? If the former, make clear that the Bernoulli process can continue beyond \(t\) without limit. If the latter, acknowledge the resulting bias, analyze its magnitude, and adjust the theoretical framing accordingly (renounce the unbiasedness claim in favor of "approximately unbiased" or "low-bias").
-2. **Report and include partitioning overhead.** State the algorithm, value of \(k\), and time required for partitioning each dataset. Show that even including this cost, SEIGNN's end-to-end time is competitive (or at least discuss the regime—number of training epochs—where the one-time cost is amortized).
-3. **Report results with error bars** (standard deviations over at least 3 random seeds) for the main accuracy and timing results.
-4. **Define "total time"** in Table 7 unambiguously.
-5. **Add a variance or convergence diagnostic** for the stochastic solver (e.g., relative error to exact equilibrium vs. number of iterations, across random seeds).
+
+1. Add variance diagnostics for the stochastic solver (e.g., repeated forward passes at a fixed checkpoint) — this is the single most impactful change, as it directly addresses the main methodological gap.
+2. Specify the partitioning algorithm and \(k\) values used in experiments.
+3. Add a brief statement in Section 4 explicitly noting that SEIGNN uses a linear equilibrium equation (following MGNNI) and that this is a design choice relative to nonlinear alternatives like IGNN.
+4. Include a sensitivity table for \(\alpha\) and \(k\) on at least one dataset.
 
 ## Score and Decision
 
-The paper makes a genuine contribution: the coarse-node design for mini-batch training of implicit GNNs is novel and well-validated, and the stochastic solver's speedup is practically significant. The weaknesses are concerning but fixable: the solver ambiguity needs clarification, and the efficiency analysis is incomplete without partitioning overhead. Neither issue invalidates the core contribution, and both can be addressed in a revision without changing the experimental results.
-
-**Score:** 6.5
-
-**Decision:** Accept
+The paper makes a clear contribution: it identifies the two roadblocks to scaling implicit GNNs (full-batch training and slow solvers) and provides concrete, empirically validated solutions. The coarse-node mini-batch idea is simple yet effective, and the ablation studies convincingly isolate its contribution. The main weakness — lack of variance analysis for the stochastic solver — is a real gap in methodological rigor, but the empirical evidence (Table 7) shows the solver works well in practice, so this gap does not invalidate the core claims. The remaining issues are minor presentation refinements.
 
 MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,16 +1,20 @@
-Now I have all the information I need. Let me compile the consolidated review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+
+---
 
 ## Summary
-2-3 sentence summary of the paper's contribution.
 
-The paper introduces Robust-Gymnasium, a unified modular benchmark for robust RL that wraps existing task environments (MuJoCo, robosuite, DM Control, etc.) with disruptors that perturb observations, actions, rewards, or environment dynamics. A Disrupted-MDP formalism is proposed to unify these disruption types. The benchmark includes over 60 tasks across 11 base sets spanning control, robotics, safe RL, and multi-agent RL, and the paper benchmarks 12 SOTA algorithms to demonstrate the benchmark's utility.
+Robust Gymnasium introduces a unified, modular benchmark for robust reinforcement learning built on a Disrupted-MDP framework that formalizes four disruptor types (observation, reward, action, environment) with four operation modes (random, adversarial, internal dynamic shift, external disturbance). The benchmark reportedly covers over 60 tasks across eleven task-base families spanning standard single-agent control, safe RL, and multi-agent RL, and provides preliminary benchmarking of nine state-of-the-art algorithms across these paradigms. The paper's contribution is the benchmark infrastructure itself, not a new algorithm.
 
 ## Strengths
-- **Unified Disrupted-MDP formalization**: The paper introduces a single modular framework integrating observation, action, and environment disruptors into a standard MDP (Section 2). This goes beyond prior work that typically addresses only one type of disruption in isolation and provides a principled language for constructing robust RL tasks.
-- **Large, diverse task coverage**: The benchmark includes tasks from eleven distinct base sets (Gymnasium-MuJoCo, Gymnasium-Box2D, DM Control, robosuite, Meta-World, ManiSkill, Safe-Control-Gym, MAMuJoCo, etc.) spanning over 60 environments (Section 3.1). No prior robust RL benchmark offers this breadth in a single platform.
-- **Modular and flexible task construction**: Users can combine any task base with disruption type, mode (random, adversarial, internal shift, external disturbance), and frequency (step-wise, episode-wise, intermittent) to create custom robust RL tasks (Section 3.3). This systematic design supports reusable robustness evaluation.
-- **Extends robust evaluation to safe RL and multi-agent RL**: The benchmark evaluates algorithms like PCRPO, CRPO, MAPPO, and IPPO under disruptions (Sections 4.3–4.4), broadening robust RL benchmarking beyond standard single-agent settings.
-- **Two evaluation settings (in-training and post-training)**: The paper evaluates algorithms under both settings where the disruptor is active during training+testing vs. only during testing (Section 4), providing a more informative robustness assessment than single-setting benchmarks.
+
+- **First benchmark unifying all major disruption types in RL under a single formal framework.** The Disrupted-MDP formulation (Section 2) provides a clean mathematical abstraction that integrates observation, reward, action, and environment disruptors into a standard MDP. This extends beyond prior work like RRLS (Zouitine et al., 2024) which focuses primarily on environment shifts, and one-off evaluations that test only a single disruption type.
+
+- **Modular task construction with composable disruptors.** The three-step task design (Section 3.3)—select task base, choose disruptor type+mode, specify frequency—allows users to construct customized robust RL tasks, including combinations of disruptors and variable operation frequencies (step-wise, episodic, intermittent). This flexibility is a genuine engineering contribution that prior benchmarks do not offer in a unified way.
+
+- **Open-source release and accessible platform.** The paper provides a public code repository (https://robust-rl.online/) and explicitly commits to user-friendliness, lowering adoption barriers for the community.
+
+- **Demonstration that LLMs can serve as adversarial disruptors.** Section 4.5 shows that LLM-based attacks cause larger performance drops than uniform noise on Ant-v4 with PPO, and that higher-frequency attacks cause greater degradation. While narrow in scope, this opens an interesting direction for robust RL benchmarking.
 
 ## Weaknesses
 
@@ -18,42 +22,51 @@ The paper introduces Robust-Gymnasium, a unified modular benchmark for robust RL
 None.
 
 ### Major
-- **Thin experimental validation relative to claimed scope**: The paper claims "over sixty diverse task environments" across eleven base sets but benchmarks only a handful (HalfCheetah, Ant, Hopper, Walker2d from MuJoCo; DoorCausal, LiftCausal from robosuite; MA-HalfCheetah from MAMuJoCo). Tasks from Box2D, DM Control, Meta-World, ManiSkill, Safe-Control-Gym, and other mentioned bases are not evaluated at all. For a benchmark paper, the primary contribution is the released infrastructure, so this is not fatal, but the experiments do not convincingly demonstrate that the benchmark supports meaningful evaluation across its claimed scope. A broader characterization — even a table showing performance of a single algorithm (e.g., PPO) across all 60+ tasks at a few disruption levels — would substantially strengthen the paper.
 
-- **No statistical rigor in experiments**: The paper reports no confidence intervals, standard deviations, number of random seeds, or evaluation episodes for any experiment. Deep RL results are known to be sensitive to seed variation (Henderson et al., 2018; Colas et al., 2018). Claims such as "the performance of CRPO quickly degrades" and "PCRPO demonstrates greater robustness" are unsupported without variance estimates. This undermines the reliability of the experimental findings and the benchmark's diagnostic power — readers cannot tell whether observed differences are reliable or due to noise.
+- **Experimental evaluation covers only a small fraction of the claimed 60+ tasks, limiting the evidence for the benchmark's utility.** The actual experiments test roughly 6–7 task configurations: HalfCheetah (standard RL), Ant-v5 and Hopper-v5 (robust RL), DoorCausal and LiftCausal from Robosuite (robust RL), Walker2d (safe RL), and MA-HalfCheetah (MARL). This is a thin slice of the claimed breadth. While the paper does reveal some non-trivial findings (RSC outperforms ATLA/DBC on Robosuite tasks; PCRPO is more robust than CRPO; PCRPO's performance *improves* under some disturbances), the overall experimental scope falls short of what is needed to convincingly demonstrate that the benchmark's breadth is essential. The reader cannot tell, for example, whether the 50+ untested tasks would surface different or additional patterns.
+
+- **No comparison with the closest existing benchmark (RRLS).** The paper cites RRLS (Zouitine et al., 2024) in the introduction and positions itself as filling gaps left by prior work, but never provides a concrete side-by-side comparison of task coverage, disruption types, modularity, or experimental results. For a benchmark paper entering a space where a similar tool already exists (RRLS focuses on environment shifts), the absence of any comparative analysis makes it harder for the community to assess what Robust Gymnasium uniquely adds.
+
+- **Evaluation protocol lacks statistical rigor.** The paper states it uses "performance in the original (deployment) environment" as the robust metric (Section 4) but does not report the number of random seeds, confidence intervals, standard deviations, or significance tests for any of the experimental results. Results are described only qualitatively ("performance degrades quickly," "RSC demonstrates greater robustness"). For a benchmark that aims to *standardize* robust RL evaluation, the absence of even basic statistical reporting is a serious gap. A reproducibility statement with a code link is provided, but the paper itself should document the evaluation protocol.
 
 ### Minor
-- **The Disrupted-MDP formalism is practically oriented but loosely connected to robust RL theory**: The framework defines D_s, D_r, D_a and an environment-disruptor as generic perturbation functions without specifying perturbation budgets, uncertainty sets, or how theoretically-grounded robust RL methods (which assume structured uncertainty sets) map onto these tasks. This is not a structural flaw for a practical benchmark, but the paper claims "unification" and "generality" without bridging to the theoretical robust MDP literature, which may limit the benchmark's adoption by researchers working on principled robust RL.
 
-- **The LLM-based adversarial disruption is a proof-of-concept with very limited validation**: Section 4.5 evaluates LLM-based attacks on only one task (Ant-v4) with one algorithm (PPO), with no comparison to other adversarial methods (e.g., ATLA), no evaluation on other tasks or algorithms, and no analysis of cost or reliability. As a featured benchmark capability, this requires stronger validation to demonstrate general utility.
+- **The LLM-based adversarial disturbance (Section 4.5) is demonstrated on only one task (Ant-v4) with one algorithm (PPO).** This is acknowledged as a featured demonstration, not a systematic study, but the current scope is too narrow to draw general conclusions about the mode's difficulty or value for benchmarking. The paper would benefit from at least one additional task-algorithm combination.
 
-- **Safe RL experiments lack formal definition of the cost function and safety constraint**: Section 4.3 describes perturbing "the agent's observed immediate safety cost" but does not specify the cost function, cost threshold, or constraint structure. This omission hinders reproducibility and understanding of the setup.
+- **No numeric tables for experimental results.** All results are shown in figures (Figures 5–9) with qualitative prose descriptions. For a benchmark paper where future researchers will want to compare against reported baselines, providing numeric means and variances (at least in an appendix) would substantially increase the paper's reference value.
 
-- **Benchmark characterization is missing**: The paper provides no analysis of task difficulty distribution, no discussion of which disruption types are hardest, and no identification of saturated tasks where performance does not drop. Such characterization is important for helping users select meaningful evaluation tasks.
+- **The connection between the 60+ tasks and the specific disruptor configurations tested is underspecified.** The paper describes the task bases at a high level (Section 3.1 mentions one family explicitly; the rest are referenced to Figure 17) and describes disruptor modes generically (Section 3.2), but does not clarify which specific disruptor configurations (type × mode × parameters) are feasible for which task bases, or whether all combinations are implemented. A summary table in the main paper mapping tasks to available disruptor configurations would help.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
-- A summary table in the main text (rather than deferred to appendix) listing the number of tasks per base and the disruption types each supports.
-- A brief discussion of compute requirements or training time for representative tasks.
-- Comparison or positioning against RL generalization benchmarks (e.g., Procgen, DM Control Generalization Benchmark) — these address a related but distinct problem, so the omission is not a flaw, but a brief discussion would help readers.
+
+- A summary table in the main paper listing all 11 task-base families with basic stats (number of tasks per family, supported disruptor types/modes, domain) would substantiate the "60+ tasks" claim more directly than a reference to an appendix figure.
+- Reporting results with standard deviations over multiple seeds (e.g., 5–10 runs) would significantly strengthen the benchmark's value as a reference.
+- A brief side-by-side comparison table with RRLS (tasks, disruption types, size, modularity features) would help position the contribution.
+- Expanding the LLM adversarial experiments to one more task (e.g., Hopper-v5) and one more algorithm (e.g., SAC) would strengthen Section 4.5.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-- **"Benchmark construction description is too brief; details are in the appendix"** — Removed because the appendix was stripped by the parser; it exists in the original submission. The main-text description, while concise, adequately describes the construction process through three modular steps (Section 3.3).
-- **"No comparison to existing RL generalization benchmarks"** — Removed as scope creep. Robust-Gymnasium addresses structured perturbations to agent-environment interactions, which is a different problem from visual generalization in Procgen or DM Control Generalization.
-- **"No discussion of compute requirements or training time"** — Removed as a large/impractical detail for a paper submission. This is a nice-to-have for the documentation/code repository.
+
+- **"The claim of 'over sixty diverse task environments' is unsupported in the main text"** — The paper states the 11 task-base families in Section 3.1 (the parser likely stripped the detailed listing due to image formatting) and references Figure 17 for the full list. While a summary table in the main body would be helpful, the claim is not unsupported; it is referenced to content that exists in the original submission. This is a presentation issue, not a factual gap.
+- **"Several plots are referenced but not semantically described"** — Parser artifact. The original submission contained figures with captions and in-text references. The extracted text loses figure content, but this does not reflect an omission by the authors.
+- **"Only a small handful of tasks are actually tested"** (framed as fatal) — While the experiments are limited, the critic overstates this as invalidating the paper's core contribution. The benchmark itself (the framework, code, and task zoo) is the primary contribution; the experiments are illustrative baselines. The limited scope is a genuine weakness but not fatal — it can be addressed by expanding the experimental section.
+- **Several of the harsh critic's formatting/style nitpicks** — These are parser artifacts, not author errors.
 
 ## Novel Insights
-None beyond the paper's own contributions. The harsh critic and strength finder confirm the paper's framing — the community needs a standardized robust RL benchmark, and Robust-Gymnasium addresses this need with broad task coverage and a modular design. No reviewer contribution qualitatively changes the paper's narrative or reveals a perspective the authors missed.
+
+The most interesting observation across the reviews is that the experiments actually surface a non-obvious finding: PCRPO's performance under disturbance *surpasses* its no-disturbance baseline (Section 4.3), suggesting that introducing appropriate disturbances during training can enhance overall performance. This is a qualitatively different result from the standard "disturbances always hurt" narrative and hints at a genuine robustness benefit. The LLM-as-adversary result (Section 4.5) showing LLM attacks outperform uniform noise is also noteworthy, as it suggests that adaptive, semantically-informed adversaries may provide a more stringent robustness test than random perturbations — an insight that connects robust RL to the broader LLM-as-evaluator trend. Neither review picked up on the potential significance of this.
 
 ## Suggestions
-1. **Broaden experimental coverage**: Add a table in the appendix showing performance of 1–2 representative algorithms (e.g., PPO, SAC) across all 60+ tasks with a few disruption levels. This would demonstrate the benchmark's scope and identify which tasks are most challenging.
-2. **Add statistical rigor**: Report results over ≥5 random seeds with mean and standard deviation (or other appropriate variance measure). Include error bars/regions in all figures. Specify the number of evaluation episodes per checkpoint.
-3. **Formalize the safe RL setup**: Define the cost function, cost threshold, and constraint structure for the safe RL tasks to support reproducibility.
-4. **Expand the LLM attack validation**: Test on at least 2–3 additional tasks and compare against a non-LLM adversarial baseline. If this is intended as a mature benchmark feature, it needs stronger evidence of general utility.
-5. **Acknowledge limitations explicitly**: Add a limitations section discussing what the benchmark does not cover (e.g., partial observability, distribution shifts outside structured perturbations, theoretical uncertainty sets).
+
+- Expand the experimental evaluation to at least 15–20 tasks spanning all four disruptor types, all four modes, and all three RL paradigms. At minimum, include one additional task from each under-tested category (safe RL, MARL, and at least one task with compound disruptors).
+- Add a side-by-side comparison table with RRLS (and potentially other robustness benchmarks) detailing coverage, disruption types, modularity features, and size.
+- Report all quantitative results with means and standard deviations over multiple random seeds (at least 5). Add a brief description of the evaluation protocol (seeds, hardware, hyperparameter choices) in the main text.
+- Add a table in the main paper listing the 11 task-base families with supported disruptor types and modes, so readers can assess coverage without consulting the appendix.
+- Replace or supplement the qualitative prose descriptions of experimental results with a numeric summary table (mean ± std).
+
+## Score and Decision
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

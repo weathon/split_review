@@ -1,22 +1,18 @@
-Now I have all the information needed. Let me construct the final consolidated review, carefully cross-checking each claim.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes a weakly supervised object detection method for virus capsids in electron microscopy (EM) images, using only image-level binary labels (virus present/absent). The method trains a binary classifier, then uses a gradient-based optimization with a shrinking Gaussian mask (inspired by score-based generative models) to localize particles from the classifier, producing pseudo-labels to train a Faster-RCNN. Evaluated on five virus types (Herpes, Adeno, Noro, Papilloma, Rota) spanning different sizes and imaging modalities, the method outperforms other weakly supervised approaches and, under equal annotation time budgets, can exceed fully supervised methods. A user study with six experts confirms that binary labels are faster and less error-prone than center-point or bounding-box annotations.
+This paper proposes a weakly supervised object detection method for virus capsids in electron microscopy (EM) images that requires only image-level binary labels (virus present/absent). The core technical innovation is a gradient-based optimization with a progressively shrinking Gaussian mask that directly regresses bounding box positions from a pre-trained classifier. The method is evaluated on five virus types, with a user study confirming that binary labels are faster and less error-prone than location or bounding box annotations.
 
 ## Strengths
 
-- **Novel optimization-based localization with shrinking Gaussian mask**: The gradient-based localization (Section 3.2) uses a Gaussian mask whose standard deviation decays exponentially during optimization. This design allows gradients to propagate over the full image initially and then focus on fine details, enabling direct bounding-box regression from an image-level classifier without region proposals or specialized architectures. Figure 2 visualizes how this scheme pulls distant positions toward virus particles and refines nearby ones.
+- **Novel optimization with shrinking Gaussian receptive field enables direct bounding box regression from image-level labels.** The method starts with a large Gaussian mask standard deviation covering the full image and progressively reduces it, allowing gradients to guide the position from far away to precise convergence (Section 3.2, Figure 2). This is a clean, well-motivated technical innovation that distinguishes the method from prior CAM-based or selective-search approaches and directly enables the reported detection results across five virus types (Table 1).
 
-- **User study validates the annotation-time motivation**: The study (Section 4.2) measures annotation time and accuracy for six experts on three label types (binary, center location, bounding box) across 85 patches of Herpes TEM images. Binary annotations take less time per patch, are less sensitive to particle count (Figure 3), and achieve higher F₁ scores (Figure 4). This directly supports the paper's practical motivation that binary labels reduce annotation cost and human error.
+- **User study with domain experts provides empirical evidence that binary labels are faster and more robust.** The controlled experiment with six experts annotating 85 patches under three conditions (binary, location, bounding box) uses a balanced Latin square design and measures both annotation time and F1 score (Figures 3, 4). Results show binary annotations are significantly faster (e.g., 11 hours vs. 19 hours for bounding boxes on the Herpes dataset) and less error-prone, directly supporting the core motivation.
 
-- **Outperforms alternatives under equal annotation time budgets**: When total annotation time is equated to the time needed for binary labels (Table 1, Figures 5–6), the proposed method achieves higher mAP₅₀ than location labels, bounding-box labels, and several weakly-supervised baselines (GradCAM, LayerCAM, TS-CAM, Reattention) across all five viruses. On Herpes, Ours(Opt) also outperforms all other methods when the annotation time budget is below 25% (Figure 5), showing a clear advantage when expert time is limited.
+- **Competitive results across multiple virus types under limited annotation budgets.** The detector trained on pseudo-labels (Ours(OD)) consistently performs well across Herpes, Adeno, Noro, Papilloma, and Rota viruses (Table 1). On the Herpes dataset, the method shows particular strength when annotation time is constrained (Figure 5), demonstrating practical utility in realistic scenarios.
 
-- **Generalization across diverse virus types and imaging conditions**: The method is evaluated on five viruses ranging from Noro (30 nm) to Herpes (165 nm), including both cryo-EM and negative-stain TEM images (Table 1). It obtains competitive or superior results consistently, indicating robustness to different particle sizes, contrast levels, and preparation methods.
-
-- **Comparison against modern zero-shot models (SAM, CutLER)** provides useful context: these methods perform well on some viruses (e.g., Adeno) but are less stable, especially for small viruses like Noro, whereas the proposed method is more reliable across all datasets.
-
-- **Ablation-style experiments on annotation time and dataset size** (Figures 5–6) add practical nuance: Ours(Opt) outperforms Ours(OD) when data are scarce (< 25% annotation time), and Ours(OD) matches/exceeds supervised methods with abundant data.
+- **Domain-aware design choices address specific EM challenges.** The GradCAM-based initialization (Section 3.1) reduces computational overhead, iterative virus removal with known radius (Section 3.3) handles multiple instances per image, and incorporating the known virus size mitigates the low signal-to-noise ratio problem inherent in EM images.
 
 ## Weaknesses
 
@@ -24,62 +20,46 @@ This paper proposes a weakly supervised object detection method for virus capsid
 None.
 
 ### Major
-None.
+
+- **The annotation-time comparisons in Table 1 generalize from a single-virus user study to all five virus types without validation.** The user study (Section 4.2) measures annotation times only on Herpes virus images (165 nm particles). These time estimates are then used (Section 4.4) to set time budgets for *all* viruses in Table 1, including Norovirus (30 nm). The relative cost of binary vs. bounding box annotations could differ substantially for smaller, harder-to-see particles — if binary labels are relatively more expensive for small viruses, the claimed advantage would be overstated. The Reduced Annotation Time experiment (Figure 5) is only run on Herpes, leaving the cross-virus generalization of time budgets unvalidated. This directly affects the central claim that the method "outperforms fully supervised methods given the same annotation time."
 
 ### Minor
 
-- **Missing classifier training details hinder full reproducibility.** The paper states that a ResNet-101 is used for the classifier (§4.3) and that it is pre-trained on image-level labels, but provides no details on optimizer, learning rate schedule, number of epochs, data augmentation, or whether it is fine-tuned from ImageNet pretraining. Since the downstream localization (§3.2) depends on the classifier's gradient behavior and the quality of pseudo-labels determines detector performance, these omissions make it harder for others to reproduce or adapt the method. This is a common gap in many papers but should be rectified (a brief paragraph in §4.3 or the appendix would suffice).
+- **No sensitivity analysis for the assumed virus radius.** The method requires the virus radius *r* as input and uses it throughout: mask design, virus removal, and final bounding box creation (Sections 3.2, 3.3, 3.5). While the literature-reported values are reasonable, no experiment tests how performance degrades when the true virus size deviates from the given value. For Herpes the paper validates that the literature value matches the dataset average, but for other viruses this is only assumed. A robustness analysis (e.g., ±20 % radius variation) would clarify the method's practical brittleness.
 
-- **No statistical significance assessment for the main comparisons.** Table 1 reports mean and standard deviation over three runs, which is good practice, but the key claim that Ours(OD) significantly outperforms the best alternative is not backed by confidence intervals, effect sizes, or any significance test. Given only three runs and potentially overlapping standard deviations, the reader cannot judge the reliability of the reported ordering. The authors should either add basic statistical measures or explicitly acknowledge this limitation.
+- **Limited statistical rigor in comparisons.** All results report means and standard deviations over only three runs (Section 4.3), with no statistical significance tests. Several comparisons in Table 1 show overlapping error bars (e.g., Ours(OD) vs. BB for Adeno), and the paper itself acknowledges that Adeno is an exception where the method does not achieve the best results (Section 4.4). With only three runs, it is difficult for readers to assess which reported advantages are reliable.
 
-- **User study is limited to one virus type and six experts.** The study (Section 4.2) is well-designed (balanced Latin square, randomization) but involves only six experts annotating 85 patches from a single virus (Herpes). While this is sufficient to motivate the use of binary labels in the paper's domain, the results should not be overgeneralized. The paper largely avoids overclaiming here, but the scope limitation should be stated explicitly.
+- **No comparison against MIL-based WSOD methods.** The paper compares against WSOL methods (GradCAM, LayerCAM, TS-CAM, Reattention) adapted to detection but omits MIL-based weakly supervised object detection methods (e.g., Bilen & Vedaldi 2016; Zeng et al. 2019) because they rely on selective search, argued to be ill-suited for EM. While this choice is understandable, a limited experiment on a dataset where selective search could plausibly work (e.g., Herpes with large particles) would strengthen the claim that the proposed method outperforms "other weakly supervised methods."
 
-- **Stopping criteria threshold is underspecified.** The stopping criterion in §3.4 uses a threshold *t* chosen "based on the smallest threshold used for computing the Mean Average Precision (mAP) metric." This is unclear—mAP thresholds are IoU thresholds (e.g., 0.5 for mAP₅₀), while the classifier outputs a score/probability. How the IoU threshold translates to a classifier score threshold is not explained, and it is unclear whether this choice is circular (using evaluation metric thresholds to set detection hyperparameters). The authors should clarify the mapping or specify how *t* is selected on a validation set.
-
-- **Terminology: "infinite annotation time" (Section 4.4) is confusing.** It means "all available labels," not literally infinite time. This phrasing could mislead readers.
+- **Key optimization hyperparameters are not reported.** The optimization procedure (Section 3.2) describes the shrinking-σ strategy qualitatively but omits specific values for learning rate, number of optimization steps per particle, σ_min, σ_max, and the exponential decay schedule. This harms reproducibility.
 
 ### Trivial
-
-- None beyond the minor points above; the paper is generally well-written with no significant presentation flaws.
+- **The stopping threshold *t* description is unclear.** Section 3.4 states the threshold is "chosen based on the smallest threshold used for computing the Mean Average Precision (mAP) metric." This mixes classifier-score thresholds (for stopping) with IoU thresholds (for evaluation). While likely not circular in practice, the wording is confusing and should be clarified.
 
 ## Nice-to-Haves
-
-- **Ablation of the optimization components** — removing GradCAM initialization, fixing σ to a constant, or replacing exponential σ decay with linear decay would strengthen the claim that the shrinking Gaussian mask is driving localization improvement.
-
-- **Sensitivity analysis for the assumed virus radius** — reporting how performance changes when the radius is off by 10–20% would be practically valuable.
-
-- **Failure case analysis**, especially for the Adeno virus where the method underperforms, would help users understand when the method might struggle.
-
-- **Computational cost reporting** — number of gradient steps per particle and total runtime versus training Faster-RCNN from scratch would help practitioners assess practicality.
+- A component ablation study (e.g., replacing GradCAM init with random positioning, or fixing σ to σ_max or σ_min) would clarify which parts of the pipeline are essential.
+- Per-virus annotation time estimates from a small sample of a second virus type (e.g., Noro) would strengthen the cross-virus time-budget experiments.
+- Reporting recall and precision of the pseudo-labels (Ours(Opt) boxes) before training the Faster-RCNN would make the pipeline's bottleneck explicit.
+- A brief discussion of overlapping/clustered particles as a known limitation would be helpful (the paper currently assumes non-overlapping particles via NMS).
 
 ## Removed Points
-
-These points were identified by the reviewers but are removed or downgraded per the consolidation guidelines. Treat them with caution.
-
-1. **Central claim framing (Critic Issue 1):** The critic argued the abstract could be misread as "weak labels are better than strong labels regardless of data quantity." However, the abstract already qualifies the claim: "in cases where the time to obtain the annotation is limited." The qualifier is present and sufficient. This is not a weakness.
-
-2. **Connection to score-based generative models not developed:** The critic noted the inspiration from Song & Ermon (2019) is "not developed beyond a similarity in scheduling." The paper uses this as a design inspiration, which is appropriate. No further development is needed.
-
-3. **SAM/CutLER description too brief:** The critic said it is "unclear whether these zero-shot models are used off-the-shelf or fine-tuned." The paper explicitly states "forward these through the pre-trained models," clearly indicating off-the-shelf use. The description is adequate for a comparison baseline.
-
-4. **Qualitative results request:** The critic suggested showing example detections. The paper already includes figures (Figure 2 visualizes gradients; Figure 9 is referenced as showing classifier bias). This is a wishlist item, not a weakness.
-
-5. **Dedicated limitations section:** The critic requested this, but the paper discusses limitations in Section 4.4 and mentions future work on varying object sizes in the conclusion. The existing discussion is adequate for a conference paper.
+- The critic's claim that the stopping threshold *t* creates a "circular dependency" that "inflates mAP" is inaccurate — the stopping threshold is on the classifier output score, while mAP uses IoU thresholds. These are different quantities, so no circularity exists. The presentation is unclear but the technical concern is not valid.
+- The critic's observation about zero-shot baselines (SAM, CutLER) "adding little information" is noted but the comparison provides useful context for the reader and is not a weakness.
+- The critic's suggestion about Figure 2 showing "actual optimization trajectories on real EM images" is a wishlist item, not a weakness.
 
 ## Novel Insights
-
-None beyond the paper's own contributions.
+The reviewer cross-examination reveals that the paper's most original contribution is not simply another weakly supervised detector, but a fundamentally different paradigm for converting a weak binary classifier into a spatial detector: using a parametrized mask with controlled annealing of its spatial extent to guide gradient-based optimization toward convergence. This is distinct from both CAM-thresholding and MIL-based WSOD, and especially well-suited to EM where objects have known sizes and roughly circular shapes. The key insight is that mask annealing mimics coarse-to-fine search in a differentiable way. However, the evaluation over-relies on a single time-estimate calibration (Herpes) while treating virus size as a known parameter rather than testing sensitivity to it — both gaps that undercut the generalizability claims.
 
 ## Suggestions
-
-1. Add a paragraph in §4.3 (or an appendix) specifying the classifier training details: optimizer, learning rate, epochs, data augmentation, and whether ImageNet pretraining is used.
-2. Clarify the stopping criterion threshold *t*: explain how the mAP IoU threshold maps to a classifier score threshold, or state that *t* is selected on the validation set.
-3. Add a brief note acknowledging that statistical comparisons are based on three runs without formal significance testing.
-4. Replace "infinite annotation time" with a clearer phrase such as "full dataset annotation."
+1. **Validate or qualify the cross-virus time-budget comparisons.** Either (a) collect small-sample annotation time estimates for at least one other virus type to confirm the time ratios hold, or (b) explicitly discuss this as a limitation and characterize how much the time ratios would need to shift to change the conclusions (sensitivity analysis on the time ratios themselves).
+2. **Add a sensitivity analysis for the virus radius parameter** on at least one dataset, testing performance at ±10 % and ±20 % of the reported radius.
+3. **Report optimization hyperparameters** (learning rate, number of steps, σ_min, σ_max, decay schedule) to improve reproducibility.
+4. **Clarify the stopping threshold selection** in Section 3.4 — explain how *t* is chosen in practice (e.g., fixed at 0.5, or calibrated on a validation set) without reference to mAP thresholds.
+5. **Qualify statistical claims** — acknowledge where comparisons have overlapping error bars and note the limited number of runs.
 
 ## Score and Decision
 
-The paper makes a genuine contribution: a novel, domain-appropriate method for weakly supervised virus detection in EM, with thorough evaluation across five viruses, a user study supporting its motivation, and practical results showing advantages under realistic annotation budgets. The weaknesses are all minor and addressable — none threaten the core claims. I recommend acceptance.
+This paper presents a genuinely novel and well-motivated method for weakly supervised virus detection in EM. The core technical idea (shrinking Gaussian mask optimization) is clean and domain-appropriate. The user study is a valuable contribution in itself. However, the strongest claims about outperforming fully supervised methods under equal annotation time rest on time estimates derived from a single virus type and extrapolated across all five viruses without validation — a gap that meaningfully weakens the evidence for those claims. The remaining weaknesses (no size-sensitivity analysis, limited statistical rigor, incomplete hyperparameter reporting) are addressable but non-trivial. The paper has real value but requires substantial strengthening of the evaluation.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

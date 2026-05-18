@@ -1,96 +1,74 @@
-Now I have all the information needed. Let me synthesize the final consolidated review.
+Now I have all the information I need. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper proposes BAdd, a bias mitigation method that adds pre-trained bias-capturing feature vectors **b** to the penultimate-layer representations **h** during training, thereby preventing the "loss spikes" that trap vanilla models in a cycle of encoding protected attributes. The method is evaluated on seven benchmarks spanning single-attribute (Biased-MNIST, Biased-UTKFace, Corrupted-CIFAR10, Waterbirds) and multi-attribute (FB-Biased-MNIST, UrbanCars, CelebA) bias scenarios, achieving consistent state-of-the-art or competitive results, with especially large margins on the multi-attribute benchmarks (+27.5% on FB-Biased-MNIST, +5.5% on CelebA).
+This paper introduces BAdd, a bias mitigation method that injects bias-capturing features (from a separately trained model or label-based regressor) into the penultimate layer of a classifier during training. The rationale is that by providing bias information directly, the model's main features do not need to encode it, forcing the learned representations to be invariant to the protected attribute. After training, the bias features are discarded and the classification head is fine-tuned. The method is evaluated on seven benchmarks (four single-attribute, three multi-attribute) and achieves competitive to state-of-the-art results, with notable gains on multi-attribute settings (+27.5% on FB-Biased-MNIST, +5.5% on CelebA).
 
 ## Strengths
 
-1. **Large, clean gains on the paper's primary target — multi-attribute benchmarks.** BAdd outperforms the prior state of the art by +27.5% absolute on FB-Biased-MNIST at q=0.99 (69.5% vs. 42.0% for FairKL, Table 7) and by +5.5% on CelebA bias-conflicting samples for HeavyMakeup (92.7% vs. 87.2% for FLAC, Table 9). These are the paper's most impressive and best-evidenced results, directly validating the central claim that the method excels where existing approaches struggle.
+- **Substantial gains on multi-attribute bias benchmarks**: BAdd achieves a +27.5% absolute accuracy improvement over the second-best method (FairKL) on FB-Biased-MNIST at q=0.99 (Table 5: 69.5% vs. 42.0%) and +5.5% on CelebA bias-conflicting samples for the HeavyMakeup attribute (Table 8: 92.7% vs. 87.2%). These are large margins on the exact settings where single-attribute methods collapse, directly validating the paper's central claim.
 
-2. **Consistent SOTA across all single-attribute benchmarks.** BAdd ties or beats prior methods on Biased-MNIST (all four q levels, Table 1), Biased-UTKFace for both race and age (Table 2), Corrupted-CIFAR10 (all four q levels, Table 3), and Waterbirds (ties DFR at 92.9% WG accuracy, Table 4). The margins are modest on some (e.g., +0.1–0.8% on Biased-MNIST, +1.1–1.9% on UTKFace) but larger on Corrupted-CIFAR10 (+6.5% at q=0.95).
+- **Consistent empirical superiority across diverse settings**: On single-attribute benchmarks, BAdd outperforms or ties state-of-the-art on Biased-MNIST (all four q levels, Table 1), Biased-UTKFace (both race and age bias, Table 2), and Corrupted-CIFAR10 (all four q levels, Table 5), with the Corrupted-CIFAR10 results remarkable given that a simple linear regressor substitutes the bias-capturing classifier.
 
-3. **Principled theoretical analysis of why vanilla models fail.** The paper identifies a loss-spiking cycle (Section 3.2, Figure 2) caused by bias-aligned samples dominating gradient updates, formalizes it via the gradient decomposition in Eq. (4), and shows that adding bias features eliminates these spikes. This provides genuine explanatory value beyond empirical benchmarking.
+- **Evidence of feature-level invariance**: The mean pairwise cosine similarity across background variations on Biased-MNIST (Table 4) is near 1 for all q levels (0.973–0.985), while vanilla drops to 0.416 at q=0.999. This is direct evidence that BAdd's representations are actually invariant to the protected attribute, not just improving accuracy through some other mechanism.
 
-4. **Simple, architecture-agnostic implementation.** The method requires no architectural modifications, adversarial training, or specialized augmentations — just adding a pre-trained bias-capturing feature vector to the penultimate layer. It works across two ResNet variants and a simple CNN, unlike competitors such as LLE that require object segmentation. The ablation (addition vs. concatenation, layer choice) correctly justifies the design.
+- **Ablation studies validating design choices**: The paper systematically compares addition vs. concatenation of bias features (Table 9: addition outperforms by 6.6–55.2 points) and layer depth (Table 10: penultimate layer is best), confirming that the specific design matters.
 
-5. **Introduction of a challenging multi-attribute benchmark (FB-Biased-MNIST) and principled multi-attribute evaluation on CelebA.** FB-Biased-MNIST injects both foreground and background color biases, providing a controlled testbed where most existing methods collapse. The CelebA evaluation uses an accuracy-disparity analysis (Table 0 in the paper) to identify WearingLipstick and HeavyMakeup as the two most impactful bias-inducing attributes, avoiding arbitrary attribute selection.
+- **Intuitive and plausible mechanism**: The loss-spike explanation (Figure 2) and gradient analysis (Eqs. 3–4) provide a coherent narrative for why vanilla models get trapped in a bias-reinforcing cycle and how adding bias features breaks it. While not a formal proof, the narrative is grounded in observable phenomena (the spikes) and supported by the empirical results.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None. The paper's core claims are well-supported by the evidence presented. The most serious concerns raised by reviewers — underspecification of multi-attribute integration — are addressed by the paper's formulation (a bias-capturing model predicts the tuple of protected attributes jointly; **b** is its penultimate-layer representation), though the clarity could be improved.
+
+- **Ambiguity in how $\mathbf{b}$ is constructed for multiple bias attributes.** The paper's central claim is effectiveness on multi-attribute bias, but the methodology section (Sec. 3) defines $\mathbf{b}$ as the representation from a model that predicts "protected attribute(s) $t$" without specifying how $b(\cdot)$ is designed or trained when $q>1$ attributes are involved. For FB-Biased-MNIST (foreground + background color), the paper does not state whether $b(\cdot)$ is a single multi-label classifier predicting both jointly, two separate classifiers with concatenated outputs, or some other design. For CelebA (Table 8), the table reports WearingLipstick and HeavyMakeup in separate columns — it is unclear whether this means one model was trained with both attributes embedded in $\mathbf{b}$ (and results are then disaggregated per attribute) or whether separate models were trained for each attribute. This ambiguity undermines reproducibility and the evaluation of the claimed multi-attribute capability. The paper should specify the exact architecture and training procedure of $b(\cdot)$ for each multi-attribute dataset.
+
+- **Absence of ablation on the fine-tuning step.** The fine-tuning stage (discarding $\mathbf{b}$ and retraining only the classification head for 20 epochs) is critical: it converts training-time behavior into inference-time fairness. Yet the paper provides no ablation on (a) the number of fine-tuning epochs, (b) whether fine-tuning could reintroduce bias, or (c) what happens if it is omitted entirely. Since the method's final performance depends on this step, the lack of analysis is a notable gap.
 
 ### Minor
-1. **Multi-attribute integration is underspecified for reproducibility.** The paper defines **b** as the output of a model trained to predict the tuple of protected attributes \(t \in \mathcal{T}\) (Section 3.1), and for Corrupted-CIFAR10 describes using a linear regressor from one-hot labels. However, it never explicitly states how multiple attributes are combined for FB-Biased-MNIST, UrbanCars, or CelebA. For example: does FB-Biased-MNIST use a single regressor from a concatenated 2-attribute one-hot vector, or two separate regressors whose outputs are summed? The ablation (addition vs. concatenation) only covers the single-attribute case. This is the single most important revision needed for reproducibility.
 
-2. **Bias-feature source not specified for Waterbirds and UrbanCars.** For Corrupted-CIFAR10, the paper states it uses a linear regressor from texture one-hot vectors. For Biased-MNIST, it implies a color classifier. But for Waterbirds (background bias) and UrbanCars (background + co-occurring object biases), the reader is left to guess how **b** is obtained. A single table summarizing "for dataset X, bias-feature source = Y" would resolve this.
+- **The theoretical justification is intuitive but undersupported.** The gradient analysis (Eqs. 3–4) and the loss-spike argument rely on the assumption that $\mathcal{L}_\mathcal{A} \approx 0$ while $\mathcal{L}_\mathcal{C} \gg 0$, and that adding $\mathbf{b}$ keeps $\sigma_\kappa^{(i)}$ large and $A_0^{(i)}$ small. The claim that "the addition of $\mathbf{b}$ entails invariably large $\sigma_\kappa^{(i)}$" is asserted rather than derived, and the gradient analysis abstracts away the shared dependence of $A_0^{(i)}$ on the classifier weights $\mathbf{W}$. Loss-spike evidence is shown only for Biased-MNIST (Figure 2), not for any other dataset. The paper would benefit from showing that the same dynamics hold on a second dataset (e.g., Biased-UTKFace or CelebA) and from directly measuring the gradient contributions of bias-aligned vs. bias-conflicting samples. That said, the empirical results (cosine similarity, accuracy gains) are the stronger evidence, and the theory is primarily motivational.
 
-3. **UrbanCars evaluation presents an incomplete picture.** BAdd's I.D. Accuracy (91.0) is the lowest among reported methods (LfF: 97.2, Debian: 98.0, LLE: 96.7), while its gap metrics (BG+CoObj Gap: -3.9) are the best. The paper does not discuss this I.D. Acc trade-off — is it a side effect of the method or an artifact of the evaluation protocol? The narrative ("most compared methods struggle … the only exception is LLE") also undersells BAdd's own combined-gap performance, which is actually better than LLE's (BG+CoObj Gap: -3.9 vs. -5.9). Competitor values in this table lack standard deviations.
+- **Missing comparison with multi-attribute methods on FB-Biased-MNIST.** The paper cites OccamNets (shrestha2022occamnets) as a multi-attribute method but does not compare against it on the FB-Biased-MNIST benchmark where BAdd claims its largest gains. On UrbanCars, LLE is compared and BAdd is competitive on BG+CoObj Gap (−3.9 vs. −5.9) and CoObj Gap (−1.6 vs. −2.7) but worse on BG Gap (−4.3 vs. −2.1). A head-to-head comparison against OccamNets on FB-Biased-MNIST would strengthen the multi-attribute claims. This is minor because BAdd already outperforms strong single-attribute methods (FairKL, FLAC, BC-BB) by large margins on that benchmark.
 
-4. **Ablation limited to single-attribute Biased-MNIST.** The ablation studies (addition vs. concatenation; layer selection) are informative but conducted only on single-attribute Biased-MNIST. There is no ablation on: (a) whether the fine-tuning step is necessary (compare with/without fine-tuning the classifier head), (b) sensitivity to the dimensionality of **b**, (c) performance when the bias-capturing model has noisy attribute labels, or (d) how the choice of bias-feature source (classifier vs. regressor) affects results. Point (a) is the most consequential, as the fine-tuning step is a non-obvious component of the pipeline.
+- **Protected attribute labels are required.** As the paper acknowledges (Conclusion), BAdd requires access to protected attribute labels during training. Several competing methods (LM, Rubi, ReBias, LfF, FLAC) do not. This makes the comparison inherently asymmetric (methods that need no labels vs. one that does) and means some of BAdd's gains may come from label availability rather than the core mechanism. This is an honest limitation but worth flagging.
 
-5. **No results on unbiased data in the main paper.** A common concern with bias-mitigation methods is that they degrade performance on unbiased data. The authors mention (in a commented-out line in the LaTeX source) that such experiments exist in supplementary material, but no summary appears in the main text. Given that the paper's contribution is methodological, a brief sentence or small table confirming no adverse effect on standard benchmarks would strengthen reader trust.
-
-6. **Fine-tuning step underspecified.** The paper states that "the classification head … is fine-tuned for an additional 20 epochs" (Section 4) without specifying what data is used (the same training set?), whether the bias-aligned samples are re-seen without **b** features, and whether this re-exposure risks reintroducing bias. This directly connects to the method's mechanism — if fine-tuning on the same data without **b** allows the model to re-learn biased shortcuts, the method's guarantees are weaker than claimed.
+- **The Regressor variant on Corrupted-CIFAR10 is not analyzed.** The paper uses a linear regressor from one-hot texture labels (rather than a trained bias-capturing classifier) for Corrupted-CIFAR10, noting that training a classifier would be complex. This is a pragmatic choice, but the paper does not analyze how the quality or capacity of the regressor bounds the method's performance, nor whether a trained classifier would improve results further.
 
 ### Trivial
-- For FB-Biased-MNIST, the test set is said to have \(q=0.1\), but it is not specified whether this applies to each bias independently or jointly. Clarify in the evaluation protocol.
-- For Corrupted-CIFAR10, the paper describes using "a linear regressor to obtain feature vectors of the desired size from one-hot vectors representing the texture labels" — this is clear but the phrase "without any additional training procedure" in the footnote about regressors is slightly misleading: a linear regressor's weights are either learned or predefined; if the latter, state it directly.
+
+None.
 
 ## Nice-to-Haves
-- An ablation comparing BAdd with and without the fine-tuning step would confirm whether fine-tuning is necessary or whether the classifier can be used as-is with bias features removed at test time.
-- Reporting UrbanCaps competitor results with standard deviations (or noting they are taken from Li et al. 2023 and may not be directly comparable) would improve the table's rigor.
-- A brief paragraph discussing the I.D. Acc vs. gap trade-off on UrbanCars would help readers understand the method's operating point.
+
+- Show loss-spike plots for at least one additional dataset (e.g., Biased-UTKFace or CelebA) to demonstrate the mechanism generalizes.
+- Provide an ablation where the quality of $\mathbf{b}$ is varied (e.g., using a deliberately under-trained or lower-capacity bias classifier) to test robustness.
+- Ablate the fine-tuning step: vary epoch count, test omission, verify bias is not re-introduced.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"No experiment validates that h has learned unbiased representations"** (from Harsh Critic). This is factually wrong — Table 5 (`tab:sim`) reports mean pairwise cosine similarity between 10 variations of each Biased-MNIST test sample with different background colors. BAdd achieves 0.973–0.985 across all q levels vs. vanilla's 0.416–0.889, directly showing that **h** is invariant to the protected attribute. Figure 3 (activation maps on biased regions) further confirms this.
-
-- **"Statistical significance of activation reduction not reported"** (from Harsh Critic). This is not standard practice in this literature and does not affect the validity of the results.
-
-- **"Overclaims by saying existing methods 'fail in complex real-world scenarios' without citing how BAdd handles those complexities"** (from Harsh Critic). The paper explicitly describes the mechanism (adding **b** prevents loss spikes, Section 3) and provides empirical evidence (Section 5) on multi-attribute benchmarks. The claim is supported.
-
-- **"Comparison with FLAC is apples-to-oranges because FLAC doesn't use attribute labels"** (from Harsh Critic). The paper already acknowledges in Section 2 that LM, Rubi, ReBias, LfF, and FLAC "can be employed without utilizing the protected attribute labels" and notes BAdd's own label requirement as a limitation in the conclusion (Section 7). The comparison is standard and informative — it shows that even methods not requiring labels are outperformed, making the case for BAdd's effectiveness despite its stronger supervision requirement.
-
-- **"Regressor approach described as not requiring training is confusing"** (from Harsh Critic). The footnote states the regressor "encodes the protected attribute labels into a feature vector" — this is a standard linear projection of a one-hot vector, which requires no iterative training (unlike a full classifier). The meaning is clear in context.
+- **"Figure 1 (teaser) is referenced but not provided in the text"**: This is a parser artifact (figures are typically stripped from text-only PDF extraction). Not an author error.
+- **The framing of the theoretical gap as a "critical issue"**: The reviewer called this a critical/structural flaw. Upon verification, the theoretical explanation is intuitive and coherent; it is not a formal proof but is supported by substantial empirical evidence (loss spikes, cosine similarity, accuracy gains across 7 benchmarks). This is a minor weakness, not fatal.
+- **"The paper's performance is bounded by how well a simple regressor can encode the bias — an unremarked source of variation"**: The paper explicitly remarks that it uses a linear regressor (Section 4, paragraph on Corrupted-CIFAR10). The concern about lack of analysis of regressor quality is real and retained in Minor, but the framing "unremarked" is inaccurate.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one genuinely valuable observation: the UrbanCars results reveal a tension between I.D. accuracy and worst-group performance that is endemic to the debiasing literature but rarely discussed in one place. BAdd achieves the best gap metrics at the cost of lower average accuracy — a trade-off that mirrors findings in distributionally robust optimization (Sagawa et al., 2020) where methods that optimize the worst group often sacrifice in-distribution performance. This insight is worth the authors addressing explicitly in revision, as it would help practitioners calibrate expectations about when BAdd is the right tool (settings where group fairness is paramount) versus where a method with higher average accuracy might be preferred.
+The most interesting dynamic the reviews surface is the tension between the paper's simple, elegant mechanism (add bias features → prevent bias encoding in main features → fine-tune) and the under-specification of exactly how that mechanism plays out when biases are heterogeneous (e.g., foreground color + background color = two unrelated visual biases). The reviews collectively expose that the paper's strongest claim — multi-attribute capability — rests on the least documented design decision: how $b(\cdot)$ is constructed for $q>1$. The core insight that the reviews do not contradict but rather refine is that BAdd's simplicity is both its strength (easy to implement, strong results) and its weakest documentation point (the multi-attribute $\mathbf{b}$ construction is underspecified). Beyond the paper's own contributions, the reviews confirm that the field would benefit from a clearer taxonomy of multi-attribute bias mitigation strategies (joint prediction vs. separate per-attribute features vs. ensemble) to make comparisons more systematic.
 
 ## Suggestions
 
-1. **Specify the multi-attribute integration.** Add a brief formalization: for protected attribute tuple \(t = (t_1, \dots, t_q)\), define how **b** is produced (e.g., concatenate one-hot encodings and project; train a single multi-label classifier; or sum per-attribute regressor outputs). A sentence or algorithmic box suffices.
-
-2. **Add a "Bias Feature Source" table.** For each of the seven benchmarks, state: (a) the protected attribute(s), (b) whether **b** comes from a classifier or regressor, (c) what the regressor input is (one-hot vector? dimension?), and (d) any training details. This single addition would resolve the main reproducibility gap.
-
-3. **Discuss the UrbanCars trade-off.** Add a paragraph explaining why BAdd's I.D. Acc is lower and whether this is expected given the method's optimization landscape. Report whether the gap metrics are computed on conflict subsets or globally.
-
-4. **Add a fine-tuning ablation.** Show a single comparison (e.g., on Biased-MNIST q=0.99) of BAdd with vs. without fine-tuning the classifier head. This would confirm the design choice.
-
-5. **Briefly report unbiased-data performance** in the main paper (even as a single sentence with a pointer to supplementary tables).
+1. **Clarify $\mathbf{b}$ construction for multi-attribute cases** in a dedicated paragraph or table: specify architecture, training data, output dimensionality, and whether attributes are predicted jointly or separately for each multi-attribute dataset (FB-Biased-MNIST, UrbanCars, CelebA).
+2. **Add an ablation for the fine-tuning step**: show results with 0, 10, 20, 50 fine-tuning epochs, and check whether bias-conflicting accuracy degrades if fine-tuning is too long.
+3. **Add loss-spike plots for a second dataset** (e.g., Biased-UTKFace) to demonstrate that the claimed mechanism is not dataset-specific.
+4. **Compare against OccamNets** on FB-Biased-MNIST, or explicitly state why it cannot be compared (e.g., architecture incompatibility).
+5. **Report the accuracy of the bias-capturing classifier** for each dataset and show how it correlates with BAdd's final performance.
 
 ## Score and Decision
 
-This is a solid methods paper with a genuinely interesting theoretical insight (the loss-spike analysis), a simple and effective algorithm, and strong empirical results — particularly on multi-attribute benchmarks where the field has struggled. All identified weaknesses are in the minor-to-trivial range: they concern clarity, reproducibility documentation, and the completeness of a few experiments, not the validity of the core contribution. The paper would benefit from the suggested revisions but is already publishable in its current form.
+The paper introduces a simple, effective method that delivers strong empirical results across seven benchmarks, with particularly impressive gains on multi-attribute settings where prior work struggles. The core idea is novel and the ablations validate the design choices. The main weaknesses are documentation gaps (multi-attribute $\mathbf{b}$ construction, fine-tuning ablation) rather than fundamental flaws. These are addressable in a revision and do not invalidate the paper's contribution. The paper makes a solid contribution to the bias mitigation literature.
 
-**Originality**: Good — the loss-spike mechanism analysis is novel and the additive bias-feature approach is cleverly simple.
-
-**Significance of the research question**: High — bias mitigation in multi-attribute settings is a well-recognized gap.
-
-**Claims well-supported**: Yes, by 7 benchmarks with standard deviations and ablations.
-
-**Soundness of experiments**: Solid — proper baselines, standard protocols, multiple seeds. Minor gaps in reproducibility documentation.
-
-**Clarity**: Good overall; the methodology and loss analysis are well-explained. Some reproducibility details need elaboration.
-
-**Value to community**: High — simple, effective, easily adoptable method with strong results.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

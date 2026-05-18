@@ -1,18 +1,18 @@
-Now I have a thorough understanding of the paper. Let me construct the final consolidated review.
+Now I have all the verification I need. Let me produce the final consolidated review.
 
 ## Summary
 
-The paper proposes MMD-MP, a multi-population aware optimization for kernel-based Maximum Mean Discrepancy that removes the intra-class MGT distance term $k_\omega(y,y')$ from the training objective to reduce variance when dealing with MGTs from diverse LLMs. The method is applied to paragraph-based (two-sample test) and sentence-based (single-instance detection) MGT detection tasks. Extensive experiments across ChatGPT, GPT2, GPT3, and GPT-Neo series show consistent improvements over baselines, with particularly large gains in transfer to unseen LLMs.
+This paper studies MGT detection using kernel-based Maximum Mean Discrepancy (MMD). It identifies a key issue: when MGTs come from multiple LLM populations, the standard MMD training objective (MMD-D) suffers from inflated variance, degrading detection stability. The proposed solution, MMD-MP, removes the intra-class MGT term $k_\omega(y,y')$ from the training objective, yielding variance reduction and improved detection. The paper provides theoretical analysis (asymptotics, test power, uniform convergence) and extensive experiments across multiple LLMs showing consistent gains, particularly dramatic improvements (23-27% absolute test power) when detecting texts from unknown/unseen LLMs.
 
 ## Strengths
 
-1. **Novel and well-motivated variance-reduction approach**: The paper identifies a genuine problem — training deep kernel MMD on multi-population MGT data inflates variance (Fig. 1) — and proposes a clean solution: remove the $k_\omega(y,y')$ intra-class term during optimization. The motivation is supported by empirical variance decomposition (Fig. 2c–d) showing MMD-MP achieves substantially lower variance than MMD-D.
+1. **Clear diagnosis of a practically important problem**: The paper identifies and empirically demonstrates that standard MMD training degrades when MGTs come from multiple LLM populations due to variance inflation. The variance decomposition analysis (Section 2.3) and Figure 2 concretely show how the $k_\omega(y,y')$ term drives this issue. This is a novel and well-motivated observation.
 
-2. **Large and convincing gains on transfer to unknown LLMs**: When trained on ChatGPT/GPT2-series MGTs and tested on unseen LLMs (GPT-Neo-L, GPT-j-6b, GPT4all-j), MMD-MP achieves absolute test-power gains of **23.61%–27.65%** over MMD-D (Table 5) and ~3–4% AUROC gains (Table 6). These are large, unambiguous improvements that directly support the paper's claim of enhanced transferability.
+2. **Simple, well-motivated fix with strong empirical validation**: Removing the $k_\omega(y,y')$ term during training (MMD-MP) is a clean modification directly targeting the diagnosed problem. The results consistently show MMD-MP outperforming MMD-D across nearly all settings. The most striking results are on unknown LLM texts (Tables 5-6), where MMD-MP achieves 23.61%-27.65% absolute test power improvements over MMD-D and 3.25% AUROC improvement — evidence of genuinely better transferability.
 
-3. **Consistent superiority across diverse settings**: Across single/multi-population, full/limited/unbalanced training data, paragraph-based and sentence-based detection, MMD-MP outperforms all baselines (MMD-D, C2ST, metric-based, model-based) in every table. The advantage is particularly pronounced when multiple MGT populations are present — e.g., 79.92 vs 62.34 on three-population limited data (Table 2) — which is exactly the scenario the method is designed for.
+3. **Strong performance under challenging conditions**: The method shows substantial gains when training data is limited (Table 2: 8.20% average improvement over MMD-D on 2 populations, 13.97% on 3 populations) and when data is unbalanced (Figure 3: 6.96%-14.40% improvement). These are practically relevant scenarios where existing methods struggle.
 
-4. **Theoretical backing for the proposed objective**: Proposition 1 (asymptotic normality of MPP), Corollary 1 (test power expression), and Theorem 1 (uniform convergence bound) provide statistical grounding for the proxy objective, going beyond purely heuristic modification.
+4. **Theoretical grounding beyond typical MGT detection papers**: Proposition 1, Corollary 1 (asymptotic test power analysis), and Theorem 1 (uniform convergence bound) provide theoretical support for the modified objective, which is more analysis than most papers in this area provide.
 
 ## Weaknesses
 
@@ -20,60 +20,49 @@ The paper proposes MMD-MP, a multi-population aware optimization for kernel-base
 None.
 
 ### Major
-None. The issues raised do not threaten the core claims of the paper.
+None.
 
 ### Minor
 
-1. **Training MGTs for non-ChatGPT LLMs generated from only 20 prompts (line 382).** The paper uses the first 20 prompts of HWT in HC3 to generate training MGTs for all non-ChatGPT LLMs. This is a narrow prompt distribution, and the paper does not discuss whether test prompts are disjoint or how representative these 20 prompts are. While this does not invalidate the method — the core contribution is about optimization, not data scaling, and the synthetic experiments (Section 4.1) and ChatGPT results (which use the full HC3) provide complementary evidence — it does limit confidence that the results would fully generalize to broader prompt distributions. The paper should acknowledge this as a limitation.
+1. **Training-testing objective mismatch**: The kernel is trained using the MPP objective (which excludes $k_\omega(y,y')$) but evaluated using the full MMD (which includes it). The paper provides a practical justification (Remark 2: MPP does not converge properly under $\mathfrak{H}_0$, so full MMD is needed for testing) and notes that empirically the two strategies give nearly identical results. However, this gap means the theoretical claims about MPP's variance properties are not directly linked to the actual test-time behavior. The paper would benefit from either a theoretical argument connecting MPP-optimal kernels to full-MMD test power, or a cleaner evaluation protocol where the test uses MPP directly with an appropriate threshold.
 
-2. **Significance level for test power not specified.** Test power is defined as the probability of rejecting the null when $P \neq Q$, but the rejection threshold $\alpha$ (e.g., 0.05) is never stated. Algorithm 2 outputs a p-value, but the paper does not say what threshold is used to compute the reported test powers. This makes the raw numbers not fully interpretable, though relative method comparisons remain valid.
+2. **Improvements on single-population detection are modest and may lack statistical significance**: On single-population ChatGPT detection (Tables 1-2), MMD-MP vs. MMD-D differences are small (e.g., 93.21 vs. 91.76, 92.31 vs. 91.38) with overlapping error bars. No significance tests are reported. The method's strength clearly lies in multi-population and transfer settings rather than single-population, and the paper should be more careful not to overclaim in this regime.
 
-3. **Some single-population improvements are modest relative to reported variance.** On a few cells (e.g., ChatGPT column in Table 1: 93.21$\pm$1.35 vs 91.76$\pm$1.58; ChatGPT column in Table 2: 92.31$\pm$2.30 vs 91.38$\pm$2.09), the improvement is less than the sum of standard deviations. This tempers the claim of "superiority" on those specific settings, though the method never loses to baselines and the multi-population/transfer results are decisive.
+3. **C2ST baselines perform anomalously poorly**: C2ST-S achieves test power as low as 27.65 on Neo-S and 24.53 on multi-population settings — sometimes barely above chance. A classifier-based two-sample test with a reasonable architecture should capture _some_ signal. The paper does not discuss whether this reflects architectural choices, training issues, or fundamental limitations. This does not affect the paper's own contributions but weakens the baseline comparisons.
+
+4. **Theoretical bound has limited practical force**: Theorem 1's uniform convergence bound scales with $\sqrt{D \log(R_\Omega n)}$ where $D$ is the parameter space dimension. For the deep neural network $\phi_{\hat{f}}$ used in experiments, $D$ could be very large, making the bound potentially vacuous. The $\mathcal{O}(n^{-1/3})$ rate is also slower than the standard $\mathcal{O}(n^{-1/2})$. This does not invalidate the empirical results, but it means the theory section contributes less rigor than its framing suggests.
 
 ### Trivial
 
-1. **Data generation details for non-ChatGPT LLMs are underspecified.** The paper states "first 20 prompts of HWT in HC3" but does not specify which prompts, how many MGTs were generated per prompt, or any filtering criteria applied. These details would improve reproducibility.
+1. **"Pairing rules" is used as an informal, undefined concept** (Section 2.3, line 149). The intuition is clear from context, but the term lacks a formal definition.
 
-2. **The variance decomposition analysis (Section 2.3) is shown for a single run.** While the paper uses this as motivation (not proof) and validates the method extensively downstream, noting that the observations come from a single un-ablated trajectory would improve rigor.
+2. **Unbalanced experiment (Figure 3) description is sparse** — the caption and Section 5.3 give minimal detail about the setup beyond "2,000 HWT and 400 MGT training paragraphs."
 
 ## Nice-to-Haves
 
-- A controlled ablation training with the full MMD objective plus an explicit variance regularizer would further strengthen the causal claim that variance reduction is the mechanism.
-- Quantitative metrics of feature separation (e.g., silhouette score, centroid distance) to complement the t-SNE visualization in Figure 4.
-- A brief discussion of how the 20-prompt limitation might affect generalization and why the method's core contribution does not depend on prompt diversity.
+- A controlled experiment holding total MGT training size fixed while varying the number of LLM populations would more cleanly isolate the multi-population effect from simply having more training data.
+- An ablation where the $k_\omega(y,y')$ term is down-weighted (rather than fully removed) via a hyperparameter $\lambda$ would test whether complete removal is necessary or just reducing the term's influence suffices.
+- Reporting statistical significance (e.g., paired t-tests) for key comparisons where error bars overlap would strengthen the claims.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-1. **"Disconnect between training objective and test-time statistic"** — The paper explicitly addresses this at line 288 ("Empirically, the performance of these two strategies is almost identical") and at line 316 with a clear rationale (MMD equals zero when $P=Q$, MPP would be negative). The theoretical analysis of the MPP objective is for training; the empirical validation shows the trained kernel works with the full MMD at test time. The critic's concern is addressed by the paper.
-
-2. **"Variance decomposition analysis is empirical and not controlled"** — The paper presents the variance decomposition as observational motivation (Section 2.3: "conduct empirical studies to demonstrate the trends"), not as a rigorous proof. The method is then rigorously evaluated in experiments. This is standard hypothesis-generation followed by validation.
-
-3. **"Figure 1 axis labels not described"** — Figure axis labels are embedded in the figure images, which are not accessible in plain text extraction. The subfigure captions clearly indicate what each plot shows (MMD values, MMD variance, test power).
-
-4. **"unbanlance hc3" typo in Figure 3** — Per instructions, formatting/typo nitpicks are removed as parser artifacts.
-
-5. **"Missing baselines (DNA-GPT, Fast-DetectGPT)"** — The existing baseline set (Log-Likelihood, DetectGPT, OpenAI-D, ChatGPT-D, C2ST, MMD-D, CE-Classifier) is adequate for demonstrating the method's effectiveness. Adding more baselines would not change the core claims.
-
-6. **"Request for t-SNE quantitative metrics"** — This is a nice-to-have; the t-SNE visualization is qualitative and appropriate as a supplement.
-
-7. **"Notation Var(E[H*]) is ambiguous"** — The paper explicitly defines this at line 137: "$\mmE$ denotes taking expectations across two populations sampled from MGTs and HWTs and $\mathrm{Var}$ denotes taking variances within these sampled populations." The notation is explained.
+- **"Missing experimental details (architecture, hyperparameters)"**: Per instructions, the parser strips appendix content. These details likely exist in the original submission.
+- **"Synthetic experiment varies μ not population count"**: The real experiments (Tables 1-2) do vary the number of LLM populations, which is the actual test. The synthetic experiment evaluates a related but different aspect (variance magnitude). The criticism is partially addressed by the paper's existing experiments.
+- **"No proof of Theorem 1 in main text"**: Per instructions, proofs are typically deferred to the appendix which the parser strips.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The reviews surface the training-testing mismatch as the key unresolved tension in the paper's framing, and the observation that the method's largest gains come in transfer/unknown-LLM scenarios (suggesting the mechanism is primarily about avoiding overfitting to diversity in $S_\mathbb{Q}$ rather than directly modeling multi-population structure). These are useful clarifications but the paper already covers them implicitly.
 
 ## Suggestions
 
-- State the significance level $\alpha$ used in permutation tests for test power computation explicitly.
-- Add a brief limitations paragraph discussing the reliance on 20 prompts for non-ChatGPT MGT generation and whether test prompts are disjoint.
-- For single-population results where gains are modest, consider adding bootstrap confidence intervals or paired significance tests to clarify which differences are reliable.
-- Specify the number of MGTs generated per prompt and any filtering steps used in data preparation.
+1. Address the training-testing gap directly: either develop a test that uses MPP (with a corrected threshold), or provide a theoretical argument (e.g., the gradient of MPP is an unbiased estimate of the MMD gradient gradient under mild conditions) connecting the two. At minimum, show that the optimal kernel for MPP is near-optimal for full MMD.
+2. Add statistical significance tests for comparisons where error bars overlap (e.g., single-population ChatGPT).
+3. Discuss why C2ST-S/C2ST-L perform so poorly in the paper's setup — this is important context for practitioners reading the paper.
 
 ## Score and Decision
 
-This paper makes a genuine contribution: it identifies a real problem (variance inflation in MMD under multi-population training), provides a clean solution (removing $k_\omega(y,y')$), and validates it extensively with particularly strong results on the practically important transfer-to-unknown-LLM scenario. The weaknesses — limited prompt diversity for non-ChatGPT models, unspecified test-power significance level, and modest gains on a few single-population settings — are real but addressable and do not undermine the core claims. The paper is acceptable with minor revisions.
+This paper makes a genuine contribution: it identifies a real and consequential problem (variance inflation in MMD from heterogeneous MGT populations), proposes a clean fix, and validates it with strong empirical results — especially the transferability gains (23-27% test power). The training-testing mismatch is the main unresolved tension, but it does not undermine the empirical findings. The weaknesses identified are minor relative to the contribution: the method works, the improvement is clear in the settings that matter (multi-population, limited data, unbalanced data, unknown LLMs), and the theoretical framing, while imperfect, adds value. I recommend acceptance.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

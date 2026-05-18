@@ -1,73 +1,110 @@
-Now I have all the information needed. Let me write the final consolidated review.
+Now I have a thorough understanding of the paper and can verify claims directly. Let me produce the consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes DyTaylorCNN, a pre-training-free network for few-shot point cloud semantic segmentation with two core components: (1) Dynamic Taylor Convolution (DyTaylorConv), which combines a Low-order Convolution (LoConv) for basic geometry with a Dynamic High-order Convolution (DyHiConv) using learnable power-weighted feature differences, and (2) an Interactive Prototype Refinement (IPR) module that uses self-enhancement and cross-attention between support and query sets to refine coarse prototypes. The method achieves strong empirical results, outperforming prior methods by 5–8% mIoU on S3DIS and ScanNet across multiple few-shot settings.
+This paper proposes DyTaylorCNN, a pre-training-free architecture for few-shot point cloud semantic segmentation. The method has two core components: (1) Dynamic Taylor Convolution (DyTaylorConv), which decomposes local feature extraction into a low-order branch (LoConv, based on positional encoding) and a dynamic high-order branch (DyHiConv, a multi-branch dynamic convolution with signed power activation), and (2) an Interactive Prototype Refinement (IPR) module that iteratively refines prototypes to bridge the support-query distribution gap. Experiments on S3DIS and ScanNet show SOTA results, outperforming the previous best method Seg-PN by 5–8 mIoU points across settings.
+
+---
 
 ## Strengths
 
-1. **State-of-the-art results with substantial margins across multiple settings.** On S3DIS 2-way 1-shot, DyTaylorCNN reaches 71.95% mIoU (+5.54 over Seg-PN); on ScanNet 2-way 1-shot, it achieves 71.96% mIoU (+8.22 over Seg-PN). These gains hold across 1-shot and 5-shot settings on both datasets (Tables 1–2), providing strong empirical support for the method's effectiveness.
+- **Consistent SOTA results across benchmarks and settings**: DyTaylorCNN outperforms all prior methods on both S3DIS and ScanNet under 2-way and 3-way settings for both 1-shot and 5-shot. For example, 71.95% vs 66.41% (Seg-PN) on S3DIS 2-way-1-shot, and 71.96% vs 63.74% on ScanNet 2-way-1-shot (Tables 1, 2). The gains are substantial and hold across all evaluated configurations.
 
-2. **Coarse-to-fine prototype refinement is convincingly validated.** Ablations (Table 4b) show the IPR module contributes ~21% mIoU improvement over the no-IPR baseline. PEM alone yields 70.57%, PRM alone yields 70.05%, and the full module reaches 71.95%, cleanly demonstrating that both sub-components are meaningful and complementary.
+- **Ablation study clearly establishes the IPR module's large impact**: Table 4b shows that adding the Prototype Enhancement Module (PEM) alone boosts mIoU by 20.27 points (from 50.30% to 70.57%), and the full IPR module reaches 71.95%. This convincingly demonstrates that coarse-to-fine prototype refinement effectively addresses the support-query domain gap.
 
-3. **DyHiConv's structural contribution is supported by ablations.** Increasing HiConv count from 1 to 8 improves mIoU from 70.10% to 71.95% (Table 3a), and incorporating richer geometric information into the explicit structure $h_j$ progresses from 70.70% to 71.95% (Table 3b). These trends confirm that the multi-basis design and geometric priors benefit local feature learning.
+- **Systematic ablation of architectural choices**: The paper provides ablations on the number of HiConv branches (Table 3a, V=1→8), the composition of explicit geometric information (Table 3b, from [p_j] alone to the full [p_i,p_j,p_j-p_i,‖p_i,p_j‖]), and HiConv parameters s and p (Table 4a). These experiments validate that each design decision contributes measurably to the final performance.
 
-4. **Pre-training-free paradigm achieves competitive or superior results.** Despite avoiding the pre-training step that prior methods rely on, DyTaylorCNN outperforms them, demonstrating that the proposed components can compensate for the lack of pre-training.
+- **Geometric interpretability of HiConv**: Figure 4b visualizes how varying parameters s and p allows HiConv to represent diverse geometric shapes (hyperplanes, hyperspheres, concave/convex forms), providing intuitive support for the claim that the module can flexibly fit local 3D structures.
+
+---
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
 
-1. **The connection to Taylor series is overstated and not mathematically realized.** The paper claims DyHiConv's high-order neuron (Eq. 8) "can simulate the high-order terms of Taylor series." In reality, the operation $\mathcal{T}(f_i,f_j) = (\text{sign}(w_j \odot (f_j-f_i)))^s \odot |w_j \odot (f_j-f_i)|^p$ is a power-weighted feature difference with a single learnable exponent $p$, not a polynomial expansion involving derivatives or multiple increasing powers of $(x-x_0)$. A Taylor series requires terms of order 1, 2, 3, ... with factorial denominators and derivative evaluations — none of which appear here. The analogy between dynamic convolution (Eq. 4) and the Taylor series (Eq. 1) is likewise superficial (both are sums of terms). This overclaiming pervades the paper's framing, including its title. The contribution would be clearer and more honest if presented as a novel dynamic convolution variant with learnable power normalization and explicit geometric priors, rather than claiming a theoretical basis from Taylor series that is not realized. This is a significant weakness because it concerns the core intellectual framing of the work, not a peripheral detail.
+1. **The Taylor series connection is asserted but not mathematically substantiated.**  
+   The paper's central conceptual framing—that DyTaylorConv captures "high-order term features" via a Taylor-series-inspired decomposition—is not backed by any formal derivation. Equation (10) defines the DyHiConv output through a signed power-normalization operator T(f_i,f_j) = ((w_j⊙(f_j−f_i))/|w_j⊙(f_j−f_i)|)^s ⊙ |w_j⊙(f_j−f_i)|^p. This is a multi-branch dynamic convolution with a specific activation function, not a polynomial expansion. No derivation shows that summing V such terms approximates any order of a Taylor expansion around p_i. The "low-order" LoConv is positional encoding plus linear projection—a standard technique with no clear relation to Taylor series either. The paper would be equally (or more) valid if it described DyHiConv honestly as a multi-branch dynamic convolution with signed power activation. The Taylor framing inflates claimed novelty without technical substance.
+
+2. **Training hyperparameters are entirely absent.**  
+   The paper reports no information about the optimizer, learning rate, learning rate schedule, batch size, number of training episodes, data augmentation, or hardware. This makes reproduction impossible and is a serious omission for any empirical paper. (Verified by grep: no matches for "optimizer," "learning rate," "batch size," or "epoch" anywhere in the manuscript.)
+
+3. **No error bars or variance reporting.**  
+   Few-shot evaluation is inherently noisy due to random episode sampling, with reported standard deviations often in the 2–5 point range in this literature. The paper reports improvements of 5–8 mIoU points over baselines without any measure of variance (standard deviation, confidence interval, or even number of test episodes). Without this, it is impossible to assess whether the reported gains are statistically meaningful. (Verified by grep: zero matches for "standard deviation," "error bar," "variance," "confidence," or "episode" in quantitative context.)
+
+4. **DyTaylorConv's independent contribution as a feature extractor is not isolated from the IPR module.**  
+   The ablation in Table 4b shows the model without IPR achieves only 50.30% mIoU. While this low baseline is expected (the base model uses only naive masked-average-pooling prototypes with no refinement), the paper never compares DyTaylorConv against alternative feature extractors (e.g., EdgeConv, KPConv, or the Seg-PN backbone) while holding the IPR module and decoder fixed. Such a controlled experiment is needed to substantiate the claim that DyTaylorConv provides a fundamentally better local geometry representation. As it stands, the paper cannot rule out the possibility that the IPR module is the primary driver of gains and that a different feature extractor would perform similarly when paired with IPR.
 
 ### Minor
 
-2. **No ablation replacing DyTaylorConv with a standard convolution.** The ablations vary the number of HiConv heads and the explicit structure $h_j$, but never replace DyTaylorConv with a standard convolution (e.g., EdgeConv or PAConv) in the same architecture while keeping the IPR module. Without this control, the marginal contribution of DyTaylorConv over a simpler convolution is unclear — especially given that the IPR module provides ~21% improvement while increasing HiConv from 1 to 8 provides only ~1.85%.
+1. **The positioning against "pre-training paradigms" is somewhat misleading.**  
+   The paper repeatedly frames itself as "pre-training-free" and criticizes existing methods for relying on pre-training. However, the strongest baseline Seg-PN (Zhu et al., 2024) is itself a pre-training-free, non-parametric method (confirmed by its reference title: "No Time to Train: Empowering Non-parametric Networks…"). The paper does not acknowledge this or explain how DyTaylorCNN differs methodologically from non-parametric approaches. This weakens the rhetorical positioning.
 
-3. **No uncertainty quantification.** Results in Tables 1–4 report only point estimates of mIoU with no standard deviations, confidence intervals, or number of episode seeds. Few-shot segmentation has known variance across episodes; the absence of this information weakens the reliability of the reported margins. This is standard practice to report in this area (e.g., Zhao et al. 2021b report std devs).
+2. **IPR module notation is partially unclear.**  
+   In the Prototype Refinement Module section, the notation F_q^{I'} appears without definition, and the operations for computing Δ_G are described but the tensor dimensions and the meaning of the I' superscript are not explained. Given that IPR accounts for the vast majority of performance, this section deserves clearer presentation.
 
-4. **Missing training hyperparameters.** The paper provides architecture details but no information about optimizer, learning rate, number of training episodes, batch size, or data preprocessing (number of points per sample, sampling method). These are essential for reproducibility.
+3. **No model complexity comparison.**  
+   The paper emphasizes avoiding "time-consuming pre-training" but provides no comparison of parameter counts, FLOPs, or training/inference time against baselines. The DyHiConv uses up to 8 parallel convolution branches with power operations, which may carry non-trivial computational cost. This should be quantified.
 
-5. **Ablations limited to one setting (S3DIS 2-way 1-shot).** The ablations for HiConv count, explicit structure, IPR components, and HiConv parameters are all conducted on a single setting. Generalizability of the ablations to other settings (3-way, 5-shot, ScanNet) is not demonstrated.
-
-6. **Notation issues in the method section.** (a) Eq. 9 defines $\phi_v$ using $h_j$, which is per-neighbor, but $\phi_v$ is used in Eq. 7 as a per-basis aggregation weight — it is unclear how the per-neighbor $\phi_v$ is reduced. (b) The high-order neuron (Eq. 8) involves a denominator $|w_j \odot (f_j-f_i)|$ that could be zero; numerical stability is not discussed. (c) The delta-refinement term $\Delta_G = F_q'^T F_q - F_s'^T F_s$ is dimensionally unclear.
-
-7. **No model complexity comparison.** Given that the paper criticizes pre-training for computational cost, a comparison of parameter counts, FLOPs, or inference time with baselines would help validate this claimed advantage.
+4. **The HiConv shape visualization (Fig. 4b) is not connected to quantitative analysis.**  
+   The paper visualizes what geometric shapes HiConv can represent under different (s,p) values but never reports which settings produce the best performance in actual experiments, nor analyzes whether specific shapes correlate with better segmentation on particular classes. Table 4a reports s=1 yields best results (71.95%), but this is not discussed in relation to the visualization.
 
 ### Trivial
 
-8. The caption of Figure 2 contains a large block of line numbers ("162 163 164...") that appear to be formatting artifacts from the submission.
+None.
+
+---
 
 ## Nice-to-Haves
 
-- A version of the strongest baseline (Seg-PN) trained without pre-training in the same episodic fashion would strengthen the claim that DyTaylorConv's design — not just the training paradigm — drives the improvement.
-- A cross-dataset evaluation (e.g., train on S3DIS, test on ScanNet) would further demonstrate generalization, though this is beyond the paper's stated scope.
-- Reporting the initial value and learned range of the exponent parameter $p$ in HiConv would provide useful insight.
+- A controlled experiment swapping DyTaylorConv for other feature extractors (EdgeConv, KPConv) while keeping the IPR module and decoder fixed would substantiate the claim that DyTaylorConv provides superior local geometry representation.
+- Reporting standard deviations computed over a large number of test episodes (standard practice in this literature).
+- Including training hyperparameters (optimizer, learning rate schedule, number of episodes, data augmentation) for reproducibility.
+
+---
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed; treat them with caution:
 
-- **"ProtoNet reference is missing ('?')"** — This is a PDF extraction artifact; the original submission contains the proper citation.
-- **"Baseline comparison confounded by training paradigm (evidential/structural)"** — The paper explicitly claims pre-training-free operation as a contribution. Comparing against pre-trained methods and winning despite this disadvantage is a valid comparison that supports the paper's claims, not a confound. The ablations already show the components matter within the same paradigm. The controlled experiment suggested (pre-training the authors' backbone) would be a useful addition but the absence does not invalidate the comparison.
-- **"Connection to Taylor series is 'not a real paper contribution'" type framing** — This was kept as Major weakness 1 above (the connection IS overstated), but hyperbole suggesting this invalidates the entire paper is rejected. The method still works; the framing is just overclaimed.
-- **"The 50.30% baseline without IPR is suspicious"** — This baseline represents the encoder without any prototype refinement on a 2-way task (random ≈ 33.3%). The low value is consistent with operating without pre-training and without prototype refinement. The 21% jump from IPR is actually evidence of IPR's effectiveness, not a flaw.
+1. **"The IPR section is compromised by garbled text"** — The garbled string "thbeyr cmroorses,- rewfei noebmteainnt" is a PDF parsing artifact. Per instructions, formatting artifacts from extraction are not author errors. The underlying concern about unclear notation is kept in Minor.
+
+2. **"ProtoNet (?) citation contains a question mark"** — Parser artifact; the original submission does not have this.
+
+3. **"Diminishing returns from V=6 to V=8 are not discussed"** — This IS discussed: the paper explicitly states "the marginal gain from 6 to 8 convolutions is only 0.42%, implying diminishing returns" (line 249). The paper already addresses this.
+
+4. **Critic's claim that "50.30% base model is substantially worse than existing methods"** — This compares the model's backbone without IPR (50.30%) against the full Seg-PN method (66.41%) which has its own prototype handling. This is an apples-to-oranges comparison and misrepresents what the ablation shows.
+
+---
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface two useful observations: (1) the IPR module is the dominant driver of performance (~21% improvement) compared to DyTaylorConv's incremental gain (~1.85%), which is not clearly communicated in the paper's balanced presentation of "two innovative components," and (2) the Taylor series framing, while attention-grabbing, creates an expectation of mathematical rigor that the method does not deliver — a cautionary example for papers that borrow inspiration from classical mathematics.
+None beyond the paper's own contributions.
+
+---
 
 ## Suggestions
 
-1. **Reframe the Taylor series connection honestly.** Replace claims of "high-order terms of Taylor series" with "inspired by the decomposition into low-order and high-order geometric cues." Describe the high-order neuron as a learnable power-weighted feature difference, which is already a novel and useful design without needing to claim Taylor expansion.
-2. **Add a controlled ablation** replacing DyTaylorConv with a standard convolution (e.g., PAConv or EdgeConv) in the same architecture to isolate the contribution of the proposed convolution design.
-3. **Report standard deviations** over at least 3–5 random episode seeds for all main results and ablations.
-4. **Add training details** (optimizer, learning rate, schedule, episodes, batch size, number of points per sample) to the appendix.
-5. **Expand ablations** to at least one additional setting (e.g., 3-way 1-shot on S3DIS) to show generalizability.
+1. Either provide a genuine mathematical connection between the proposed DyHiConv operator and Taylor expansion, or drop the Taylor framing entirely and describe the method as a multi-branch dynamic convolution with signed power normalization. The latter would be more honest and does not weaken the empirical contribution.
+
+2. Add a controlled experiment: swap DyTaylorConv for EdgeConv or KPConv while keeping the IPR module and decoder fixed, and report mIoU. This would directly validate the claim that DyTaylorConv provides superior local geometry representation.
+
+3. Add error bars (standard deviation over episodes) to all main results, and state the number of test episodes used.
+
+4. Add a table with training hyperparameters (optimizer, learning rate, batch size, number of training episodes, data augmentation, hardware) to support reproducibility.
+
+5. Clarify the notation in the PRM section (define F_q^{I'}, annotate tensor dimensions) given that IPR drives the majority of performance.
+
+---
 
 ## Score and Decision
 
-The paper presents a method that achieves genuinely strong empirical results with a well-validated IPR module and a reasonable (if overframed) convolution design. The core weakness is the overstated Taylor series connection, which affects the paper's framing more than its technical validity. The missing training details and lack of variance estimates are addressable in revision. On balance, the empirical contributions outweigh the presentation issues.
+This paper presents an architecture that achieves SOTA results on few-shot point cloud segmentation, supported by reasonably thorough ablations. The empirical contribution is real. However, the paper suffers from three significant issues: (1) the Taylor series framing—which is central to the paper's identity and title—is mathematically unsubstantiated and amounts to overclaiming; (2) training details are entirely absent, preventing reproduction; and (3) no variance reporting makes it unclear whether the gains are statistically significant. These are correctable weaknesses, but in their current form they substantially undermine confidence in the results. A major revision addressing these issues would make the paper suitable for acceptance.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

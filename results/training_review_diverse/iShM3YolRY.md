@@ -1,20 +1,20 @@
-Now I have a complete picture. Let me synthesize the final review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper investigates whether open-source LLMs can be made competitive with closed models (GPT-4) for software tool manipulation using only a practical amount of human supervision. It identifies three failure modes of open-source LLMs (API selection, argument populating, non-executable generation) and adapts three well-known techniques — model alignment with programmatically generated data, a demonstration retriever, and a system prompt — to address them. The paper introduces the SNAct benchmark covering 8 diverse tasks with real execution evaluation. Results show that the combined techniques boost open-source LLMs to be competitive with GPT-4 on 4 of 8 tasks.
+This paper investigates whether open-source LLMs can be made competitive with closed models (GPT-4) on software tool manipulation tasks using a practical amount of human supervision. The authors identify three failure modes of open-source LLMs (API selection, argument population, non-executable generation) and adapt three well-known techniques—model alignment via programmatic data generation, an in-context demonstration retriever, and a system prompt—to address them. They introduce SNACT, a benchmark of 8 diverse tools with predefined test cases, and show that the proposed recipe boosts open-source LLMs by up to 90% success rate, achieving competitive or better performance than GPT-4 on 4 of 8 tasks.
 
 ## Strengths
 
-- **Systematic identification of three failure modes specific to open-source LLMs for tool manipulation (Section 3, Tables 2-3).** The paper empirically categorizes errors into API selection, argument populating, and non-executable generation, providing a clear causal diagnosis that directly motivates the three proposed techniques.
+1. **Systematic diagnosis of open-source LLM failure modes in tool manipulation.** The paper identifies and quantitatively characterizes three distinct failure types—API selection, argument populating, and non-executable generation—providing breakdowns across models (e.g., Table 2 shows argument populating causes 32% of LLaMA failures and 63% of CodeGen failures). This taxonomy is actionable and directly motivates the three proposed techniques.
 
-- **Programmatic data generation enables practical model alignment with O(n) human templates per tool (Section 4.1, Figure 3).** The paper demonstrates that fewer than 100 human-crafted templates per tool, instantiated with random values, can generate sufficient training data. This makes the approach practical — the paper claims approximately one developer day per tool.
+2. **Programmatic data generation for model alignment reduces required human effort to O(n) templates.** The core idea of writing a few dozen templates with placeholders and bootstrapping training data via random instantiation is practical and well-demonstrated. The paper shows that fewer than 100 templates per tool suffice (O(n) where n is the number of APIs), and ablation studies confirm model alignment is the most impactful technique, degrading up to 7 of 8 tasks when removed.
 
-- **Quantitative evidence that the combined techniques substantially boost open-source LLMs (Section 6.2, Table `\input{tables/baslines}`).** The boosted open-source models match or exceed GPT-4 on 4 of 8 tasks (OpenWeather, Cat API, VirtualHome, WebShop — explicitly listed in the text). The paper reports up to 90% absolute improvement over zero-shot baselines, and gaps on Home Search and Trip Booking are reduced to ~11–13%.
+3. **Evidence that a small pool of demonstrations (O(n)) generalizes to unseen API combinations.** The home search task with 15 API functions is a convincing case study: with only 10 human-curated demonstrations that do not match any test case's API combination, the retriever boosts success rates by up to 79% across open-source models. This strongly supports the claim that the approach requires only modest human effort.
 
-- **Introduction of the SNAct benchmark with real execution evaluation (Section 5).** The benchmark provides predefined test cases and an infrastructure that actually executes generated API calls, enabling reproducible quantitative evaluation — a practical improvement over prior benchmarks that rely on offline evaluation or closed APIs.
+4. **Introduction of SNACT, a benchmark with pre-defined test cases for reproducible quantitative evaluation.** While prior tool-augmented LLM benchmarks (Li et al. 2023, Qin et al. 2023) focused on closed-model evaluation without standardized test cases, SNACT provides ground-truth test cases across 8 diverse tools spanning single-step and multi-step scenarios. The API complexity score is a useful auxiliary contribution for quantifying task difficulty.
 
-- **Empirical verification that the demonstration retriever generalizes to unseen API combinations (Section 4.2, Figure 4).** With only 10 human-curated demonstrations for a 15-API task (Home Search), retrieval boosts open-source LLMs by up to 79%, demonstrating that O(n) examples suffice for generalization to unseen API combinations.
+5. **Insight that GPT-4 internalizes API usage knowledge during training.** Figure 2 shows GPT-4 can select correct APIs without documentation or examples, whereas open-source models fail. This observation provides a clear empirical rationale for why model alignment with API usage examples is necessary for open-source models.
 
 ## Weaknesses
 
@@ -22,60 +22,56 @@ This paper investigates whether open-source LLMs can be made competitive with cl
 None.
 
 ### Major
-- **The main text's ablation analysis uses counts of tasks improved/hurt rather than magnitudes of improvement (Table `tab:breakdown`).** Table 7 reports how many tasks improve or degrade when techniques are added/removed, which conflates small improvements with large ones. A task that improves by 2% and one that improves by 40% are counted identically. The paper itself acknowledges that low-success-rate tasks (<20%) are volatile. While the full per-task results are referenced to the appendix (`tab:baselines_over_techniques`), the main text's analysis is coarse enough to obscure the actual effect sizes. This weakens the support for the claim that "model alignment does the heavy lifting."
+None.
 
 ### Minor
-- **The API complexity score (Equation 1, Section 5.2) is defined but not validated or used to interpret results.** The score S is presented as a task-agnostic measure of API selection difficulty, listed in `tab:all_tasks`, and briefly invoked to explain why WebShop's complexity is zero (line 318). But it is never empirically validated (e.g., by correlation with model performance), never used to drive analysis of which tasks remain hard, and does not appear to inform any experimental conclusion. It is a tangential formalism rather than an analytical tool.
 
-- **No random-retrieval baseline for the demonstration retriever (Section 4.2).** The retriever is validated by comparing with zero-shot, but not against randomly selected demonstrations of the same size. This makes it impossible to attribute the improvement specifically to the retrieval mechanism rather than simply having any in-context example. Given that retrieval is positioned as a core component, this is a notable gap.
+1. **Missing variance reporting on main results prevents assessing the reliability of the "competitive" claim.** The paper reports averages over 3 runs (line 343) but does not report standard deviations, confidence intervals, or any measure of variance for the headline results in the main tables (Tables 2, 3). While the observed improvements are large (up to 90%), the claim that open-source models become "competitive or better" than GPT-4 on 4 of 8 tasks would be substantially strengthened by showing error bars or explicitly defining thresholds (e.g., within 5% absolute). The paper's own text acknowledges that low-success-rate tasks are "hypothetically subject to high variance and fluctuation" (line 394), which underscores the need for variance reporting across all results.
 
-- **The "up to 90% improvement" phrasing is ambiguous (Section 6.2).** The paper states "the success rates of the open-source LLMs can improve up to 90%" without clarifying whether this is in absolute percentage points or relative improvement. The context (zero-shot success rates near 0% for some tasks) suggests it is absolute, but this should be explicit.
+2. **The "one developer day" supervision claim is reported as an observation rather than a measured quantity.** The paper states "we find it takes on average one day for one developer to curate the data" (line 234) and "We observe that providing these supervisions takes one developer day on average" (line 359). However, no information is provided about who performed the curation, their expertise level, the measurement methodology, or variance across tools. This is the paper's central evidence for "practical" supervision, and an anecdotal observation is weaker than the claim warrants. The paper would be stronger if it either reported this as a rough qualitative estimate or conducted a minimal measurement (e.g., two developers independently curating data for one tool and reporting time + agreement).
 
-- **The "one developer day" claim could be better substantiated.** The paper mentions this average figure without a supporting breakdown (e.g., a table of template counts, example curation time, and variance across tools). The claim is central to the paper's practical-supervision narrative and would be strengthened by granular evidence.
+3. **The demonstration retriever's embedding model and similarity metric are not specified.** The paper states the retriever "selects demonstration examples with the most semantically similar goals" (Section 3.2, line 243) but does not specify which embedding model or distance function is used. The API document retriever is described as using BM25 (line 110), but the demonstration retriever appears to use a different semantic similarity mechanism that is left unspecified. This is a concrete reproducibility gap for a component that directly affects the results.
 
-- **No discussion of potential data contamination in GPT-4.** The paper observes that GPT-4 can select correct APIs without documentation (Figure 2, left) and notes this "hypothetically" reflects internalized knowledge. A brief acknowledgment of possible training-data contamination would strengthen the rigor.
+4. **The "first open-source benchmark" claim is qualified but could invite unnecessary debate.** The paper carefully qualifies this claim with "among the ones brought up in the recent tool-augmented LLM literature" and specifically contrasts with the cited works (li2023api, qin2023tool). While this is a defensible qualified claim, phrasing it more modestly (e.g., "to the best of our knowledge, the first open-source benchmark among those in the recent tool-augmented LLM literature with predefined test cases") would avoid distracting discussions. This is a minor presentational issue.
 
 ### Trivial
-- The text has a few minor typos consistent with parser artifacts (e.g., "VirturalHome" instead of "VirtualHome" at line 355 — likely a paper typo; "approximately approximately" at line 279).
+
+- The ablation study in the main text (Table 7) reports only the count of tasks improved/hurt rather than the magnitude of changes. While the full results are referenced in the appendix (Table "baselines_over_techniques"), the count-based summary alone is weak evidence for the contribution of each technique in the main text.
+
+- The paper compares tuned open-source LLMs with untuned GPT-4 (since GPT-4 tuning APIs are unavailable). This asymmetry is acknowledged in a footnote (line 57) but could be made more explicit in the main narrative framing.
 
 ## Nice-to-Haves
-- Reporting standard deviations or confidence intervals for the 3-run experiments, especially for tasks with low success rates where variation could be high.
-- A comparison with other open-source instruction-tuned models (e.g., Vicuna, Mistral) — the paper notes in a footnote that such models did not outperform base models on tool manipulation, but does not show the data.
-- A scatter plot correlating the complexity score S with zero-shot model performance would validate (or justify removing) the score.
+
+- A per-task breakdown of which failure modes persist after enhancement on the 4 tasks where open-source models are not competitive would provide actionable insight for future work.
+- A small-scale inter-annotator study (e.g., two developers independently creating templates for one tool) to add rigor to the "one developer day" claim.
+- A brief error analysis on the 4 tasks where open-source models still lag behind GPT-4, quantifying how much of the gap is attributable to each of the three failure modes.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were flagged by the reviewers but are removed after verification against the paper:
 
-1. **"The main text does not contain a full table of success rates for all models across all conditions"** — REMOVED as factually wrong. The paper includes `\input{tables/baslines}` in the main text (Section 6), which presents both zero-shot and full-system success rates. The critic's claim that "the only numerical evaluation in the main body is a coarsely aggregated 'count of tasks improved/hurt'" is incorrect. The per-technique breakdown is deferred to the appendix, which is standard practice. The fact that the plain-text extraction cannot render LaTeX `\input` commands is a parser issue, not a paper defect.
-
-2. **"Claim of 'competitive to GPT-4 in 4 out of 8 tasks' is poorly qualified — the paper should explicitly list which four tasks"** — REMOVED as factually wrong. The paper explicitly names the four tasks at line 355: "Open Weather, the Cat API, VirturalHome and WebShop." It also discusses the nature of the remaining gap in the "Remaining challenges" paragraph (lines 360-361), attributing it to required "advanced reasoning" on Google Sheets and Tabletop.
-
-3. **"Missing appendix, missing proofs in appendix, absent references"** — REMOVED per instructions; these are parser-stripped content that exists in the original submission.
-
-4. **Several generic formatting/style nitpicks** — REMOVED per instructions.
-
-5. **Requests for the paper to cover additional domains/tasks beyond its stated scope** — REMOVED as scope creep.
+- **"Comparison asymmetry is not discussed":** The paper explicitly acknowledges this in a footnote (line 57: "Model alignment is not applicable to GPT-4 as there is no publicly available tuning APIs for it during our experiments"), so the reviewer missed this discussion.
+- **"The novelty claim about the benchmark may be overstated":** The paper carefully qualifies its "first" claim with "among the ones brought up in the recent tool-augmented LLM literature" and specifically contrasts with the benchmarks it cites (li2023api, qin2023tool). The reviewer's concern about hypothetical prior benchmarks like ToolBench is already addressed — ToolBench (qin2023tool) is cited and is the very benchmark the paper contrasts against.
+- **Strength Finder's "Cost and effort analysis validates practicality":** This conflates the anecdotal "one day" claim (which is a genuine weakness) with a validated finding. Since the weakness is verified, this strength claim conflicts and is removed.
+- **Generic/misaligned strength claims:** None remaining in Strength Finder output after filtering.
+- **Weaknesses about missing appendix content:** References to appendix tables (baselines_over_techniques, training_data, app_exp_details) are standard — the parser strips appendix sections from all papers.
 
 ## Novel Insights
 
-The most interesting cross-review observation is the tension between the paper's practical ambition and its evidential sufficiency. The reviewers broadly agree that the problem is well-motivated, the failure-mode diagnosis is useful, and the three techniques are sensible adaptations. Where the assessment diverges sharply is evidentiary: the harsh critic argues the paper's core quantitative claims are unverifiable, but this stems from (a) treating parser artifacts as paper defects and (b) missing the explicit task listing and main results table that are present in the original submission. The genuine weakness — that the ablation uses coarse counts instead of magnitudes in the main text — is real but does not invalidate the paper's contribution; it weakens the resolution of the analysis but the full data is in the appendix. The paper would benefit most from surfacing quantitative magnitudes in the main ablation and validating the complexity score or dropping it.
+The meta-review reveals that the reviewers broadly agree the paper's core empirical contribution is solid and well-executed, but disagree on how much weight to assign to the paper's softer claims (the "one developer day" estimate and the "competitive" framing). The most interesting tension is between the paper's candid reporting of an approximate human-effort estimate — which is standard practice in systems papers — and the harsh critic's expectation of a controlled user study. This reflects an unresolved methodological question in the LLM-plus-human-supervision literature: when a paper claims a technique is "practical," what level of evidence is sufficient? The paper's template-count evidence (O(n), <100 templates per tool) is arguably the more important and falsifiable claim than the exact time estimate, and the review would benefit from recognizing that distinction.
 
 ## Suggestions
 
-- **In the ablation (Section 6.4), replace the count-based table with one reporting per-task success rate deltas or average improvement magnitudes.** The current table tells the reader that alignment "improves 5-7 tasks" but not by how much. A companion table with mean ± range would make the relative contribution of each technique concrete.
-
-- **Add a random-retrieval baseline for the demonstration retriever experiments.** A simple comparison (random 3-shot vs. retrieved 3-shot) on at least one task (e.g., Home Search) would cleanly attribute the benefit to retrieval quality rather than the mere presence of examples.
-
-- **Clarify the "up to 90% improvement" as absolute or relative percentage points.** Given that zero-shot rates can be near 0%, absolute improvement is the natural reading, but being explicit avoids ambiguity.
-
-- **Either validate the complexity score S (e.g., via a scatter plot against zero-shot performance) or remove it** from the main paper. A dead formalism distracts from the paper's stronger contributions.
-
-- **Substantiate the "one developer day" claim with a small table** showing template counts, number of demonstration examples, and approximate curation time per tool.
+1. Add standard deviations or confidence intervals (e.g., from the 3 runs already conducted) to all main-result tables.
+2. Specify the embedding model and similarity metric used for demonstration retrieval, or replace the "semantic similarity" description with the actual mechanism (e.g., if BM25 is also used for demonstrations, state this clearly).
+3. Reframe the "one developer day" claim as a qualitative observation rather than a measured result, or conduct a minimal measurement (even n=1 or n=2 developers on one tool) to add credibility.
+4. Consider adding a per-task failure-mode analysis for the 4 tasks where open-source models still underperform GPT-4.
 
 ## Score and Decision
 
-The paper addresses a practical and timely problem, provides a clear failure-mode analysis, and demonstrates that relatively simple, low-supervision techniques yield substantial improvements. The core claims are supported by the existing experimental apparatus (results table in main text, full breakdown in appendix). The weaknesses — coarse ablation metric in the main text, unvalidated complexity score, missing retrieval baseline — are real but addressable and do not invalidate the central contributions. The paper represents a solid empirical contribution to the tool-augmented LLM literature with a practical recipe for open-source deployment.
+**Originality:** The paper's main novelty lies in the empirical demonstration that combining three known techniques with modest human effort bridges the gap to closed models on tool manipulation — the individual techniques are not novel, but the recipe and the diagnosis of failure modes are. This is a solid empirical contribution rather than a methodological breakthrough. **Importance of research question:** High — enabling open-source LLMs for tool manipulation has clear practical implications for industrial adoption of LLMs without exposing sensitive data. **Claims supported:** Mostly well-supported for the core results, but the "competitive" claim and the "one developer day" supervision claim need tighter grounding. **Soundness:** The experimental design is reasonable, with runs over 3 seeds, diverse models and tasks, and ablation studies. The main gap is missing variance reporting. **Clarity:** Generally well-written and well-structured. **Value to community:** High — the benchmark (SNACT) and the practical recipe are likely to be useful for practitioners and future researchers.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+The paper makes a useful and well-executed empirical contribution. The weaknesses identified (missing variance, soft supervision claim, unspecified retriever details) are real but minor — they do not undermine the paper's central findings. The improvements are large enough that the core conclusions are robust despite these issues.
+
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

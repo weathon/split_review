@@ -1,82 +1,78 @@
-Now I have a thorough understanding of the paper and can verify the reviewer claims against the actual content. Let me write the final consolidated review.
+Now I have all the information needed. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper studies how temporal aggregation (summarizing high-frequency data into lower-frequency observations) distorts non-temporal causal discovery. It formally defines two notions of consistency — **functional consistency** (relevant to FCM-based methods like LiNGAM) and **conditional independence consistency** (relevant to constraint-based methods like PC) — and analyzes when each is preserved under aggregation. The key findings are: (1) functional consistency is generally fragile and often lost under aggregation, (2) conditional independence consistency can be preserved under a **partial linearity** condition (only one edge in a chain/fork needs to be linear), (3) the collider structure is naturally robust, and (4) experiments confirm that aggregation degrades causal discovery quality, especially in fully nonlinear settings.
+This paper studies whether causal relations can be recovered from temporally aggregated i.i.d. data when the true underlying process involves time delays. It formalizes two notions of consistency — **functional consistency** (for FCM-based methods) and **conditional independence consistency** (for constraint-based methods) — and provides conditions under which each holds. The key contributions are: (1) showing that the collider structure is robust to aggregation even in nonlinear cases, while chain and fork structures are not; (2) proving that partial linearity in either the X-Y or Y-Z relation suffices for chain/fork consistency; and (3) demonstrating through theory and experiments that fully nonlinear systems distort causal discovery, but recoverability is possible under partial linearity or with appropriate priors.
 
 ## Strengths
 
-- **Formal framework for aggregation-aware causal analysis**: The paper introduces two precise formal definitions — functional consistency (Definition 4) and conditional independence consistency (Definition 6) — that map directly to the two major families of causal discovery methods (FCM-based and constraint-based). This provides a principled vocabulary for discussing a known but under-analyzed problem.
+- **Novel conditional independence consistency analysis.** The paper formalizes what it means for conditional independence structure to survive temporal aggregation (Definition 7, Remark 3, Theorem 4) and delivers a clean, nontrivial result: collider structure is robust, while chain and fork are not, and partial linearity in the causal mechanism suffices for chain/fork consistency (Corollaries 4–5). This directly supports the paper's central claim that recoverability is possible under certain conditions but fails in fully nonlinear settings.
 
-- **Non-trivial necessary and sufficient condition for CI consistency (Theorem 3/4)**: The integral-equation characterization of when \(\overline{X} \perp\!\!\!\perp \overline{Z} \mid \overline{Y}\) holds in chain/fork structures is a genuine theoretical contribution. It decomposes the condition into components that involve only the X→Y and Y→Z mechanisms separately, enabling the partial-linearity analysis that follows.
+- **Experimental validation of the core theoretical predictions.** Figure 2 shows Direct LiNGAM accuracy dropping from near 100% to random chance as the aggregation factor k increases, confirming that even linear non-Gaussian cases suffer from aggregation. Table 1 shows that the key conditional independence (VI) for fork structure is rejected 58% of the time in fully nonlinear systems (far from the expected 5%) but drops to 5% under partial linearity — directly validating the sufficient conditions in Corollary 5.
 
-- **Partial linearity sufficient condition (Corollaries 4 and 5)**: The result that only one of the two causal edges needs to be linear for CI consistency to hold is practically useful and non-obvious. It explains why some constraint-based methods might succeed on aggregated data even when the broader system is nonlinear, and it offers actionable guidance for practitioners.
+- **Clear bridging argument between time-delay and aligned models.** Section 2.2 provides a precise asymptotic argument showing that temporal aggregation of a time-delay VAR converges to aggregation of an instantaneous aligned model as k → ∞, and the paper transparently states that its theoretical results apply to aligned models with any finite k, with the extension to time-delay models requiring large k (lines 100–102).
 
-- **Collider robustness result**: The observation that the collider structure's conditional independence pattern (\(\overline{X} \perp\!\!\!\perp \overline{Z}\)) is naturally preserved under aggregation — even in fully nonlinear settings — is a clean positive result that usefully bounds which structures are vulnerable.
-
-- **Experimental evidence of the problem**: The LiNGAM experiment (Figure 2) clearly demonstrates that aggregation degrades correct-direction rates from near-100% to random-guess (50%) as \(k\) increases from 1 to 100, even under linear non-Gaussian data. This makes the paper's warnings tangible. Table 1's CI test results directly corroborate the partial-linearity sufficient conditions.
+- **Identifies and addresses limitations of prior work.** The paper explicitly critiques Fisher (1970) for assuming fixed noise and Gong et al. (2017) for considering only linear cases, then extends the analysis to general nonlinear settings with random noise, justifying the novelty of its contributions.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None. The paper's core claims are supported by the theory and experiments. The identified issues are about framing, presentation, and scope — not about correctness or invalidity of the contribution.
+
+None.
 
 ### Minor
 
-- **Definition 4's "only in the correct causal direction" clause is never verified**: The definition of functional consistency (line 131–133) requires that the additive-noise representation exists *only* in the correct direction, but the paper's analysis (Theorems 1–2) only addresses existence, not exclusivity. The paper explicitly acknowledges (line 135) that for linear models the reverse representation also exists, making the system unidentifiable. For nonlinear models, no proof is given that the reverse direction fails. This clause is thus aspirational rather than derived, weakening the definition's operational value. The analysis would be cleaner if existence and identifiability were treated separately.
+- **The functional consistency section (Section 3) is weakly developed relative to the claims made for it.** Theorem 2 gives a necessary and sufficient condition for the additive noise model to hold on aggregated data, but the condition (independence of the residual from $\overline{X}$) is essentially a restatement of the definition in terms of the theorem's own construction. The paper's own analysis observes that this reduces to a constant conditional variance requirement — a non-trivial condition, but no further sufficient conditions beyond the already-known linear case are provided. Theorem 3 (general case for different regions) shows both directions are representable, which follows from standard arguments about the existence of arbitrary conditional distributions and yields an unsurprising negative result. The paper's contribution list claims this section as a main pillar, but the delivered insight is largely "functional consistency is hard in nonlinear cases" without substantive new sufficient conditions. The paper would be stronger by either providing nontrivial sufficient conditions or explicitly acknowledging this as a formalization of negative results rather than a discovery of comparable weight to the CI consistency analysis.
 
-- **Theorem 3 (General Case for Functional Consistency Across Different Regions) states a known/near-trivial result**: The theorem asserts that for continuous aggregated variables, functions \(\hat{f}\) and \(\hat{g}\) exist in both directions with independent noise. As the paper itself notes (line 166), this is always possible "due to a lack of constraint" and "such a function can exist in both directions, rendering the system still unidentifiable." Calling this a "theorem" inflates what is essentially a well-known property of continuous distributions being restated as a limitation. It contributes no aggregation-specific insight.
+- **Theorem 4 (CI main theorem) is presented as an integral condition that is essentially a restatement of the conditional independence condition.** The theorem involves integrals over $y_{1:k}$ of products of conditional densities, which is a direct translation of the definition into integral form. While the paper does use the decomposition of this integral to motivate the sufficient conditions (lines 265–269: "This inspires us to consider different parts of the model individually"), the connection from the integral equations to the corollaries is not derived explicitly — the corollaries are instead introduced via an intuitive separate argument ($\overline{X} \perp Y_{1:k} \mid \overline{Y}$). Making the derivation from the integral condition to the partial linearity result explicit would strengthen the theoretical chain.
 
-- **The d-separation argument in Remark 1 is informal**: The claim that the conditional independence set of aggregated data for chain/fork models is \(\emptyset\) is justified by a brief graphical intuition ("all adjacent nodes of \(\overline{Y}\) point to \(\overline{Y}\), so conditioning on \(\overline{Y}\) cannot block any path"). Since \(\overline{Y}\) is a deterministic function of \(Y_1,\dots,Y_k\), the d-separation analysis with deterministic nodes is more subtle than this suggests. Providing a formal argument or a concrete numerical counterexample would strengthen the paper. (That said, the paper's main CI contribution — the necessary and sufficient condition — does not depend on this remark as a rigorous proof.)
+- **Experimental detail is uneven across the five claimed experiments.** The CI consistency experiment (Section 5.3) is described with reproducible detail. However, the FCM-based experiment (Section 5.2) is reported qualitatively without precise numerical results (rejection rates, confidence intervals). The "skeleton prior" experiment (experiment five) is named but receives no description of setup, results, or analysis — the paper simply states it "consistently obtained correct results" as a "preliminary solution" (line 301). For an empirical paper where experiments support theoretical claims, this unevenness makes parts of the evidence base harder to assess.
 
-- **The chain-case sufficient condition (Corollary 4, item ii) is quite restrictive**: For the chain model, the \(X \to Y\) linearity condition requires stationarity and Gaussianity on top of linearity. This is not highlighted as restrictive in the main text or conclusion, where "partial linearity" is described more optimistically.
-
-- **The approximation error between time-delay and aligned models is not quantified**: Section 2.2 shows that \(\overline{Y'} - \overline{Y} \to 0\) as \(k \to \infty\), but provides no bound or guidance on how large \(k\) must be for the approximation to be practically reliable. This limits the actionable translation of the theoretical results (which are proven for arbitrary finite \(k\) on aligned models) to real time-delay settings.
-
-- **Experiments have limited coverage**: The LiNGAM experiment tests only one causal strength (2) and one noise distribution (uniform). The CI experiment uses only \(k=2\). While these serve as proofs of concept, broader variation would strengthen the empirical support.
+- **Column-label mapping in Table 1 requires cross-referencing.** The columns I–VI and A–B are defined in the body text (line 339) but the table caption does not restate the mapping, and the table is stated to be for "fork structure" only in the surrounding text. A self-contained table (explicitly labeling which CI statement each column tests) would improve readability and reduce the risk of misinterpretation.
 
 ### Trivial
 
-- The kernel CI test hyperparameters are not specified. This is a mild reproducibility gap but standard for this setting.
+- **Notation shifts across sections.** The paper switches from vector-valued $X_t$ (Section 2) to scalar $X,Y,Z$ (Sections 3–4) with a footnote acknowledgment, but the shift is jarring when reading consecutively. A unified notational scheme from the outset would improve flow.
+
+- **The title is broader than the paper's actual focus.** The paper primarily studies the *limits* of recoverability and conditions under which it *fails* (or succeeds only under partial linearity). A more precise title (e.g., "On the Limits of Recovering Causal Relations from Temporally Aggregated Data") would better reflect the paper's contributions.
 
 ## Nice-to-Haves
 
-- **Practical guidance for practitioners**: The paper could offer even brief recommendations (e.g., "test for linearity; if at least one causal edge is linear, constraint-based methods may be reliable") to increase real-world impact.
-- **Quantification of the approximation error** (bound on \(|\overline{Y'} - \overline{Y}|\) in probability) would bridge the gap between aligned-model theory and time-delay practice.
-- **A concrete numerical counterexample** where a fully nonlinear chain/fork fails the CI condition would make the negative result more tangible.
-- **Overlapping aggregation windows** are explicitly scoped out; a brief discussion of whether results extend would be helpful.
+- The paper could briefly discuss how the choice of normalization $g(k)$ (sum, average, etc.) interacts with distributional properties and CLT convergence rates, to guide practitioners in real applications.
+- A brief discussion of how heavy-tailed noise distributions could slow CLT convergence and thus alleviate the identifiability problem in the linear non-Gaussian case would strengthen the interpretation of the Direct LiNGAM experiment.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were raised by reviewers but removed after verification against the paper:
 
-- **"The reader must infer what each column tests from the structure description"**: The paper explicitly lists (line 339) what each column (I–VI, A, B) tests. The critic's claim is factually incorrect — the information is present. **Removed** (factually wrong).
-- **"No discussion of overlapping aggregation windows"**: The paper explicitly states (line 21) "we only consider aggregation without overlapping windows." Criticizing a paper for not covering something it explicitly scopes out is inappropriate. **Removed** (scope creep).
-- **"Statistical power analysis missing"**: Requesting power curves for a proof-of-concept experiment goes beyond the standard expected for this type of paper. **Moved to Nice-to-Haves**.
-- **"Missing confidence intervals for rejection rates"**: Single-run significance tests at 5% are standard for this type of benchmark; confidence intervals are not the norm. **Removed** (standard practice).
-- **"The paper should cover more baselines/models"**: The model choices (PC, FCI, GES, LiNGAM, ANM) are defensible and cover major method families. **Removed** (taste-based).
-- **"Section 2.2 creates a disconnect between motivation (large k) and theory (any finite k)"**: The paper explicitly explains (line 102) that results apply to any finite \(k\) for aligned models, and only need large \(k\) to connect to time-delay models. This is not a disconnect but an explicit bridging argument. **Removed** (misreading).
+- "Theorem 4 does no work in the paper" — **Removed because factually incorrect.** The paper explicitly states that the decomposition of the integral in Theorem 4 "inspires us to consider different parts of the model individually" (lines 265–269) and uses this to motivate the sufficient conditions.
+- Criticism about missing appendix/stripped content — **Removed per hard rule:** parser strips appendices from all papers; they exist in the original submission.
+- "The paper should not claim to be 'first'" — **Removed:** the paper already uses "To the best of our knowledge" (line 31).
+- Pure formatting and labeling nitpicks (table label mismatches, missing numbers) — **Removed per hard rule:** these are parser artifacts.
+- "Gap between motivating problem and aligned model is underclarified" — **Downgraded from major to removed as a weakness:** the paper explicitly acknowledges this gap and states the conditions under which the results transfer (lines 100–102). The paper is transparent about the scope; the framing is reasonable for the paper it is.
+- Missing related works / demands for broader coverage — **Removed:** cannot verify existence of missing references; demanding the paper cover additional domains constitutes scope creep.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one noteworthy observation: the asymmetry between how functional consistency and conditional independence consistency behave under aggregation. The strongest theoretical and empirical finding is that CI consistency is relatively robust (requiring only partial linearity), while functional consistency is almost always lost (either the model form breaks, or identifiability conditions like non-Gaussianity are destroyed by the CLT). This contrast is not fully emphasized in the paper itself but is a genuine insight for the community: constraint-based methods may be less vulnerable to aggregation than FCM-based methods, which is the opposite of what one might expect given that FCM-based methods use "more information." The paper could strengthen its impact by highlighting this asymmetry explicitly.
+None beyond the paper's own contributions. The reviews confirm the paper's core strengths (CI consistency analysis, partial linearity condition) and highlight that the functional consistency section is the weaker part of the paper, but these observations are consistent with the paper's own presentation.
 
 ## Suggestions
 
-1. **Split Definition 4**: Define functional consistency purely as existence of the additive-noise representation in the known correct direction; then separately discuss (in)ability to identify the correct direction (identifiability). This resolves the tension between the "only in correct direction" clause and the analysis that follows.
+1. **Restructure Section 3** to either (a) provide nontrivial sufficient conditions for functional consistency beyond the linear case, or (b) explicitly recast it as a formalization of why functional consistency fails, downgrading its prominence relative to the CI consistency results.
 
-2. **Relegate Theorem 3 to an observation or remark**: The "general case for different regions" result is a known limitation — stating it as a theorem inflates its significance. Rephrase it as "Remark: In unconstrained continuous settings, the aggregated variables admit representations in both directions, so no identifiability is possible."
+2. **Connect Theorem 4 to its corollaries more explicitly** by showing how the integral equations simplify under the linearity assumptions of Corollary 5, rather than introducing the corollaries through a separate argument.
 
-3. **Provide a rigorous or numerical justification for Remark 1**: Either give a proper d-separation argument handling deterministic nodes, or replace the graphical claim with a concrete numerical example showing that a fully nonlinear chain violates \(\overline{X} \perp\!\!\!\perp \overline{Z} \mid \overline{Y}\).
+3. **Fill in experimental gaps in the main text** — at minimum, report numerical rejection rates for the Direct LiNGAM experiment and describe the skeleton prior experiment's setup and results briefly.
 
-4. **Highlight restrictiveness of chain-case condition**: When presenting Corollary 4.ii, explicitly note that Gaussianity + stationarity + linearity is required, and contrast this with the fork case which only needs linearity.
+4. **Make Table 1 self-contained** by including the mapping of columns I–VI and A–B to the tested conditional independence statements directly in the caption or as a table footnote.
 
 ## Score and Decision
 
-This paper addresses a genuine and underappreciated problem — the distortion of causal discovery by temporal aggregation — with a formal framework and practically meaningful sufficient conditions (partial linearity). The CI consistency analysis is the strongest contribution; the functional consistency analysis is weaker but still useful as a negative result. The weaknesses are primarily framing and presentation issues rather than fatal errors. With revisions addressing the definitional clarity, the informal d-separation reasoning, and the over-inflated Theorem 3, the paper would be solid.
+This paper addresses a genuine and understudied problem with a clean theoretical framework. The conditional independence consistency analysis — particularly the robustness of colliders, the failure of chain/fork, and the partial linearity sufficient condition — is the paper's strongest contribution and is well-supported by experiments. The functional consistency section is noticeably weaker and would benefit from reduced emphasis or strengthening. The experimental section has uneven coverage. However, the core contributions are novel, sound, and useful to the community. The paper is suitable for publication with minor revisions.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

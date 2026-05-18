@@ -1,20 +1,20 @@
-Now I have a thorough understanding of the paper and all the reviewer claims. Let me construct the consolidated review.
-
----
+Now I have thorough understanding of the paper. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes an unsupervised OOD detection method that computes the $k$-NN radius of a test point relative to training embeddings at multiple intermediate layers of a neural network, normalized and aggregated into a single score. The authors show that training the network with label smoothing contracts in-distribution embeddings more than OOD embeddings (the Label Smoothed Embedding Hypothesis), which amplifies the separation in $k$-NN radii. They provide finite-sample high-probability theoretical guarantees (Theorems 1–2, Proposition 1) and demonstrate strong empirical results across nine dataset pairings, outperforming several baselines including Robust Deep $k$-NN, DeConf, one-class SVM, Isolation Forest, and POEM.
+This paper proposes an unsupervised OOD detection method that computes a k-NN density estimate on intermediate neural network embeddings and aggregates these scores across layers. The core insight — the "Label Smoothed Embedding Hypothesis" — is that training with label smoothing contracts same-class embeddings more than cross-class embeddings, making k-NN density a stronger OOD discriminator. The paper provides finite-sample theoretical guarantees (Theorem 1, 2) for k-NN radius as an OOD detection statistic, a theoretical model for label smoothing's benefit (Proposition 1), and empirical results on several benchmark datasets.
 
 ## Strengths
 
-- **Novel combination of $k$-NN density on embeddings with label smoothing.** The paper introduces the Label Smoothed Embedding Hypothesis as a principled motivation for why label smoothing improves $k$-NN-based OOD detection, and demonstrates this effect empirically (Figure 1, Table 1). Using only the $k$-NN radius (distance) rather than neighbor label distributions makes the method unsupervised and applicable even when label information is unreliable.
+1. **Well-motivated, simple method.** The combination of k-NN density estimation on label-smoothed embeddings is clean and clearly motivated. The paper builds on a known property of label smoothing (Müller et al., 2019) and transforms it into a practical OOD score in a straightforward way.
 
-- **Finite-sample high-probability guarantees for $k$-NN OOD detection.** Theorems 1 and Corollary 1 provide uniform bounds on recall and precision for identifying OOD examples using the $k$-NN radius. Theorem 2 shows that the $k$-NN radius approximately preserves the ranking by true density when density gaps are large enough. These go beyond prior asymptotic $k$-NN analyses by being tailored to the OOD setting.
+2. **Consistent empirical benefit from label smoothing.** Table 1 shows that k-NN(α=0.1) achieves higher ROC-AUC than k-NN(α=0.0) on nearly every dataset pairing (e.g., MNIST→Fashion MNIST: 0.878 vs 0.785; CIFAR10→SVHN: 0.829 vs 0.804; Fashion MNIST→MNIST: 0.933 vs 0.913). The ablation in Table 2 corroborates this at the individual-layer level.
 
-- **Strong empirical performance across diverse benchmarks.** In Table 1, the proposed $k$-NN($\alpha$) method with label smoothing achieves the most bolded entries (within two standard errors of the max) across nine dataset pairings, including against POEM which is given an unfair outlier-pool advantage. The improvement is consistent across MNIST, Fashion MNIST, SVHN, CIFAR10, and CelebA.
+3. **Finite-sample theoretical guarantees for k-NN density in OOD detection.** Theorem 1 and Corollary 1 provide uniform recall and precision bounds: any point with f(x)=0 has r_k(x) ≥ r, and any point with r_k(x) ≥ r has f(x) ≤ λ, where r and λ decay at rates (k/n)^{1/(β+d)} and (k/n)^{β/(β+d)}. Theorem 2 shows ranking preservation under density gaps. While the techniques draw on Dasgupta & Kpotufe (2014), the application to OOD detection with these specific guarantees is new.
 
-- **Informative ablation studies.** The paper systematically studies the impact of $k$ (Figure 2, left), label smoothing amount $\alpha$ (Figure 2, right), and choice of intermediate layer (Table 2). The results provide practical guidance ($k=1$, $\alpha=0.1$ as reasonable defaults) and show that the method is robust to these hyperparameter choices.
+4. **Strong ablations on k, α, and layer choice.** Figure 2 shows stable performance across k (recommending k=1) and a consistent unimodal effect of α. Table 2 shows label smoothing benefits every layer individually. These provide concrete deployment guidance.
+
+5. **k-NN density outperforms other embedding-based density methods.** SVM and Isolation Forest on the same embeddings with identical layer aggregation achieve lower performance (e.g., MNIST→Fashion MNIST: SVM 0.748, iForest 0.612 vs k-NN(0.1) 0.878), isolating the discriminative power of the k-NN radius statistic itself.
 
 ## Weaknesses
 
@@ -23,53 +23,54 @@ None.
 
 ### Major
 
-- **The embeddings used for SVM and Isolation Forest baselines are not disclosed.** The paper describes SVM and IF as ablative models that "leverage the same intermediate layer representations as our method" (Section 4.3), but Table 1 reports only single columns for SVM/IF while $k$-NN has two columns ($\alpha=0$ and $\alpha=0.1$). It is never stated whether SVM/IF were evaluated on embeddings from the standard model ($\alpha=0$) or the label-smoothed model ($\alpha=0.1$). If they used $\alpha=0$ embeddings, the comparison between $k$-NN($\alpha=0.1$) and SVM/IF conflates the choice of detector with the choice of training regime. This does not invalidate the paper's core claim (the method works well), but it undermines the specific argument that "$k$-NN consistently outperforms them" as an apples-to-apples comparison. The authors should clarify which embeddings were used and, ideally, run SVM/IF on both $\alpha=0$ and $\alpha=0.1$ embeddings in a $2\times3$ design.
+1. **Missing key baselines limits empirical contribution.** The paper's central empirical claim is that the method is "competitive" and "outperforms many OOD baselines," but standard and widely-used methods are absent from the comparisons — specifically Mahalanobis distance (Lee et al., 2018) and energy-based OOD detection (Liu et al., 2020). These methods operate on the same regime (intermediate representations and logits, respectively) and are considered standard in the OOD detection literature. The paper includes DeConf (an improved ODIN), but ODIN is not the same as energy-based detection, and neither Mahalanobis distance nor energy-based methods appear. The comparison against POEM (which has an unfair advantage via outlier pool access) is valuable but does not substitute for these standard baselines. Without them, the claim that the method is "competitive" cannot be fully assessed against current best practices.
+
+2. **Significant gap between theoretical conditions and practical regime.** Theorem 1 requires k ≥ 2⁸·log(2/δ)²·d·log n. For realistic embedding dimensions — e.g., d=256 (DNN penultimate layer) with n=60,000 — this condition requires k on the order of millions, far exceeding the training set size. The paper recommends k=1 for practical use, which is several orders of magnitude below the theoretical requirement. The paper never discusses this gap, does not report the embedding dimensions used in experiments, and provides no analysis of how the method's empirical success relates to the theory given that the theoretical conditions are unmet. This disconnect between the theory and practice is a significant omission that should be addressed.
 
 ### Minor
 
-- **Proposition 1 provides theoretical intuition, not a rigorous derivation from label smoothing.** The proposition assumes a specific contraction mapping $\phi$ with faster contraction for in-distribution points than for OOD points, but it does not argue that label smoothing training actually produces this particular mapping. The paper acknowledges this is "theoretical intuition" (Section 3.3), but the gap between the assumed transformation and what label smoothing actually does to embeddings limits the proposition's force as a theoretical justification.
+1. **Proposition 1 does not empirically connect to label smoothing.** The contraction mapping φ is constructed entirely from assumptions about how label smoothing behaves, but the paper provides no empirical evidence that label smoothing actually induces this specific geometric transformation (beyond the 2D histograms in Figure 1). The paper presents this as "theoretical intuition," which is fair, but the result would be considerably stronger with direct measurement of how label smoothing changes distance ratios across layers.
 
-- **Uniform averaging across layers is presented without justification.** The aggregation $\hat{T}(x) = (1/M)\sum_i \hat{T}_i(x)$ averages normalized $k$-NN radii uniformly. No discussion is given of why equal weights are appropriate or whether a learned or heuristic weighting scheme (e.g., emphasizing deeper layers) would improve performance.
+2. **Theoretical novelty relative to prior work is modest.** The paper acknowledges that its techniques "use similar techniques" to Chaudhuri & Dasgupta (2010) and Dasgupta & Kpotufe (2014). The contribution is in applying these to OOD detection and providing specific OOD-relevant bounds, which is useful but incremental. The ranking preservation result (Theorem 2) requiring a density gap ϵ_{k,n} is the most OOD-specific result, but its practical import is limited by the condition that the gap be sufficiently large.
 
-- **Theory is stated for the data space, but the method operates on embedding spaces.** Assumptions 1 (Hölder continuity) and 2 (boundary smoothness) are stated for the density $f$ on $\mathbb{R}^d$. The paper does not discuss whether these properties are plausibly inherited by the embedding spaces of neural networks, leaving a gap between the theoretical guarantees and the practical setting.
+3. **Standard errors reported only as summary statistics.** The paper reports "mean, median, and max" standard errors (0.0119, 0.00815, 0.0727) rather than showing per-entry standard errors in Table 1. Given the max is 0.0727 (a sizable fraction of many AUC differences), readers cannot assess which comparisons are statistically robust.
 
-- **Layer ablation (Table 2) is limited to two datasets.** The study of which single layer works best covers only Fashion MNIST and CelebA. While not a fatal omission, the conclusions about layer choice would be stronger with additional datasets.
+4. **Evaluation limited to relatively small-scale datasets.** The experiments use MNIST, Fashion MNIST, SVHN, CIFAR10, and CelebA. While these are standard benchmarks, the method's scalability to higher-resolution, larger-scale problems (e.g., ImageNet-scale) is untested. Given that k-NN methods incur storage and search costs on training embeddings, scalability implications are unclear.
 
 ### Trivial
-
-- **Figure reference mismatch.** The text in Section 2 (line 70) refers to "Figure 2" when describing the distribution of 1-NN distances, but the first figure in the paper is labeled Figure 1. The reference should be to Figure 1.
+- No dedicated limitations section, which would be helpful for flagging the dimensionality gap, computational cost at scale, and Euclidean-distance-based OOD assumption.
 
 ## Nice-to-Haves
-
-- **Add modern embedding-based OOD baselines.** Methods such as Mahalanobis distance (Lee et al., 2018) and energy-based detection (Liu et al., 2020) operate on intermediate representations and are natural competitors. Including them would strengthen the positioning against the state of the art, even if the proposed method remains competitive.
-
-- **Provide more direct quantitative evidence for the embedding contraction hypothesis.** The current evidence is the 1-NN radius histograms (Figure 1). Additional metrics such as within-class vs. between-class average distances, silhouette scores, or the ratio of ID-to-OOD radii before and after label smoothing would more directly validate the claimed mechanism.
-
-- **Discuss computational complexity at test time.** Computing the $k$-NN radius requires distances to all training embeddings, which could be prohibitive for large training sets. The paper notes that $k=1$ enables efficient index structures, but a brief analysis of runtime vs. training set size would help practitioners assess scalability.
+- **Add Mahalanobis distance and energy-based OOD detection baselines.** These are the most natural competitors because they also use the trained model's representations without requiring additional data or outlier pools.
+- **Provide direct empirical evidence for the contraction mechanism.** Compute the ratio of average OOD k-NN distance to average ID k-NN distance for models with and without label smoothing across layers. If this ratio increases, it directly validates the mechanism Proposition 1 attempts to model.
+- **Discuss the dimensionality gap between theory and practice.** Report the embedding dimensions used, discuss whether the effective dimensionality is lower due to manifold structure, and contextualize the theoretical bounds accordingly.
+- **Include a dedicated limitations section** covering: (a) sensitivity to the curse of dimensionality, (b) computational cost of storing all training embeddings and computing nearest neighbors at test time, (c) sensitivity to layer choice, and (d) the Euclidean-distance assumption (which may not hold for certain semantic shifts).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **α=0.1 not tuned / may understate performance** — The paper explicitly acknowledges this as a design choice ("we always use... α=0.1") and provides an ablation showing the effect of α. Using a fixed default without tuning is a feature (robustness), not a weakness. Removed per rule about weaknesses the paper already addresses.
 
-- **"inf" in Definition 1 (likely "inf")**: The notation $\operatorname*{inf}$ (infimum) is standard and correct in mathematical writing. This is a reviewer confusion with LaTeX markup, not a paper error.
-- **"flipping" misspelled as "filpping"**: Per policy, typographical/orthographic artifacts (parser issues or minor copy-editing misses) are removed from consideration.
-- **Missing appendix, proofs, or references**: The parser strips these sections; they exist in the original submission.
-- **Demand for additional related work coverage**: Per policy, missing related works are not flagged since external verification is not possible.
-- **General reproducibility nitpicks (e.g., undisclosed hyperparameters)**: The experimental setup is sufficiently described; remaining implementation details are standard.
+- **Theoretical results presented without enough detail to verify correctness** — The critic noted this but said "for a conference review this would be fine assuming the appendix is present." Since the parser strips the appendix, this criticism cannot be evaluated and is removed per hard rules.
+
+- **POEM included despite being outperformed** — The critic lists POEM as an inadequate baseline, but the paper's method outperforms POEM despite POEM having an unfair advantage (outlier pool access). This is a strength of the paper, not a weakness.
+
+- **Missing related works** — Removed per hard rules about not having external sources to confirm existence of cited work not mentioned in the review.
+
+- **Generic formatting/style nitpicks** — None present in the original reviewer input.
 
 ## Novel Insights
 
-The reviewers' analyses converge on the core empirical contribution (label smoothing + $k$-NN density works well) but diverge on severity. The harsh critic's most substantial point — the uncontrolled SVM/IF comparison — is genuine but fixable and does not threaten the paper's central result, since the key claim (label smoothing improves $k$-NN OOD detection) is supported by the within-method comparison (k-NN(0) vs k-NN(0.1)) and the ablation studies. The Strength Finder correctly identifies the theoretical guarantees (Theorems 1–2) as a meaningful contribution beyond prior asymptotic analyses. The most interesting tension between the reviews is whether Proposition 1 adds value: the harsh critic sees it as an unmotivated assumption, while the Strength Finder sees it as a formalization of the hypothesis. The paper's own hedging language ("theoretical intuition") suggests the truth is somewhere in between — it is a useful conceptual illustration but not a rigorous proof.
+None beyond the paper's own contributions. The reviews largely converge on the paper's stated claims and limitations without surfacing a cross-cutting observation that the paper itself misses.
 
 ## Suggestions
 
-1. **Clarify the SVM/IF embedding source immediately.** Add a sentence in Section 4.2 or 4.3 stating explicitly which model's embeddings (α=0, α=0.1, or both) were used for each baseline. Ideally, rerun SVM/IF on both sets of embeddings and report a full 2×3 comparison.
-2. **Add a brief justification for uniform layer averaging**, or at minimum acknowledge that alternative weighting schemes are possible and note this as future work.
-3. **Discuss the data-space-to-embedding-space gap** in the theory section, noting that the theoretical results apply to the feature space under the stated assumptions and that the method inherits these properties if the embedding space approximately preserves the relevant structure.
+1. Add Mahalanobis distance (Lee et al., 2018) and energy-based (Liu et al., 2020) baselines to Table 1 to substantiate the claim of competitiveness.
+2. Compute and report the ratio of OOD-to-ID k-NN distances with and without label smoothing across layers as direct evidence for the contraction hypothesis.
+3. Report embedding dimensions for each architecture, discuss the effective vs. ambient dimensionality, and address why the theoretical condition k ≥ c·d·log n is not met in practice while the method still works.
+4. Add per-entry standard errors (or confidence intervals) to Table 1 so readers can assess variability per dataset pairing.
+5. Add a limitations paragraph covering the curse of dimensionality, computational cost of k-NN storage/search at scale, and the Euclidean distance assumption.
 
 ## Score and Decision
 
-The paper makes a genuine contribution: a simple, well-motivated OOD detection method with both theoretical guarantees and strong empirical results. The main unresolved weakness — ambiguity about which embeddings were used for SVM/IF baselines — is a presentation gap that can be addressed in a minor revision and does not affect the paper's strongest contribution (label smoothing improves $k$-NN OOD detection, validated by the within-method comparison and ablations). The paper would benefit from additional modern baselines and a tighter connection between theory and practice, but these are enhancements, not structural flaws.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

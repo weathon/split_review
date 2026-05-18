@@ -1,0 +1,28 @@
+- Decision: Accept
+- Scores: 6, 6, 6, 8, 5
+
+## Merged Review
+
+### Summary
+The paper studies client-side detectability of malicious server (MS) attacks in federated learning. It introduces a new metric, D-SNR, that detects prior MS attacks, then proposes a novel attack framework called SEER that jointly learns a secret decoder (disaggregator and reconstructor) with the shared model to bypass detection. Experiments on CIFAR10/100 and TinyImageNet show SEER can reconstruct user data with batch sizes up to 512 and under secure aggregation. The paper is well-written and addresses several limitations of prior work.
+
+### Strengths
+- The D-SNR metric provides a principled way to detect gradient disaggregation by a malicious server, and is considered a useful contribution across reviewers.
+- SEER is a novel attack that co-optimizes the disaggregator and reconstructor, enabling it to evade client-side detection and reconstruct data even under secure aggregation and large batch sizes (up to 512) – a significant step beyond prior MS attacks.
+- The paper is well-organized and self-contained, with clear motivation and a good summarization of prior work (Reviewer 2, 4). Reviewer 4 found it an “enjoyable read”.
+- The approach addresses several limitations of prior attacks, such as reliance on batch normalization statistics and label assumptions.
+- Empirical results show favorable reconstruction quality and stealthiness compared to a baseline (Table 4). Reviewer 4 highlighted the innovation of both the detection metric and the attack framework, giving a score of 8 (high confidence). Reviewer 5 acknowledged the value of designing defense-aware attacks.
+
+### Weaknesses
+1. **Threat model and practical assumptions** – Multiple reviewers noted that the threat model lacks clarity and is restrictive. The attack relies on an auxiliary dataset (e.g., CIFAR10 for client data like medical records) and requires multiple steps of offline training (~14 GPU days for ResImageNet, per Reviewer 2). The server’s capabilities (e.g., modifying client-side code vs. only server parameters) are not specified (Reviewer 5). The joint optimization of the shared model ignores classification loss, which could be detected by clients monitoring local loss trends (Reviewer 2). One reviewer questioned whether the attack can be deployed in early rounds without raising alarms (Reviewer 2).
+2. **Missing evaluations under defenses** – The core claim that SEER evades detection is not experimentally validated against any defense (e.g., differential privacy, gradient clipping, secure aggregation with noise). Only stealthiness against D-SNR is shown, but no client-side checks are explicitly defined or evaluated (Reviewer 5). This lack of defense evaluation undermines the main motivation.
+3. **Insufficient baseline comparisons** – Only one baseline (prior MS attack) is compared in Table 4. Missing comparisons with recent attacks such as LOKI (Zhao et al., S&P 2024) and the attack by Zhang et al. (ICA3PP 2023) (Reviewer 5).
+4. **Auxiliary data dependency and generalizability** – SEER’s performance hinges on the quality and quantity of auxiliary data and the pre-defined property. When client data is highly specialized (e.g., medical records), a generic auxiliary dataset may fail because the property might differ significantly (Reviewer 4). The paper lacks ablation studies on auxiliary data size, diversity, and distribution shift (Reviewer 5). Evaluations are limited to image datasets (CIFAR10/100, TinyImageNet); applicability to other modalities (NLP, time-series, medical imaging) is unclear (Reviewer 1).
+5. **Complexity and scalability concerns** – Algorithm 1 retrains a set of models per sample per property, incurring high computational cost (Reviewer 5). The complexity is not quantified or compared with other attacks. How the method scales to larger batch sizes and more complex models is not discussed.
+6. **Lack of clarity on secure aggregation and detection mechanisms** – The paper does not explain how SEER specifically bypasses secure aggregation (Reviewer 5). The necessary conditions for avoiding detection are described vaguely, without theoretical or experimental proof (Reviewer 5). The term “handcrafted modifications” is not precisely defined.
+7. **Batch normalization strategy and non-IID data** – The method for using BN statistics to choose the local property is unclear; in cases where BN is absent (e.g., secure aggregation, no BN layer), the attacker would need to fall back to a linear search (Reviewer 2). It is also unclear how the property selection accounts for non-IID client data; correlated local data may reduce success (Reviewer 2, 4).
+8. **Counter-intuitive results in Table 3** – The variation in reconstruction quality with different properties lacks explanation, which weakens the credibility of the attack (Reviewer 5).
+9. **Distinguishing property existence** – It is not guaranteed that a distinguishing property exists for every sample in a batch; the attack’s failure mode when no such property exists is not addressed (Reviewer 5, question 1).
+10. **Defense and mitigation insights** – Reviewers asked for insights into potential defenses beyond DP and HE (Reviewer 2) and initial ideas for defending against SEER (Reviewer 3), but these are missing from the paper.
+
+**Note on reviewer disagreement:** Reviewer 4 gave a high score (8, confidence 4) emphasizing innovation and significance, while Reviewer 5 gave the lowest score (5, confidence 4, soundness “poor”) citing serious omissions in threat model, evaluations, and comparisons. Other reviewers (1,2,3) gave scores of 6 with medium confidence, indicating general appreciation but clear reservations.

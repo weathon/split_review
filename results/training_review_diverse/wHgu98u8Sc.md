@@ -1,89 +1,71 @@
-Now I have thoroughly verified the reviewer claims against the paper. Let me construct the consolidated review.
+Now I have all the information I need. Let me compile the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper introduces ν-ensembles, a method that improves deep ensemble calibration in the small-data regime by assigning *different random labels* from an unlabeled set to each ensemble member, then training each member on the combined labeled and randomly-labeled data. The method is refreshingly simple (no architectural changes, no auxiliary losses, no joint training), adds negligible computational overhead over standard ensembles, and is shown to produce better-calibrated predictions across LeNet, MLP, and WideResNet22 architectures on CIFAR-10 and CIFAR-100 while maintaining accuracy.
+This paper introduces ν-ensembles, a method that improves deep ensemble calibration in the small-data regime by assigning random labels (sampled without replacement across ensemble members) to unlabeled data. The method is extremely simple: each ensemble member fits the labeled training set plus an unlabeled set with a distinct randomly chosen label per point. The paper provides a PAC-Bayes bound (Theorem 1) connecting test NLL to average member NLL and ensemble diversity on unlabeled data, and empirically evaluates calibration improvements on CIFAR-10/100 with training sets of 1K–40K samples.
 
 ## Strengths
 
-- **Simple and practical method with clear calibration improvements.** Table 1 shows that ν-ensembles achieve substantially better calibration (e.g., ECE drops from ~10% to ~6% on CIFAR-10 with LeNet) across all architectures and both datasets, while maintaining the same accuracy as standard ensembles. The method adds no architectural changes, no auxiliary losses, and no joint training — only a single random-labeling pass on unlabeled data. This is a genuinely useful tool for practitioners.
+- **Extremely simple and computationally efficient**: The method requires no hyperparameter tuning, no complex training loops, and no joint training of ensemble members. It maintains the same per-member training cost as standard deep ensembles. This is a genuine differentiator from prior diversity-promoting methods (Masegosa 2020 requires two gradient evaluations per step; Agree to Disagree requires greedy sequential training).
 
-- **Empirical confirmation of increased ensemble diversity.** The mutual information (MI) metric in Table 1 is consistently lower for ν-ensembles (e.g., 0.112 vs. 0.150 for LeNet on CIFAR-10), directly validating that the random-labeling strategy produces more diverse ensemble members. The calibration benefits are thus linked to a measurable and theoretically grounded property.
+- **PAC-Bayes bound provides useful theoretical framing**: Theorem 1 formally connects test NLL to average training NLL minus a diversity term (empirical variance on unlabeled data) plus a complexity penalty. While the bound is generic (not specific to the random labeling procedure), it motivates why increasing diversity on unlabeled data without hurting labeled-set performance can improve test calibration.
 
-- **Robustness to distribution shift.** Figure 3 demonstrates that ν-ensembles retain and sometimes widen their calibration advantage under common corruptions (e.g., ECE improvement grows from ~10% to ~15% for ResNet22 at high corruption intensity), showing the benefit is not limited to in-distribution settings.
+- **Consistent calibration improvements claimed across architectures and datasets**: The paper reports that ν-ensembles match standard ensemble accuracy while improving calibration (ECE, TACE, Brier reliability, NLL) for training set sizes up to 10K on CIFAR-10/100, across LeNet, MLP, and WideResNet22 architectures. The text provides specific numbers for OOD experiments (ECE improvement from 10% to 15% for ResNet22 under high-intensity corruptions).
 
-- **Computational efficiency compared to prior diversity-promoting methods.** ν-ensembles have O(1) memory scaling (sequential training) and only O(m) added computation for the unlabeled set, versus O(K) for Masegosa and Agree-to-Disagree ensembles that require joint or sequential member training. Figure 4 directly quantifies this advantage.
+- **OOD robustness**: The method maintains its calibration advantage under common image corruptions across all severity levels, while retaining the same accuracy as standard ensembles.
 
-- **Theoretical analysis of sampling without replacement.** Proposition 2 analytically shows that sampling without replacement yields higher ensemble variance, and the paper provides empirical confirmation. This gives implementable guidance for practitioners.
+- **Theoretical and empirical comparison of sampling with/without replacement**: Proposition 2 derives expected diversity under with-replacement sampling, and the paper confirms experimentally that without-replacement (the recommended variant) yields better calibration.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **Data quantity confound undermines the mechanistic interpretation.** Each ν-ensemble member is trained on the labeled set *plus* 5000 unlabeled examples (with random labels), while each standard-ensemble member is trained on the labeled set alone (1000–40000 samples). A ν member therefore sees 6000 to 45000 training examples versus 1000 to 40000 for the standard ensemble. The paper attributes the calibration improvement to *diversity from different random labels across members*, but it does not control for the simpler hypothesis that adding any data (even with random labels) regularizes individual members and improves calibration. The critical control — a standard ensemble where every member is trained on labeled data plus the *same fixed random labeling* (shared across members) — is absent. Without this control, the empirical evidence does not distinguish the claimed diversity mechanism from a data-quantity effect. The with/without-replacement comparison in Section 5.3 partially addresses this (both conditions use the same data quantity with different label assignments), but the core comparison against standard ensembles remains confounded.
-
-- **Theoretical disconnect between the PAC-Bayes bound and the algorithm.** Theorem 1 presents a bound where the variance term `V(ρ̂)` is computed on the unlabeled set *using true labels* (the sum runs over `y`). The ν-ensemble, however, trains on unlabeled data with *random* labels, not true labels. The paper never argues that training on random labels tends to increase `V(ρ̂)` on the true-label distribution, nor does it provide any empirical measurement of true-label variance. The bound therefore provides motivation at the wrong level of abstraction: it says "if you maximize variance on true labels you improve test NLL," but the method maximizes variance on *random* labels. Without a bridge connecting these, the theory does not justify the algorithm — it is a generic inequality with no demonstrated connection to the specific design choice. This is a structural weakness in the paper's scientific argument, not merely a missing detail.
+- **Experimental confound between extra data and diversity mechanism**: In the experimental setup, ν-ensembles train on Z_train ∪ U (where U is 5000 unlabeled points with random labels), while standard ensembles train on Z_train alone. This means ν-ensembles effectively train on substantially more data (up to 6× in the smallest Z_train case). The paper does not disentangle whether the calibration improvement comes from the *diversity* of different random labels per member or simply from having more training data (even with noisy labels). A controlled baseline — e.g., standard ensemble members each trained on Z_train ∪ U with the *same* random label per unlabeled point for all members — is needed to isolate the diversity effect. Without this, the central empirical claim that the specific random-labeling-per-member mechanism drives the improvement is not fully supported.
 
 ### Minor
 
-- **No error bars or multiple seeds.** All reported metrics (Table 1, Figures 2–3) are single-run point estimates without confidence intervals or standard deviations. In the small-data regime (1000–4000 training samples), stochasticity from data splits and initialization is high. While the consistency of the pattern across architectures and datasets provides some reassurance, a single run per configuration cannot establish significance, especially for the claimed 30–50% relative ECE reductions. This is an evidential gap that weakens confidence in the headline claims.
+- **Theoretical claim is overstated relative to what is proven**: The abstract states the PAC-Bayes bound "guarantees that for such a labeling we obtain low negative log-likelihood and high ensemble diversity." However, Theorem 1 is a generic PAC-Bayes bound that holds for *any* ensemble, regardless of how it was trained. It does not specifically reference the random labeling procedure. The bound provides motivation — showing that increasing diversity can lower an upper bound on test NLL — but it does not constitute a guarantee about the specific method. The paper would benefit from reframing this claim more accurately.
 
-- **Unclear whether baselines had access to the same unlabeled data.** The paper compares ν-ensembles against Masegosa and Agree-to-Disagree ensembles but does not state whether those baselines also used the 5000 unlabeled examples. Agree-to-Disagree (Matteo et al., 2023) is described as forcing disagreement on unlabeled data, so it presumably does use them. For Masegosa, it is unclear. If the baselines did not use unlabeled data, the comparison is unfair: ν-ensembles benefit from extra data while the baselines do not. The paper should clarify this and, ideally, evaluate all methods with and without access to the same unlabeled set.
+- **No uncertainty quantification in experimental results**: The paper does not report standard deviations, confidence intervals, or the number of random seeds used for any experiment. Given that the method's primary claimed benefit is numerical (improvements in calibration metrics like ECE, NLL, etc.), the absence of any measure of variability makes it impossible to assess whether the reported improvements are statistically significant or consistent across runs.
 
-- **Reproducibility details are insufficient.** The paper states "AdamW" and "hyperparameter search with 50 trials" but does not list the search space, learning rate schedule, number of training epochs, or early-stopping criteria. A practitioner cannot reproduce the results from the information provided. Additionally, training details for baseline methods (Masegosa, Agree-to-Disagree) are not given.
-
-- **The without-replacement empirical result is only summarised, not shown.** Section 5.3 states: "We confirm our prediction by redoing the experiments in Table 1, but this time sampling with replacement. On average, sampling without replacement results in better calibration across our different metrics." This result is not presented in a table or figure — only a single sentence. Given that this comparison directly supports the diversity mechanism (since data quantity is held constant), it deserves full tabular presentation.
-
-- **No analysis of why the method fails in the large-data regime.** The limitations section (Section 6) honestly notes that the method "had a detrimental effect on calibration" in the large-data regime, but offers no analysis or hypothesis for why. This limits guidance for practitioners on when the method is appropriate.
+- **Unexplored dependency between ensemble size and number of classes**: For CIFAR-10 with K=10 ensemble members and c=10 classes, sampling without replacement assigns each class exactly once per unlabeled point across the ensemble. For CIFAR-100 with c=100 but K=10, the behavior is very different. The paper does not discuss how the relationship between K and c affects the diversity mechanism, nor does it explore varying K.
 
 ### Trivial
 
-- The failed DICE replication attempt is noted honestly (line 103) but without analysis of why it failed. This is not a weakness of the paper's method but could be addressed with a brief comment.
+- **Proposition 2 assumes perfect fitting of random labels**: The analysis of expected diversity under with-replacement sampling assumes each ensemble member perfectly fits its assigned random labels. This is an unrealistic assumption, especially in the small-data regime with rich architectures. The paper partially compensates with empirical validation, but the theoretical analysis would benefit from acknowledging this gap.
 
 ## Nice-to-Haves
 
-- Measuring mutual information on the *unlabeled set* used during training (rather than the test set) would more directly connect the diversity-enforcement mechanism to the measured diversity.
-- A small synthetic or toy experiment with known ground truth could isolate the diversity mechanism without confounds.
-- Reporting the true-label variance `V(ρ̂)` on a held-out labeled set for both standard and ν-ensembles would help bridge the theory-practice gap.
+- A small controlled experiment varying the size of U relative to Z_train to show the transition where the method stops helping and starts hurting.
+- A self-training or consistency-regularization baseline using the same unlabeled set U, to benchmark against a more standard semi-supervised approach.
+- Discussion of what happens when U comes from a genuinely different distribution (true OOD unlabeled data).
 
 ## Removed Points
 
-*"The function h in the bound is never specified; the bound is therefore not checkable."* — The paper explicitly states "h: ℝ⁺ → ℝ⁺ is a strictly increasing function" (line 77). This is a standard PAC-Bayes formulation where h is a generic function that exists by the theory; it is not left undefined. Removed as factually incorrect.
-
-*"The validation set's role is never explained."* — The paper states it uses "5000 samples as validation data Z_val" (line 95) and that hyperparameter search used 50 trials (line 99). While not exhaustively detailed, the validation set's role in tuning is clearly stated. Removed as a misreading.
-
-*"Section 5.3: Proposition 2 assumes each model perfectly fits its random labels, which is unrealistic."* — This is a standard theoretical simplification for an analytical proposition. The paper then validates the trend empirically. Removed as a generic nitpick that misjudges the role of theory.
-
-*"Missing appendix / missing proofs / missing references"* — Parser artifacts; removed per instructions.
-
-*"DICE replication failure not analysed"* — The paper honestly reports the attempt and correspondence with the authors. This is a disclosure, not a weakness. Removed per instruction to avoid penalizing honest reporting.
+- **"Results cannot be verified because Table 1/Figures are not rendered"**: The images are present in the original PDF submission but not renderable by the text parser. This is a format artifact, not a paper flaw.
+- **"Proposition 1 is not stated"**: Proposition 1 (the without-replacement case) was likely in the appendix, which is stripped by the parser. It is referenced in the text ("Comparing numerically propositions 1 and 2").
+- **Criticisms about missing proofs in appendix**: The parser strips appendices; these exist in the original submission.
+- **Various formatting/style nitpicks and complaints about parser-level text garbling**: These do not reflect author errors.
 
 ## Novel Insights
 
-The most valuable observation from these reviews is the concrete suggestion to control for data quantity by comparing ν-ensembles against standard ensembles trained on labeled data *plus the same unlabeled set with a single fixed random labeling shared across members*. This experiment cleanly separates the two hypotheses — "more data per member" versus "diverse labels per member" — and the paper's central claim stands or falls on it. The reviews also highlight that the with/without-replacement comparison (which the paper already runs but under-reports) is in fact a more powerful control than the paper currently treats it as, because it holds data quantity constant while varying label diversity. Recasting this experiment as the primary evidence for the diversity mechanism would strengthen the paper significantly.
+None beyond the paper's own contributions. The reviews surface a genuine experimental confound that the paper itself does not discuss, but the core idea (using different random labels per ensemble member on unlabeled data) is clearly presented and the simplicity argument is well-made.
 
 ## Suggestions
 
-1. **Add the control experiment**: Standard ensemble where each member trains on labeled data plus the same 5000 unlabeled samples with a *single fixed random labeling* (shared across all members). If ν-ensembles still outperform this baseline, the diversity mechanism is isolated.
-2. **Report means and standard deviations** over at least 3–5 independent runs (different data splits and random seeds) for all metrics. The patterns are consistent enough that significance likely holds, but it must be shown.
-3. **Present the without-replacement vs. with-replacement comparison as a full table**, not a single sentence. This is the cleanest evidence for the diversity mechanism.
-4. **Bridge the theory-practice gap**: measure `V(ρ̂)` (computed with true labels) on a held-out set for both standard and ν-ensembles to empirically verify that random-label training increases true-label variance.
-5. **Clarify the baseline setup**: explicitly state whether Masegosa and Agree-to-Disagree baselines had access to the same unlabeled set, and if so, describe how they were adapted.
-6. **Provide full hyperparameter search spaces** and training details (epochs, learning rate schedule, early stopping) for all methods.
+1. **Resolve the confound**: Add a baseline where a standard ensemble is trained on Z_train ∪ U, with all members receiving the *same* randomly sampled label per unlabeled point (or a fixed label). If ν-ensembles still outperform this baseline, the diversity mechanism is doing real work beyond the extra data.
+
+2. **Reframe theoretical claims**: Replace "guarantees" with language like "motivates" or "provides an upper bound showing that...". Explicitly acknowledge that the bound applies to any ensemble and that the connection to the specific labeling procedure requires showing the trade-off works in practice.
+
+3. **Add error bars**: Report results over at least 3–5 random seeds with standard deviations, at least for the main result (Table 1).
+
+4. **Discuss the K vs. c relationship**: Explain what happens when K < c, K = c, and K > c, and justify the choice K=10.
 
 ## Score and Decision
 
-This paper proposes a genuinely simple and practical method that delivers clear calibration improvements with minimal overhead. The strengths are real: the method is easy to implement, the empirical improvements are consistent across architectures and datasets, and the computational cost is negligible. However, the experimental design confounds data quantity with label diversity for the central comparison, and the theoretical framework does not connect to the algorithm in a substantive way. These are not fatal — the method empirically works — but they weaken the paper's scientific argument about *why* it works. The contributions are sufficient for acceptance at a conference that values practical empirical methods, but the paper would benefit substantially from addressing the control experiment and error bars before publication.
+The paper presents a genuinely simple and interesting idea that could be practically useful. However, the central empirical comparison contains a significant confound (ν-ensembles use more training data than standard ensembles), and the theoretical claims are stronger than what the analysis supports. The absence of any uncertainty quantification further weakens the evidence. These issues are addressable in a revision, but as presented, the paper does not convincingly demonstrate that the proposed mechanism — diverse random labeling per member — is responsible for the observed improvements.
 
-**Score**: 6.0
-
-**Decision**: Accept
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**MY FINAL SCORE:** <pineapple>4.5</pineapple>
+**MY FINAL DECISION:** <orange>Reject</orange>

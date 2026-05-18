@@ -1,18 +1,20 @@
-Now I have all the information needed. Let me synthesize the final review.
+Now I have a thorough understanding of the paper and both reviews. Let me synthesize the final review.
+
+---
 
 ## Summary
 
-PLUM proposes an on-policy preference learning framework for code language models that uses automatically generated test cases (from GPT-4) to create preference labels from the model's own outputs, then trains with KTO or DPO — all without training a separate reward model. The paper evaluates across multiple code LMs (MagiCoder, CodeQwen, DeepSeek Coder, StarCoder2, etc.) and benchmarks (HumanEval, MBPP, LiveCodeBench), reporting pass@1 improvements of up to 4.8% on standard benchmarks and 11.8% on LiveCodeBench.
+PLUM proposes a framework for on-policy preference learning for code language models that replaces human annotation or explicit reward models with automatically generated test cases. Given a code instruction, GPT-4 generates test cases; candidate solutions are sampled from the current model and evaluated against these test cases to produce preference pairs (passing = chosen, failing = rejected); the model is then trained with KTO or DPO. The paper evaluates on six code LMs across HumanEval, MBPP, EvalPlus, and LiveCodeBench, reporting consistent improvements.
 
 ## Strengths
 
-- **Consistent gains across diverse models and benchmarks**: PLUM improves pass@1 across six different code LMs spanning different base architectures and sizes (MagiCoder, OpenCodeInterpreter, CodeQwen, DeepSeek Coder, StarCoder2), and across three datasets (OSS-Instruct, EvolInstruct, ShareGPT). The improvements hold on both standard benchmarks and the harder LiveCodeBench, suggesting genuine capability gain rather than benchmark-specific fitting.
+- **Sound core idea with practical appeal**: Using automatically generated test cases to create on-policy preference pairs eliminates the need for separate reward model training or human annotation. This is well-motivated and addresses a real bottleneck in applying preference learning to code.
 
-- **Ablation evidence supports the design choices**: The paper runs controlled ablations showing (a) using only un-runnable code as negatives does not consistently help (Figure 2), (b) synthetic negatives from AST mutations harm performance (Section 3.2), and (c) on-policy KTO outperforms off-policy KTO (Table 6). These experiments directly support the claim that natural, on-policy negatives labeled by test-case execution matter.
+- **Consistent improvements across diverse models and challenging benchmarks**: PLUM is evaluated on six models (MagiCoder, OpenCodeInterpreter, CodeQwen, DeepSeek Coder, StarCoder2) and four benchmarks. Gains of up to ~4.8% on standard benchmarks and ~11.8% on LiveCodeBench are reported, and the trend is consistent across model families. This breadth strengthens the generalizability claim.
 
-- **Scalable preference signal without reward model training**: The framework generates test cases via GPT-4 and labels preference pairs using execution results, bypassing the need to train a separate reward model. This is a practical contribution — it makes on-policy preference learning feasible at scale for code generation, where unit tests provide a natural ground-truth signal.
+- **Systematic ablation evidence**: The paper validates its design choices through multiple controlled experiments: comparing on-policy vs. off-policy training (Table 6), testing synthetic negatives via AST manipulation, and ablating the test-case-based preference signal against using only un-runnable code as negatives (Figure 2). These experiments support the claim that natural, on-policy, test-case-grounded preference signals drive improvement.
 
-- **Iterative online alignment demonstrated**: Table 7 shows that iterative PLUM outperforms offline methods on the challenging LeetCode benchmark, providing preliminary evidence that the framework supports multi-round policy improvement without a reward model.
+- **Demonstration of iterative online alignment**: The paper shows that PLUM supports iterative preference learning without reward model retraining (Table 7), a practically relevant capability for continued improvement on harder problems.
 
 ## Weaknesses
 
@@ -21,56 +23,61 @@ None.
 
 ### Major
 
-- **On-policy vs. off-policy comparison confounds distribution with source-model capability**. The experiment in Table 6 compares on-policy KTO on CodeQwen-1.5B against off-policy data from *different* models (DeepSeek-Coder-1.3B, Qwen2.5-Coder-1.5B, CodeStral-22B, DeepSeek-Coder-33B). Because these models have different solution quality, the observed gap conflates distribution mismatch with data quality differences. (Notably, the off-policy set includes models *larger* than the target — 22B and 33B — whose solutions may be higher quality, meaning the confound does not trivially favor the on-policy condition. But the experiment still cannot isolate whether "on-policy *per se*" drives the improvement.) A cleaner control would use the same model at different training checkpoints.
+- **No dedicated method section (Section 2 is absent)**: The paper jumps from Section 1 (Introduction) directly to Section 3 (Experiments), with no separate exposition of the framework. Key procedural details — how test cases are generated (prompt format, acceptance criteria), how preference pairs are constructed from sampled solutions, how KTO/DPO are applied, and how iterative PLUM (Algorithm 1) works — are scattered across the abstract and experimental narrative rather than presented coherently. This structural gap makes the contribution harder to evaluate than it should be and is surprising for a method paper.
 
-- **Missing training hyperparameters and reproducibility details**. The paper reports no learning rate, batch size, number of epochs, optimizer, hardware, or training runtime. This is a serious reproducibility gap for an empirical systems paper. Standard training configurations (these are not "trivial details") must be reported for the results to be verifiable.
+- **On-policy vs. off-policy comparison confounds model family**: Table 6 compares on-policy training (data from CodeQwen-1.5-Chat itself) against off-policy data from *different* model families and sizes (DeepSeek-Coder-1.3B, Qwen2.5-Coder-1.5B, CodeStral-22B, DeepSeek-Coder-33B). Because both model family and on/off-policy status vary simultaneously, the gap could partly reflect data-source differences rather than the on-policy principle. A cleaner comparison would use off-policy data from the *same* model at a different training stage.
+
+- **Missing comparisons against execution-feedback RL methods**: The paper compares against Reflexion (prompting) and LeTI (value-conditioning), but does not experimentally compare against methods that use test outcomes with RL objectives (e.g., CodeRL, RLTF). While these methods differ in approach (explicit reward models vs. preference learning), comparing against them would better isolate the value of PLUM's design choice to avoid explicit reward models.
 
 ### Minor
 
-- **No comparison to CodeRL or RLTF as baselines**. The abstract claims PLUM "delivers substantial improvements over ... other execution-feedback-driven approaches," but CodeRL (Le et al., 2022, cited in Related Work §4) and RLTF (Liu et al., 2023a, in references) are not included in the experimental comparison. While the paper does compare against Reflexion, LeTI, and value-conditioning (all execution-feedback methods), CodeRL and RLTF represent the most directly related RL-based training paradigms. Including them (or explaining why they are not directly comparable) would strengthen the claim.
+- **Training hyperparameters not reported**: Learning rate, batch size, number of epochs, and KL penalty for KTO/DPO training are absent. This limits reproducibility.
 
-- **Iterative PLUM experiment lacks procedural detail**. Table 7 shows iterative PLUM results, but the paper does not specify the number of iterations, how test-case generation or data collection changed across rounds, or the computational cost. The statement "iterative preference learning ... outperforms offline methods" is not adequately substantiated without these details.
+- **Test case generation details missing**: The paper states that GPT-4 is used to generate test cases but does not provide the prompts used, the number of test cases generated per problem, or any quality filtering criteria beyond a self-consistency number (Table 1, not visible in extracted text).
 
-- **No analysis of test-case quality or noise**. The paper uses GPT-4-generated test cases as the preference signal but provides no analysis of their reliability (e.g., false-positive/false-negative rates, fraction of questions where generated tests are insufficient). Table 1 reports a "self-consistency pass rate" but is not discussed. Since the entire training signal depends on these test cases, their quality is a first-order concern.
+- **No confidence intervals or significance measures**: Main results (Tables 2, 4, 5) are reported as point estimates without variance. Given that some reported improvements are very small (potentially 0.1–0.3% on MBPP for some models), it is unclear whether these gains are statistically reliable.
 
-- **No discussion of computational cost**. The paper does not report the number of GPT-4 API calls, the total training time, or the relative cost compared to baselines. This is important for practical adoption assessment.
+- **Data efficiency claim not validated with scaling**: The paper uses only 1K (OSS-Instruct) and 400 (EvolInstruct) instances and claims data efficiency, but does not show how performance changes with larger subsets or full datasets. The reader cannot assess whether the small-subset results are representative.
+
+- **Value of on-policy negatives not fully disentangled from negative quality**: The on-policy vs. off-policy comparison varies model family, and the synthetic-negative ablation uses off-policy negatives. Because these confounds overlap, it remains unclear whether the benefit of "on-policy" data comes from being on-policy per se or from the higher quality of natural negatives produced by a capable model.
 
 ### Trivial
 
-- Some tables (2, 4, 5, 6, 7) are embedded as images with minimal textual description of key numbers; the text should report representative absolute pass rates so the reader can assess results without decoding figures.
-- Figure 2's description uses "worse than PLUM in most cases" — "most" is vague; whether the gap is consistent or small is unclear without seeing the figure.
+- **Typo**: "levitates the need to train reward models" (line 8) should be "eliminates."
 
 ## Nice-to-Haves
 
-- Run the on-policy vs. off-policy comparison using the *same model* at different training checkpoints (e.g., after 25%, 50%, 75% of SFT) to control for solution quality.
-- Include standard deviations or confidence intervals for main results; many reported gains are modest (~3–5%), and without variance estimates their significance is unclear.
-- A more detailed analysis of test-case quality (e.g., human evaluation of a random sample, or comparison against held-out oracle tests) would increase confidence in the preference signal.
+- Full-dataset experiments (or at least 2–3 data sizes) to substantiate the data efficiency claim.
+- Providing the GPT-4 prompts used for test case generation, or releasing them as supplementary material.
+- Error bars (e.g., bootstrapped confidence intervals) for the main benchmark results.
+- A controlled on-policy vs. off-policy comparison where off-policy data comes from the same model (e.g., a frozen earlier checkpoint) to isolate the on-policy effect.
+- A comparison against a simple reward-model baseline trained on the same test outcomes.
 
 ## Removed Points
 
-- **"Algorithm 1 is referenced but missing"**: The algorithm is likely present in the original submission as an image/table that was stripped by the PDF parser. Not a valid weakness.
-- **"No comparison to execution-feedback RL methods" framed as if CodeRL is entirely absent from the paper**: CodeRL IS cited in Related Work §4 ("Code Generation with Large Language Models"), so the criticism that it is "omitted" from the paper is factually incorrect. The valid concern is its absence from baselines, which is kept above as a minor weakness.
-- **"Results for rejection-sampling-based SFT and value-conditioning are not presented"**: The paper states these are in Table 2 and discusses them in the text (line 78–80). The table likely contains these results; the text description is sparse but the results exist.
-- **"The paper does not release code or data"**: While this is stated by the reviewer, the paper is a conference submission and release decisions are typically made post-acceptance. This is a pre-publication expectation that is not standard to enforce at review time.
-- **Strength Finder's claim that "Comprehensive comparison against multiple baselines"**: Overstated — the comparison is reasonably thorough but not comprehensive (missing CodeRL/RLTF). Merged into minor weakness above.
-- **"The 'on-policy data is key' claim is not novel" (from Section-by-Section notes)**: This is a criticism about framing/novelty that does not identify a concrete flaw. The paper's contribution is the *method* for enabling on-policy preference learning at scale with test cases, not the claim that on-policy data matters in general.
+- **"Missing related works (CodeRL, RLTF, SPoC, AlphaCode)"** — All four are cited in the paper (Related Works section or references). Factually incorrect; removed.
+- **"Algorithm 1 is absent"** — The parser strips sections from all papers; Algorithm 1 likely existed in the original submission. Removed per hard rules on missing appendix/section content.
+- **"Rejection-sampling SFT results never reported in main tables"** — The paper states it performed these experiments; table images are not visible in the parsed text and may contain these results. Cannot verify absence.
+- **"Garbled text passages (e.g., 'We tk .20 ing temperature')"** — Parser artifact rather than author error. Removed per hard rules.
+- **Several formatting/style nitpicks and generic observations** — Removed as they do not affect evaluation.
 
 ## Novel Insights
 
-The reviews surface an under-analyzed subtlety in the on-policy vs. off-policy experiment: the off-policy sources include models *larger* than the target (CodeStral-22B, DeepSeek-Coder-33B vs. CodeQwen-1.5B). This means the off-policy data is not necessarily lower-quality — if larger models produce better solutions, the confound could actually *favor* the off-policy condition. That on-policy training still wins despite potentially weaker candidate solutions is interesting but not directly interpretable from the current experiment design. A properly controlled study (same model, different checkpoints) would cleanly resolve this and could reveal whether distribution match or solution quality is the dominant factor.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. Add standard training hyperparameters (learning rate, batch size, optimizer, epochs, GPU type, training time) to a reproducibility section.
-2. Run a controlled on-policy vs. off-policy experiment using the same model at different training stages to isolate the effect of distribution match.
-3. Add a test-case quality analysis — either manual evaluation of a sample or comparison against held-out oracle tests — to quantify noise in the preference signal.
-4. Include CodeRL or RLTF as baselines, or explicitly discuss why they are not directly comparable to the preference-learning paradigm.
-5. Provide details on the iterative PLUM setup: number of rounds, how data changes, and whether performance saturates.
-6. Report the GPT-4 API cost and total training wall-clock time.
+1. **Add a dedicated method section (Section 2)** that describes the three-stage pipeline coherently: test case generation (prompts, filtering criteria, quality checks), preference-pair construction from on-policy samples, and the KTO/DPO training objective with hyperparameters. Without this, the paper is structurally incomplete.
+
+2. **Run a cleaner on-policy vs. off-policy comparison** using off-policy data from the *same* model (e.g., generations from an earlier training checkpoint) to isolate whether on-policy training itself drives improvement, independent of model family confounds.
+
+3. **Report confidence intervals or standard deviations** for main results, especially where gains are small, so readers can assess statistical reliability.
+
+4. **Include the test case generation prompts** (e.g., in supplementary material) and the hyperparameter configuration for all training runs to support reproducibility.
 
 ## Score and Decision
 
-The paper proposes a practical, well-motivated framework with consistent empirical improvements across diverse models and settings. The core idea — using test-case execution to create on-policy preference labels at scale — is solid and the ablations are informative. The main weaknesses are (a) the confounded on-policy vs. off-policy comparison, which partially undermines a central claim, and (b) missing training hyperparameters, which hinders reproducibility. These are addressable but non-trivial. The paper's contributions are real and the experiments demonstrate genuine utility, but the current evidence falls short of fully establishing that "on-policy *per se*" drives the gains. With stronger controls and additional details, this could be a solid paper.
+The paper tackles a relevant problem with a well-motivated approach and provides reasonably broad empirical validation across six models. The core idea — using auto-generated test cases for on-policy preference learning — is sound and the ablations are informative. However, the structural gap (absent method section), several important experimental confounds, and missing reproducibility details prevent the current manuscript from being publishable as-is. The paper would need a dedicated method section, a cleaner on-policy vs. off-policy experiment, and basic hyperparameter reporting to meet the bar for publication. The contributions are real but the presentation and evaluation are not yet rigorous enough.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

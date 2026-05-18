@@ -1,81 +1,90 @@
-Now I have all the evidence I need. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and all the reviewer claims. Let me compose the final consolidated review.
 
 ---
 
 ## Summary
 
-RotPruner introduces a training-based pruning framework that learns orthonormal rotation matrices to transform the weight and activation spaces of LLM linear layers before applying existing pruning methods (magnitude, Wanda, SparseGPT). The core insight is that the original parameter space is suboptimal for pruning and that a learned rotation—optimized via Cayley SGD without modifying pretrained weights—can produce a weight distribution with more salient outliers, enabling better pruning decisions. The method supports unstructured, 2:4 semi-structured, and structured sparsity and is evaluated on OPT, LLaMA-2, and LLaMA-3 families.
+RotPruner introduces a training-based pruning framework that learns orthonormal rotation matrices to transform the weight and activation spaces of linear layers before applying existing pruning methods (magnitude, Wanda, SparseGPT). The key insight is that the original parameter space is suboptimal for pruning, and a learned rotation can create a more favorable distribution (with larger weight outliers and variance) that makes subsequent pruning more effective. The method supports unstructured, 2:4 semi-structured, and structured sparsity patterns, and is evaluated on OPT (125M–6.7B), LLaMA-2-7B, and LLaMA-3-8B, showing consistent perplexity reductions over baselines.
 
 ## Strengths
 
-- **Novel and well-motivated core insight.** The paper demonstrates concretely (Section 3.1, Figure 2, Table 1) that the original weight space is not optimal for pruning, that random rotation hurts performance, but that a *learned* rotation produces more weight outliers and consistently improves perplexity over pruning in the original space. This is a clean conceptual contribution applicable across pruning methods.
+1. **Novel and well-motivated idea with clear evidence that the rotation is essential.**  
+   The paper frames pruning as a problem of finding the right space rather than just the right mask. Table 1 provides strong evidence: on OPT-125M (50% unstructured), Wanda in the original space achieves 64.82 perplexity, random rotation catastrophically increases it to 3839.86, but the learned rotation reduces it to 59.53. This clean ablation isolates the contribution of the learned rotation from confounding factors.
 
-- **Strong empirical results against one-shot baselines across models and sparsity patterns.** RotPruner achieves consistently lower WikiText-2 perplexity than SparseGPT, Wanda, and SliceGPT on OPT-125M through OPT-6.7B, LLaMA-2-7B, and LLaMA-3-8B at 50% unstructured, 2:4 semi-structured, and 30% structured sparsity (Table 2). Zero-shot accuracy improvements on OPT-6.7B and LLaMA-3-8B (Table 3) further validate that the approach transfers to actual task performance.
+2. **Consistent perplexity improvements across model scales, sparsity patterns, and base pruning methods.**  
+   Results in Table 2 show RotPruner improves over Wanda and SparseGPT in nearly every setting (e.g., OPT-6.7B at 50% unstructured: Wanda 11.42 → RotPruner+Wanda 9.37; LLaMA-3-8B at 30% structured: SliceGPT 11.32 → RotPruner 8.27). Table 9 further confirms the improvement generalizes across magnitude, Wanda, and SparseGPT as base methods.
 
-- **Flexible framework rather than a single algorithm.** RotPruner integrates with multiple base pruners (magnitude, Wanda, SparseGPT — Table 9) and supports three sparsity patterns. This makes it a general enhancement that can be layered on top of various one-shot methods, which the ablation study cleanly demonstrates.
+3. **Minimal inference-time overhead.**  
+   Table 4 shows that adding residual rotations to the attention block results in only 1.006× the inference time of a sparse model without rotations; sharing rotation matrices narrows the gap to 1.003×. This demonstrates that the performance gains do not come at the cost of deployment speed.
 
-- **Comprehensive ablation studies.** The paper ablates loss functions (Table 5), STE variants (Table 6), optimization methods (Table 7), calibration set size (Figure 5), number of rotation matrices (Table 8), and base pruning methods (Table 9). These provide clear evidence for the chosen design (cosine distillation loss + SR-STE + Cayley SGD) and show the method's robustness to design choices.
-
-- **Efficient optimization that preserves pretrained knowledge.** Cayley SGD keeps matrices orthonormal at ~2× SGD cost (Section 3.3). The weights themselves are never updated, which distinguishes RotPruner from training-based methods that risk forgetting. The 8B model is pruned in 1.5 hours on a single L40S GPU — a practical cost.
+4. **Practical trade-off via shared rotation matrices.**  
+   Table 8 shows that even when every four rotation matrices share parameters (reducing storage and computation), RotPruner on OPT-1.3B still achieves 12.87 perplexity, outperforming both Wanda (13.12) and SparseGPT (13.10). This makes the framework viable in memory-constrained settings.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **No comparison against other training-based pruning methods.** The paper positions RotPruner as a "training-based pruning framework" (Abstract, Section 2.2) and cites ADMM-Pruner, FISTAPruner, and AST as related training-based approaches. Yet all baselines in Tables 2–3 are one-shot methods (SparseGPT, Wanda, SliceGPT). The paper claims "state-of-the-art" performance, but without evidence that RotPruner also outperforms other training-based approaches (which also use calibration data and training), the SOTA claim is incomplete. Training-based methods typically outperform one-shot methods at higher computational cost, so showing improvement over one-shot baselines alone does not establish SOTA within the training-based class. The authors should include comparisons with at least the most comparable training-based methods that use similar calibration data scales.
+1. **Computational cost is not contextualized against one-shot baselines.**  
+   RotPruner is a training-based method (5 epochs, ~1.5 hours on an L40S for an 8B model), while the primary baselines—SparseGPT, Wanda, SliceGPT—are one-shot methods requiring minutes. The paper reports the training time but never discusses whether the perplexity improvements (e.g., LLaMA-2-7B 50% unstructured: SparseGPT 6.29 → RotPruner 6.17) justify the additional compute. Without a training-time baseline (e.g., ADMM-pruner, FISTAPruner, or running SparseGPT with multiple passes of reconstruction) or a cost-vs-performance scatter plot, a reader cannot determine whether the gains stem from the rotation itself or simply from having more optimization budget. This is the most significant gap in the paper's evaluation.
 
 ### Minor
 
-- **The "pruned model outperforms dense model" claim is stated without explanation or analysis.** Lines 163 and 165 report that OPT-6.7B at 50% sparsity and OPT-1.3B below 50% sparsity surpass the dense model's perplexity. This is a notable result that could arise from a regularization effect, under-trained dense baseline, or evaluation noise, but the paper offers no discussion. Adding a brief explanation (or contextualizing the magnitude of the improvement relative to the dense model's variance) would strengthen credibility. As presented, the claim risks appearing anomalous without support.
+1. **Structured pruning evaluation does not fully demonstrate compatibility with existing structured pruning methods.**  
+   The paper claims RotPruner is "capable of integrating with other pruning methods" and supports structured pruning. However, for structured pruning, the mask is fixed *a priori* to the bottom rows/columns rather than generated by any existing structured pruning method. While the comparison against SliceGPT is fair (SliceGPT also removes bottom components after its own rotation; RotPruner initializes from SliceGPT's PCA and fine-tunes the rotation), the evaluation does not test whether RotPruner improves *existing structured pruning methods' mask selection*. Using an importance-driven mask on the rotated weights (e.g., row-wise L2 norm, or pruning the lowest-variance dimensions after rotation) would better demonstrate the claimed compatibility.
 
-- **No variance or confidence intervals reported for main results.** Figure 5 shows that RotPruner is more sensitive to calibration set size than baselines (e.g., perplexity degrades noticeably when moving from 128 to 64 samples). The paper acknowledges this sensitivity but does not report standard errors or intervals for any main results (Tables 2, 3). Without this, the reader cannot assess whether improvements are statistically significant or artifacts of a specific calibration draw. This is a standard concern in LLM pruning papers (SparseGPT and Wanda also typically report single runs), but it carries extra weight here given the documented sensitivity.
+2. **Outlier distribution claims are supported only by qualitative visual evidence.**  
+   The paper states that the learned rotation produces "more outliers and larger variance" (Figure 2) and ties this to the method's motivation (Section 3.1), but provides no quantitative metric such as kurtosis, Gini coefficient, or variance ratio to substantiate this claim. The visual evidence from a single layer of OPT-125M is anecdotal.
 
-- **Structured pruning initialization conflates the learned rotation with fine-tuning.** For structured pruning, Q is initialized to SliceGPT's PCA-based rotation matrices, then fine-tuned (Section 3.4). The paper reports RotPruner outperforming SliceGPT, but this improvement could come primarily from the additional training steps rather than the rotation being *learned* per se. An ablation initializing Q to identity (analogous to the unstructured/semi-structured setting) would separate these factors. No such ablation is provided for structured pruning.
+3. **The OPT-6.7B result where the pruned model outperforms the dense model is noted but not explained.**  
+   The paper acknowledges (line 163) that "the pruned OPT-6.7B can outperform the dense model" and later notes this occurs at sparsity ratios below 50% (Figure 4), but offers no hypothesis or analysis for why this happens. This is unusual and, without comment, raises questions about calibration set overlap, regularization benefits, or potential metric artifacts.
+
+4. **The mask update schedule in Algorithm 1 is underspecified.**  
+   The text says "after several iterations, update the masks based on new orthonormal matrix" but does not specify the period. This affects reproducibility.
 
 ### Trivial
 
-- **The calibration split of WikiText-2 should be specified explicitly.** The paper states "Perplexity is measured on test set of WikiText-2" (line 151) and "We use WikiText2 as the calibration set" (line 155) without clarifying which split (train or validation) the calibration samples are drawn from. While standard practice is to use the training split, stating this explicitly would remove any ambiguity.
+1. **The choice of cosine distillation over L2 or JS is determined empirically (Table 5) but not explained mechanistically.** The paper reports that cosine distance works best but offers no intuition for why.
+
+2. **No limitations section.** The paper would benefit from discussing limitations such as sensitivity to calibration set size (briefly mentioned but not contextualized), the need to train per model/sparsity level, and the restriction to linear-layer pruning.
 
 ## Nice-to-Haves
 
-- An ablation for structured pruning where Q is initialized to identity (rather than SliceGPT's solution) to isolate the benefit of learning the rotation from the benefit of additional fine-tuning.
-- Reporting perplexity across multiple calibration draws (e.g., 3–5 random seeds with std dev) to quantify stability, especially given the documented sensitivity to calibration set size.
-- An end-to-end wall-clock speed benchmark for full-model inference (not just single layers) with and without the residual rotations, to give practitioners a complete picture of the inference cost.
+- A scatter plot or table showing perplexity vs. total pruning time (including training) for RotPruner and the one-shot baselines, to allow readers to assess the cost-benefit trade-off transparently.
+- Quantitative outlier metrics (kurtosis, Gini coefficient, or variance ratio) for weight distributions before and after rotation, to substantiate the claim in Section 3.1.
+- A brief discussion of why the pruned OPT-6.7B outperforms the dense model — even a hypothesis (e.g., implicit regularization, noise injection from STE) would help.
+- A comparison against a training-based pruning baseline (e.g., ADMM-pruner or FISTAPruner) to better isolate the effect of the rotation from the effect of additional optimization.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **Section 3.1 motivation is weak / link to algorithm is weak** — This is an overly pedantic reading of a motivation section. The paper provides a clear narrative arc: toy example → minimize ||AW||₀ → hard → approximate with ||AW||₁ → activation matters too → end-to-end loss optimization. Perfectly adequate for a motivation section.
-
-- **Section 3.2 inconsistency between fusion claim and residual rotations** — The paper is clear: fusion *can* be done theoretically (via SliceGPT's computational invariant), but the practical implementation adds residual rotations, whose overhead is explicitly measured in Section 4.2 (Table 4). There is no inconsistency.
-
-- **Data leakage / calibration-evaluation overlap concern** — The paper explicitly distinguishes calibration ("WikiText2") from evaluation ("test set of WikiText-2"). Standard practice in the field is to use the training split for calibration and the test split for evaluation, making leakage unlikely. The criticism is based on an assumption not supported by the text.
-
-- **Zero-shot tasks are minimal** — Seven tasks (WinoGrande, Piqa, RTE, ARC Easy, ARC Challenge, WNLI, QNLI) is a standard evaluation suite for LLM pruning papers. This criticism does not reflect a genuine weakness.
-
-- **Missing related works from 2024–2025** — No specific papers are named by the reviewer, so this cannot be verified. The paper already cites works from 2024 (Ashkboos et al., Liu et al., Huang et al., Dubey et al.).
+- **"Structured pruning comparison is unfair because SliceGPT selects rows/columns based on a singular-value criterion."** — Both RotPruner and SliceGPT remove bottom rows/columns *after* their respective rotations. RotPruner initializes its rotation from SliceGPT's PCA and further learns it. The mask selection strategy is identical (bottom k components); the difference is in the rotation itself. The comparison is fair.
+- **"The paper does not comment on the OPT-6.7B anomaly."** — The paper explicitly states "We also find that the pruned OPT-6.7B can outperform the dense model" (line 163). This is factually incorrect.
+- **"The toy example is too contrived."** — The example is explicitly introduced as a simple motivation ("Consider a simple example"), not a general proof. Textbook-style motivation examples are standard and do not constitute a weakness.
+- **"The paper never analyzes the learned rotation matrices."** — This is a reasonable suggestion (moved to Nice-to-Haves), not a weakness.
+- Various formatting/style nitpicks and demands for scope expansion beyond what the paper intends to cover.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The reviews did not surface any perspective that the paper itself does not already articulate.
 
 ## Suggestions
 
-1. **Add at least one training-based pruning baseline** (e.g., ADMM-Pruner or FISTAPruner) to the main comparison tables. If these methods use different settings (weight updates vs. frozen weights), clearly explain the differences and how the comparisons should be interpreted. If full comparison is impractical, explicitly qualify the "state-of-the-art" claim to refer to the class of one-shot-pruner-enhancement methods.
+1. **Add a compute-cost analysis.** Report total training time for RotPruner alongside inference-only time for baselines, and include a training-based baseline (e.g., ADMM-pruner or fine-tuning sparse weights) to control for optimization budget. A perplexity-vs-time scatter plot would be ideal.
 
-2. **Explain or contextualize the "pruned outperforms dense" result** in one sentence — whether it reflects a regularization effect, noise relative to the dense baseline, or an artifact of evaluation.
+2. **Strengthen the structured pruning evaluation.** Use an importance score on the rotated weight (e.g., row-wise L2 norm or variance) to automatically select rows/columns to prune, and compare to SliceGPT using the same approach. This would directly test whether the learned rotation improves structured pruning mask selection.
 
-3. **Report variance** (at least 3 random calibration draws) for the main perplexity tables, or at minimum for one representative model (e.g., OPT-1.3B) to establish the stability of the claimed improvements.
+3. **Quantify the outlier distribution.** Report layer-wise kurtosis or Gini coefficients before and after the learned rotation, to convert the visual claim in Figure 2 into a measurable, reproducible result.
 
-4. **For structured pruning, include an ablation** initializing Q to identity and comparing against the SliceGPT-initialized variant.
+4. **Discuss the sub-dense perplexity result.** Provide a hypothesis (regularization? calibration set overlap? metric noise?) for why the pruned OPT-6.7B outperforms the dense model, even if speculative.
+
+5. **Specify the mask update frequency in Algorithm 1.** State explicitly how many iterations elapse between mask updates during training.
 
 ## Score and Decision
 
-The paper introduces a genuinely novel idea (learned rotation before pruning) that is well-motivated, supported by reasonable evidence, and practically efficient. The main empirical gap is the absence of training-based baselines, which makes the "state-of-the-art" claim incompletely supported. However, the core contribution does not depend on being SOTA among *all* training-based methods — the demonstration that learned rotation consistently improves over one-shot methods is itself a solid contribution. The remaining issues (unexplained out-performance of dense model, no variance reporting, structured pruning ablation gap) are addressable in revision.
+The paper proposes a novel and well-motivated idea — learning a rotation to improve pruning spaces — and backs it with consistent experimental evidence across multiple models, sparsity patterns, and base pruning methods. The main weakness is the lack of a fair computational-cost comparison against the one-shot baselines, which makes it difficult to assess the practical value of the modest perplexity gains. This is a real gap but not a fatal one: the core contribution (rotation improves pruning effectiveness) is convincingly demonstrated. With reasonable revisions (particularly adding a compute analysis and strengthening the structured pruning evaluation), the paper would be a solid contribution.
 
 MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

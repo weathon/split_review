@@ -1,20 +1,20 @@
-Now I have a thorough understanding of the paper. Let me construct the final meta-review by carefully cross-referencing each reviewer claim against the actual paper content.
+Now I have a thorough understanding of the paper. Let me write the final consolidated review.
 
 ## Summary
 
-This paper introduces ProbMed, a probing evaluation dataset (57k QA pairs from 6,303 medical images) designed to rigorously evaluate LMMs in medical VQA through two key innovations: (1) **adversarial negation pairs** that pair each original "yes" question with a "no" question about a hallucinated attribute, and (2) **procedural diagnosis** that requires models to answer questions across multiple diagnostic dimensions (modality, organ, abnormality, condition/finding, position). The core finding — that top LMMs like GPT-4o, GPT-4V, and Gemini Pro perform near or below random baselines on specialized diagnostic questions — is supported by evaluation across 12 models. An ablation study tracing performance bottlenecks identifies poor visual understanding as the primary limitation of open-source models (9.44% average improvement when augmented with GPT-4o-generated visual descriptions).
+This paper introduces ProbMed, a large-scale medical VQA dataset (57,132 QA pairs from 6,303 images) that pairs each original question with a negation/hallucinated adversarial variant, and evaluates 12 LMMs across five diagnostic dimensions (modality, organ, abnormality, condition/finding, position). The key findings are that top models (GPT-4o, GPT-4V, Gemini Pro) perform near or below stated random baselines on fine-grained diagnostic questions, and that poor visual understanding is a key bottleneck for open-source models.
 
 ## Strengths
 
-1. **Adversarial probing evaluation exposes a severe reliability gap that standard benchmarks miss.** The key evidence is in Table 1: introducing adversarial pairs causes massive accuracy drops across all 12 models (e.g., GPT-4o drops 20.71% on ProbMed, LLaVA-Med-v1.5 drops 28.22%). This cleanly demonstrates that standard Med-VQA accuracies are misleading and that models fail basic discriminative tests.
+1. **Probing evaluation with adversarial pairs reveals severe reliability gaps.** The core methodological contribution — pairing each question with a negated hallucinated variant and requiring both to be answered correctly — is simple, elegant, and effective. Table 1 shows accuracy drops of 20–37% across all models when adversarial pairs are introduced, convincingly demonstrating that standard evaluations overstate LMM reliability (lines 148–189).
 
-2. **ProbMed is a well-structured, human-verified dataset with unique features not present in prior benchmarks.** The dataset covers 4 organs × 3 modalities with procedural diagnosis across 5 dimensions, includes adversarial pairs for every question (a feature absent in VQA-RAD, SLAKE, PathVQA, and PMC-VQA per Table 2), and achieves 97.79% accuracy on human-verified QA pairs (Section 3.3). The 57k QA pairs from 6.3k images provide a practically useful evaluation resource.
+2. **Systematic, large-scale evaluation of 12 LMMs across multiple diagnostic dimensions.** The paper evaluates a diverse set of models (proprietary, open-source general, open-source medical) on five distinct question categories, going beyond existing benchmarks that treat questions independently (Table 1 comparison, Table 3 categorical results). The procedural diagnosis framework — requiring correct answers across multiple dimensions per image — is a more realistic diagnostic assessment.
 
-3. **The ablation study isolates poor visual understanding — rather than language reasoning — as the primary bottleneck for open-source LMMs.** The controlled comparison (Figure 2) shows chain-of-thought reasoning gives a 6.51% average gain, while adding GPT-4o-generated visual descriptions gives a 9.44% gain. This causal decomposition is the clearest evidence in the paper for *why* models fail and points to a concrete improvement path.
+3. **Carefully curated, manually verified dataset.** ProbMed is balanced across modalities and organs (Table 2), with 94% metadata accuracy and 97.79% QA accuracy verified by medical experts (line 107). The adversarial pairs are grounded in a principled data generation pipeline using GPT-4 and a positional reasoning module.
 
-4. **CheXagent analysis provides evidence that organ-specific domain expertise can transfer across modalities zero-shot.** CheXagent (trained exclusively on chest X-rays) achieves higher accuracy on chest-related questions in CT and MRI than on non-chest organs within the same unseen modalities (Section 4.2.2). This is an interesting finding with implications for domain-specific training strategies.
+4. **Ablation study isolating visual understanding as a key bottleneck.** Adding GPT-4o-generated visual descriptions yields an average 9.44% improvement for open-source models, substantially outperforming the 6.51% gain from chain-of-thought alone (Figure 3). This provides the strongest evidence to date that poor visual perception, not just reasoning, limits open-source Med-VQA models.
 
-5. **Comprehensive evaluation across 12 models (3 proprietary + 9 open-source) with a consistent setup.** Includes both general-domain (LLaVA, MiniGPT-v2) and medical-specific (LLaVA-Med, Med-Flamingo, CheXagent, BiomedGPT, RadFM) models, enabling fair head-to-head comparison.
+5. **Novel finding on cross-modality expertise transfer.** CheXagent, trained only on chest X-rays, shows higher accuracy on chest CT and MRI than on other organs within the same unseen modalities (Figure 4), suggesting that domain-specific knowledge transfers zero-shot across imaging modalities of the same organ.
 
 ## Weaknesses
 
@@ -23,58 +23,61 @@ None.
 
 ### Major
 
-None that are truly structural. The concerns below are addressable but important.
+1. **The "worse than random" baseline computation for Condition/Finding and Position is not adequately explained.** The paper's headline claim hinges on comparing model accuracy against a "Random Choice" baseline (Table 3: 35.67% for Condition/Finding, 36.48% for Position). However, the paper never states how these baselines are derived. Given the metric definition — "categorical accuracy... considering a hit only when the model correctly answered all questions within a category for an image" (line 146) — and the fact that each question is binary (yes/no), the expected random accuracy per image with *k* pairs would be (0.5)^(2k). For *k*=1 this gives 25%, and for larger *k* it decreases further, making 35.67% and 36.48% non-obvious. Without a formula, the distribution of questions per image per category (the referenced `table:question_per_image` is in the stripped appendix), or an explanation of how the random baseline is computed, the central claim that models are "worse than random" on specialized questions is unverifiable from the paper text alone. This is especially important because GPT-4V's Condition/Finding accuracy (35.19%) is only 0.48% below the stated baseline — a small baseline miscalculation would reverse the claim for this model. **The authors must provide a clear, mathematical derivation and confirm the baseline numbers are correct.**
+
+2. **Error analysis Table 4 contains likely data errors.** The accuracy and error distribution numbers for Gemini Pro on Condition/Finding (accuracy 39.97%; errors: deny-ground-truth 39.04%, accept-hallucination 59.69%, reject-to-answer 1.26%) are *identical* to the corresponding numbers for GPT-4V on Position (same 39.97% accuracy and identical error percentages). This is almost certainly a copy-paste error in the LaTeX table. This undermines confidence in the error analysis results.
 
 ### Minor
 
-1. **The random baseline derivation for Condition/Finding and Position is insufficiently explained in the main text.** The paper defines categorical accuracy as requiring all questions in a category for an image to be correct (line 146), and references Table `question_per_image` (likely in the stripped appendix) for per-category question counts. However, the main text neither states the number of questions per image per category nor shows how the random baselines of 35.67% and 36.48% are computed from those counts. While Modality (25% = 1/4), Organ (25% = 1/4), and Abnormality (50% = 1/2) are self-explanatory, the Condition/Finding and Position baselines are not obvious. This is not fatal — the qualitative conclusion (models are near/at chance) would survive even if these baselines shifted by a few percent — but the paper's headline claim requires a transparent derivation.
+3. **The "poor visual understanding as primary bottleneck" claim is somewhat conflated with reasoning effects.** Chain-of-thought reasoning alone (without new visual input) yields a 6.51% average improvement, and LLaVA-Med-v1.5 improves from 40.19% to 54.55% with CoT alone — closing most of the gap to GPT-4o's vanilla performance (55.60%). The paper frames the bottleneck as primarily visual, but the CoT results indicate that weak reasoning and prompt structure also play significant roles. The claim is not wrong (visual descriptions give the largest gains), but the narrative could more precisely separate these factors.
 
-2. **Inference details (temperature, prompt templates, zero-shot vs. few-shot format) are not reported.** For closed-ended VQA, temperature and prompt formatting can affect answer distributions, especially for models with a "reject to answer" mode. Reporting these details in an appendix would aid reproducibility and allow readers to assess whether the evaluation setup is standard.
+4. **Small sample sizes for the cross-modality transferability analysis.** The transferability claim for CheXagent (Figure 4) relies on small per-cell counts, particularly chest MRI (40 images) and chest CT (548 images, but with most images being chest X-ray). The reported 3–4% accuracy differences are not accompanied by confidence intervals or significance tests, making their reliability uncertain.
 
-3. **The framing "worse than random guessing on medical diagnosis questions" (Abstract) is imprecise.** The actual finding (from Table 3) is that models perform near or below random on the two most specialized categories — Condition/Finding and Position — while performing well above random on Modality, Organ, and Abnormality. The body text (lines 31, 194–196, 299) correctly specifies "specialized diagnostic questions," but the abstract and some summary statements use broader language that could mislead readers about the scope of the result.
-
-4. **The CheXagent transferability claim (3% for MRIs, 4% for CT scans) is stated in the text but not reported in a table or figure caption.** These specific numbers appear only in line 286. Adding them to the figure caption or a small table would improve precision.
+5. **Data contamination risk not discussed.** The evaluation images come from MedICaT (PubMed/PMC) and ChestX-ray14, datasets whose images may overlap with pre-training data for some models. While this does not invalidate the results (contamination would inflate scores, making the low observed performance even more striking), it should be acknowledged for completeness, particularly regarding CheXagent (trained on ChestX-ray14).
 
 ### Trivial
 
-1. The "Averaged Accuracy" column label in Table 1 could be clearer. While the caption correctly states "averaged across individual questions in a pair" (i.e., including both original and adversarial), a reader might initially interpret it as original-only accuracy. Adding "Original & Adversarial" or "Per-question average" would eliminate ambiguity.
-
-2. The error analysis in Table 4 is correctly described as conditional on preceding diagnostic steps (line 236), but adding a footnote to the table caption restating this would prevent confusion.
+None.
 
 ## Nice-to-Haves
 
-- **Analyze variation in adversarial difficulty.** The adversarial pairs are created by "selecting random entities" (line 105). A finer-grained analysis of whether models reject implausible vs. plausible hallucinations at different rates would strengthen the diagnostic conclusions. The error analysis in Table 4 partly addresses this for GPT-4V and Gemini Pro; extending it to open-source models would be valuable.
-- **Include a control condition for the visual description ablation.** The 9.44% improvement from adding GPT-4o descriptions could reflect either better visual information or a stronger language prior. A control (e.g., non-visual descriptions, or captions from a weaker model) would sharpen the causal claim, though the paper already frames this as a diagnostic rather than a practical solution.
-- **Describe the types of errors found in metadata/QA verification.** The paper reports 94% metadata accuracy and 97.79% QA accuracy but does not characterize what kinds of errors occurred (e.g., wrong condition name vs. wrong position). This would help users assess ground-truth quality.
+- **Human performance baseline:** A human VQA accuracy estimate on a sampled subset of ProbMed would contextualize the difficulty and verify that the questions are answerable from the images. This would strengthen the claim that low model accuracy reflects genuine failure rather than question ambiguity.
+- **Confidence intervals for transferability results:** Binomial confidence intervals or permutation tests for the CheXagent cross-modality results (Figure 4) would clarify whether the observed 3–4% differences are statistically reliable given the small sample sizes.
+- **Answer distribution bias analysis:** Reporting each model's proportion of "yes" vs "no" answers per category would deepen the error analysis and reveal systematic biases.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **Reviewer's claim that the error analysis conditioning contradicts unconditional categorical accuracy.** This reflects a misunderstanding: conditional accuracy (passing previous diagnostic stages, Table 4) and unconditional categorical accuracy (within-category, Table 3) measure different things and are not expected to coincide. Conditioning on passing earlier stages naturally selects easier cases, so the similarity is a finding, not a contradiction. Removed as factually incorrect criticism.
 
-- **"Adversarial pair generation biases are not analyzed" (Harsh Critic #2):** The paper verifies 1,090 QA pairs at 97.79% accuracy, which is a standard quality check. The suggestion to analyze per-model rejection rates by plausibility is a reasonable extension but not a weakness of the current paper — the error analysis in Table 4 already provides partial relevant data. Moved to Nice-to-Haves.
-- **"Table 1 column ambiguity implies original-only accuracy" (Harsh Critic #4):** The caption explicitly states "averaged across individual questions in a pair" — the critic misread this. The column reports the per-question average across both original and adversarial questions, which is exactly what the caption says. Downgraded to Trivial.
-- **"Dataset splits and randomness not stated" (Harsh Critic, Missing Parts):** ProbMed is an evaluation benchmark, not a training set — it does not require train/validation/test splits. The critic misunderstands the paper's purpose.
-- **"Table 4 accuracies are conditional — reader could be confused" (Harsh Critic #6):** The paper explicitly states this on line 236: "Each accuracy measurement is conditional on the model successfully answering the preceding diagnostic questions." Already addressed.
-- **"Figure 3 ablation should control for language prior" (Harsh Critic #7):** A reasonable extension but not a weakness of the current paper, which frames the ablation as a diagnostic sensitivity analysis, not a practical improvement method. Moved to Nice-to-Haves.
-- **Various formatting/style nitpicks and missing appendix references:** Removed per parser-stripping rules.
+- **Reviewer's critique about "unfair comparison with other methods."** Not present in the review — no action needed.
+
+- **Missing related works complaints.** The instruction prohibits manufacturing missing related works criticisms.
+
+- **Formatting/style nitpicks.** None present in the review.
+
+- **The "data contamination risk" as a fatal weakness.** The reviewer correctly notes this issue but the paper's own results are so low that contamination would only strengthen the conclusions. Kept as a minor concern.
 
 ## Novel Insights
 
-**Synthesizing across reviews:** The reviews converge on recognizing that ProbMed's adversarial probing methodology is the paper's primary contribution, and that the random baseline derivation needs clarification. However, no genuinely novel insight emerges beyond the paper's own contributions. The key takeaway is that the paper's claims are broadly sound but under-clarified in one important place (the random baseline), and the strength of the contribution (dataset + probing methodology) is robust enough that this clarification would resolve the main concern.
+The most interesting observation cutting across the reviews is that the adversarial probing methodology reveals a *qualitative* failure mode — models do not merely perform poorly, they fail *symmetrically* on ground-truth and hallucinated questions, suggesting they lack the visual grounding to distinguish real medical findings from plausible-sounding alternatives. This goes beyond a simple accuracy gap and points to a fundamental absence of reliable visual-semantic alignment in current LMMs for medicine. The fact that even chain-of-thought alone substantially helps (6.51% average improvement) but external visual descriptions help more (9.44%) further suggests that the bottleneck is not purely visual or purely reasoning, but rather a compounding deficit where models cannot consistently extract the right visual information even when they know how to reason about it.
 
 ## Suggestions
 
-1. **Provide a transparent, self-contained derivation of the random baseline** for each question type under the categorical accuracy metric. Show the formula with the number of questions per image per category (from Table `question_per_image`), and walk through a concrete example for Condition/Finding. This single fix would solidify the paper's headline claim.
+1. **Clarify the random baseline computation.** Provide a formula showing how the "Random Choice" accuracies for Condition/Finding and Position are computed from the per-image question distribution. Show the distribution of question counts per image per category (as already referenced in the now-missing appendix table). If the baseline is computed differently than described, explain and ensure consistency with the metric definition.
 
-2. **Add inference details** (temperature, prompt template, zero-shot format) to an appendix.
+2. **Correct the error analysis table.** Verify and correct the numbers in Table 4 (error analysis). The identical numbers for Gemini Pro Condition/Finding and GPT-4V Position strongly suggest a data entry error.
 
-3. **Tighten the abstract phrasing** to match the body: "on specialized diagnostic questions" rather than "on medical diagnosis questions."
+3. **Disentangle the visual vs. reasoning bottleneck.** Add an ablation where models receive external visual descriptions *without* chain-of-thought, isolating the effect of visual information from the effect of multi-step reasoning.
 
-4. **Add the 3%/4% transferability numbers** to the Figure 3 caption or a supplementary table.
+4. **Add confidence intervals for transferability results.** Report binomial confidence intervals or conduct permutation tests for the CheXagent cross-modality comparisons, especially given the small sample sizes for non-chest, non-X-ray categories.
+
+5. **Soften the "worse than random" framing or verify it thoroughly.** If the baseline is correct, state the derivation explicitly. If it is not clearly defensible, reframe the headline finding as "near-chance" or "alarmingly low" accuracy, which is supported regardless of the exact baseline.
 
 ## Score and Decision
 
-This paper makes a meaningful contribution by introducing a principled probing evaluation methodology and a human-verified dataset that reveals genuine reliability gaps in LMMs for medical VQA. The main weaknesses — an under-explained random baseline and missing inference details — are addressable and do not undermine the core contributions (dataset, probing methodology, ablation findings). The paper is a solid contribution to the Med-VQA community.
+**Score: 6.0** — The paper makes a solid contribution (ProbMed dataset + probing evaluation methodology), and the core findings about LMM unreliability are convincing. However, the opaque random baseline computation is a significant clarity issue for the headline claim, and the likely data error in Table 4 needs correction. These are fixable but non-trivial issues that prevent unconditional acceptance.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Decision: Weak Accept** — The contribution (dataset, methodology, and extensive evaluation) is valuable and reproducible independent of the "worse than random" framing. The baseline clarification and table correction are addressable in a revision and do not invalidate the core contribution.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

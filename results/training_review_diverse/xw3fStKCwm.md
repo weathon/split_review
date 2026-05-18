@@ -1,28 +1,24 @@
-Now I have all the information needed. Let me compose the final consolidated review.
-
-## Final Review Synthesis
-
-After carefully cross-checking all reviewer claims against the paper, I can now produce the authoritative review.
-
-Key corrections to the harsh critic:
-1. The claim that the hierarchical search is "never evaluated" is **incorrect** — the paper evaluates Recall@R (line 236-239) which uses the hierarchical search to retrieve candidates. The missing part is speed/runtime evaluation, not accuracy evaluation.
-2. The paper explicitly acknowledges it is a proof-of-concept for ANN (lines 189-191), so criticisms that treat it as a fully-deployed ANN system are somewhat misaligned with the paper's own framing.
+Here is my consolidated meta-review:
 
 ---
 
 ## Summary
 
-This paper proposes compressing point clouds via tensor-train (TT) low-rank decomposition trained with density-estimation losses (Sliced Wasserstein + Nearest-Neighbor Distance), which avoids the row-ordering sensitivity that plagues standard TT-SVD/ALS. The compressed TT point cloud is applied to: (a) OOD detection as a replacement for coreset subsampling in PatchCore, and (b) ANN search as an index structure with a hierarchical beam-search mechanism. Experiments on MVTec AD (OOD) and Deep1B (ANN bucket quality/recall) are presented.
+This paper proposes using tensor-train (TT) low-rank decomposition to compress point clouds by framing compression as density estimation with Sliced Wasserstein and nearest-neighbor distance losses. This probabilistic approach avoids the ordering sensitivity of standard TT-SVD. The TT point cloud is evaluated for OOD detection (replacing coreset subsampling in PatchCore on MVTec AD) and as an indexing structure for ANN search (on Deep1B), where its hierarchical structure yields better bucket coverage than GNO-IMI.
+
+---
 
 ## Strengths
 
-1. **Probabilistic reframing of TT compression eliminates ordering sensitivity.** The paper identifies that standard TT approximation (TT-SVD, ALS) is sensitive to row ordering in the point cloud matrix, and addresses this by treating compression as distribution approximation using Sliced Wasserstein + NN-distance losses (§2.2–2.3). This is a genuinely novel solution to a real limitation of prior TT approaches.
+- **Superior compression quality on MVTec AD:** At both 100× and 1000× compression ratios, the TT point cloud trained with SW + NN losses outperforms coreset subsampling on pixel-level metrics, with the gap widening at higher compression (Section 3.2). This directly validates the core compression claim.
 
-2. **Competitive OOD detection results against coreset subsampling.** On MVTec AD pixel-level metrics at both 100× and 1000× compression, TT point cloud consistently outperforms coreset subsampling. The P@R90 metric (where coreset values are sometimes as low as 0.19) shows TT maintaining better precision (§3.2). Hyperparameters are fixed across all 15 datasets to avoid overfitting — a nice methodological choice.
+- **Better bucket coverage than GNO-IMI on Deep1B:** The TT-based indexing has roughly 6× fewer empty buckets and a 5× lower expected bucket size (at TT-rank 32) compared to GNO-IMI, and the recall-difference curve shows sustained advantage across most of the recall spectrum (Section 3.3, Figs. `fig:expected-bucket-sizes`, `fig:empty-buckets`, `fig:delta-recall-curve`).
 
-3. **As an ANN index, TT yields substantially better bucket quality than GNO-IMI.** The TT index produces ≈6× fewer empty buckets across all ranks, and with rank 32, the expected bucket size is only 21% of GNO-IMI's (§3.3, Fig. expected-bucket-sizes, Fig. empty-buckets). The recall analysis shows a consistent advantage over GNO-IMI for most recall ranges. These are meaningful contributions to index structure design.
+- **Probabilistic formulation cleanly addresses ordering sensitivity:** By treating compression as distribution approximation with density-estimation losses, the method becomes invariant to row ordering — a known limitation of direct TT-SVD that the paper identifies and solves (Section 2, lines 68–76).
 
-4. **Clear exposition of the core methodology.** The tensorization (§2.1), the SW loss (§2.2), and the NN-distance loss (§2.3) are all described clearly and correctly. The memory complexity analysis (§2.1) is explicitly stated.
+- **Clear memory-advantage derivation tied to experimental design:** The paper derives the complexity reduction from O(ND) to O(D N₁ r + k r² N_max) and explicitly matches parameter counts to baselines in both the MVTec and Deep1B experiments, making the memory-efficiency claims concrete and verifiable (lines 65–66, 173–175, 214).
+
+---
 
 ## Weaknesses
 
@@ -31,58 +27,77 @@ None.
 
 ### Major
 
-1. **Title and abstract claim "efficient" and "fast" ANN search, but no speed measurements are provided.** The paper states (lines 189–191): "we focus on indirect characteristics such as the quality of dataset coverage, rather than providing actual queries-per-second values." Yet the title begins with "Tensor-Train Point Cloud Compression and **Efficient** Approximate Nearest Neighbor Search" and the abstract promises "fast approximate nearest-neighbor searches." This is a significant mismatch between framing and evidence. The hierarchical search recall curves (Fig. delta-recall-curve) are evaluated, which the harsh critic incorrectly claimed was missing — but wall-clock time, QPS, or any direct speed comparison against a flat scan, GNO-IMI's greedy search, IVF, or HNSW is absent. For a paper claiming "efficiency," this is the central evidential gap. The paper would be far stronger if it acknowledged this as a preliminary study and toned down the efficiency claims, or added even a single runtime-vs-recall plot.
+1. **Underspecified ANN algorithm and missing efficiency metrics.** The hierarchical beam-search method is described in only a single paragraph (~4 lines, lines 145–148). No formulas, pseudocode, or search algorithm are given in the main text. The paper references `\cref{eq:ttm-centroids}` (line 157) and may contain details in the appendix, but the main-text description alone is insufficient. More critically, despite the title promising "Efficient Approximate Nearest Neighbor Search," the paper itself states that it "focus[es] on indirect characteristics such as the quality of dataset coverage, rather than providing actual queries-per-second values" (line 191). Without any latency, throughput, or distance-computation measurements, the "efficiency" claim is unsupported. The paper's own "proof-of-concept" framing (line 190) does not relieve it of the need to justify the efficiency asserted in the title. This is the most significant gap in the paper.
+
+2. **Missing experimental hyperparameters for the MVTec experiments.** The paper states that for the MVTec AD experiments, it uses a TT representation with two cores and chooses N₁, N₂, and r to match the parameter count of the coreset (lines 173–175), but the actual numerical values of N₁, N₂, and r are never reported. Without these, the number of points in the TT cloud (N₁×N₂) is unknown, and the experiments are not fully reproducible. The paper's statement that it uses "the same hyperparameters for all MVTec datasets" (line 175) only underscores the need to disclose what they are.
 
 ### Minor
 
-2. **Hierarchical search algorithm is under-specified.** Section 2.5 (§sec:hierarchical-structure) devotes only four sentences to the mechanism. It states that TT "allows rapid computation of mean vectors along any suffix of indices" but provides no formula, complexity analysis, or algorithm pseudocode. The beam-search procedure (beam width K, candidate selection mechanism, termination criteria) is not described. While the centroid computation equation (eq:ttm-centroids) likely exists in the appendix (stripped by the parser), the search algorithm itself needs a clear description to be reproducible. This limits the paper's value as a methods contribution.
+3. **No analysis of training cost or convergence.** The paper acknowledges using a random subset to estimate the NN loss efficiently (line 114) and mentions SGD optimization (line 77), but provides no training time, iteration count, or convergence discussion. Given that computing the Sliced Wasserstein loss requires generating and sorting all TT points per projection (O(N log N)), the computational overhead of training could be substantial, and the paper offers no guidance on whether this cost is acceptable in practice.
 
-3. **No ablation study of the loss functions.** The method combines Sliced Wasserstein loss and Nearest-Neighbor Distance loss with a coefficient α, with the claim that SW handles macroscopic structure and NN refines local correspondence. However, no experiment separates the two terms — not even on a toy dataset or a single MVTec category. Given that standard TT losses (MSE) would fail due to ordering sensitivity, understanding the role of each loss component is critical for validating the training methodology.
+4. **No ablation of the loss trade-off parameter α.** The NN loss uses a linear combination with coefficient α (line 122–124), but no sensitivity analysis or ablation is provided to show how α affects compression quality. Similarly, the initialization of the TT cores is not specified, which is a standard concern for non-convex optimization.
 
-4. **Results reported without error bars or statistical significance.** Both MVTec (pixel-level metrics) and Deep1B (recall curves) are reported as single numbers/curves. The SW loss uses Monte Carlo estimation with random projections, and the NN loss uses subsampling — both introduce stochasticity. Without variance estimates (even from a few runs on a subset of datasets), the reader cannot assess whether the reported improvements are reliable.
+5. **No validation that the probabilistic training improves over TT-SVD.** The paper motivates the probabilistic approach by arguing that direct TT-SVD is sensitive to row ordering, but never directly compares the trained TT cloud against a TT-SVD baseline (e.g., TT-SVD applied after a learned row permutation) to demonstrate that the density-estimation losses are actually beneficial. The claim that the probabilistic training is necessary therefore lacks direct supporting evidence.
 
 ### Trivial
 
-- The paper leaves the feature dimension D un-factorized in the tensorization (§2.1) but does not discuss why D is not folded further. This is a design choice worth a brief justification.
-- The toy examples (§3.1) are purely qualitative; a simple numerical measure (e.g., SWD between original and compressed cloud) would strengthen the exposition.
+- The paper states "exellent" instead of "excellent" (line 272).
+- The ANN experiment uses a 10M subset of Deep1B, so the scalability to the full billion-scale dataset is unknown — this is acknowledged by the authors but worth flagging.
+
+---
 
 ## Nice-to-Haves
 
-- **A runtime-vs-recall plot** for the hierarchical search on the Deep1B subset would directly address the largest gap in the paper. Even an unoptimized Python implementation compared against a flat scan would ground the efficiency claims.
-- **A k-means baseline** for the ANN index comparison (same number of centroids) would help isolate whether the TT structure itself provides advantages beyond having more evenly distributed buckets.
-- **Ablation of loss terms** (on toy data or one MVTec category) showing the compressed cloud from SW-only, NN-only, and both, with a simple metric.
-- **Reporting the expected search cost** (Eq. 7) rather than just bucket sizes would quantitatively tie the bucket quality analysis to search efficiency.
-- **Training time** for TT compression would be useful for practitioners considering this approach.
+- Comparison with alternative compression approaches such as TT-SVD with a learned row permutation, low-rank matrix factorization (SVD-based coreset generation), or a simple autoencoder would further validate the necessity of the proposed training framework. However, the existing comparison against the relevant SOTA (coreset subsampling for PatchCore) is sufficient for the paper's stated scope.
+
+- An analysis of how the factorization lengths N₁,…,N_k should be chosen (e.g., as a function of data dimensionality and desired compression ratio) would strengthen the method's practical usability.
+
+---
 
 ## Removed Points
 
-*"ANN does not support the claim of efficient nearest neighbor search — the hierarchical search algorithm is never evaluated"* — Partially removed/corrected. The paper does evaluate recall@R using the hierarchical search (§3.3). The claim that the search is "never evaluated" is factually incorrect. The corrected weakness (above) is that speed/efficiency is not measured, not that the search is unevaluated.
+These points are flagged to be removed; treat them with caution:
 
-*Strength: "Hierarchical structure of TT point clouds enables efficient approximate nearest-neighbor search"* — Removed because this conflicts with the verified weakness that efficiency is not directly measured. The hierarchical structure enables hierarchical search, but whether it's "efficient" in terms of speed is unvalidated.
+- **"Unfair comparison due to different point counts" (Harsh Critic Issue 1, part):** The reviewer argued that if N₁N₂ > cN, the TT cloud has an unfair advantage. However, the paper matches *parameter counts* (memory budget), which is the standard way to compare compression methods. Having more generated points from the same parameter budget is a legitimate advantage of parametric compression, not a confound. The valid core of this concern (missing N₁,N₂ values) is retained in Weakness #2 above.
 
-*Strength: "Proof-of-concept ANN system demonstrates practical viability despite not matching highly optimized engines"* — Removed because "practical viability" for an index system requires speed evidence, which is absent.
+- **"Missing centroid formulas / hierarchical derivation" (Harsh Critic Issue 2, part):** The paper references `\cref{eq:ttm-centroids}` (line 157), suggesting that centroid computation formulas exist in the appendix, which the parser strips from all submissions. Per policy, this criticism is removed as it concerns content likely present in the original submission.
 
-*"The paper does not compare the search quality within the TT index against a simpler baseline such as k-means"* — Moved to Nice-to-Haves. This is scope-creep; the paper already compares against GNO-IMI, which is the relevant baseline for the IMI family.
+- **"No comparison with TT-SVD, SVD, autoencoder" as a major omission (Harsh Critic Issue 3):** The paper's comparison target (coreset subsampling) is the relevant SOTA for the OOD application domain. Demanding comparisons against generic compression methods not used in this application is scope creep. Moved to Nice-to-Haves.
 
-*"No discussion of how the tensorization dimensions are chosen"* — Moved to Nice-to-Haves. The paper fixes N₁=1024, N₂=1024 for MVTec, which is a reasonable choice for demonstrating methodology.
+- **Generic strengths from Strength Finder:** Some strengths were generic (e.g., the paper addresses an important problem). These are dropped as they lack specific evidentiary content.
+
+---
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The key insight — that TT compression with distribution-matching losses avoids row-ordering sensitivity and that the resulting structure has hierarchical properties useful for search — is the paper's own contribution.
+None beyond the paper's own contributions. The reviews surface no new interpretation of the results — they primarily request better specification and more thorough evaluation.
+
+---
 
 ## Suggestions
 
-1. **Tone down the title/abstract claims about ANN efficiency** (replace "Efficient" with "Hierarchical" or "Structured") or add a runtime-vs-recall experiment. This is the single change that would most improve the paper's integrity.
+1. **Report N₁, N₂, r for every experimental setting** (at least for MVTec) and explicitly state the resulting TT point cloud size (N₁×N₂) alongside the coreset size (cN) so readers can directly compare point counts.
 
-2. **Expand Section 2.5** with at least: (a) the formula for computing subtree mean vectors from TT cores, (b) the algorithm steps for beam search including complexity, and (c) the K value used in experiments.
+2. **Provide the beam-search algorithm and centroid computation formulas** in the main text or a clearly referenced appendix. Even a brief pseudocode listing would suffice for reproducibility.
 
-3. **Add a brief ablation** of the two loss terms on one dataset (toy or MVTec category) with a quantitative metric.
+3. **Add at least a rough runtime measurement** for the ANN search (e.g., queries per second on the 10M Deep1B subset compared to GNO-IMI) to substantiate the "efficient" claim in the title. Alternatively, re-scope the title to avoid promising efficiency that is not evaluated.
 
-4. **Add variance estimates** for at least a subset of the MVTec experiments (3–5 runs) to establish statistical significance.
+4. **Include an ablation of α** and specify the initialization strategy for the TT cores to improve reproducibility and scientific rigor.
+
+5. **Add a direct comparison between trained TT and TT-SVD** on a simple metric (e.g., SW distance to the original cloud) to empirically validate the necessity of the probabilistic training.
+
+6. **Briefly discuss training time** (e.g., wall-clock hours for the MVTec or Deep1B experiments) so readers can assess practical applicability.
+
+---
 
 ## Score and Decision
 
-The paper presents a genuinely novel approach to point cloud compression using TT decomposition with distribution-matching losses, and the OOD detection experiments provide reasonable evidence of its effectiveness. However, the ANN claims in the title/abstract significantly over-promise relative to what is evaluated (no speed measurements), and the hierarchical search is under-specified. The missing ablation and error bars are standard weaknesses that reduce confidence. The core methodological contribution is solid but the packaging overreaches. This is a borderline paper that would benefit from revisions.
+**Originality:** 3/5 — The idea of using TT decomposition for point cloud compression with density losses is reasonably novel.  
+**Importance:** 3/5 — The problem (efficient point cloud representation for OOD and ANN) is relevant, but the paper's contribution is incremental in a crowded space.  
+**Claims support:** 2/5 — The core compression claim is supported, but the ANN efficiency claim is unevaluated, and some experimental details are missing.  
+**Soundness:** 3/5 — The methodology is sound, but the evaluation gaps (missing hyperparameters, no training cost, no runtime) weaken empirical support.  
+**Clarity:** 3/5 — The method is clearly explained, but the ANN algorithm description is too brief.  
+**Value:** 3/5 — If the experimental gaps are addressed, the paper would be a useful contribution; in its current form, it is suggestive but incomplete.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,73 +1,82 @@
-Now I have all the information I need. Let me produce the final consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
-The paper presents ShadowKV, a system for high-throughput long-context LLM inference that stores low-rank projections of pre-RoPE keys on GPU while offloading the value cache to CPU, then reconstructs sparse KV pairs on-the-fly for accurate decoding. The core insight is that pre-RoPE keys are exceptionally low-rank (compressible 6× without accuracy loss) and that most post-RoPE keys exhibit spatial locality enabling chunk-level selection with only 0.2–0.3% outlier chunks needing special handling. Empirically, ShadowKV matches full-attention accuracy across multiple long-context benchmarks (RULER, LongBench, Needle-in-a-Haystack) while supporting up to 6× larger batch sizes and delivering up to 3.04× throughput improvement on an A100 GPU.
+
+ShadowKV presents a system for high-throughput long-context LLM inference that combines low-rank key cache compression (pre-RoPE keys stored as SVD projections) with value cache offloading to CPU, plus accurate chunk-level sparse attention using landmarks and outlier detection. The evaluation spans six models across RULER, LongBench, and Needle In A Haystack, showing up to 6× larger batch sizes and 3.04× throughput improvement on an A100 GPU while maintaining accuracy within 1–2 points of full attention.
 
 ## Strengths
-- **Novel identification of pre-RoPE keys as exceptionally low-rank.** The paper systematically shows (Figure 1a, Figure 2a) that pre-RoPE keys exhibit the sharpest singular-value decay among all KV cache components and can be compressed 6× without accuracy degradation. This directly motivates the system design of storing low-rank key projections on GPU while offloading values.
-- **Accurate sparse attention with minimal budget.** With only 1.56% sparse budget, ShadowKV matches or closely approaches full-attention accuracy across RULER (86.88% vs 86.68% for Llama-3-8B-1M) and LongBench (39.94% vs 39.86%), consistently outperforming Quest and Loki under the same budget. The outlier caching mechanism (0.2–0.3% of chunks) is a practical contribution.
-- **Substantial throughput gains on real hardware.** On an A100 with 122K context (Llama-3.1-8B), ShadowKV achieves 245.90 tokens/s at batch 24 vs. 80.78 tokens/s at batch 4 for full attention — a 3.04× improvement. These gains are consistent across models (2.56× for GLM-4-9B-1M, 2.66× for Yi-9B-200K) and context lengths (60K–244K). The gains stem from real memory reduction enabling larger batch sizes, not from cherry-picked settings.
-- **Compatibility with efficient pre-filling (MInference).** ShadowKV integrates with MInference without accuracy loss (82.04 vs 81.98 average on RULER), showing modularity and practical deployability.
-- **Multi-turn robustness.** Unlike eviction-based methods (SnapKV, StreamingLLM) whose accuracy collapses after the first turn, ShadowKV maintains stable multi-turn needle retrieval, supported by the observation that pre-RoPE keys within a sequence share low-rank subspaces across turns.
+
+1. **Strong, multi-model empirical validation of accuracy retention under high sparsity.** ShadowKV with a 1.56% sparse budget consistently matches or stays within 1–2 points of full attention on RULER (128K) across Llama-3-8B-1M (86.88 vs. 86.68), GLM-4-9B-1M (85.62 vs. 86.82), and Llama-3.1-8B (83.57 vs. 85.53), while Quest and Loki degrade significantly. On LongBench, ShadowKV averages within 0.1–0.8 points of full attention across all four models — a convincing demonstration that the landmark + outlier selection strategy recovers almost all information with minimal budget.
+
+2. **Substantial throughput gains that surpass the infinite-GPU-memory ideal in several configurations.** On an A100, ShadowKV achieves 245.90 tokens/s for Llama-3.1-8B at 122K context, exceeding the projected throughput of full attention with infinite batch size (134.30 tokens/s). Gains of 2.23–3.04× hold across four models and three context lengths (60K–244K), with the decomposition between batch-size and sparsity effects visible via the "Full Attention (Inf)" column at ShadowKV's batch size.
+
+3. **Well-motivated design grounded in empirical observations.** The paper demonstrates that pre-RoPE keys are the most low-rank among the matrices studied (Figure 1a), that within-sequence low-rank subspaces are similar while cross-sequence ones are not (Figure 1b), that outlier chunks are only 0.2–0.3% (Figure 2b), and that the KV cache has high temporal locality (Figure 2c). These observations directly inform the system's four-component design (low-rank keys, offloaded values, landmarks, outlier cache).
+
+4. **Compatibility with pre-filling acceleration and robustness in multi-turn settings.** ShadowKV integrates with MInference without accuracy loss (Table 4), and maintains performance across multiple conversation turns where eviction-based methods (SnapKV, StreamingLLM) fail (Figure 5) — demonstrating practical deployability beyond single-turn evaluation.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None.
+
+None. The paper's core claims (3× throughput, accuracy retention at 1.56% budget, effective system design) are well-supported by the empirical evidence.
 
 ### Minor
-- **The "infinite batch size" framing is overstated.** The abstract and conclusion claim ShadowKV "surpasses the performance achievable with infinite batch size under the assumption of infinite GPU memory." However, the "Full Attention (Inf)" column in Table 3 is a theoretical bound based on A100's peak memory bandwidth (2 TB/s) for *attention computations only* (footnote, line 372–373), ignoring MLP computation, activation memory, kernel launch overheads, and communication. ShadowKV's 245.90 tokens/s is an end-to-end measured throughput. Comparing an end-to-end number against a partial theoretical upper bound inflates the perceived result. The real and well-supported contribution is the 3.04× gain over the *practical* full-attention baseline (80.78 → 245.90 tokens/s). The authors should reframe or qualify the "infinite batch" comparison as a theoretical equivalent-bandwidth argument (which is well-handled in Section 4.2) rather than a headline claim of "surpassing infinite GPU memory."
 
-- **The efficiency evaluation lacks throughput comparisons against other sparse-attention methods under the same offloading setup.** Table 3 compares ShadowKV (which offloads values, enabling batch 24) only against full attention (which keeps all KV on GPU, batch 4). While this comparison validly demonstrates the system-level benefit of memory reduction, it conflates the general advantage of CPU offloading with ShadowKV's specific design choices. Throughput measurements for Quest/Loki with the same value-offloading strategy at the same batch size would help isolate whether ShadowKV's particular KV selection and key-reconstruction mechanisms add value beyond any method that frees GPU memory via offloading. As it stands, the throughput advantage over full attention is real, but its attribution is incomplete.
+1. **Absolute SVD cost for very long contexts is under-quantified.** Figure 1c shows SVD overhead as a fraction of attention computation time, which decreases with sequence length. However, for 1M-token sequences the *absolute* SVD cost on a 1M × 4096 matrix is non-trivial even if the fraction is small. The paper mentions asynchronous offloading to CPU and prefix caching as mitigations but provides no absolute timing numbers, no break-even analysis, and no evaluation of how this cost behaves in multi-batch serving where pre-filling and decoding are interleaved. While this does not invalidate the core claims, it is a gap for a systems paper targeting practical deployment.
 
-- **The observation that ShadowKV "even outperforms full attention on certain tasks" (RULER, Table 1) is presented without caveat.** The average difference is 86.88 vs 86.68 (+0.20) for Llama-3-8B-1M, and per-task differences (e.g., QA-2: 52.08 vs 48.96, VT: 81.67 vs 78.54) are in a range that could reflect normal variance. No statistical significance tests, confidence intervals, or multi-seed runs are reported anywhere in the paper. The paper should either acknowledge these differences are plausibly within noise, attribute them to a regularization effect of the sparse selection, or provide evidence of statistical significance. In its current form, the claim is unsupported.
+2. **No per-model breakdown of GPU memory savings.** The paper repeatedly claims "6× memory reduction" but does not report the exact GPU memory bytes saved by low-rank key compression vs. full key cache, broken down by model, rank, and context length. This would help readers calibrate the memory–accuracy tradeoff and understand how batch-size gains scale across models with different KV head counts and hidden dimensions.
 
-- **No error bars or variance estimates on any ablation study.** The ablation figures (chunk size, rank, sparse budget) report single-run accuracy without variance. Given that differences between settings (e.g., chunk size 4 vs 8 in Figure 6a; rank 160 vs 256 in Figure 7c) are small, it is unclear whether they are meaningful. This is a recurring weakness across the empirical evaluation that limits reproducibility assessment.
+3. **The 60% reduction from cache-aware kernels lacks direct validation.** The paper claims cache-aware CUDA kernels reduce computation and value fetching by 60%, citing temporal locality (Figure 2c hit rate). While the hit rate qualitatively supports this figure, the paper would be strengthened by profiling data (e.g., a latency breakdown or bar chart showing GPU/PCIe timeline overlap) that directly validates the claimed 60% reduction and confirms that CUDA multi-streams effectively overlap key reconstruction with value fetching.
+
+4. **Equivalent bandwidth formula presentation skips intermediate derivation.** The formula in Section 4.2 is mathematically correct (M cancels out in the full derivation, leaving the presented expression), but the presentation omits the step showing that the denominator implicitly carries an M/B_GPU factor. A reader who tries to verify the 7.2 TB/s numeric example directly from the formula without reconstructing the derivation may find the units unclear. Adding a two-line derivation would improve clarity for a broad audience.
 
 ### Trivial
-- **Algorithm 2 notation is ambiguous.** The input K, V are given shape b×h_{kv}×s_q×d (line 166), where s_q appears to be the current decoding step's KV cache, but this is not explicitly defined. Algorithm 2 also references K and V in lines 182–185 as the current token cache being concatenated, which can be inferred but should be clarified.
-- **Multi-turn NIAH evaluation (Figure 5) only compares against eviction-based baselines (SnapKV, StreamingLLM).** While this validly demonstrates superiority over methods that discard tokens, including Quest or Loki (which keep all KV) would provide a more comprehensive picture. This is a relatively minor gap since the focus is on multi-turn degradation specific to eviction.
+
+1. **Multi-turn needle experiment (Figure 5) is a single curve without confidence intervals or replication.** The trend aligns with the paper's claims, but the lack of error bars makes it difficult to assess whether the reported gap is robust or within noise.
+
+2. **The invariance of hit rate with chunk size is noted but not discussed.** Figure 8b shows hit rate is ~60% across all chunk sizes. The paper observes this but does not discuss why — e.g., whether this implies accuracy drop at larger chunks is driven entirely by poorer landmark approximation rather than cache efficiency. Brief commentary would make the ablation more informative.
 
 ## Nice-to-Haves
-- A latency breakdown showing time spent on SVD during prefill, value fetching per decoding step, key reconstruction, and attention computation would help identify bottlenecks.
-- A report of peak GPU memory usage for ShadowKV vs. full attention at the same batch sizes would concretely illustrate the 6× memory reduction claim.
-- A discussion of PCIe bandwidth saturation at larger batch sizes and when the throughput improvements saturate would strengthen the system analysis.
+
+- A latency breakdown (bar chart or table) for the decoding step showing GPU memory reads, PCIe transfers, key reconstruction, and attention computation — to validate the CUDA multi-stream overlap claim and the 60% cache-kernel reduction.
+- Show the singular value spectrum of the value cache explicitly alongside the other curves in Figure 1a. While the paper states this analysis was conducted (Section 3, Observation paragraph), making the value cache curve explicit in the figure and caption would close any ambiguity about the design justification for full value offloading.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-- **Harsh critic's claim that Algorithm 1 uses "full SVD" while the observation uses "truncated SVD":** Both the observation (Section 3.1, line 98: "truncated SVDs of pre-RoPE keys") and Algorithm 1 (line 124: stores rank-r factors A∈ℝ^{s×r}, B∈ℝ^{r×d}) use truncated SVD. The critic misread the implementation. Removed as factually wrong.
-- **Harsh critic's claim that the paper "should not overclaim the insight's role" regarding cross-sequence subspace sharing:** The paper only uses this observation to justify per-sequence compression (line 16–17: "a sequence and its continuation tend to strongly share low-rank subspaces, enabling high compression rates within each sequence"). This is a valid use of the observation, not an overclaim. Removed as based on a misreading.
-- **Criticism about "only one subfigure shown for Needle-in-a-Haystack":** The paper explicitly references the appendix for more experiments ("More experiments on a range of models can be found in \cref{appen:niah}"). Per the rules, appendix content stripped by the parser should not be faulted. Removed.
-- **Several formatting/notation nitpicks and demands for large implementation details (complete training logs, CUDA kernel pseudocode).** These are either parser artifacts or impractical to include in a submission. Removed per rules.
-- **Complaint that the paper does not report "absolute SVD time" and "SVD overhead in end-to-end throughput":** The paper already addresses this — Figure 1c shows SVD overhead relative to prefill, and the text (line 42) notes the quadratic scaling of attention makes linear-cost SVD negligible. This is adequately addressed. Downgraded to nice-to-have at most.
+
+These points were raised by reviewers but are not valid weaknesses of this paper:
+
+- **Equivalent bandwidth formula is "dimensionally inconsistent" / "mathematically incorrect":** REMOVED — the formula is correct. The derivation: total dense bytes = 2MS; sparse time = M/B_GPU × [S/C + 2(K+O)C + (1-α)KC·B_GPU/B_PCIe]; therefore B_equivalent = (2S·B_GPU) / (denominator). M cancels. The critic's claim that M is "missing" or that the units are wrong reflects a failure to trace the derivation. The numerical example (7.2 TB/s) checks out.
+
+- **"No empirical evidence" that value cache is not low-rank:** REMOVED — the paper states in Section 3 ("by conducting SVD on ... the value cache ... we visualize the relative singular value distributions in Figure 1a") and in the Introduction ("pre-RoPE keys are exceptionally low-rank compared to ... values ... as indicated in Figure 1a"). The evidence exists in the figure; the caption simply does not enumerate all curves. At most a caption clarity issue.
+
+- **Throughput comparison "conflates two sources of improvement":** REMOVED — Table 3 provides the decomposition. The "Full Attention (Inf)" column first number projects full-attention throughput *at the same batch size as ShadowKV*, which isolates the sparsity benefit. The "Gain" column shows the combined effect. Both are visible; no conflation.
+
+- **Chunk size hit rate "paper does not comment on this":** REMOVED — the paper explicitly states "the chunk size choice has minimal impact on the chunk hit rate" (Section 5.3). The paper does note the observation.
+
+- **Cache-aware kernel 60% claim "no experimental validation":** REMOVED — the hit rate plot (Figure 2c) provides empirical support for temporal locality. The specific 60% figure is derived from this measured hit rate. A more direct measurement would strengthen but is not absent.
+
+- **Missing related works, formatting/typo nitpicks, reproducibility nitpicks about undisclosed hyperparameters:** REMOVED per policy — these are either parser artifacts or otherwise not valid criticisms.
 
 ## Novel Insights
-The key insight that emerges from the reviews — and is not fully articulated by the paper itself — is that ShadowKV's system design achieves its throughput advantage through a *three-way bandwidth play*: it uses GPU memory bandwidth for landmark-based selection (compressed attention scores), PCIe bandwidth for value fetching, and local GPU memory for key reconstruction, all overlapped via CUDA multi-streams. The paper's equivalent-bandwidth analysis (Section 4.2) hints at this, but the reviews highlight that this architectural insight (effectively aggregating two physical memory buses into one logical pipeline) is the actual novel contribution, separate from the specific low-rank or chunking mechanisms. The paper would benefit from foregrounding this system-design principle rather than the "infinite batch" framing.
+
+The most interesting observation from the reviews is the tension around the equivalent bandwidth formula: a reader who jumps directly to the formula without tracing the derivation (where M cancels and B_GPU factors are properly handled) can easily conclude the units are wrong. This suggests that even well-motivated readers may find the presentation citation gap a barrier to verification. The paper would benefit from a more explicit walkthrough of the algebraic steps — not because the formula is incorrect, but because the current condensed presentation is fragile to casual reading.
 
 ## Suggestions
-1. **Reframe the "infinite batch size" comparison.** Either remove it as a headline claim or qualify it clearly as a theoretical equivalent-bandwidth calculation (not a direct empirical comparison). The 3.04× improvement over the practical baseline is impressive enough on its own.
-2. **Add throughput measurements for Quest/Loki with V-only offloading at the same batch size**, or at minimum acknowledge that the throughput comparison conflates offloading benefits with ShadowKV-specific optimizations.
-3. **Add a sentence acknowledging that the 0.2-point average improvement over full attention on RULER is within expected noise**, or provide multi-seed variance to demonstrate significance.
-4. **Clarify Algorithm 2's input notation** — distinguish the current token's KV cache from the full cached KV data more explicitly.
-5. **Add error bars or multi-seed runs to at least one key ablation** (e.g., rank variation) to establish measurement stability.
+
+1. Add a two-line derivation of the equivalent bandwidth formula in Section 4.2 showing B_equivalent = 2MS / (M/B_GPU × [...]) = 2S·B_GPU / [...] to make the cancellation explicit.
+2. Profile the decoding step with a latency breakdown (e.g., stacked bar chart showing GPU landmark loading, PCIe value transfer, key reconstruction, attention computation) to validate the claimed overlap and 60% reduction.
+3. Report absolute GPU memory savings (in GB) broken down by model, rank, and context length — this is more informative than a single "6×" ratio.
+4. Report absolute SVD time for the longest context evaluated (e.g., 1M tokens) to help readers assess the system's applicability to extreme-length scenarios.
 
 ## Score and Decision
-**Originality**: Good — the observation about pre-RoPE key low-rank structure is novel, and combining it with value offloading and chunk-level sparse selection is a sound system contribution.
 
-**Importance**: High — long-context LLM serving efficiency is practically important, and the throughput gains are substantial.
+This paper presents a well-engineered system with strong empirical support across multiple models and benchmarks. The core claims (3× throughput, accuracy retention at high sparsity) are validated. The identified weaknesses are minor and addressable — none threaten the central contribution. The paper should be accepted.
 
-**Claims support**: The accuracy claims are well-supported; the throughput claims are supported against a practical baseline but overstated against the theoretical "infinite batch" baseline. The "exceeding full attention" accuracy claim needs qualification.
+**Score: 7.5**
 
-**Soundness**: The experimental design is generally sound. The main technical concern is the lack of throughput comparison against other sparse methods under the same offloading setup.
-
-**Clarity**: Mostly clear. The algorithm description is reasonable, though the notation in Algorithm 2 could be improved. The "infinite batch" framing is the main clarity issue.
-
-**Value**: High — the system design is practical and the throughput improvements are meaningful for real deployment.
-
-**Overall**: The paper makes a solid contribution to efficient long-context LLM inference. The core ideas (low-rank pre-RoPE key storage, value offloading, accurate sparse selection with outlier caching) are well-motivated and validated. The main issues are presentation overreach (infinite batch claim, "outperforming full attention" without caveat) and a missing throughput baseline against other sparse methods. These are addressable in revision and do not undermine the core contribution.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,83 +1,65 @@
-Now I have all the information I need to produce a thorough, verified review. Let me synthesize everything.
+Now I have verified the paper content against the reviewer claims. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper identifies a confound in prior evaluations of unseen-class unlabeled data in semi-supervised learning (SSL): earlier work fixed total unlabeled dataset size while varying the proportion of unseen classes, which simultaneously changed the amount of seen-class data, violating the controlled variable principle. The paper proposes the RE-SSL framework, which fixes the seen-class ratio and varies only the unseen-class ratio, and evaluates 15 SSL algorithms across five factors (sample-number, category-number, category-index, nearness, label distribution) using five robustness metrics. The central finding is that unseen classes do not necessarily impair SSL performance—several methods (e.g., ICT, PseudoLabel) are robust or even benefit from unseen-class data under properly controlled conditions.
+This paper identifies a confounding flaw in prior evaluations of how unseen-class unlabeled data affects SSL models: prior work fixed total unlabeled dataset size while varying unseen-class proportion, which inadvertently changed seen-class proportion. The authors propose RE-SSL, a controlled-variable evaluation framework that fixes seen-class quantity while varying unseen-class samples across five dimensions (sample count, category number, category index, nearness, and label distribution). They introduce five robustness metrics and evaluate 15 SSL algorithms on CIFAR-10/100, finding that unseen classes do not necessarily harm SSL models and can even help under specific conditions.
 
 ## Strengths
 
-- **Identifies a genuine confound in prior SSL evaluation protocols.** The paper uses a structural causal model (Figure 1) to formalize why fixing total |D_U| while varying unseen-class proportion creates a spurious correlation between seen- and unseen-class data. This is a novel and well-motivated critique that prior safe SSL evaluations overlooked.
+- **Identifies a fundamental confounding flaw in prior SSL evaluations**: The paper constructs a structural causal model (Figure 1) showing that fixing total unlabeled size while varying unseen-class proportion creates a spurious correlation between seen-class and unseen-class unlabeled data. The RE-SSL framework (Figure 2b) removes this confound by fixing $r_s$ while varying $r_u$, providing a causally sounder evaluation baseline. This conceptual contribution is the paper's strongest and most original element.
 
-- **Proposes a principled corrected evaluation framework (RE-SSL).** The core idea—holding seen-class unlabeled data constant (fixing \(r_s\)) while varying unseen-class data (\(r_u\))—is conceptually sound and directly removes the confound identified in prior work. The dataset construction is clearly illustrated in Figure 2.
+- **Comprehensive, multi-dimensional analysis across five factors**: Beyond the sample-count factor ($r$), RE-SSL systematically investigates category-number ($C_n$, Table 3), category-index ($C_i$, Table 4), nearness (near vs. far OOD, Table 4), and label distribution ($C_{ib}$, Table 5). This breadth is genuinely informative and goes well beyond what is typical in safe SSL evaluations — Table 6's per-factor GM aggregation showing that models are most sensitive to $r$ (avg GM=0.170) and most robust to $C_{ib}$ (avg GM=0.040) is a useful empirical finding.
 
-- **Demonstrates a non-obvious finding that challenges a prevailing assumption.** The main results (Tables 1, 2) show that under the corrected protocol, multiple SSL methods have near-zero or even positive \(R_{\text{slope}}\) (e.g., ICT: +0.039 on CIFAR10, PseudoLabel: -0.010, UASD: -0.019). Extended experiments (Table 3) show that accuracy can increase as the number of unseen-class categories grows (e.g., MixMatch from 0.496 at base to 0.606 at \(C_n=5\)), directly contradicting the assumption that unseen classes always harm SSL models.
+- **Introduction of five targeted robustness metrics**: The paper defines $R_{slope}$, GM, WAD, BAD, and $P_{AD\geq0}$ (Eqs. 1–5) to capture both global and local robustness. These go beyond single-point accuracy comparisons and enable fine-grained analysis (e.g., FixMatch's $R_{slope}=-0.223$ vs. ICT's near-zero slope on CIFAR-10, Table 1).
 
-- **Explores five orthogonal factors of unseen-class impact.** Beyond sample-number (\(r\)), the paper examines category-number (\(C_n\)), category-index (\(C_i\)), nearness (CIFAR vs. MNIST), and label distribution (\(C_{ib}\)). This multi-dimensional exploration goes well beyond prior work's narrow focus on sample-number alone.
-
-- **Provides actionable algorithm-level insights.** The analysis identifies which algorithms are robust (ICT, PseudoLabel, PiModel, UASD, CAFA) and offers reasoned explanations—e.g., ICT's Mixup mitigates unseen-class interference; FixMatch's fixed threshold makes it overly sensitive. These insights provide practical guidance for model selection in deployment scenarios with potential unseen-class contamination.
+- **Actionable insights for practitioners**: Table 6 provides per-algorithm $F_{avg}$ rankings identifying PseudoLabel, PiModel, and ICT as most robust to unseen classes while FixMatch is most sensitive. The analysis explains why adaptive-threshold methods (FlexMatch, FreeMatch, SoftMatch) improve upon FixMatch's fixed-threshold design — a concrete design lesson for SSL in open-world scenarios.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None. (The weaknesses identified below are real but do not threaten the core contribution.)
+
+- **No measures of variance reported for any experimental result**. The paper states that three seeds (0, 1, 2) were used per sampling point with averages reported, but no standard deviations, confidence intervals, or ranges are provided. This makes it impossible to assess whether the observed differences between methods or between $r$ levels are meaningful relative to noise. For example, the claim that PseudoLabel's accuracy at $r=0.2$ (0.743) exceeds that at $r=0$ (0.730) cannot be evaluated. Similarly, the paper describes FixMatch showing a "significantly low accuracy" at $C_i=6$ (0.504) without any error bars to justify the word "significantly." This is a standard expectation for an empirical paper that draws conclusions about trends and comparisons, and its absence weakens the entire quantitative foundation. The core conceptual contribution (identifying the confound) does not depend on these numbers, but the empirical claims about which methods are robust/sensitive and under which conditions do.
 
 ### Minor
 
-1. **Metrics for extended factors are not formally redefined.** The five evaluation metrics (\(R_{\text{slope}}\), GM, WAD, BAD, \(P_{AD\ge0}\)) are formally introduced in §3.2 for the factor \(r\) (a ratio from 0 to 1), with integral forms over continuous \(r\). When these metrics are applied to the category-number factor \(C_n\) (Table 3), category-index factor \(C_i\) (Table 4), and label-distribution factor \(C_{ib}\) (Table 5), the paper does not explicitly restate how each metric is computed for the new independent variable. For instance:
-   - In Table 3, \(R_{\text{slope}}\) is reported for accuracy vs. \(C_n\) (integer values 1–5), but the paper never says "we fit a linear regression of accuracy on \(C_n\) and report the slope."
-   - For \(C_i\) (Table 4), the paper notes that only GM is used because the values lack a progressive relationship, but the original GM is an integral over continuous \(r\); the discrete adaptation for category-index values is not specified.
-   - For \(C_{ib}\) (Table 5), both \(R_{\text{slope}}\) and GM are reported without restating the formula.
+- **The abstract's "enhancement" claim is broader than the primary experiment supports.** The abstract states that "under certain conditions, unseen classes may even enhance them [SSL models]." In the main experiment (Tables 1 and 2), where the number of unseen-class samples ($r$) is varied while seen-class quantity is held constant, the vast majority of methods show negative or near-zero slopes. The evidence for enhancement comes primarily from the category-number factor ($C_n$, Table 3) and local BAD values (e.g., FlexMatch BAD=0.166). The abstract and introduction do not distinguish between these factors, making the headline claim appear broader than what the primary $r$-factor experiment supports. The paper's strongest and best-supported message is that previous evaluations *overstated* the harm of unseen classes (robustness), while "enhancement" is a secondary finding under specific conditions. Restructuring the narrative around robustness first and enhancement as a specific exception would better match the evidence.
 
-   This does not invalidate the results (the adaptation is conceptually straightforward and the comparisons within each table are internally consistent), but it makes exact reproducibility harder and should be clarified.
-
-2. **No direct empirical comparison with the prior (confounded) evaluation protocol.** The paper critiques prior methods (DS3L, Safe-Student) for using a flawed protocol, but never replicates that protocol on the same algorithms to show that conclusions would differ. A side-by-side comparison—e.g., plotting accuracy curves under the old protocol (fixing total |D_U|, varying unseen proportion) vs. RE-SSL—would empirically validate the central motivation. As it stands, the critique remains a logical argument rather than an empirically demonstrated confound. This weakens the persuasiveness of the motivation but does not undermine the paper's independent contribution: the RE-SSL framework and findings stand on their own as a corrected methodology.
-
-3. **No uncertainty quantification.** All experiments are run with three seeds (0, 1, 2) and averaged, but no standard deviations, confidence intervals, or per-seed ranges are reported. Given the fine-grained distinctions drawn between algorithms (e.g., "PseudoLabel and ICT are relatively robust" vs. "FixMatch is very sensitive"), the reader cannot assess whether observed differences are statistically reliable. Reporting variance is standard practice and should be straightforward to add.
-
-4. **Value of the fixed seen-class ratio \(r_s\) is not specified.** The paper states that \(r_s\) is fixed (line 40) but never discloses its numerical value. For a paper whose core contribution is a controlled evaluation framework, this is a notable omission that hampers reproducibility. The experiments cannot be exactly replicated without knowing this parameter.
+- **The robustness definitions rely on an arbitrary threshold.** Definition 1 states that an algorithm exhibits $\delta_g$-slope robustness if $R_{slope} \ge \delta_g$. In Section 5.3, the authors "assume that $\sigma_g$ equals -0.020" without justifying why -0.020 is a meaningful cutoff. No theory or reference anchors this value. The raw $R_{slope}$ values provided in the tables are informative on their own; the threshold-based classification adds little and introduces subjectivity. The paper would be stronger by presenting the raw values and letting the reader judge significance (e.g., "a slope of -0.02 means 2 percentage points of accuracy lost across the full $r$ range").
 
 ### Trivial
 
-- **The robustness threshold (\(\sigma_g = -0.020\)) is chosen without justification.** The paper "assumes" \(\sigma_g = -0.020\) to categorize algorithms as robust vs. sensitive (line 128). Since the actual \(R_{\text{slope}}\) values are reported in full, the threshold mainly affects narrative framing (robust vs. sensitive labels) rather than the quantitative contribution. A relative ranking by \(R_{\text{slope}}\) would avoid the arbitrary threshold.
-- **The linearity assumption for \(R_{\text{slope}}\) is not acknowledged.** The regression function assumes a linear relationship between accuracy and \(r\) over seven discrete points. The paper does not discuss whether this assumption is reasonable or how nonlinearities might affect interpretation.
-- **The label-distribution experiment (§5.4, Table 5) does not specify how many unseen classes are used.** The imbalance factor \(C_{ib}\) is defined, but the number of unseen-class categories in this setting is not stated, adding minor ambiguity.
-- **The "far OOD" experiment (MNIST vs. CIFAR-10) confounds nearness with dataset-level differences (grayscale vs. color, digit vs. natural image).** The conclusion that "smaller semantic shift → less damage" is directionally sound but the magnitude of the observed difference may partially reflect low-level feature disparities, not purely semantic nearness. A brief acknowledgment would be appropriate.
+- **No explanation for the choice of $r$ values (0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0)**. The non-uniform spacing (the inclusion of 0.5) is not justified. This is a minor documentation gap.
 
 ## Nice-to-Haves
 
-- A replication-comparison with the old (confounded) protocol using one representative prior method (e.g., DS3L) would substantially strengthen the paper's motivational narrative.
-- A sensitivity analysis on the fixed value of \(r_s\) (e.g., trying two different \(r_s\) values) would test whether the conclusions are robust to the choice of this parameter.
-- Explicit GPU-hour estimates would help future users assess the cost of adopting the RE-SSL framework.
+- **Replicate one prior evaluation protocol** (e.g., from DS3L or Safe-Student) on the same datasets and overlay RE-SSL results to visually demonstrate the confounding effect. The paper argues that prior evaluations are confounded but never shows that the confounding leads to different conclusions. A direct comparison would make the paper's central critique much more concrete and compelling.
+
+- **Discuss how results might generalize** beyond CIFAR-10/100 (e.g., higher-resolution datasets, different backbone architectures). A study that challenges a widely held belief should at least address potential limits on generality. The paper acknowledges this gap only indirectly via the Limitations section.
+
+- **The $r=0.5$ point choice** could be briefly justified, given that all metrics depend on these seven points.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviews are removed per the filtering rules; they are listed here for completeness only and should be treated with caution.
 
-- *"The examples of SSL in NLP and image recognition are generic and add no weight"* — Generic language in the introduction is a presentational nitpick, not a substantive weakness.
-- *"The structural causal model slightly over-promises"* — The paper uses the causal model appropriately to motivate the framework; it does not claim to do causal inference beyond identifying the confound. The reviewer's concern is overblown.
-- *"The integral forms... but the data only exists at seven discrete points"* — The paper already acknowledges this: "The integrals in Eq. 1 and Eq. 2 are computed as accumulation operations based on empirical values" (line 84). The reviewer's concern is addressed.
-- *"Missing related works"* — Per instructions, I cannot confirm the existence of missing references and should not raise this.
-- *"Typos, formatting, style nitpicks"* — These are parser artifacts, not author errors.
-- *"ResNet-50 is large for CIFAR with 100 labels"* — This is standard practice in the SSL literature; criticizing it is a matter of preference, not a real weakness.
-- *"The paper does not discuss computational cost"* — This is a nice-to-have, not a weakness.
-- *"The paper uses 'safe SSL' and 'robust SSL' interchangeably"* — This is a minor terminology preference, not a substantive issue.
+- **"No direct comparison to the flawed evaluation framework"** — flagged as absence but this is an enhancement suggestion, not a weakness. Moved to Nice-to-Haves above.
+- **"The metric definitions are presented with integrals that are then computed as discrete sums, which is fine but jarring"** — the paper explicitly addresses this on line 84 ("The integrals in Eq. 1 and Eq. 2 are computed as accumulation operations based on empirical values"), so the criticism is already resolved by the paper.
+- **Generic/encompassing strength from Strength Finder** such as "this paper addressed an important problem" — not included as they lack specific content tied to the paper.
 
 ## Novel Insights
 
-The most interesting insight from synthesizing these reviews is that the paper's two most significant weaknesses—the undefined metrics for extended factors and the lack of direct replication—are actually complementary. If the paper had provided rigorous formal definitions for how the metrics generalize beyond the ratio factor \(r\), it would immediately enable a precise replication of the prior protocol as a special case (where both \(r_s\) and \(r_u\) vary jointly). Making those definitions explicit would both fix the reproducibility gap and naturally enable the direct comparison that would empirically validate the confound critique. This suggests a clean path forward: unified notation for metric computation over arbitrary ordered/continuous factors would solve both problems at once.
+None beyond the paper's own contributions. The reviews largely converge on the paper's core findings and do not surface novel interpretations that the paper itself does not already articulate.
 
 ## Suggestions
 
-1. **Provide formal, explicit definitions of how each of the five metrics is computed for each of the five factors.** For each factor, specify the independent variable, its range and discretization, and the exact formula used for slope, GM, WAD, BAD, and \(P_{AD\ge0}\). A single table mapping factor → metric applicability → formula would be ideal.
-2. **Disclose the numerical value of \(r_s\) used in all experiments** and consider adding a brief sensitivity analysis with an alternative value.
-3. **Report standard deviations or per-seed ranges** for key accuracy values and metrics to allow readers to assess the reliability of the observed differences.
-4. **Replace the arbitrary threshold \(\sigma_g = -0.020\)** with a relative ranking by \(R_{\text{slope}}\) when discussing algorithm robustness, or provide a principled justification for the chosen threshold.
-5. **Add a brief acknowledgment of the linearity assumption** for \(R_{\text{slope}}\) and note that it captures only the overall trend.
+1. Add standard deviations (or at least min/max ranges) to all accuracy tables for the three-seed runs. Even a supplementary table of standard deviations for the main CIFAR-10 results would dramatically increase confidence in the quantitative claims.
+2. Restructure the narrative to center on "robustness" as the primary finding and present "enhancement" as a specific exception tied to the category-number ($C_n$) factor and local BAD values, rather than lumping both under the same headline claim.
+3. Replace the threshold-based robustness classification (Definition 1 with $\sigma_g=-0.020$) with direct comparison of raw $R_{slope}$ values, optionally interpreting their practical significance in percentage-point terms.
+4. Provide a brief justification for the $r$ sampling points, especially the inclusion of $r=0.5$.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+The paper makes a genuinely useful conceptual contribution (identifying the confounding flaw in prior SSL evaluations) and offers broad experiments across 15 algorithms and 5 factors. The RE-SSL framework and metrics are sound methodological contributions. However, the absence of error bars is a significant weakness for an empirical paper that makes comparative claims about method robustness — it prevents the reader from assessing the reliability of the quantitative findings. The framing mismatch around "enhancement" is addressable. With revisions to add variance reporting and tighten the narrative, this would be a solid contribution. In its current form, the lack of statistical rigor is a material weakness, but not fatal to the core conceptual contribution.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

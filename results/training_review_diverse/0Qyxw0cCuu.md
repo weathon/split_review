@@ -1,76 +1,80 @@
-Now I have a thorough understanding of the paper. Let me produce the final review.
+Now I have all the information I need. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper proposes CONTROL, a framework that adds three contrastive losses (supervised, nearest-neighbor, unsupervised) to existing BCE-based open-world semi-supervised learning methods like ORCA and NACH. The authors claim a theoretical justification that contrastive losses are more robust to misaligned pairs than BCE loss, and that uniformity in contrastive learning prevents representation collapse. Experiments on CIFAR-10, CIFAR-100, and ImageNet-100 show improvements over the base methods, with the largest gains on CIFAR-100 (+6.4% unseen classes).
+This paper proposes CONTROL, a contrastive learning framework for open-world semi-supervised learning (SSL) that adds three contrastive losses (supervised, nearest-neighbor, and unsupervised) to existing BCE-based methods such as ORCA and NACH. The authors claim theoretical justification that contrastive losses are more robust than BCE loss to misaligned nearest-neighbor pairs, and that uniformity in contrastive learning prevents representation collapse. Experiments on CIFAR-10, CIFAR-100, and ImageNet-100 show improvements over baseline methods, with the largest gains on unseen class accuracy (e.g., +6.4% on CIFAR-100 with NACH).
 
 ## Strengths
 
-- **Significant and consistent empirical gains on CIFAR-100**: Table 1 reports a 6.4% improvement in unseen-class accuracy and 2.1% all-class accuracy when CONTROL is added to NACH, and 11.8% unseen-class / 9% all-class improvement over ORCA. These are nontrivial improvements on a standard benchmark that demonstrate practical value.
+- **Consistent empirical gains across benchmarks.** CONTROL improves unseen class accuracy over NACH by 6.4% on CIFAR-100 and 4.0% on ImageNet-100 (Tables 1 and 2). All-class accuracy also improves by 2.1% and 1.2% respectively. These are non-trivial improvements that suggest the framework is doing something useful.
 
-- **Mechanistic analysis linking the method to its hypothesized effect**: Table 4 directly measures that CONTROL increases the ratio of unseen-unseen nearest-neighbor pairs (+2.35%) and the ratio of unseen-class predictions (+2.77%). This provides a concrete explanation for why feature-level alignment translates to better unseen-class classification—a stronger form of analysis than typical ablation studies.
+- **Quantitative analysis connecting the framework to the claimed mechanism.** Table 4 shows that CONTROL increases the ratio of unseen-unseen nearest-neighbor pairs by 2.35% and the ratio of unseen class predictions by 2.77% on CIFAR-100 with NACH. This directly supports the paper's narrative that feature-level alignment reduces the seen-unseen pair problem identified in Figure 2.
 
-- **Ablation study validating individual loss components**: Table 3 shows that each of the three contrastive losses contributes to the overall improvement, with the combination of L_SupSeen + L_SimAll yielding +2.7% unseen classes and adding L_SupNN further boosting unseen classes by 2.6%. This decomposition supports the design choice.
+- **Plug-and-play compatibility with existing BCE-based methods.** CONTROL is tested with two distinct BCE-based baselines (ORCA and NACH) across three datasets and improves both in every configuration, demonstrating that the framework can be applied as an add-on module.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **The theoretical analysis in Section 4.1 is not mathematically rigorous and does not support the paper's central claims.** The derivation contains unjustified steps that undermine both the BCE-loss analysis and the contrastive-loss analysis:
-  - **BCE analysis**: The paper claims that under independent samples, $g(\phi(x))^\top g(\phi(v)) = 0$ and therefore $M \to -\infty$. This is not generally true. For softmax probability vectors (which $g$ outputs), the inner product of independent random vectors is not zero; under a uniform predictor it would be approximately $1/C$, giving a finite value. The paper provides no justification for why these vectors would be orthogonal.
-  - **Contrastive analysis**: The derivation claims that $\mathbb{E}_{x\sim P_X}\mathbb{E}_{v^+\sim P_V}[-\phi(x)^\top\cdot\phi(v^+)/\tau] + \mathbb{E}_{x\sim P_X}\mathbb{E}_{v^-\sim P_V}[\log\sum\exp(\phi(x)^\top\cdot\phi(v^-)/\tau)]$ simplifies to $\log(|\mathcal{N}(x)|)$ "because $\phi(x), \phi(v^+), \phi(v^-)$ are independent." Independence alone does not make the first term vanish (the expected inner product of independent unit vectors is not zero in general) nor does it make the log-sum-exp collapse to $\log(|N|)$. The simplification requires strong assumptions (uniformity of features on the sphere, equal logits for all negatives) that are not stated and do not hold during training.
-  
-  Because the paper frames this theoretical argument as its central motivation ("we theoretically prove that optimization of contrastive learning at the feature level benefits unseen classification" — abstract, contributions), this flaw is a structural weakness rather than a missing detail.
+- **The theoretical derivation in Section 4.1 is not rigorous and contains errors.** This is presented as a core contribution (item two in the contribution list), but the analysis has two substantive problems that prevent it from serving as valid theoretical support.
 
-- **Claims of broad generality are not supported by the experiments.** The abstract states CONTROL is "compatible with a broad range of existing open-world semi-supervised learning algorithms," and Section 4.4 describes a "replaceable open-world semi-supervised learning module." However, experiments only combine CONTROL with two BCE-based methods (ORCA and NACH). No results are shown with the non-BCE methods the paper itself discusses (OpenLDN, TRSSL) or with OpenCON used as the base module. Without broader validation, the paper reads as a targeted improvement for BCE-based methods rather than a general framework, and the compatibility claim is unsubstantiated.
+  *BCE analysis:* The paper claims that when $x$ and $v$ are independent, $g(\phi(x))^\top g(\phi(v)) = 0$ and consequently $M \to -\infty$. Neither step is justified. Independence of random variables does not imply their inner product is zero — this would require distributional assumptions (e.g., zero-mean or uniform on the hypersphere for features, plus a corresponding property for logits $g(\cdot)$) that are neither stated nor argued. Additionally, $-\log(0) = +\infty$, not $-\infty$, so the direction of the claimed blow-up is wrong. While the core intuition (noisy pairs create a large gap in BCE risk) may still be correct, the mathematical presentation is incorrect.
+
+  *Contrastive analysis:* The paper simplifies $\mathbb{E}_{\mathrm{P}_{XV}^\eta}\mathcal{L}_\phi$ to $(1-\eta)\mathbb{E}_{\mathrm{P}_{XV}}\mathcal{L}_\phi + \eta\cdot\log(|\mathcal{N}(x)|)$ by claiming the cross-terms vanish because $\phi(x),\phi(v^+),\phi(v^-)$ are independent. This is insufficient. Independence alone does not imply $\mathbb{E}[-\phi(x)^\top\phi(v^+)/\tau] = 0$ (this requires features to be zero-mean or orthogonal in expectation), nor does it imply $\mathbb{E}[\log\sum\exp(\phi(x)^\top\phi(v^-)/\tau)] = \log(|\mathcal{N}(x)|)$ (this requires the dot products to all be zero, i.e., perfect uniformity on the hypersphere, which is neither guaranteed nor shown). Without these additional assumptions, the conclusion that the noisy and clean distributions yield the same optimal classifier is unsubstantiated.
+
+  Because the theory is listed as a key contribution and motivates the framework, this is a significant weakness. The paper would be stronger if it either provided a correct derivation with explicit assumptions, or acknowledged the argument as heuristic and relied on empirical analysis instead.
+
+- **Complete absence of error bars or measures of variability.** All tables report single means over three runs with no standard deviations, confidence intervals, or statistical significance tests. For improvements that are modest (e.g., +0.8% on seen classes for NACH+CIFAR-100, +0.2% on all classes for SupNN ablation), it is impossible to assess whether these gains are meaningful or within the noise of the runs. This is a basic reporting requirement for empirical ML papers and directly undermines the claim of "significant improvement."
 
 ### Minor
 
-- **The paper makes an unsubstantiated claim about OpenCON.** At line 31, the paper states OpenCON "is incapable of sustaining continuous optimization of representations during the process of semi-supervised learning" without providing any citation, analysis, or experimental evidence. OpenCON uses contrastive learning throughout training, so this assertion needs support or should be removed.
+- **Ablation does not fully isolate each loss component.** Table 3 reports "(SupSeen + SimAll)" combined and SupNN alone, but never reports SupSeen alone, SimAll alone, or the other pairwise combinations. Without these, it is difficult to attribute the gains to specific components. This is partially mitigated because each component is shown to contribute positively in at least one configuration, but the attribution remains incomplete.
 
-- **The empirical gains are inconsistent across settings, and the method adds meaningful complexity.** On CIFAR-10, the improvement over NACH is only +0.4% all classes and +0.3% for ORCA—gains that are small enough to be within run-to-run variation (no error bars are reported). On ImageNet-100, the gains are modest (+0.7% all classes for NACH). The method adds three extra losses with three λ hyperparameters, a temperature parameter, and a nearest-neighbor lookup mechanism, yet the paper provides no sensitivity analysis for these hyperparameters. The practical significance of small gains given this added complexity is unclear.
+- **Hyperparameter values are not reported.** The framework has three weighting coefficients $\lambda_1,\lambda_2,\lambda_3$ and a temperature $\tau$, all of which are mentioned in the formulation but never given numerical values. The paper does not state how these were selected (grid search? heuristic?) or whether the results are sensitive to them. For a "simple and efficient" framework intended for broad use, this information is necessary for reproducibility.
 
-- **The paper has no discussion of limitations.** There is no section or paragraph discussing when CONTROL might fail, whether it requires larger batch sizes, how it affects training time, or whether certain dataset characteristics make it more or less effective. This omission makes the paper less useful as a reference for practitioners.
-
-- **The claim that "performance improvement for all class classifications primarily comes from the uniformity component" (Section 5.2) is not directly supported by the ablation.** The ablation in Table 3 combines L_SupSeen (supervised contrastive, which provides both alignment and uniformity) with L_SimAll (unsupervised contrastive, also providing both). The improvement could come from alignment effects, and the study does not isolate the uniformity mechanism separately (e.g., by adding only a uniformity regularizer without alignment).
+- **Unclear whether the OpenCon comparison is controlled.** The paper compares against OpenCon but does not explicitly state whether OpenCon was re-implemented under the same backbone and training protocol or whether numbers are taken from its original paper. The statement "all experiments use the same backbone ResNet18" is given for the main comparisons but not specifically confirmed for OpenCon. If OpenCon uses a different backbone or augmentation strategy, the comparison may not be fair.
 
 ### Trivial
 
-- **BCE loss notation ambiguity**: In Section 3.2, $p(x)$ is used in the BCE loss formula $-\log(p(x)^\top p(\tilde{x}))$ without clarifying whether $p$ represents softmax probabilities or logits. The notation is resolved later in Section 4.1 with $g(\cdot)$ for logits, but the earlier usage could confuse readers.
+- The paper claims CONTROL is "compatible with a broad range of existing open-world semi-supervised learning algorithms" but only tests on two BCE-based methods (ORCA and NACH). Acknowledging this scope limitation more explicitly would strengthen the paper's claims.
 
 ## Nice-to-Haves
 
-- A hyperparameter sensitivity analysis for the three λ weights and the temperature $\tau$ would help assess whether the reported gains are robust or fragile.
-- Error bars or standard deviations in all tables would help assess significance, especially for the small CIFAR-10 gains.
-- Additional ablation isolating the uniformity effect from alignment (e.g., using the decomposition from Wang & Isola 2020 directly as a loss term).
+- Sensitivity analysis for the hyperparameters $\lambda_1,\lambda_2,\lambda_3$ and $\tau$ would help establish the framework's robustness.
+- An experiment on a non-BCE-based method (such as OpenLDN or TRSSL) would strengthen the claimed generality, though this is not required given the paper's focus on BCE-based methods.
+- Visual analysis of the learned feature representations (e.g., t-SNE plots or alignment/uniformity metrics) would provide empirical support for the claims about uniformity and collapse prevention, partially compensating for the flawed theoretical analysis.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **"Theoretical justification that contrastive loss is robust to noisy nearest-neighbor pairs while BCE loss is not"** (from Strength Finder). This strength directly conflicts with the verified weakness that the theoretical derivation is flawed. The strength is removed because the weakness wins.
 
-- **"Missing experimental details (batch size, epochs, learning rate)"**: Per instructions, hyperparameter implementation details stripped by the parser are assumed to exist in the original submission.
-- **"The method is a straightforward combination of existing contrastive losses" / "incremental contribution"**: While this is a fair opinion on novelty level, it overlaps with other verified weaknesses and is too subjective to carry weight as a standalone criticism; the paper's empirical results indicate genuine practical value beyond what is trivial.
-- **Strength Finder's "Theoretical justification" claim**: This conflicts with the verified weakness that the theory is not rigorous; per rules, when strength and weakness disagree, weakness wins.
-- **Strength Finder's "Generality and compatibility" claim**: This conflicts with the verified weakness about narrow empirical scope.
+- **"Ablation study isolating each loss component"** (from Strength Finder). This overstates what the paper actually does — the ablation combines SupSeen and SimAll without isolating them individually. The strength is removed as overly generous.
+
+- **"The paper should also test non-BCE-based methods"** (from Harsh Critic's "Other Observations"). This demands breadth outside the paper's stated scope (BCE-based methods). Weakened to a minor scope note above rather than a standalone weakness; the core issue is that the claimed "broad compatibility" is not fully supported, which is already addressed in the Trivial section.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface a useful meta-point: when a paper's theoretical derivation relies on distributional assumptions that are not checked against actual training dynamics (e.g., independence of features, zero inner-product of independent softmax outputs), the claimed theoretical motivation can be more of a rhetorical device than a genuine proof. The paper's empirical contribution—that adding contrastive regularizers helps BCE-based open-world SSL—may well be valid independently of the theory, but the paper would be stronger and more honest if presented as an empirical finding rather than a theoretically grounded framework. The mechanistic analysis in Table 4 (showing increased unseen-unseen pair ratios) is actually the most compelling support for the method's effectiveness, and it doesn't depend on the flawed theory at all.
+None beyond the paper's own contributions. The core idea — that feature-level contrastive losses can complement logit-level BCE alignment in open-world SSL — is a natural extension of existing work. The reviews do not surface any unexpected synthesis or cross-observation that the paper itself does not already articulate.
 
 ## Suggestions
 
-1. Remove or substantially rewrite the theoretical analysis in Section 4.1. The current derivation cannot be salvaged by clarifications; the key claims about BCE loss diverging to $-\infty$ and contrastive loss simplifying to a constant are simply not provable under the stated assumptions. Consider either (a) presenting the method as an empirically motivated approach without theoretical guarantees, or (b) replacing the flawed analysis with a correct argument (e.g., noting that contrastive loss is bounded while BCE loss on probability vectors is not, or providing a properly derived bound).
-2. Scale back the generality claims. Either replace "broad range of existing algorithms" with "BCE-based methods such as ORCA and NACH," or add experiments with at least one non-BCE method (e.g., OpenLDN) to substantiate the claim.
-3. Add a limitations paragraph discussing computational cost, hyperparameter sensitivity, and settings where the method may not help.
-4. Add error bars/standard deviations to all tables.
-5. Remove or substantiate the unsupported claim about OpenCON's limitations.
+1. **Either fix or remove the theoretical analysis.** If the derivation in Section 4.1 cannot be made rigorous with proper assumptions, the paper should honestly retreat from the theoretical claim and instead provide empirical support for why contrastive losses help (e.g., measuring feature alignment/uniformity, visualizing the embedding space, or analyzing gradient agreement). The current form is a liability.
+
+2. **Report standard deviations for all experimental results.** This is the single most important addition. Without it, the empirical contribution cannot be evaluated.
+
+3. **Disclose all hyperparameter values** ($\lambda_1,\lambda_2,\lambda_3,\tau$) and state how they were chosen. Include a sensitivity analysis for the weighting coefficients.
+
+4. **Complete the ablation.** Report the contribution of each loss component individually (SupSeen alone, SimAll alone, SupNN alone) and each pairwise combination.
+
+5. **Clarify the OpenCon comparison** — state whether it was re-implemented under the same conditions or cite the original paper's numbers, and if the latter, note any differences in protocol.
 
 ## Score and Decision
 
-The paper has genuine empirical value—the CIFAR-100 gains are notable, and the mechanistic analysis in Table 4 is well-designed. However, the theoretical analysis that the paper presents as a central contribution is not mathematically sound, and the claims of broad generality are overstated relative to the evidence. These are not minor issues; they directly affect how the paper's contributions should be evaluated. The paper would need substantial revision (fixing the theory or dropping it, broadening the experiments, scaling back the claims) to meet the standard for a competitive venue. In its current form, it does not meet that standard.
+The paper addresses a real problem and the empirical pattern is promising, but the current form has two major issues: (1) the theoretical analysis, presented as a core contribution, is not mathematically sound; and (2) the empirical reporting lacks basic statistical rigor. These issues are addressable in revision but prevent the paper from making a convincing contribution in its current form.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

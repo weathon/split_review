@@ -1,88 +1,74 @@
-Now I have a thorough understanding of the paper. Let me produce the consolidated review.
-
 ## Summary
 
-This paper proposes *feedback-weight matching*, a method to enable Direct Feedback Alignment (DFA) for fine-tuning pre-trained fully connected networks. The core idea is to factor pre-trained weight matrices into DFA feedback matrices and re-initialize the network weights to satisfy the corresponding product structure, thereby inducing strong weight alignment (WA) and gradient alignment (GA). The method is evaluated on image classification (CIFAR-10/100, SVHN, STL-10, TinyImageNet) and NLP tasks (GLUE with BERT-Tiny/Small), showing large and consistent gains over standard DFA fine-tuning — e.g., 82.67% vs. 74.70% accuracy on a 6-layer network, and 0.76 vs. 0.10 Pearson on STSB — while also demonstrating synergy with weight decay.
+This paper proposes "feedback-weight matching," a method to enable reliable fine-tuning of pre-trained neural networks using Direct Feedback Alignment (DFA). The key insight is that standard DFA fails during fine-tuning because back-propagation pre-trained weights do not satisfy the strong weight alignment (WA) condition needed for DFA to work. The proposed method performs two steps: (1) reconstruct feedback matrices by decomposing pre-trained weight matrices, and (2) re-initialize weights to match those reconstructed feedback matrices, thereby inducing strong WA and gradient alignment (GA). Experiments on image classification (CIFAR-10, SVHN, STL-10) and NLP (GLUE with BERT) show substantial improvements over standard DFA fine-tuning.
 
 ## Strengths
 
-1. **Novel and principled approach to a previously unaddressed problem.** The paper is the first to systematically identify why standard DFA fails at fine-tuning (Proposition 3.3: pre-trained BP weights do not satisfy DFA's strong WA condition) and to propose a targeted solution (feedback-weight matching). This fills a genuine gap in the DFA literature.
+1. **Novel problem framing with principled diagnosis.** The paper identifies a concrete, theoretically grounded cause for DFA's failure in fine-tuning: pre-trained weights do not satisfy strong WA (Proposition 3.3). This goes beyond prior observations of difficulty (Chu & Bacho, 2024) by tracing the problem to a specific structural condition, and the proposed method directly targets this cause. Applying WA/GA analysis to the fine-tuning setting is a genuine contribution.
 
-2. **Large and consistent empirical gains across diverse settings.** The improvements over standard DFA are substantial and reproducible across architecture depths (4-layer, 6-layer), datasets (image classification and GLUE benchmarks), and model families (MLPs and BERT). On BERT-Small, the method achieves 0.76 Pearson (STSB) and 0.53 Matthews (CoLA) where standard DFA yields near-zero results (0.10 and 0.06 respectively). These gaps are large enough that variance is unlikely to reverse the qualitative conclusion.
+2. **Large and consistent empirical gains.** The method achieves a 7.97% accuracy improvement on SVHN (6-layer network: 82.67% vs. 74.70% for standard DFA), and raises Pearson correlation on STSB from 0.10 to 0.76 with BERT-Small (Table 2). These are substantial, task-spanning improvements that convincingly demonstrate the method's effectiveness.
 
-3. **First successful application of DFA fine-tuning to Transformers.** While DFA has been shown to struggle even for from-scratch Transformer training, this paper demonstrates that feedback-weight matching enables meaningful fine-tuning of BERT-Tiny and BERT-Small on GLUE tasks — a non-trivial extension.
+3. **Clean ablation study isolating component contributions.** Table 3 shows that removing weight matching causes a large accuracy drop (e.g., 83.16% to 79.77% on SVHN) while removing feedback matching has a smaller effect. This decomposition of the method into two mechanisms is informative and honest — it shows which component drives the gain.
 
-4. **Empirically validated synergy between feedback-weight matching and weight decay.** Table 4 shows an average 8.35% accuracy improvement when weight decay is combined with feedback-weight matching, versus negligible effect when applied to standard DFA. This aligns with the paper's theoretical analysis (Proposition 4.1) and provides a practical recipe for practitioners.
-
-5. **Direct empirical evidence for the proposed mechanism.** Figures 1a/1b show that feedback-weight matching induces strong WA and GA from the start of fine-tuning, while standard DFA exhibits weak alignment throughout — directly supporting the paper's explanatory narrative.
+4. **Demonstration of weight decay synergy.** The paper shows theoretically (Proposition 4.1) and empirically (Table 4) that weight decay improves accuracy by 8.35% on average when combined with the proposed method, while having minimal effect without it. This is a non-obvious finding that extends prior FA+weight-decay analysis to the DFA fine-tuning setting.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Underspecified decomposition procedure (Definition 3.4).** The paper's core step — "Equation (6) requires us to decompose the pre-trained weight W^0_{1<l<L} into F_l and F_{l-1}^T" — is stated without any algorithm, approximation strategy, or discussion of existence conditions. Several issues are glossed over:
-   - **Existence constraints.** For interior layers, W_l = F_l F_{l-1}^T where F_l ∈ ℝ^{n_l × n_L} and F_{l-1} ∈ ℝ^{n_{l-1} × n_L}. This requires rank(W_l) ≤ n_L (the output dimension). For tasks with small output dimensions (e.g., n_L=1 for STSB regression, n_L=2 for CoLA), the pre-trained weight matrices may have rank far exceeding n_L, making exact decomposition impossible. The paper does not discuss when or how this is addressed.
-   - **Layer-index coupling.** Consecutive layers share F_l (F_l appears in both W_l = F_l F_{l-1}^T and W_{l+1} = F_{l+1} F_l^T), creating cross-layer constraints that a naive per-layer SVD cannot satisfy. The paper provides no method for finding a consistent set of feedback matrices.
-   - **No concrete algorithm.** Even when a decomposition exists, no specific method (SVD, QR, iterative approach) is suggested.
+1. **The core decomposition procedure is underspecified, making the method non-reproducible from the paper alone.** Equation (6) states that for intermediate layers, $\bar{F}_l \bar{F}_{l-1}^\top \equiv W_{1<l<L}^0$ — a decomposition of pre-trained weights into feedback factors. The paper provides no algorithm, no SVD, no rank constraint, no iterative procedure, and no regularization to accomplish this. The problem is nontrivial because each $\bar{F}_l$ appears in two adjacent decomposition equations (for layer $l$ and layer $l+1$), creating consistency constraints. The text simply says "Equation (6) requires us to decompose the pre-trained weight" without saying how. The grep for "SVD," "factorization," "pseudo-code," or "Algorithm" returned zero matches. The paper claims code is available, but the paper itself does not define its own central operation. This is not a minor omission — it is the method itself. A reader cannot tell whether the claimed improvements stem from the intended mechanism or from an arbitrary implementation choice for the factorization.
 
-   This is a **reproducibility gap**: a reader cannot implement the core contribution from the paper alone. An anonymous code repository is mentioned, but the paper should specify the decomposition method in text.
-
-2. **No statistical uncertainty reported.** All results in Tables 1–4 appear to be single runs. DFA is intrinsically stochastic (random feedback matrices), and fine-tuning outcomes can vary with initialization and data splits. Without standard deviations, confidence intervals, or even a statement about the number of seeds, the reader cannot assess whether the reported improvements are statistically reliable. This is especially important for the smaller gaps in Table 1 (e.g., 55.54% vs. 55.03% in one ablation condition) where noise could change the conclusion.
+2. **Theoretical argument for Proposition 3.6 (that the method induces strong WA) is asserted, not proven.** Proposition 3.6 states that after feedback-weight matching, DFA updates induce strong WA. No proof or dynamical argument is given — it is simply claimed. The original Refinetti et al. (2021) analysis shows strong WA emerges from specific training dynamics over time; the paper does not establish that those same dynamics hold after re-initialization. This weakens the theoretical scaffolding: Lemma 4.1 then uses the strong WA expression ($W_l^t = c_l^t \bar{F}_l \bar{F}_{l-1}^\top$) to derive error bounds, but whether strong WA actually holds under the method is not rigorously established. The logical chain (Proposition 3.6 → Lemma 4.1 → Proposition 4.1) has a weak link at the start.
 
 ### Minor
 
-3. **Theoretical claims lack rigorous justification in the main text.** Propositions 3.3, 3.6, and 3.8 are stated essentially as assertions, with no proof or even a proof sketch in the main body. Section 4's Lemma 4.1 uses "with high probability" without defining the probability space or distribution. Proposition 4.1 introduces unspecified constants α_l. While proofs may have been in a stripped appendix (unmentioned in the parsed text), the main text should at minimum outline the reasoning. As presented, the theoretical sections read more as motivation and conjecture than rigorous analysis.
+1. **Details of applying the method to BERT are sparse.** The paper says feedback-weight matching is applied to "attention, intermediate, and block outputs of the encoder layers in a similar way to previous works (Launay et al., 2020)." But Launay et al. applied standard DFA (random feedback matrices) to Transformers — they did not decompose pre-trained weights into feedback matrices. The paper does not explain how the factorization in Equation (6) handles non-square attention projection matrices, how the consistency constraint propagates across BERT's many weight matrices, or whether the factorization is applied per-component or globally. Given that the NLP results show the largest gains over standard DFA, this omission is significant.
 
-4. **Proposition 3.6 is nearly tautological.** The claim that re-initializing weights to satisfy W̄^0_l = F_l F_{l-1}^T induces "strong WA" follows almost directly from the definition (Equation 4, W^t_l ∝ F_l F_{l-1}^T). The non-trivial part — whether DFA updates preserve this relationship during training — is not formally justified for the fine-tuning setting (the existing WA theory was derived for from-scratch training with random initialization).
+2. **Method is framed as "fine-tuning" but involves re-initialization.** Equation (7) replaces pre-trained weights $\bar{W}_l^0$ with $\bar{F}_l \bar{F}_{l-1}^\top$. If the decomposition is not exact (e.g., due to rank constraints or dimension mismatches), the re-initialized weights differ from the original pre-trained weights. The paper claims the method "preserves the knowledge embedded in the pre-trained weights" (line 110) without testing this — e.g., by measuring the re-initialized network's accuracy on the original pre-training task before any DFA fine-tuning. This gap between the "fine-tuning" framing and the actual operation should be acknowledged.
 
-5. **Sections 6 (Limitations) and 8 (Reproducibility Statement) are empty placeholders.** Even accounting for possible parser stripping, the paper has no discussion of limitations (e.g., when the decomposition might fail, applicability to CNNs) or reproducibility details beyond the code repository mention. These are important for a method paper.
+3. **The theoretical analysis is conducted on linear networks (Propositions 3.8, 4.1) and two-layer non-linear networks, then conjectured to generalize.** This is standard practice, but the gap between these simplified settings and the actual experiments (6-layer networks with ReLU, Transformer architectures with layer norm and residual connections) is large. The paper could strengthen its claims by testing on intermediate network depths or providing evidence that the key lemmas hold empirically.
 
 ### Trivial
 
-- The text in Section 3.1 contains a garbled passage ("lweaeidgs htth ... tarlaijgencetodr tyo otfh aDt FoAf tboa cbke- ccomppaagraatibolen") — assumed to be a parser artifact, but the underlying typo density is higher than expected.
+- Figure 1's axis labels and legend colors are hard to distinguish in grayscale reproduction.
 
 ## Nice-to-Haves
 
-- Comparison against Chu & Bacho (2024), which is cited but not used as a baseline despite being the closest prior work on DFA fine-tuning.
-- Ablation: when the decomposition is necessarily approximate (rank(W_l) > n_L), what strategies work best (e.g., SVD truncation, iterative projection), and how does approximation error affect downstream fine-tuning accuracy?
-- Discussion of computational overhead: the decomposition step cost and whether it must be recomputed during fine-tuning.
-- Analysis of when the method might fail (e.g., very low-rank target tasks, very deep networks, convolutional architectures).
+- **Intermediate baselines for DFA fine-tuning.** The paper compares only against standard DFA (random feedback matrices). It would be informative to see results for hybrid approaches (e.g., DFA on the classification head only while keeping the encoder frozen, or applying DFA only to a subset of layers) to better isolate where the difficulty lies.
+- **Rank and computational cost of the factorization.** Reporting the rank of the factorized feedback matrices and the cost of computing the decomposition (vs. standard DFA or BP fine-tuning) would help readers assess practical trade-offs.
+- **Exact vs. approximate decomposition.** Clarify whether the $\equiv$ in Equation (6) demands exact equality or allows approximation, and if approximate, how the error is measured and controlled.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points are flagged to be removed; treat them with caution.
 
-- **Criticism about missing appendix/proofs for theoretical claims** — Removed because the parser may have stripped supplementary material; the original submission may contain proofs.
-- **Criticism about the "-0" truncation in Table 3** — Removed as a parser artifact; the original table likely shows the full negative value.
-- **Criticism about "typos" and "OCR oddities"** — Removed as parser artifacts, not author errors.
-- **Criticism about "missing related work" (checking ICLR/NeurIPS 2025–2026 for similar ideas)** — Removed per instructions: I cannot verify existence of unreviewed concurrent work.
-- **Claim that "the method cannot be reproduced or evaluated"** — Weakened to "reproducibility gap" (Major weakness #1) since (a) an anonymous code repo is provided, and (b) matrix factorization is a standard operation, even if the paper should specify which one to use.
-- **Strength: "Simple and replicable method with open code"** — Downgraded from a standalone strength because the decomposition procedure is underspecified, partially contradicting the "replicable" claim. The code availability is noted but the method as described in text is not fully replicable without it.
+- **"First" claim is overstated (Chu & Bacho 2024).** The paper acknowledges Chu & Bacho (2024) in lines 12 and 43, which studied the instability of switching from BP to DFA. The paper's claim ("first attempt... via an in-depth study") is distinguishably about proposing and analyzing a solution, not just observing the problem. This criticism misunderstands the paper's scope.
+- **"Standard DFA baseline is a strawman."** Comparing against standard DFA fine-tuning (random feedback) is the natural baseline — it is the method that the paper aims to improve. Suggesting the authors should have tested DFA on a subset of layers or hybrid DFA/BP is scope creep. The paper shows its method works; exploring all possible intermediate DFA variants is not required.
+- **"Limitations section is missing."** The paper has a "LIMITATIONS AND FUTURE WORKS" section (line 232); its emptiness in the extraction is a parser artifact. Parser-stripped content should not be held against the paper.
+- **"Weight matching discards pre-trained knowledge."** If the decomposition is exact ($\bar{F}_l \bar{F}_{l-1}^\top \equiv W_l^0$), then $\bar{W}_l^0 = W_l^0$ and nothing is discarded. This criticism depends on whether the decomposition is approximate, which is part of the underspecification issue (kept as Major Weakness #1). As a standalone point it is not supported without evidence that the decomposition is inexact.
+- **"The paper should also cover Y / additional tasks"** — demands for breadth outside the paper's scope.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The harsh critic's observation that the ablation study (Table 3) hints weight matching may be the dominant component (feedback matching contributes marginally) is worth highlighting — the critic frames this as a potential weakness, but it is actually a strength of the paper's empirical honesty. The paper acknowledges (line 214) that removing feedback matching yields only a marginal decline because the re-initialized weights are "amenable to arbitrary random feedback matrices." This suggests the method might work almost as well with weight matching alone (re-initializing to factorized weights) + random feedback, and the feedback-matching step is secondary. This is a genuinely useful insight that future work could investigate further: is the factorization of feedback matrices necessary, or is the weight re-initialization the critical step? The paper's current theory (Proposition 3.6) says both are needed for strong WA, but the ablation suggests otherwise.
 
 ## Suggestions
 
-1. **Specify the decomposition concretely.** Provide at least one algorithm (e.g., start from the last layer: set F_{L-1} = (W^0_L)^T; for each preceding layer l, solve for F_{l-1} using W^0_l = F_l F_{l-1}^T via SVD or least-squares). Discuss existence conditions: is rank(W_l) ≤ n_L required? What approximation is used when the condition fails? This single fix would resolve the most serious weakness.
+1. **Specify the decomposition algorithm.** This is the single most important fix. Provide pseudo-code: is it an SVD truncated to a specific rank? A least-squares decomposition? Does it enforce the adjacent-layer consistency constraint, and if so, how? Without this, the method is incompletely defined in the paper. If the code is the only full specification, state this explicitly and reference the relevant file/function.
 
-2. **Add statistical rigor.** Report results over at least 5 random seeds (both for DFA's random feedback matrices and fine-tuning stochasticity) with means and standard deviations. If the gaps are as large as reported, this will only strengthen the claims.
+2. **Strengthen the theoretical grounding of Proposition 3.6.** Provide at least a sketch of why the re-initialized weights combined with matched feedback matrices induce strong WA under DFA dynamics. If a full proof is not possible, state the conditions under which strong WA holds and verify them empirically (as the paper already does in Figure 1).
 
-3. **Restructure the theoretical sections.** Either (a) provide proof sketches in the main text, or (b) honestly reframe Sections 3 and 4 as heuristic motivation and empirical analysis, downgrading the "proposition" labels to observations/conjectures. The paper's empirical contributions are strong enough to stand without overclaiming theoretical depth.
+3. **Provide BERT-specific details.** Explain how the factorization applies to each BERT sub-layer (self-attention Q/K/V projections, output projection, intermediate feed-forward, layer normalization scaling factors if applicable). A table showing which weight matrices are decomposed and the resulting feedback matrix dimensions would largely resolve the concern.
 
-4. **Fill Sections 6 and 8** with substantive discussion of limitations (when does the decomposition fail? applicability to CNNs? scalability to larger models?) and reproducibility details (architecture specifics, hyperparameter ranges, compute resources).
+4. **Verify knowledge preservation.** Measure the accuracy/loss of the re-initialized network ($\bar{W}_l^0$) on the original pre-training data or a held-out validation set, compared to the original pre-trained weights ($W_l^0$). This would directly test the claim that "knowledge embedded in pre-trained weights is preserved."
 
 ## Score and Decision
 
-Based on my assessment: the paper introduces a genuinely novel method for an important problem (enabling DFA fine-tuning), demonstrates large and consistent empirical gains across multiple domains, and provides empirical validation of the proposed mechanism. However, the core decomposition step is underspecified (creating a reproducibility gap), and the absence of statistical uncertainty measures weakens the empirical claims. The theoretical framing oversells what is essentially heuristic motivation. These are addressable issues, but they are real.
+The paper addresses an interesting and practically relevant problem, and the empirical results are strong and well-documented. The ablation study is informative, and the weight-decay synergy finding is a genuine contribution. However, the paper has a significant structural weakness: the core method is not fully specified in the paper. The decomposition in Equation (6) is the central algorithmic operation, yet no algorithm, pseudo-code, or implementation strategy is provided. A reader cannot reproduce the method from the paper alone. Combined with the unsubstantiated Proposition 3.6 and the sparse BERT details, the paper as submitted falls short of the completeness standard for acceptance. The underlying idea and empirical validation are promising enough to warrant a resubmission with the missing specification filled in.
 
-**Score**: 6.0
-
-**Decision**: Accept
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

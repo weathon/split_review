@@ -1,20 +1,18 @@
-Now I have a thorough understanding of the paper and can verify all reviewer claims against the actual content. Let me write the consolidated review.
+Now I have all the information I need. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper introduces Multi-Field Adaptive Retrieval (mFAR), a framework that decomposes structured documents into constituent fields (e.g., title, abstract, authors), scores each field independently using both lexical (BM25) and dense (Contriever) scorers, and learns a query-conditioned weighting mechanism to combine these scores adaptively. On the STaRK benchmark (three datasets: Amazon, MAG, Prime), mFAR achieves state-of-the-art results, outperforming prior methods including strong lexical/dense baselines, LLM-based rerankers, and agent-based approaches.
+This paper introduces Multi-Field Adaptive Retrieval (mFAR), a framework for retrieving structured documents by decomposing them into fields, scoring each field independently with dense and/or lexical scorers, and combining scores via learned query-conditioned weights. On the STaRK benchmark (Amazon, MAG, Prime), mFAR achieves state-of-the-art results, with the best hybrid variant (single-field lexical + multi-field dense) obtaining 0.478 H@1 and 0.686 R@20 on average, outperforming prior methods including AvaTaR, GPT-4 reranking, and fine-tuned Contriever.
 
 ## Strengths
 
-- **State-of-the-art results on structured retrieval.** Table 1 shows mFAR variants (especially mFAR₁₊ₙ) substantially outperform all prior methods on STaRK across three datasets, with average H@1 of 0.478 vs. the next best non-mFAR (Contriever-FT at 0.360) and even surpassing the GPT-4 reranker (0.347) and the agent-based AvaTaR (0.376). This directly validates the central claim.
+1. **State-of-the-art results on multi-field structured retrieval.** mFAR achieves the best average scores across all three STaRK datasets, outperforming strong baselines including BM25, fine-tuned Contriever, and the agent-based AvaTaR (Table 4). The best model (mFAR\_1+n) surpasses the prior best method (AvaTaR) by 0.102 H@1 and 0.184 R@20 on average — a substantial margin.
 
-- **Query-conditioned adaptation is clearly necessary for performance.** Table 2 provides a clean ablation: removing query-conditioned weighting from mFAR_Hybrid causes large drops across all metrics (e.g., H@1 drops 22.6% on STaRK average, 41.1% on Prime). This is strong evidence that the adaptive weighting mechanism is not superfluous.
+2. **Clear empirical demonstration that query-conditioned weighting is essential.** The ablation in Table 5 (lines 248–268) shows that removing query conditioning (i.e., using global per-field weights only) causes large drops across all datasets: up to 41.1% loss in H@1 on Prime and 22.6% average H@1 loss. This directly validates the paper's central claim about adaptive weighting.
 
-- **Hybrid lexical–dense scoring consistently outperforms single-scorer variants.** In both multi-field (mFAR_Hybrid vs. mFAR_Dense/mFAR_Lexical) and single-field settings (mFAR_Single vs. BM25/Contriever-FT), using both scorers yields better results than either alone across virtually all metrics and datasets. Scorer masking (Table 3) confirms that both scorer types contribute nontrivially.
+3. **Thorough analysis of field and scorer contributions.** Section 6.2 provides fine-grained field-level ablation (Table 7), showing which fields contribute via lexical vs. dense channels and revealing interactions (e.g., masking one scorer type for a field may show no effect, yet masking both hurts — suggesting redundancy across scorers for that field). This is practically useful for understanding the model's behavior and for future work on structured retrieval.
 
-- **Interpretable and controllable via post-hoc field/scorer masking.** The framework's design enables principled ablation of individual fields and scorers after training (Tables 3–4), revealing dataset-specific behaviors (e.g., MAG relies more on lexical scores, Amazon on dense scores) and providing insight beyond raw accuracy.
-
-- **Practical efficiency: outperforms LLM-based methods without large models or pretraining.** mFAR finetunes a standard Contriever encoder (512-token window) and still outperforms methods using larger context windows (ada-002 with 2K tokens) and expensive LLM rerankers (Claude3, GPT-4), making the contribution practically relevant.
+4. **Sound experimental design.** All dense scorers use the same base encoder (Contriever) as the dense baseline, ensuring fair comparisons. The paper tests multiple configurations (multi-field dense, multi-field lexical, multi-field hybrid, single-field hybrid, and the hybrid 1+n variant), providing a clear picture of where each component helps.
 
 ## Weaknesses
 
@@ -22,57 +20,52 @@ This paper introduces Multi-Field Adaptive Retrieval (mFAR), a framework that de
 None.
 
 ### Major
-None. The paper's core claims are supported by the evidence presented. The issues below are addressable without altering the fundamental conclusions.
+
+1. **Inference shortlist k is unspecified and unanalyzed.** The paper states (lines 122–125) that at test time it forms a top-*k* shortlist per (field, scorer) and scores only the union of those shortlists to produce the final ranking. This is a lossy approximation — a relevant document that does not appear in *any* single field's top-*k* is permanently missed. The paper never states what *k* is used, nor provides any analysis of recall degradation vs. exact scoring. Without this, readers cannot assess whether the reported results reflect the method itself or a particular (possibly aggressive) approximation. The authors should report *k* and provide a sensitivity analysis on a development set demonstrating that approximation loss is negligible at the chosen *k*.
 
 ### Minor
 
-- **No variance or statistical significance reported.** All tables report point estimates from a single run per configuration. Some comparisons between mFAR variants involve close scores (e.g., mFAR_Single vs. mFAR₁₊ₙ on Amazon: H@1 0.574 vs. 0.565; average H@1: 0.435 vs. 0.478), and the reader cannot assess whether differences are reliable. While single-run evaluation is common in large-scale retrieval benchmarks, reporting means and standard deviations over 3–5 seeds would significantly strengthen the paper's rigor and is standard practice in top-tier venues.
+2. **Framing oversells "multi-field" when the best variant partially abandons it.** The title, abstract, and contributions emphasize multi-field decomposition, yet the overall best model (mFAR\_1+n) uses a *single-field* lexical scorer combined with multi-field dense scorers. The paper acknowledges this candidly (lines 224–234, "Multi-field vs. Single-field"), but the narrative still centers "multi-field" as the core contribution. The main advantage is actually the ability to combine *both* a hybrid mixture and per-field scoring, with optimal use being dataset- and scorer-dependent. Recalibrating the framing around the mFAR\_1+n configuration and explaining *why* single-field lexical works better (e.g., BM25's length normalization is inappropriate for per-field scoring) would make the contribution sharper.
 
-- **Inference approximation is unanalyzed.** The paper uses an inexact inference procedure (Section 2, Inference): retrieve top-k per field-scorer, then compute full scores for the union. The potential for missing relevant documents that are not individually captured by any single field-scorer is acknowledged but never quantified. A simple comparison of exact vs. approximate ranking on a subset of queries would establish whether this introduces systematic bias. Without it, the reported numbers reflect the approximation, not the true model.
+3. **No analysis of what the query-conditioned weights actually learn.** The ablation (Table 5) convincingly shows query conditioning matters, but the mechanism remains a black box. Since the weight predictor is a softmax over dot products between learned embeddings `a_f^m` and the query embedding `q` (which also feeds the dense scorer), the conditioning could be picking up on query length, token frequencies, or other shallow correlates rather than genuine field semantics. A small analysis — e.g., computing average learned weights for "authors" when the query contains a person name, or for "enzyme" when biomedical terms appear — would strengthen the claim that the model learns query-field semantics, not just correlations.
 
-- **Interpretability claim is partially supported but not directly verified.** The paper asserts that field weights are "naturally interpretable and controllable," but the analysis (Section 5.2) only demonstrates interpretability through ablation (masking out entire fields/scorers globally). The paper does not inspect actual learned weight values per query to verify, for example, that queries about "authors" produce higher weights on the authors field. While the ablation evidence is useful, it falls short of directly validating the interpretability claim at the per-query level. (The qualitative examples in Figure 2 illustrate behavioral advantages but do not examine weights directly.)
-
-- **Missing hyperparameter details for best models.** The paper reports a grid search over learning rates and whether to use normalization, but does not disclose which configurations were selected for each dataset's best model. This would aid reproducibility.
-
-- **Computational cost of the multi-field inference pipeline is not discussed.** For practitioners, understanding how mFAR's retrieval time (with the approximate shortlist) compares to standard dense retrieval would be valuable, especially given that mFAR involves scoring each field-scorer pair separately.
+4. **No discussion of computational cost.** Indexing each field separately multiplies storage by the number of fields (22× on Prime). At query time, the dense scorer computes dot products against each field embedding for all shortlisted documents. The paper should acknowledge this trade-off and ideally provide latency or storage numbers to help assess practical viability.
 
 ### Trivial
 
-- Adaptive weighting is limited to query-embedding-based field selection; the model cannot dynamically adjust weights based on whether query terms actually appear in a specific field. This design choice (which the paper does not acknowledge as a limitation) means the model can only learn globally query-type-correlated field importance, not instance-level decisions. This is worth noting but not a flaw.
+5. **Some hyperparameter details missing.** The embedding dimension of `a_f^m` (the field-scorer embedding used in the query conditioning mechanism) and whether it is trained from scratch or initialized are not stated.
+
+6. **Full field listing not provided.** The paper gives field counts and names a few examples in tables/figures, but a complete list of fields for each dataset (ideally in an appendix) would aid reproducibility.
 
 ## Nice-to-Haves
 
-- Adding a simple fixed-weight hybrid baseline (e.g., sum of normalized BM25 + Contriever-FT scores with a single tuned weight on dev) would cleanly isolate whether learned adaptive weighting adds value over a tuned static fusion. The existing "No QC" ablation (which still uses multi-field decomposition with learned *global* weights) partially addresses this, and mFAR_Single (both scorers, single-field) further shows hybrid > single-scorer, so this is not a gap — but it would tighten the argument.
-- A direct analysis of the inference approximation error (Recall@k of approximation vs. exact ranking) on a query subset.
-- Disclosing how the learned field embeddings $\mathbf{a}_f^m$ are initialized (random? based on field-name embeddings?) and whether this affects convergence speed or final weight interpretability.
+- **Weight interpretability analysis:** Compute average learned weights per field across queries, and separately for queries whose content likely targets a specific field. This would directly validate that the model "learns" field semantics.
+- **"Late fusion" baseline:** Compare mFAR to a baseline that retrieves from each field independently with BM25 and Contriever, then merges ranks with a learned global per-field weight (no query conditioning). This would isolate the value of the adaptive component.
+- **Proactive controllability demonstration:** Show a case where manually overriding a learned field weight (e.g., setting "authors" weight to zero for a query known to need only "title") produces an expected effect — this would strengthen the "controllability" claim in the introduction.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were raised by reviewers but are removed or downgraded per the rules:
 
-- **"Best model does not align with central motivation" (Harsh Issue 4).** The paper *acknowledges at length* (Section 4) that multi-field lexical scoring sometimes underperforms single-field BM25, and *explicitly motivates* mFAR₁₊ₙ as a synthesis of findings (multi-field dense is good, single-field lexical is good, hybrid is best). The paper's contribution is the framework, not a prescription that every component must be multi-field. This is an honest finding, not a contradiction. **Removed** because the paper already addresses this.
-
-- **Missing related works (ColBERT, SPLADE, etc.).** Per rules, I cannot verify whether these are missing or whether the paper's scope justification is adequate. **Removed** per instructions.
-
-- **"Multi-field lexical hurts" as a weakness.** The paper is transparent about this finding and offers a plausible explanation (BM25 length normalization). A finding that a component of a framework does not always help is not a weakness of the paper — it is a nuanced result.
-
-- **Strength Finder's potential generic/superficial strengths.** All listed strengths have specific citations to tables or figures and do not conflict with verified weaknesses. No removal needed.
+- **"Controllability not demonstrated":** The paper *does* demonstrate controllability via the masking analysis in Section 6.2, where specific field/scorer weights are zeroed at test-time to measure their contribution (lines 273–312). This is a legitimate form of test-time control. Removed.
+- **"Qualitative analysis is anecdotal / not systematically sampled":** Two examples in Figure 3 are standard practice for retrieval papers; the paper's core claims are supported by quantitative results and ablations. The qualitative examples are illustrative, which is appropriate. Downgraded to removed point.
+- **"Loss(%) column difficult to interpret":** The paper already shows raw scores alongside loss percentages (Table 5). This criticism was addressed. Removed.
+- **"adaptive vs. query-conditioned terminology":** A pure style preference. The paper uses both terms consistently. Removed.
+- **"Related work is well-organized":** Generic strength without specific evidence. Removed per instructions.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface useful but incremental suggestions (variance reporting, inference analysis, weight inspection) that would strengthen the paper; they do not reveal a fundamentally different interpretation of the work.
+The most interesting finding emerging from the reviews — beyond what the paper explicitly foregrounds — is the asymmetry between lexical and dense scorers regarding multi-field benefits: multi-field decomposition *helps* dense retrieval (mFAR_Dense outperforms Contriever-FT on all datasets) but can *hurt* lexical retrieval (BM25 alone outperforms mFAR_Lexical on Amazon and MAG). The paper attributes this to BM25's length normalization being ill-suited to per-field scoring (citing Robertson et al., 2004), but this asymmetry has deeper implications: it suggests that dense embeddings naturally benefit from the "separation of concerns" that fields provide (each field's embedding focuses on a sub-aspect), while BM25 relies on cross-field term frequency signals that are lost when fields are split. This could guide future work toward different field-aggregation strategies for different scorer types.
 
 ## Suggestions
 
-- **Run 3–5 random seeds** for each mFAR variant and report means and standard deviations in Tables 1–4. This single change would address the most significant rigor gap.
-- **Analyze the inference approximation** on a held-out query subset: compare exact full-scoring rankings against the approximate shortlist method and report Recall@k of the approximation.
-- **Add a qualitative weight inspection** for a handful of queries where the relevant field is unambiguous (e.g., a query mentioning "authors"). Show that the learned weights meaningfully shift toward the relevant field and scorer.
-- **Report the selected hyperparameters** (learning rate, normalization setting) for each dataset's best mFAR configuration.
-- **Add a brief discussion of computational cost** — approximate per-query latency vs. standard dense retrieval.
+1. **Specify the inference shortlist *k* and evaluate its impact** on recall vs. exact scoring using a development set. This is the most critical missing detail and must be addressed for the results to be reproducible and trustworthy.
+
+2. **Recalibrate the paper's framing** to center the mFAR\_1+n variant as the main contribution, explaining *why* a single-field lexical scorer + multi-field dense scorers works best. This would make the paper's narrative match its strongest empirical finding.
+
+3. **Add a weight analysis** showing average learned field weights across queries, ideally broken down by query properties (e.g., queries containing named entities vs. not), to demonstrate that the query-conditioning mechanism learns meaningful field semantics.
 
 ## Score and Decision
 
-This is a solid paper with a clear, well-motivated contribution. The mFAR framework is novel, achieves substantially better results than prior work on a challenging benchmark, and the ablations convincingly validate the key design choices (query conditioning, hybrid scoring). The weaknesses are all addressable in a minor revision and do not undermine the core claims. The paper would benefit from multiple seeds and a few additional analyses, but in its current form it already makes a compelling empirical contribution.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

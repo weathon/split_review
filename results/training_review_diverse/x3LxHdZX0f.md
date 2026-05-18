@@ -1,22 +1,20 @@
-Now I have a thorough understanding of the paper. Let me produce the final review.
+Now I have all the information needed to synthesize the review. Let me produce the final output.
 
 ## Summary
 
-PUMA presents a secure MPC inference framework for Transformer models using 2-out-of-3 replicated secret sharing. It contributes accurate polynomial approximations for GELU and Softmax, faithful MPC implementations of Embedding and LayerNorm, and an end-to-end system that loads pre-trained models without retraining or architectural modification. Experiments show accuracy within 0.011 of plaintext across GLUE tasks, ~2× speedup over MPCFormer, and the first-ever MPC evaluation of LLaMA-7B (~200 seconds per token).
+PUMA presents the first MPC framework capable of secure inference of Transformer models up to 7B parameters (LLaMA-7B) without requiring architectural modification or retraining. It achieves near-plaintext accuracy (≤0.011 MCC difference, ≤0.02 perplexity difference) while being approximately 2× faster than the state-of-the-art open-source framework MPCFormer. The key technical contributions are accurate polynomial approximations for GELU and Softmax that are efficient in MPC, and secure Embedding and LayerNorm protocols that enable direct loading of pretrained models from libraries like HuggingFace.
 
 ## Strengths
 
-- **First MPC evaluation of a 7B-parameter model.** PUMA demonstrates secure inference of LLaMA-7B at ≈200 seconds/token with 1.794 GB communication, a clear first result that validates the paper's title and represents a genuine engineering achievement (lines 6, 229–231). The serialization optimization (automatically chunking oversized secret-shared structures) is a practical contribution that enabled this result (lines 227–228).
+- **Significant and quantified speedup over prior art**: PUMA achieves 1.375–1.916× faster runtime than MPCFormer on BERT models and 2.250–2.414× faster on GPT2 models, with communication improvements of 1.079–1.884× (Section 5.2). These numbers are clearly reported with specific model-by-model breakdowns.
 
-- **Near-plaintext accuracy without retraining.** Across Bert-Base/Large, RoBERTa-Base, and GPT2-Base/Medium/Large, PUMA's accuracy differs from plaintext by ≤0.011 (GLUE) and perplexity by ≤0.02 (Wikitext-103) (lines 174–179). This directly supports the claim that the polynomial approximations and secure protocols preserve model quality without fine-tuning — a capability prior open-source frameworks lacked.
+- **Accuracy matching plaintext without retraining — a first for MPC Transformer inference**: On GLUE benchmarks, PUMA's accuracy differs from plaintext by at most 0.011 (e.g., CoLA MCC 0.613 vs. plaintext 0.616). GPT2 perplexity differs by at most 0.02 (Section 5.1). Prior work required retraining and still fell short of plaintext quality.
 
-- **~2× speedup over MPCFormer with a conservative comparison.** PUMA shows 1.375–1.916× runtime improvement on BERT models and 2.250–2.414× on GPT2 models (line 188). The comparison is run in the same environment with re-implemented baselines (line 151). Notably, the comparison is conservative: MPCFormer's architecture is simpler (BatchNorm instead of LayerNorm, ReLU instead of GELU, client-side one-hot), so PUMA achieves speedup despite computing more expensive per-layer operations — making the result stronger, not weaker.
+- **First successful MPC evaluation of LLaMA-7B**: PUMA evaluates a 7B-parameter model in ~200 seconds per token on 3 servers (Section 5.4). This is an unprecedented scale for secure MPC inference and represents the paper's headline result.
 
-- **Faithful implementation of missing layers.** MPCFormer replaces LayerNorm with BatchNorm (causing a catastrophic accuracy drop from 0.616 to -0.020 MCC on CoLA) and lacks secure Embedding. PUMA implements both faithfully, recovering accuracy to 0.613 (lines 149–150, footnote). This architectural completeness is a core differentiator.
+- **End-to-end compatibility with pretrained plaintext models**: PUMA implements all Transformer layers (Embedding, LayerNorm, etc.) in MPC, enabling direct loading from HuggingFace without model modification or retraining (Section 4). This is contrast to MPCFormer, which cannot load pretrained models and whose architecture modifications (e.g., replacing LayerNorm with BatchNorm) cause catastrophic accuracy loss (MCC drops from 0.616 to -0.020, as reported in the paper's footnote).
 
-- **First open-source end-to-end framework for pre-trained Transformers in MPC.** PUMA loads models directly from Hugging Face without retraining or modification (line 40). This is a practical contribution that lowers the barrier for deploying secure inference on existing models.
-
-- **Efficiency gains scale with model size.** The speedup over MPCFormer grows for larger GPT2 models (line 190), suggesting the optimizations are particularly effective at scale — important for the large-model setting PUMA targets.
+- **Novel, accurate, and efficient polynomial approximations**: The paper designs specialized polynomial approximations for GELU and Softmax that are both cheaper to compute in MPC than exact alternatives and preserve model accuracy within negligible margins (Tables 1–2).
 
 ## Weaknesses
 
@@ -24,59 +22,50 @@ PUMA presents a secure MPC inference framework for Transformer models using 2-ou
 None.
 
 ### Major
-None.
+None. The core claims (speedup, accuracy without retraining, LLaMA-7B evaluation) are well-supported by the experimental results.
 
 ### Minor
 
-- **Accuracy comparison with MPCFormer is indirect.** The paper demonstrates MPCFormer's accuracy loss via a plaintext experiment replacing LayerNorm with BatchNorm (MCC 0.616 → -0.020). While this convincingly shows the impact of a single architectural change, it does not simulate the combined effect of *all* of MPCFormer's approximations (ReLU for GELU + quadratic Softmax + BatchNorm) under secure inference. A plaintext ablation that applies all MPCFormer-style approximations simultaneously would provide stronger evidence for the claim that "MPCFormer cannot achieve similar accuracy." The current evidence is strongly suggestive but indirect (lines 148–151).
+- **Missing per-component runtime breakdown to quantify embedding overhead.** The paper acknowledges (Section 5.3) that PUMA's efficiency gains decrease with longer sequences and attributes this to extra one-hot embedding costs incurred because PUMA accepts token ids as input (rather than one-hot vectors, which MPCFormer accepts). However, no per-component or per-layer cost breakdown is provided for any model. This makes it impossible for a reader to assess how much of the total runtime is consumed by embedding vs. attention vs. FFN vs. LayerNorm, and therefore how significant the overhead of the "no architectural modification" design actually is. A breakdown for at least one representative model (e.g., Bert-Base or GPT2-Base) would substantially strengthen the scalability discussion.
 
-- **No statistical variance reported.** Runtime, communication, and accuracy results are reported without standard deviations or multiple-run statistics (lines 142, 174–188). While MPC protocols are largely deterministic, runtime can vary due to CPU contention and network jitter, and fixed-point rounding can exhibit run-to-run variation under truncation. Repeating key experiments (even 2–3 runs) would strengthen the reliability of the reported numbers.
+- **Comparison with MPCFormer's approximate (Quad) variant is omitted.** The paper compares PUMA against MPCFormer *without* its Quad approximations (i.e., the faithful but expensive version). The authors provide valid justification: MPCFormer+Quad requires retraining, uses a modified architecture (BatchNorm instead of LayerNorm), and cannot load pretrained models, making a direct accuracy comparison infeasible. Nevertheless, reporting the runtime and accuracy of MPCFormer+Quad on the same tasks — even with the caveat that the architecture and training are different — would complete the accuracy-efficiency trade-off landscape and make the "2× faster" claim more informative. Without it, the reader cannot distinguish how much of PUMA's advantage comes from approximation quality vs. the ability to skip retraining.
 
-- **Lack of a dedicated limitations section.** The conclusion briefly notes that "inference cost is still quite high" (line 236), but the paper would benefit from a limitations paragraph discussing: the semi-honest, no-collusion threat model; the one-hot embedding overhead for longer sequences (honestly discussed in §5.3 but not in a limitations context); the network requirements (1 ms RTT, 5–20 Gbps); and the high hardware requirements for LLaMA-7B (1 TB RAM servers). Acknowledging these upfront would strengthen the paper's scholarly rigor.
-
-- **LLaMA-7B timing ambiguity.** The paper states that "given an input sentence of 8 tokens, PUMA can output one token in around 200 seconds" (line 231). It is not fully clear whether this 200 seconds is the end-to-end time for processing all 8 input tokens *plus* generating 1 output token, or only the time for generating the single token after the inputs have been processed. The distinction matters for understanding the cost of autoregressive generation (where each subsequent token requires a fresh forward pass). The stripped table may have clarified this, but the current text is ambiguous.
+- **Security argument in the main text could be more explicit about new protocol composition.** The paper states a key invariant: layers start and end with secret shares, which "do not leak any information to each party," and this "ensures that the layers can be sequentially combined" (Section 4.1, lines 122–123). This is a valid generic sequential composition argument. However, the paper does not explicitly state that the *newly designed* protocols (GELU polynomial approximation, Softmax polynomial approximation, Embedding, LayerNorm) are built exclusively from operations with known secure implementations under the stated threat model. A single sentence making this explicit would help readers unfamiliar with MPC assess the security claim without having to infer it from the protocol descriptions.
 
 ### Trivial
 
-- **Citation specificity for the "first open-source" claim.** The contribution bullet claims PUMA is "the first open-sourced MPC solution that supports accurate inference of pre-trained Transformer models without further modifications" (line 40). The paper names MPCFormer as the only open-source alternative (line 54) but does not explicitly enumerate *which* prior works are closed-source or require architectural modifications — a small clarity improvement for the claim.
+- **Statistical significance of accuracy differences.** The paper reports differences ≤0.011 MCC and ≤0.02 perplexity but does not discuss whether these differences are statistically significant or whether they would affect downstream use in practice. A brief comment would strengthen the precision claim.
+
+- **Hardware dependency for LLaMA-7B results.** The paper specifies the server configuration (ecs.r7.32xlarge, 128 threads, 1TB RAM, 20GB bandwidth) but does not discuss how costs scale with less powerful hardware. A brief note on expected scaling behavior would be helpful for practitioners.
 
 ## Nice-to-Haves
 
-- **Per-operation cost breakdown.** A breakdown of runtime by operation (matrix multiplication, GELU polynomial, Softmax polynomial, LayerNorm, Embedding) for both PUMA and MPCFormer would help readers understand which specific optimizations contribute the most to the 2× speedup. This is not necessary to validate the core claim (which holds conservatively given the architectural asymmetry), but would strengthen the paper's scientific contribution.
-
-- **Ablation of approximation quality.** Replacing PUMA's GELU polynomial with ReLU (in plaintext) and reporting the accuracy change would quantitatively demonstrate that the high-quality approximation is necessary for accuracy preservation. Similarly for Softmax. This would reinforce the claim that PUMA's approximations are both efficient and accurate.
-
-- **Mitigation discussion for one-hot overhead.** The paper honestly acknowledges that one-hot embedding in MPC reduces efficiency gains for longer sequences (lines 214–215). A brief discussion of potential mitigations (e.g., trusted-client preprocessing for token IDs, or alternative embedding protocols) would be useful.
-
-- **Comparison to published numbers from closed-source frameworks.** While direct runtime comparison is not possible, citing published efficiency numbers from frameworks like Iron, PrivFormer, or Bumblebee for context (even without re-running) would help position PUMA in the broader landscape.
+- A per-component runtime breakdown for at least one model to quantify embedding overhead.
+- Accuracy and runtime of MPCFormer+Quad on the same tasks to complete the trade-off picture.
+- An explicit sentence in Section 4 stating that the new protocols are composed only of operations whose security follows from the underlying replicated secret-sharing and sub-protocols.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+The following points from the reviews were found to be inaccurate, already addressed, or not applicable:
 
-1. **"Unfair baseline comparison — speedup conflates protocol improvement with architectural simplification."** This criticism is factually backward. MPCFormer's architecture (BatchNorm instead of LayerNorm, ReLU instead of GELU, client-side one-hot) is *simpler and cheaper* per operation than PUMA's full Transformer. PUMA achieves 2× speedup *despite* computing more expensive operations per layer. The asymmetry favors the baseline, not the author's method, making the speedup claim *conservative*. Per hard rules, removed as factually wrong.
+- **"Other frameworks (e.g., IRON, BOLT) exist — discuss why not included"**: The paper already addresses this at line 54, stating MPCFormer is "the only one that have been open-sourced," and IRON is cited in the related work. This criticism is already accounted for in the paper.
 
-2. **"Protocol details are missing due to `\input` statements."** The reviewer correctly notes this is a parser artifact (the protocols were present in the original PDF). Per hard rules, removed.
+- **"Security argument is absent from the main body"** (in its strongest form): The paper does provide a security argument at lines 122–123 (the key invariant about shares not leaking ensures compositional security). This criticism is factually incorrect in its absolute form; the weakened version is retained above as a minor weakness about making the argument more explicit.
 
-3. **"The paper should compare against more MPC frameworks."** The paper clearly explains that MPCFormer is the only open-source alternative (line 54). Demanding comparison against frameworks that would require re-implementation is scope creep. Moved to Nice-to-Haves.
-
-4. **Various formatting/style nitpicks.** Per hard rules, removed.
+- **"Cannot be independently verified" type claims**: None present in the reviews.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a perspective that the paper itself misses. The insights all stem from what PUMA already reports: that faithful MPC inference of a 7B model is feasible within minutes, that high-quality polynomial approximations preserve accuracy without retraining, and that the main remaining bottleneck is the one-hot embedding overhead for long sequences.
+None beyond the paper's own contributions. The reviews confirm the paper's core claims without identifying unexpected implications or connections not already drawn by the authors. The main synthesis insight is that the weaknesses are largely about *additional* analyses that would strengthen an already convincing paper, rather than flaws that undermine its existing results.
 
 ## Suggestions
 
-1. Add a plaintext ablation applying MPCFormer's full set of approximations (ReLU + quadratic Softmax + BatchNorm) to quantify the combined accuracy loss.
-2. Clarify whether the LLaMA-7B "200 seconds" covers only the output generation step or the entire forward pass including the 8 input tokens.
-3. Report at least 2–3 runs of key runtime and accuracy experiments with standard deviations.
-4. Add a brief limitations section covering the threat model, network requirements, one-hot overhead, and hardware cost.
-5. Consider adding a per-operation runtime breakdown to help readers attribute the speedup.
+- Add a per-component runtime breakdown (embedding, attention, FFN, LayerNorm) for at least Bert-Base and GPT2-Base in Section 5.3 to quantify the one-hot embedding overhead and make the scalability discussion concrete.
+- Include a brief comparison with MPCFormer+Quad — even if only runtime on a small task — to complete the accuracy-efficiency trade-off landscape.
+- Add one sentence in Section 4 explicitly stating that the new GELU/Softmax/Embedding/LayerNorm protocols are composed from operations with known secure implementations (multiplication, comparison, rSqrt, etc.) and therefore inherit the framework's security guarantees.
+- Briefly note whether the ≤0.011 MCC and ≤0.02 perplexity differences are statistically significant or negligible for downstream use.
 
 ## Score and Decision
-
-This is a strong empirical systems paper with a clear novelty — the first MPC evaluation of a 7B-parameter Transformer — supported by solid accuracy preservation, thorough comparisons (conservatively favoring the baseline), and practical engineering contributions (serialization chunking, faithful LayerNorm/Embedding). The weaknesses are all minor or addressable: indirect accuracy evidence for the baseline, missing variance reporting, no dedicated limitations section, and a minor timing ambiguity. No fatal or major flaw threatens the core claims. The paper makes a genuine contribution to the field of secure ML inference.
 
 MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

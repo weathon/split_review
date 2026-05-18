@@ -1,74 +1,79 @@
-Now I have everything I need. Let me produce the final consolidated review.
+Here is my final consolidated review, synthesized after cross-checking the paper against all reviewer claims.
+
+---
 
 ## Summary
 
-This paper proposes modeling temporal-difference (TD) errors in RL using the generalized Gaussian distribution (GGD) instead of the conventional Gaussian assumption. The approach introduces a shape parameter β (estimated by a "beta head" network), combined with a risk-averse weighting scheme (ω^RA = β) derived from stochastic dominance, and a batch inverse error variance (BIEV) regularization term for epistemic uncertainty. Experiments on MuJoCo and noisy discrete-control tasks show that the method outperforms variance-network baselines in both SAC and PPO.
+This paper proposes modeling TD errors in deep RL with the Generalized Gaussian Distribution (GGD) instead of the standard Gaussian, adding a β-head (shape parameter) to capture kurtosis and tail behavior. The authors augment the actor-critic loss with risk-averse weighting (ω^RA = Q^β_t) and a Batch Inverse Error Variance (BIEV) regularization term. Experiments on MuJoCo and discrete control tasks with SAC and PPO show that GGD-based variants consistently outperform variance-network (Gaussian NLL) baselines, with more stable parameter estimation.
 
 ## Strengths
 
-1. **Empirical demonstration that TD errors are non-Gaussian and heavy-tailed (Section 3.1.1, Figure 2).** The paper provides concrete evidence that TD error distributions from SAC and PPO deviate significantly from Gaussian, with heavier tails that grow more pronounced during training. This directly motivates the need for flexible error modeling and is the paper's strongest empirical finding.
+1. **Novel and well-motivated application of GGD to TD error modeling.** The paper identifies a real limitation of Gaussian error assumptions in TD learning—heavy tails that evolve during training—and provides empirical evidence of non-normality (Figure 1). Replacing the Gaussian with a GGD that adapts per-sample tail behavior is a principled and computationally lightweight idea (one extra head).
 
-2. **Novel application of GGD to TD error modeling in RL.** While GGD is known in regression, applying it to RL TD errors with a learned shape parameter is new. The closed-form expression for aleatoric uncertainty as a function of β (Remark 4) and the connection to stochastic dominance (Theorem 2) provide a coherent framework that goes beyond simply adding a distributional head.
+2. **Consistent empirical gains over variance-network baselines across multiple settings.** In all six MuJoCo environments (SAC, Figure 2) and across both continuous and discrete control tasks (PPO, Figure 5), GGD variants match or exceed their variance-head counterparts. The improvements are particularly visible where variance heads degrade performance (e.g., HalfCheetah-v4, Hopper-v4), suggesting the method is more robust.
 
-3. **Consistent empirical improvement over variance-head baselines across both SAC and PPO (Figures 3, 6).** On MuJoCo environments, the beta-head variants (GGD-SAC, GGD-PPO) achieve better sample efficiency and asymptotic performance than their variance-head counterparts, particularly in environments where variance heads degrade performance (HalfCheetah, Hopper). The BIEV regularization performs at least as well as BIV regularization, with improvements in some settings.
+3. **More stable parameter estimation.** Figure 3 shows that the coefficient of variation of β estimates is consistently lower and more stable than that of variance estimates, supporting the claim that the GGD head yields more reliable uncertainty estimates than a Gaussian variance head.
 
-4. **More stable parameter estimation than variance networks (Figure 4).** The coefficient of variation of β estimates is lower and converges more smoothly than that of variance estimates, which the paper connects to kurtosis-driven variance estimation instability (Proposition 1, Remark 2). This stability is a practical advantage independent of final return.
+4. **Theoretical scaffolding.** The connection to second-order stochastic dominance (Theorem 2) provides a principled basis for the risk-averse weighting scheme, and the discussion of kurtosis-induced bias in variance estimation (Proposition 1) correctly identifies a genuine statistical issue in variance-network training.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **The risk-averse weighting ω^RA = β is introduced without a principled derivation from the stated theory.** Theorem 2 establishes second-order stochastic dominance among GGD variables with the same α: larger β implies less spread. The paper then defines ω^RA = β as a multiplicative weight in the GGD-NLL loss. However, the step from "random variables with larger β are preferred under concave utility" to "weight NLL terms proportionally to β" is not formally justified. The loss function is negative log-likelihood, not a utility over the return distribution, and the paper provides no derivation connecting stochastic dominance to sample weighting in MLE. The intuitive justification ("capitalizes on the tendency of GGD to learn from less spread-out samples") is reasonable but constitutes an evidential gap that weakens the paper's theoretical contribution.
+1. **Missing standard SAC/PPO baselines (without any uncertainty head).** The paper compares GGD variants exclusively against variance-network (GD) baselines. It acknowledges (Figure 2, line 315) that variance heads *degrade* performance in several environments relative to what one would expect. Since the abstract and title claim "significant performance improvements" broadly, the reader cannot tell whether GGD is recovering performance lost by the variance head or truly improving over standard SAC/PPO (which use plain MSE loss and no variance head). Standard SAC/PPO are the de facto reference practitioners will care about, and their omission weakens the practical significance claims.
 
-2. **The MBBE discussion (Proposition 1) is disconnected from the actual BIEV implementation.** The paper devotes a full proposition to deriving the MSE-best biased estimator of variance (MBBE), which adjusts for kurtosis. However, the BIEV weighting used in the loss function (Eq. 5 and Eq. 2) is simply ω^BIEV = 1/V[δ], with no mention of the MBBE adjustment. The paper "advocates" for MBBE adoption but does not implement it in the experiments. This makes it impossible to tell whether BIEV's benefit comes from switching to error variance (over Q-value variance) or from a more sophisticated variance estimator. The theoretical discussion of bias reduction is not tested, creating a gap between the paper's framing and its actual method.
+2. **The α=1 simplification is not adequately justified.** The paper fixes the GGD scale parameter α=1 and models only β. The claim that "moments influenced by α can also be represented by β" (Remark 2.3) is unsupported: with α=1, variance = Γ(3/β)/Γ(1/β), coupling scale and shape so that one cannot independently control spread and tail behavior. Real TD error distributions may require both. The paper mentions an ablation study on integrating the α head (line 356, deferred to appendix), which suggests the authors are aware of the issue, but the main text offers no evidence (or a rigorous counterargument) that α is dispensable. This limitation undercuts the claim to be modeling the *generalized* Gaussian—the method uses a one-parameter subclass, not the full GGD family.
 
 ### Minor
 
-3. **Fixing α = 1 limits the expressivity of the GGD in ways the paper only partially addresses.** The GGD's scale parameter α and shape parameter β jointly determine the distribution's moments (variance = α² Γ(3/β)/Γ(1/β)). Fixing α = 1 forces β to compensate for both scale and shape, preventing independent control of spread and tail behavior. The paper acknowledges this limitation (Remark 1) and references an ablation with the alpha head in the appendix, but the claim that "the impact of omitting α is minimal" would be more convincing if the ablation were presented in the main paper rather than deferred. This does not invalidate the empirical results—the method still works—but it tempers the claim that the framework realizes the "full flexibility" of the GGD family.
+3. **Theorem 1 is imprecisely framed.** The paper states "The NLL of GGD is well-defined for β∈(0,2]" and cites positive-definiteness of the characteristic function. In fact, the GGD PDF is a valid density (positive, integrates to 1) for *all* β>0, so the NLL is well-defined as a loss function for any β>0 regardless. The positive-definiteness property discussed is about characteristic functions, not about the NLL being valid. The practical method is unaffected, but the theoretical framing is misleading.
 
-4. **No statistical significance tests are reported for final performance comparisons.** With 10 seeds per condition, claims of "consistent efficacy" and "significant performance improvements" would be strengthened by paired bootstrap tests or Mann-Whitney U statistics between methods across seeds. In some environments (e.g., Hopper-v4 with SAC, Humanoid-v4 with PPO), the improvement over the variance-head baseline appears marginal relative to the reported standard deviation; without formal tests, it is unclear which differences are reliable.
+4. **The risk-averse weighting using β as a multiplicative weight (ω^RA_t = Q^β_t) needs better justification.** The GGD NLL already contains β in the exponent (|δ|^β) and in log terms. Weighting by β across the batch on top of this is a separate mechanism that the paper motivates via stochastic dominance (Theorem 2), but the interaction between the likelihood structure and the batch-level weighting is not analyzed. The critic's concern about "double usage" is reasonable—the paper should explain why the likelihood's own β-dependence is insufficient.
 
-5. **No comparison to plain SAC/PPO without any uncertainty head.** The paper compares only against variance-head variants of SAC and PPO. While the scoping to head-based methods is explicitly stated (Section 4), the absence of baseline algorithms without an uncertainty head makes it difficult to assess whether the beta head provides a net improvement over the simplest alternative. If the variance head degrades performance (as the paper shows in several environments), the beta head's improvement could simply be recovering lost performance. Including plain SAC/PPO would contextualize the absolute improvement.
+5. **BIEV notation (V[δ_t]) is underspecified.** The paper defines ω^BIEV_t = 1/(V[δ_t] + ξ) but does not explicitly state whether V[δ_t] is the variance of TD errors across the 5 ensemble members (the natural reading from the BIV analogy) or something else. The context (V[Q^μ_t] in BIV, the ensemble size of 5, Bessel's correction discussion) makes the across-ensemble interpretation clear, but a precise definition would improve reproducibility.
+
+6. **No trace plots or summary statistics of learned β values.** The paper claims β estimates "mostly converge within [0,2]" (line 52) and shows only coefficients of variation (Figure 3), which give no information about the actual value range or trajectories of β during training. Without this, the claim about convergence and alignment with Theorem 1's range is not verifiable from the presented data.
+
+7. **No quantitative goodness-of-fit measures for TD error distributions.** Figure 1 shows fitted PDFs qualitatively, but the claim of "substantial deviations from Gaussian" would be substantially strengthened by quantitative measures (e.g., estimated kurtosis, log-likelihood ratios vs. Gaussian, Kolmogorov-Smirnov statistics) across multiple environments and algorithms.
 
 ### Trivial
+
 None.
 
 ## Nice-to-Haves
 
-- A comparison with distributional RL methods (e.g., IQN, distributional SAC) would broaden the paper's reach, though these methods address return distributions rather than error distributions, so this is outside the paper's stated scope.
-- An analysis of computational cost (training time, convergence speed) relative to variance networks would be useful for practitioners.
-- Evaluating on environments with known heteroscedastic reward noise (e.g., Safety Gym) would better test the method's claimed robustness to data-dependent noise.
+- Adding standard SAC/PPO baselines would immediately strengthen the practical significance claims.
+- A single-critic (or 2-critic, as in standard SAC) ablation would clarify whether the benefit of GGD is contingent on the ensemble of 5 critics.
+- Brief trace plots of β during training (in the main text or appendix) would support the claim about convergence within (0,2].
+- Statistical significance tests or confidence intervals on final performance would help assess which differences are meaningful given seed variance.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points were flagged by reviewers but are removed or downgraded after cross-checking against the paper:
 
-- **Criticism about α=1 ablation being absent / missing:** The paper explicitly states (line 356): "We present comprehensive ablation studies in the appendix, examining... the integration of the alpha head." The parser strips appendices; the ablation exists in the original submission. Removed per hard rule.
-- **Criticism that Theorem 1 should cite the original proof:** The paper already cites the original sources (bochner1937stable, ushakov2011selected, dytso2018analytical) directly in the theorem statement. Removed per hard rule (factually incorrect criticism).
-- **Criticism about missing comparison to distributional RL methods (IQN, QR-DQN):** These methods model the return distribution, not the TD error distribution, and are architecturally different from head-based methods. The paper explicitly scopes to head-based methods. This is a different class of expectations. Removed per hard rule.
-- **Criticism about the paper not explaining why GGD is more suitable than Gumbel for environments without max operators:** The paper does explain this (lines 137-139): "We instead propose... GGD, which offers flexibility in expressing the tail behavior of diverse distributions. This method is adaptable to wider range of MDPs, even those without max operators." Removed per hard rule (factually incorrect criticism).
-- **Strength Finder's strength about "theoretical connections to broader RL frameworks":** This is generic and speculative (discussion section only, no concrete contribution). Conflicts with verified weaknesses about the weighting scheme lacking principled justification. Removed.
-- **Criticism about "no evaluation on tasks where heteroscedastic noise is known to matter":** Scope creep; the paper evaluates on MuJoCo and noisy discrete tasks. Nice-to-have, not a weakness.
-- **Formatting/style nitpicks and complaints about missing appendix content:** Removed per hard rules.
+- **Criticism that BIEV is "ill-defined" and "not reproducible":** Removed. The notation V[δ_t] naturally inherits the same interpretation as V[Q^μ_t] (variance across the ensemble), which is explicitly described as "empirical variance" with Bessel's correction over the ensemble of 5. The per-sample subscript t rules out the batch-variance misinterpretation. The method is operational as described.
+- **Criticism that the MBBE theory is disconnected from BIEV:** Downgraded from a claimed structural flaw to a minor observation. Proposition 3 is used to motivate why better variance estimation matters, and BIEV applies the insight by using error variance rather than value variance. The connection is plausible, not proven, which the paper acknowledges.
+- **Criticism about ablation studies being deferred to the appendix:** Removed per hard rule (the parser strips appendix content; the ablation study exists in the original submission).
+- **Criticism about the 5-ensemble setup not being standard:** Removed. All methods use the same ensemble; comparisons are fair. Asking for single-critic results is a reasonable extension but not a flaw in the current comparison.
+- **Strength Finder's generic strengths** (e.g., "this paper addressed an important problem"): Removed for lacking specific content or conflicting with verified weaknesses.
 
 ## Novel Insights
 
-The most interesting finding that emerges from cross-referencing the reviews is the tension between the paper's theoretical ambitions and its practical choices. The harsh critic correctly identifies that the risk-averse weighting is the paper's weakest link theoretically, yet the empirical results still show improvement over variance networks. This suggests that the core benefit may come more from the shape-adaptive GGD likelihood (even with α=1) than from the weighting scheme. The paper's own framing as a "theoretically grounded" method may be overreaching, but the underlying empirical contribution—that learning β as an additional head and using GGD-NLL loss is both feasible and beneficial—appears to hold. A cleaner paper that dropped the questionable weighting or properly justified it, and included the main-paper α=1 ablation, would be stronger.
+The cross-reviewer synthesis surfaces a tension that neither reviewer fully articulates: the paper's two main technical innovations—modeling kurtosis via β and regularizing via BIEV—pull in opposite directions. The β head explicitly models heavy tails and assigns higher weight to less spread-out samples (risk-averse), while BIEV down-weights high-variance samples for epistemic robustness. These are both forms of sample reweighting, but they operate on different signals (β vs. δ variance). Understanding when these mechanisms reinforce, trade off, or conflict would deepen the contribution. The paper does not analyze this interaction.
 
 ## Suggestions
 
-1. **Either justify the risk-averse weighting formally (e.g., connecting it to β-divergence or robust M-estimation) or drop it.** The empirical results may hold without this component; testing this via an ablation (also noted to be in the appendix) would clarify whether the weighting is essential.
-2. **Make clear in the main text whether BIEV uses simple error variance or the MBBE-adjusted variance.** If the MBBE discussion is purely theoretical context, state this explicitly. If MBBE was used, describe how.
-3. **Add plain SAC/PPO to the main experimental comparison** to anchor the absolute improvement of the beta head.
-4. **Report statistical significance tests** (e.g., paired bootstrap over seeds) for the final-return comparisons.
-5. **Move the α=1 ablation (integration of the alpha head) to the main paper** if space permits, since this directly addresses the most obvious concern about the simplification.
+1. Add standard SAC (MSE loss, no variance head) and standard PPO as baselines to all main learning curves. This is the single change that would most strengthen the paper.
+2. Either add an α head and show whether it helps, or provide a rigorous theoretical or empirical argument (not just a claim) that fixing α=1 is harmless. The ablation study in the appendix should be reported in the main text.
+3. Clarify the definition of V[δ_t] in the BIEV weight by writing, e.g., "the empirical variance of the TD error δ_t across the K=5 ensemble critics" or adding a sentence of pseudocode.
+4. Replace or supplement Theorem 1's discussion: state clearly that the GGD PDF is valid for all β>0, and reposition the positive-definiteness reference as a property of the characteristic function (which may be relevant to a different theoretical claim).
+5. Report at least a summary of learned β values (mean ± std across seeds, or trace plots) to substantiate the claim about convergence within (0,2].
 
 ## Score and Decision
 
-The paper identifies a meaningful gap (non-Gaussian TD errors) and proposes a plausible, empirically effective solution. The core idea—using a GGD shape parameter for TD error modeling—is novel in the RL context, and the empirical results show consistent improvement over the most directly comparable baselines (variance networks). However, the paper has two significant weaknesses: (1) the risk-averse weighting is introduced without formal justification, claiming theoretical grounding it does not fully possess, and (2) the MBBE discussion creates confusion about what was actually implemented. These issues, combined with the narrow experimental scope (no plain algorithm baselines, no statistical tests), prevent the contribution from being fully established. The paper would benefit from revisions that address these gaps, but the core empirical finding is real and the method is likely to be useful to practitioners.
+The paper introduces a sensible and well-motivated technique with consistent empirical support across multiple domains and algorithms. However, two issues prevent stronger endorsement: (a) the absence of standard SAC/PPO baselines leaves the practical significance claims incompletely supported, and (b) the α=1 simplification is asserted without rigorous justification. These are addressable but non-trivial gaps. The theoretical framing of Theorem 1 is imprecise, though the method itself is unaffected.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Score: 6.0 / 10** — A solid technique with clear promise, but with significant evidential gaps that must be closed before the contribution can be fully assessed.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

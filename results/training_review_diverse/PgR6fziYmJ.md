@@ -1,100 +1,84 @@
-Now I have a thorough understanding of the paper. Let me compile the final review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-The paper proposes HP3O and HP3O+, hybrid-policy variants of PPO that use a FIFO trajectory replay buffer. In each training batch, HP3O includes the trajectory with the best return alongside randomly sampled trajectories, aiming to reduce variance and improve sample efficiency. The paper provides theoretical policy improvement bounds (Lemmas 2–3, Theorems 1–2) extending prior work to non-consecutive policy pairs, and evaluates on four continuous control environments.
-
----
+This paper proposes HP3O (and its variant HP3O+), a hybrid-policy variant of PPO that incorporates a FIFO trajectory replay buffer. Instead of using only on-policy samples, HP3O samples a minibatch consisting of the best-return trajectory plus randomly selected trajectories from recent prior policies. The paper derives policy improvement lower bounds (Theorems 1 and 2) to provide theoretical guarantees for this off-policy reuse, and introduces a best-trajectory baseline in HP3O+ that induces an additional value-penalty term intended to reduce variance. Experiments on four continuous control environments show HP3O/HP3O+ achieving comparable or better final returns than on-policy baselines (PPO, A2C) with visibly narrower performance variance, and with lower runtime than fully off-policy methods like SAC.
 
 ## Strengths
 
-1. **Novel hybrid-policy architecture with FIFO buffer and best-trajectory sampling.** The paper introduces a concretely specified hybrid: a trajectory replay buffer with FIFO eviction limits distribution drift, and the per-batch inclusion of the best-return trajectory provides a simple mechanism for leveraging past successes. This design is clearly motivated and positioned against prior work (Abstract, Section 1, Section 4).
+- **Novel hybrid-policy lower bounds for off-policy reuse.** The paper extends the classic policy improvement lower bound (Lemma 1, from Achiam et al. 2017) to settings where prior policies are sampled from a replay buffer rather than being temporally adjacent (Theorem 1, Theorem 2). This provides a principled theoretical grounding for integrating off-policy data into PPO — a direction with practical motivation that prior work had only partially addressed (e.g., Queeney et al. 2021 assumed chronological order).
 
-2. **Policy improvement bounds for non-consecutive policies.** Lemma 2 and Theorems 1–2 extend the classic policy improvement lower bound (Lemma 1) to reference policies $\pi_r$ that are not required to be the immediate predecessor of $\pi_k$. This is a real technical generalization over Queeney et al. (2021), which assumed chronological ordering. The HP3O+ variant further adds a value-penalty term in the bound (Theorem 2, Remark 4), providing a theoretical rationale for variance reduction.
+- **Best-trajectory baseline with variance-reduction penalty.** HP3O+ defines a baseline from the current best trajectory in the buffer, leading to an extra value-penalty term in the lower bound (Theorem 2, Remark 4). The paper identifies this term as a form of critic regularization, and the empirical results (Figure 3a showing lowest relative standard deviation for HP3O+) support the claim that this mechanism reduces training variance.
 
-3. **Empirical evidence of variance reduction.** Across four environments, HP3O/HP3O+ achieve lower standard deviation in final returns compared to PPO, A2C, P3O, GEPPO, and OffPolicy, while matching or exceeding their mean returns (Figure 2, Figure 3a). The relative standard deviation metric directly supports the variance-reduction claim.
+- **Empirical improvement over on-policy baselines in both return and variance.** Across four MuJoCo environments (HalfCheetah, Hopper, Swimmer, Walker), HP3O and HP3O+ match or exceed the final returns of PPO and A2C while exhibiting substantially narrower performance variance (Figure 2). In Swimmer, they achieve the highest reward with near-zero variance; in HalfCheetah, they show continued learning in later training when other baselines plateau. These results demonstrate that the FIFO buffer design provides a practical benefit over standard on-policy PPO.
 
-4. **Favorable runtime vs. off-policy methods.** HP3O/HP3O+ have wall-clock times comparable to PPO, whereas SAC and GEPPO are substantially slower (Figure 3b). The paper honestly acknowledges SAC's higher returns while making the case for a practical runtime–return trade-off.
-
-5. **Candid limitations section.** Section 6.3 openly discusses hyperparameter sensitivity, the risk of insufficient learning in sparse-reward settings due to FIFO eviction, and the performance gap to SAC. This self-awareness strengthens the paper's credibility.
-
----
+- **Favorable runtime compared to off-policy methods.** The ablation study (Figure 3b) shows that HP3O and HP3O+ require roughly the same wall-clock time as PPO, whereas SAC and GEPPO require substantially more runtime. This supports the claim that hybrid-policy methods offer better sample efficiency without the full computational cost of off-policy approaches.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Misalignment between theory and the best-trajectory component of the algorithm.** The theoretical analysis (Theorems 1–2) assumes prior policies are *randomly sampled* from the replay buffer, with a distribution $v$ over them. However, the algorithm deterministically includes the trajectory with the best return in every training batch. The paper acknowledges this in Remark 3 purely as an empirical observation ("Empirically speaking, for each minibatch...we have added the best trajectory"), but the theorem statements claim to cover "any future policy $\pi$ generated by HP3O in Algorithm 1," which includes the best-trajectory selection. The deterministic, return-dependent bias introduced by picking the best trajectory is not captured by the derived bounds. This is a structural gap: the paper's central theoretical contribution does not formally cover the algorithm's signature design element. The bound itself is not wrong (it still holds for the randomly sampled portion — adding the best trajectory only makes the actual improvement larger, so the bound remains valid as a lower bound), but the framing overclaims what is proved.
+- **Lemma 2 is stated without its actual inequality.** The paper presents Lemma 2 (line 78) as: *"Consider a current policy π_k, and any reference policy π_r. For any future policy π, where C_{π_k}^π and δ(π,π_r)(s) are defined as in Lemma 1"* — then stops. No inequality or equation follows. Remark 2 describes what Lemma 2 *implies*, but the lemma's own mathematical statement is missing. Since Theorem 1 and the subsequent theoretical development depend on this lemma, the reader cannot verify the derivations or assess whether the claimed extension is valid. The intended form (Lemma 1 with π_r replacing π_k in the visitation distribution) can be inferred, but a main-text lemma must be self-contained for the paper to stand on its own theoretical footing.
 
-2. **No controlled ablation isolating the best-trajectory effect.** The core design claim is that including the best trajectory helps. Yet the paper provides no ablation comparing HP3O (with best-trajectory inclusion) against a version that samples *all* trajectories randomly from the buffer. Such an experiment would directly establish whether the best-trajectory component contributes to the reported gains or whether the gains come entirely from off-policy reuse via the FIFO buffer. This is the highest-leverage experiment the authors could run.
+- **Key parameter ε is undefined in Theorems 1 and 2.** The penalty term in Theorem 1 includes `−γ C_{π_k}^π ε / (1−γ)^2` and Theorem 2 similarly involves ε, but ε is never defined in the context of these bounds. The PPO clipping parameter (also denoted ε in Section 3) is a different quantity (a fixed threshold like 0.2), and using it directly in a theoretical bound would be nonstandard without explicit justification. Without knowing what ε represents (e.g., a bound on total variation over the buffer policies, or a different algorithmic parameter), the claimed lower bounds are technically uninterpretable. This is not a minor omission — it undermines the core theoretical contribution.
 
-3. **SAC learning curves absent from the main comparison.** The paper acknowledges that SAC "may achieve comparatively higher returns" but does not show SAC's return curves in Figure 2, where all other baselines appear. SAC is mentioned only in the ablation section (Section 6.2) on runtime and variance. The reader cannot assess the practical significance of HP3O's runtime advantage without seeing SAC's learning trajectories; if SAC's return advantage is large enough, the runtime benefit may be irrelevant.
+- **Gap between the theoretical bound and the practical estimation scheme.** Theorem 1 involves an expectation over a distribution v over prior policies with advantages A^{π_k} evaluated under the *current* policy's state-action distribution. However, in the actual algorithm, advantages must be estimated from trajectories generated by *different* prior policies, which introduces off-policy bias not accounted for in the bound. The paper recognizes that "the advantage function is still from π_k" (Remark 3) but does not address how the empirical expectation over sampled trajectories — including the best-trajectory oversampling — connects to the clean form in Theorem 1. Without this connection, the claim that HP3O "provably" inherits monotonic improvement is overstated relative to what the theory actually covers.
+
+- **Algorithm 1 is referenced but not presented in the main text.** The paper states "Algorithm 1 shows" (line 69) and later refers to "π generated by HP3O in Algorithm 1" (Theorem 1), but no pseudocode is present in the extracted paper. This is a significant reproducibility gap: the reader cannot see the buffer management, the best-trajectory selection criterion, the sampling procedure, or the update rules concretely.
 
 ### Minor
 
-1. **The "best trajectory" is underspecified.** The paper says "the trajectory with the best return" but does not state whether this is undiscounted return, discounted return, or average reward. While likely implementable from context, this lack of precision weakens reproducibility.
+- **Limited statistical power for variance claims.** The experiments use only 5 random seeds per environment. For variance reduction claims, this provides coarse estimates of standard deviation — a single outlier run can shift the estimate substantially. While 5 seeds is common in RL, the paper's central argument about variance reduction would be strengthened by reporting confidence intervals or conducting pairwise statistical tests (e.g., Mann-Whitney U). As it stands, the variance reduction claim rests on visual inspection of shaded regions in Figure 2.
 
-2. **Explained variance analysis is limited.** The robustness analysis (Figure 4) is shown for only one environment (HalfCheetah) and only for PPO vs. HP3O (not HP3O+). This is insufficient to support the broader claim that HP3O is "more robust against the variations of trajectories."
+- **Limited environment diversity.** The experiments cover only four relatively low-dimensional continuous control tasks (HalfCheetah, Hopper, Swimmer, Walker). No results on more challenging tasks (e.g., Humanoid, Ant, or the Meta-World suite) are included. While the paper does not overclaim generality, the empirical scope is narrow for a method that is presented as a general improvement to PPO.
 
-3. **Baseline hyperparameter tuning is not described.** The paper does not state whether baselines (P3O, GEPPO, OffPolicy) were tuned using the same budget, whether hyperparameters were taken from original papers or re-optimized, or how the number of policy updates per environment step was matched across methods. Given that HP3O reuses data, it likely performs more gradient steps per environment interaction than PPO, and this should be controlled or reported.
-
-4. **5 random seeds is on the low side.** For variance-reduction claims especially, 5 seeds provide wide confidence intervals. The paper would benefit from more seeds or basic significance testing. This is not unusual for the field, but it limits the strength of the claims.
-
-5. **The relationship between Theorem 1's random-sampling assumption and the empirical batch construction is not explicitly bridged.** Remark 2 and Remark 3 contain the reasoning, but a more precise statement of how the bound applies when the batch includes one deterministically chosen trajectory would be helpful.
+- **Ablation study on explained variance is restricted to one environment and one comparison.** Figure 4 shows explained variance only for HalfCheetah and only between PPO and HP3O (excluding HP3O+ and other baselines). A broader ablation would lend more support to the robustness claim.
 
 ### Trivial
 
-1. Lemma 2's statement appears incomplete in the extract (the inequality is missing). If this reflects the original, it should be corrected.
-2. Several notation inconsistencies (e.g., $|\beta|$ vs. $|B|$) should be harmonized.
-
----
+- The paper contains some garbled inline notation (e.g., the definition line in Lemma 3 and the Remark 4 text) — likely parser artifacts from PDF extraction.
+- Section numbering references (e.g., ".2 and A.3" at the end of Remark 4) are clearly remnants of cross-references to a stripped appendix.
 
 ## Nice-to-Haves
 
-- An ablation on buffer size $|\beta|$ — how does it affect the variance/return trade-off?
-- A sparse-reward experiment (e.g., a simple gridworld or Minitaur) to empirically illustrate the failure mode the paper discusses in Limitations.
-- A PPO baseline matched for the same total number of gradient updates, to control for the effect of additional updates from data reuse.
-
----
+- Include a quantified sample efficiency metric (e.g., area under learning curve, time to reach a threshold return) with confidence intervals, rather than relying solely on visual inspection of learning curves.
+- Expand the ablation (explained variance) to include HP3O+ and at least one additional environment to strengthen the robustness claim.
+- Explicitly state how the distribution v in Theorem 1 relates to the actual minibatch sampling scheme (uniform over the buffer? weighted by trajectory return?). This would tighten the theory–practice connection.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviewers are flagged for removal; they are included here for completeness but should be treated with caution.
 
-- *"Algorithm 1 not shown in the extracted text"* — Parser artifact; the original PDF almost certainly includes it. **Removed per hard rules (parser artifacts).**
-- *"Proofs only referenced, not shown in main text"* — Standard practice across ML/AI venues to defer proofs to the appendix. **Removed as this evaluates the paper against an unrealistic standard.**
-- *"The theoretical guarantee for the proposed algorithm is invalid"* — This overstates the problem. The bound remains valid as a lower bound (adding the best trajectory only increases the actual improvement), so "invalid" is incorrect. The gap is between what is proved and what is claimed, not that the proof is wrong. **Downgraded to a Major weakness.**
-- *"Criticism about 'not yet released' or reproducibility concerns citing missing code/references"* — The paper states code is available. **Removed per hard rules.**
-- *"Missing related works"* — We cannot verify existence of missing citations. **Removed per hard rules.**
-- *"Only 5 seeds is fatal"* — 5 seeds is standard for this class of environments and venues; a common practice rather than a fatal flaw. **Downgraded to Minor.**
-- *"Pure formatting/style nitpicks"* — Removed per hard rules.
-
----
+1. **Criticism about Lemma 3 being missing or garbled** — REMOVED. Lemma 3 does state its full inequality; the equation is present (lines 96–97). The garbled notation in the definition lines is a parser formatting artifact, not a missing mathematical claim. Per instructions, formatting artifacts are not author errors.
+2. **Criticism about Theorem 5 being referenced but not appearing** — REMOVED. Theorem 5 likely appears in the appendix, which was stripped by the parser. Per instructions, references to content in the stripped appendix are not valid weaknesses.
+3. **Criticism about Policy-on-off PPO (Fakoor et al., 2020) exclusion** — REMOVED. The paper provides a reasonable justification (code in deprecated MXNet, missing Mujoco actor head). The reviewer's suggestion that the authors could reimplement from scratch is not a valid weakness — such reimplementation is a large ask and the paper is not obligated to perform it.
+4. **The reviewer's claim that "theorem 1 involves an expectation over a distribution v... but the bound's dependence on v is not linked to any actual sampling scheme"** — DOWNGRADED. The bound says "for any distribution v", so it technically holds for whatever distribution the algorithm's sampling scheme induces. The real issue (which is kept) is about advantage estimation from off-policy data, not about v per se.
 
 ## Novel Insights
 
-The reviews surface an honest tension in this paper that goes beyond its individual weaknesses: the paper has a genuinely interesting idea (FIFO-offset replay buffer + best-trajectory emphasis for PPO) and a genuinely useful theoretical extension (Lemmas 2 that relaxes the chronological-ordering assumption), but the two are imperfectly coupled. The reviewer correctly identifies that the theory proves a bound for random sampling while the algorithm relies on a deterministic bias toward high-return trajectories. What neither the paper nor the reviewer fully articulates is that this coupling is actually quite common in RL — many algorithms have heuristics that are not fully covered by their theory (e.g., PPO-clip's clipping heuristic is only loosely motivated by the CPI bound). The real question is whether the gap is acknowledged and whether the empirical evidence is sufficient to fill it. The paper partially acknowledges the gap (Remark 3) but does not provide the clean ablation (HP3O-random vs. HP3O) that would empirically validate the best-trajectory component. This is the paper's single most addressable weakness.
-
----
+The reviews do surface an interesting tension that the paper itself partially acknowledges but does not resolve: the bound in Theorem 1 uses a distribution v over prior policies, which is a free parameter in the theory, but in practice the algorithm deliberately skews the minibatch towards the best trajectory. This oversampling of high-return trajectories is the main practical driver of the algorithm's performance, yet the theoretical bound is agnostic to this choice — meaning the bound likely holds but does not *explain* the empirical success. The best-trajectory baseline in HP3O+ (Theorem 2) is a step toward closing this gap, but the advantage-estimation issue remains. This suggests that a tighter, algorithm-specific bound that accounts for the non-uniform sampling (e.g., importance-weighting corrections for the best-trajectory bias) would be a valuable direction for future work.
 
 ## Suggestions
 
-1. Add an ablation comparing HP3O (with best trajectory) to HP3O-random (all trajectories randomly sampled) on the same four environments. This directly tests whether the best-trajectory component contributes to the reported gains.
-2. Either modify the theory to account for the deterministic best-trajectory selection, or include a caveat in Theorems 1–2 stating that the bound applies to the randomly sampled portion and the best-trajectory inclusion is an empirical augmentation not covered by the proof.
-3. Include SAC learning curves in the main comparison figure (Figure 2), even if as a separate panel, so readers can assess the return–runtime trade-off directly.
-4. Specify how "best return" is computed (undiscounted? discounted?).
-5. Report the buffer size $|\beta|$ and other key hyperparameters in the main text.
-
----
+1. **Complete Lemma 2 in the main text.** Supply the full inequality that Lemma 2 asserts — it can be stated as the same form as Lemma 1 with π_r replacing π_k in the visitation distribution and the TV penalty, i.e., `J(π) - J(π_k) ≥ 1/(1-γ) 𝔼_{(s,a)∼d^{π_r}}[π(a|s)/π_r(a|s) A^{π_k}(s,a)] - 2γ C_{π_k}^π / (1-γ)^2 𝔼_{s∼d^{π_r}}[δ(π,π_r)(s)]`.
+2. **Define ε in Theorems 1 and 2.** State explicitly what ε represents — if it is the maximum total variation over the buffer policies, or the PPO clipping parameter, or a separate quantity — and include the definition in the theorem statements.
+3. **Include Algorithm 1 (pseudocode) in the main text or a clearly marked appendix.** The reader needs to see the buffer management, best-trajectory selection, and minibatch sampling procedure to connect the theory to the implementation.
+4. **Acknowledge and bound the off-policy advantage estimation error.** Add a discussion (and ideally a lemma) about how the empirical estimate of A^{π_k} from off-policy sampled trajectories relates to the true A^{π_k} used in the theoretical bound, or state the additional assumptions under which the bound holds in practice.
+5. **Increase statistical rigor.** Report bootstrapped confidence intervals for the variance comparison, or use more seeds (10–20) for the main comparisons. Compute and report a quantified efficiency metric (e.g., AUC of the learning curve) with standard errors.
 
 ## Score and Decision
 
-The paper makes a genuine contribution: a clean hybrid-policy architecture with a FIFO replay buffer, supported by a non-trivial theoretical extension of the policy improvement bound to non-consecutive policies, and competent empirical results showing variance reduction. The weaknesses are real but addressable — the theory–algorithm gap is significant but not fatal (the bound still holds; the overclaim is in scope, not correctness), and the missing ablation is the paper's single biggest empirical gap. For a conference venue, the paper is on the borderline but leans toward acceptance with major revisions. The ideas are solid; the execution needs tightening in one key theoretical claim and one key experiment.
+This paper proposes a sensible idea — hybrid-policy PPO with a FIFO buffer and best-trajectory sampling — and provides promising empirical evidence that it reduces variance while maintaining sample efficiency over on-policy baselines. The core contribution has merit and is likely of interest to the RL community.
 
-**Score: 6.0/10** — Marginally above the acceptance threshold. The paper would benefit substantially from the suggested ablation and a more careful framing of what the theory covers vs. what is empirical.
+However, the paper has structural deficiencies in its theoretical presentation that prevent proper evaluation: Lemma 2 is stated without its actual inequality, the symbol ε is used without definition in the main theorems, and Algorithm 1 is referenced but not presented. These are not formatting artifacts; they are missing mathematical content that the paper must contain to deliver on its claimed contribution. The gap between the idealized bound and the practical advantage estimation also weakens the claim of provable guarantees.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+The paper can be made acceptable — the fixes are well-scoped (completing Lemma 2, defining ε, including the algorithm pseudocode). In its current form, however, the theoretical contribution is not verifiable, and the paper should not be accepted without these corrections.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

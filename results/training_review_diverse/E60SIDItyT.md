@@ -1,77 +1,83 @@
-Now I have all the information needed. Let me write the consolidated review.
+Now I have all the evidence. Let me compile the final review.
+
+---
 
 ## Summary
 
-This paper studies learning from aggregate responses (bags) where only bag-level averages of responses are available. It establishes a connection between bag-level and instance-level losses, showing that the instance-level loss can be viewed as a regularized version of the bag-level loss. It introduces an interpolating estimator that bridges the two, provides an exact asymptotic characterization of its bias and variance for linear models in the proportional regime, and extends the analysis to differentially private aggregate learning. Experiments on synthetic and real data validate the theoretical predictions.
+This paper studies learning from aggregate responses (bag-level vs. instance-level losses). The key contribution is showing that the instance-level loss equals the bag-level loss plus a within-bag prediction-variance regularizer, motivating an interpolating estimator $\mathcal{L}_{\rm int} = \mathcal{L}_{\rm agg} + \rho \mathcal{R}$ with tunable $\rho \in [0,1]$. For linear models with Gaussian features in the proportional regime ($n/d \to \psi$), the paper derives precise asymptotic formulas for bias, variance, and risk of this estimator, and extends the analysis to differentially private aggregate learning with optimal bag size selection. Experiments on synthetic data and the Boston Housing dataset validate the theory and demonstrate practical benefits.
 
 ## Strengths
 
-- **Precise asymptotic characterization under the proportional regime.** Theorem 1 gives closed-form expressions for the bias and variance of the interpolating estimator as a function of bag size \(k\), sample–feature ratio \(\psi\), SNR, and regularization parameter \(\rho\). The theory is validated by finite-\(d\) simulations (Figure "verification") that match the asymptotic curves at \(d=100\), confirming the analysis is a faithful account of the trade-offs.
+1. **Novel regularization connection between instance-level and bag-level losses.** Lemma 1 proves that the instance-level loss decomposes into the bag-level loss plus a data-dependent regularizer penalizing within-bag prediction variance. This is a simple but new conceptual insight that immediately explains the bias–variance trade-off between the two approaches and motivates the interpolating estimator. The insight is model-agnostic (holds for any $f_\theta$ under quadratic loss).
 
-- **Demonstration that optimal tuning outperforms both extremes.** The paper shows that by varying \(\rho\) the interpolating estimator can achieve lower prediction risk than either the bag-level (\(\rho=0\)) or the instance-level extreme (\(\rho=1\)). This is supported by theoretical risk curves (Figure "effect_rho") and by Boston Housing experiments where the optimal \(\rho\) lies strictly between 0 and 1 for intermediate bag sizes.
+2. **Precise asymptotic characterization for linear models.** Theorem 1 provides closed-form fixed-point equations for the bias and variance of the interpolating estimator in the proportional regime. This goes well beyond the uniform-convergence bounds common in prior LLP literature (e.g., Yu et al.) and yields exact expressions capturing the effects of bag size $k$, signal-to-noise ratio, overparametrization ratio $\psi = n/d$, and the regularization parameter $\rho$.
 
-- **Characterization of optimal bag size under differential privacy.** Theorem 2 derives the asymptotic risk of the interpolating estimator with Laplace-perturbed aggregate responses for \(\varepsilon\)-label DP. The analysis reveals a phase transition: for small \(\rho\) the optimal bag size is 1, while for large \(\rho\) larger bags are better, giving actionable guidance for privacy–accuracy trade-offs.
+3. **Demonstration that the interpolating estimator outperforms both extremes.** By tuning $\rho$ (e.g., via cross-validation), the estimator achieves strictly lower risk than either pure bag-level ($\rho=0$) or pure instance-level ($\rho=1$) loss. This is shown theoretically (Figure 1) and empirically on both synthetic and real data.
 
-- **Generalization to non-quadratic convex losses.** Lemma 3 extends the regularization interpretation to any convex loss with bounded second derivative, providing an upper bound that broadens the applicability of the core insight.
+4. **DP mechanism connecting bag size to privacy–utility trade-off.** The paper proposes a mechanism for $\varepsilon$-label DP from aggregate data and shows (via Theorem 2) that the optimal bag size undergoes a phase transition depending on $\rho$ — a non-trivial insight with practical relevance. (Note: the quantitative analysis has a fixable error — see Weaknesses.)
+
+5. **Synthetic verification of the asymptotic theory.** Figure 3 shows excellent agreement between the finite-sample simulations ($d=100$) and the asymptotic predictions, supporting the practical relevance of the theoretical results.
+
+6. **Extension to general convex losses.** Lemma 2 shows that for any loss function with bounded second derivative, the instance-level loss is bounded above by the bag-level loss plus a multiple of the same regularizer, generalizing the core insight beyond quadratic loss.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-1. **Lemma 1 is mathematically incorrect (wrong coefficient in the regularization term).** The paper claims \(L_{\text{lev}}(\theta) = L_{\text{agg}}(\theta) + \mathcal{R}(\theta)\) where \(\mathcal{R}(\theta) = \frac{1}{k}\sum_a\sum_{i,j\in B_a}(f_\theta(x_i)-f_\theta(x_j))^2\). This is false. The correct relationship is  
-
-   \[
-   L_{\text{lev}} = L_{\text{agg}} + \frac{1}{2mk^2}\sum_{a=1}^m\sum_{i,j\in B_a}(f_i-f_j)^2 = L_{\text{agg}} + \frac{1}{2mk}\mathcal{R}(\theta).
-   \]
-
-   This error has several downstream consequences:
-   - The derivation in Equation (5) that writes \(L_{\text{int}} = L_{\text{agg}} + \rho(L_{\text{lev}}-L_{\text{agg}})\) is mathematically unsound as written (the equality \(\rho\mathcal{R} = \rho(L_{\text{lev}}-L_{\text{agg}})\) does not hold).
-   - The claim that \(\rho=1\) in the interpolating estimator \(L_{\text{int}} = L_{\text{agg}} + \rho\mathcal{R}\) corresponds to the instance-level loss is incorrect. The paper states this identification explicitly in the contributions list, the Corollary, and the Boston Housing experiment, and these statements are unsupported.
-   - The Corollary's formulas for the instance-level estimator (derived by setting \(\rho=1\)) cannot be attributed to \(\arg\min L_{\text{lev}}\) without a corrected connecting lemma.  
-
-   **Why this is Major, not Fatal:** The interpolating estimator \(L_{\text{int}} = L_{\text{agg}} + \rho\mathcal{R}\) (or equivalently the explicit form in Equation (5)) is a mathematically well-defined object, and Theorem 1's formulas correctly characterize its bias and variance. The error is in the *coefficient* of the regularization term, not a structural flaw in the framework. The qualitative claim — that bag-level and instance-level losses are related by an additive regularizer penalizing within-bag prediction variance — remains correct; only the exact coefficient is wrong. With a corrected coefficient (redefining \(\mathcal{R}\) or rescaling \(\rho\)), the paper's narrative is recoverable. The simulations validating Theorem 1 are unaffected because they match the theory for the estimator actually analyzed.
-
-2. **The claim that \(\rho=1\) corresponds to the instance-level loss propagates to invalidate several interpretative claims.** The Corollary explicitly labels \(\rho=1\) formulas as describing the instance-level estimator. The Boston Housing section states "\(\rho=0\) corresponds to the bag-level loss and \(\rho=1\) corresponds to the instance-level loss." The DP section states "if we optimize jointly over \((k,\rho)\), the risk is minimized at \(\rho=1\) and \(k=5\), i.e., the instance-level loss with the largest possible value of \(k\)." All of these statements rest on the incorrect Lemma 1. While the qualitative trends (larger \(\rho\) gives stronger regularization, optimal \(\rho\) varies with bag size) are likely preserved under the corrected algebra, the paper's explicit quantitative claims about the instance-level estimator are not supported as presented.
+1. **Incorrect Laplace noise scale in the DP mechanism (Algorithm 1, Lemma 4, Theorem 2).** The responses are clipped to $[-C\sqrt{\log n}, C\sqrt{\log n}]$, so changing one response changes the bag sum by at most $2C\sqrt{\log n}$ and the bag average by $2C\sqrt{\log n}/k$. For $\varepsilon$-label DP via the Laplace mechanism, the noise scale should be $\text{sensitivity}/\varepsilon = 2C\sqrt{\log n}/(k\varepsilon)$. The paper instead uses $C\sqrt{\log n}/(k\varepsilon)$ (Algorithm 1, line 255), which is too small by a factor of 2. As written, the mechanism guarantees only $\varepsilon/2$-DP, and the risk expression in Theorem 2 would change under the corrected scaling. This is a concrete mathematical error — not a minor typo — and must be fixed. The correction (doubling the noise scale) is straightforward, and the qualitative conclusions about optimal bag sizes and phase transitions would likely persist with different constants, so the error is not fatal but does undermine the quantitative credibility of the DP section in its current form.
 
 ### Minor
 
-1. **DP Laplace noise scale is off by a factor of 2.** In Algorithm 1, the Laplace noise scale is given as \(C\sqrt{\log n}/(k\varepsilon)\). The bag-average sensitivity is \(2C\sqrt{\log n}/k\) (each clipped response can change by up to \(2C\sqrt{\log n}\)), so the correct scale is \(2C\sqrt{\log n}/(k\varepsilon)\). The mechanism with the stated scale provides \(2\varepsilon\)-DP, not \(\varepsilon\)-DP as claimed in Lemma 3 (Lemma "privacy" in the paper). This is a constant-factor error that does not change the qualitative conclusions about optimal bag size but would shift the numerical expression for the risk in Theorem 2.
+2. **Inconsistency between the introduction's scope and the formal assumptions.** The introduction (Section 1, contribution (ii)) claims the proportional regime covers $\psi \in (0,\infty)$, which includes the overparametrized regime ($\psi < 1$, i.e., $d > n$). However, Assumption 1 (Section 3.2) explicitly requires $\psi \in (1,\infty)$, and Corollary 1 contains $1/(\psi-1)$ terms that are undefined for $\psi \leq 1$. The bag-level estimator further requires $\psi \geq k$. The paper never acknowledges this restriction or discusses how the analysis would change for $\psi < 1$. While focusing on $\psi > 1$ is a defensible choice, the paper should reconcile the introduction's broader claim with the actual technical scope and add a limitations statement.
 
-2. **The paper does not discuss its key assumptions as limitations.** The theory assumes non-overlapping bags of equal size, Gaussian features, and independent bag assignment. The real-data experiment uses a neural network while the theory is for linear models. A brief limitations section would be a valuable addition.
-
-3. **The Boston Housing experiment compares only different values of \(\rho\) within the interpolating family and does not compare against alternative LLP algorithms** (e.g., those cited in the related-work section). Such a comparison would help situate the practical value.
+3. **Optimal $k$ analysis restricted to $\{1,\dots,5\}$.** The optimal bag size analysis for DP (Figure 2) is limited to $k \in \{1,\dots,5\}$ with no justification for why larger $k$ are excluded. The paper notes this is "the bounded set" but doesn't clarify whether this is due to dataset size constraints or analytic convenience. Since the theoretical claims about phase transitions depend on this range, some discussion would improve completeness.
 
 ### Trivial
 
-None.
+4. **$C^2 > 2(1+\sigma^2)$ stated without justification.** Theorem 2 asserts this condition with no explanation of its origin (likely from sub-Gaussian tail bounds to ensure clipping does not occur with high probability). A brief justification would improve readability.
+
+5. **Algorithm 1 uses $y_i$ (not $y_i^c$) when computing the bag average (line 254).** The pseudocode shows $\bar{y}_a \leftarrow \frac{1}{k}\sum_{i\in B_a} y_i$ after the clipping step, but the clipped variables $y_i^c$ are not referenced. This is a minor oversight in the algorithm description; the intent is clearly to use the clipped values.
 
 ## Nice-to-Haves
 
-- Comparison against standard LLP baselines (e.g., EPRM, PropSVM, or the method of Busa-Fekete et al.) on the real-data experiment would strengthen the practical claims.
-- The assumption of non-overlapping bags of equal size is noted but not relaxed; a discussion of how overlapping or variable-size bags might affect the results would broaden applicability.
+- A brief sketch of how the fixed-point equations in Theorem 1 arise (e.g., from random matrix theory) would help readers assess the results without diving into the appendix.
+- Including a linear baseline alongside the neural network in the Boston Housing experiment would help distinguish which effects are due to the interpolating loss itself vs. nonlinearity.
+- The DP analysis could note that the optimal bag size phase transition is likely robust to correcting the noise scale, even though the precise numerical values would shift.
 
 ## Removed Points
 
-- *"The supplementary material would presumably contain a proof of Lemma 1; if that proof exists, it is incorrect."* — Moved here because the paper already states proofs are in the appendix (which the parser strips), and speculating about proof correctness is unverifiable. The algebraic error is already established by direct counterexample.
-- *"Lemma 2 attempts to generalise to convex losses, but it is built on the same flawed algebra."* — The lemma provides an *inequality* (\(L_{\text{lev}} \le L_{\text{agg}} + C\mathcal{R}\)) using a Taylor expansion bound, not the exact equality from Lemma 1. This inequality does not depend on Lemma 1's exact coefficient and is a separate claim. The criticism is incorrect.
-- *"Missing related works"* — removed per instruction.
-- *Formatting/stylistic nitpicks* — removed per instruction.
-- *"Cannot be independently verified" / reproducibility concerns about cited entities* — removed per instruction.
+These points are flagged to be removed; treat them with caution.
+
+- **"Weak link between theory and Boston Housing experiment"** (Harsh Critic, Critical Issue #3): Removed because Lemma 1 is model-agnostic — it applies to *any* model $f_\theta$, including neural networks. The paper explicitly says the experiment "confirms our theory that the instance-level loss actually has a regularization effect (as shown in Lemma 1)," which is a correct and reasonable claim. The second observation (optimal $\rho$ increases with bag size) is presented as an empirical finding, not a test of the linear asymptotic theory. The critic misreads the paper's claims.
+
+- **"Related work is descriptive without critical comparison"**: Removed per the rule against requesting missing related works. The paper's related work section is adequate for the scope and appropriately categorizes prior methods.
+
+- **"Lemmas 1 and 2 exposition could be tightened"**: A presentation suggestion, not a substantive weakness.
+
+- **"Derivation sketch in main paper"**: A nice-to-have, not a weakness. Deferring proofs to the appendix is standard practice.
+
+- **"System of equations the same in Theorem 1 and Theorem 2"**: Trivial observation; the paper's handling is fine.
 
 ## Novel Insights
 
-The harsh reviewer's main contribution is the identification of the algebraic error in Lemma 1 and tracing its consequences through the identification of \(\rho=1\) with the instance-level estimator. This is a genuine mathematical error that the paper's authors should correct. However, the reviewer understates the salvageability of the paper: the error is in a coefficient, not a structural flaw, and the interpolating estimator, asymptotic analysis, and DP characterization are self-consistent mathematical objects that can be reinterpreted with corrected algebra. The strength finder's identification of the regularization insight and the precise theoretical characterization as core strengths is accurate, though these need to be decoupled from the specific (incorrect) claim about \(\rho=1\).
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Correct Lemma 1.** Replace \(\mathcal{R}(\theta)\) with the correct expression or introduce a corrected regularizer \(\mathcal{R}'(\theta) = \frac{1}{2mk^2}\sum_a\sum_{i,j}(f_i-f_j)^2\). Then re-derive the relationship \(L_{\text{int}} = L_{\text{agg}} + \rho\mathcal{R}'\) such that \(\rho=1\) genuinely gives \(L_{\text{lev}}\). This will change the fixed-point equations in Theorem 1 by a factor involving \(k\), so the theoretical curves and simulations will need to be re-evaluated.
-2. **Alternatively**, keep the interpolating estimator \(L_{\text{int}} = L_{\text{agg}} + \rho\mathcal{R}\) exactly as defined in Equation (4), but **do not claim** that \(\rho=1\) corresponds to \(L_{\text{lev}}\). Instead, present it as a tunable regularized estimator where \(\rho\) controls regularization strength, with \(\rho=0\) giving \(L_{\text{agg}}\) and larger \(\rho\) giving stronger regularization. The quantitative theory (Theorem 1) is already correct for this estimator. Remove or relabel the Corollary's claim about the instance-level estimator.
-3. **Fix the DP Laplace scale** to \(2C\sqrt{\log n}/(k\varepsilon)\).
-4. **Add a limitations paragraph** discussing the equal-bag-size, non-overlapping, Gaussian-feature, and linear-model assumptions.
+1. **Fix the DP sensitivity error**: Double the Laplace scale in Algorithm 1 from $C\sqrt{\log n}/(k\varepsilon)$ to $2C\sqrt{\log n}/(k\varepsilon)$, update Lemma 4's privacy guarantee accordingly, and recompute the risk expression in Theorem 2 and the optimal bag size analysis (Figure 2). The qualitative conclusions are expected to survive this correction.
+
+2. **Reconcile the $\psi$ scope**: Either change the introduction's "$\psi \in (0,\infty)$" to "$\psi \in (1,\infty)$" to match Assumption 1, or add a paragraph discussing the $\psi < 1$ regime as a limitation and sketching how regularization (e.g., ridge) would be needed.
+
+3. **Clarify the bounded $k$ grid**: Explain why $k$ is restricted to $\{1,\dots,5\}$ in the DP optimal bag size analysis, or extend the range if practical.
+
+4. **Add a brief limitations paragraph** to the conclusion, acknowledging (i) the restriction to $\psi > 1$, (ii) the Gaussian features assumption, and (iii) the linear model assumption for the precise asymptotic theory.
 
 ## Score and Decision
 
-This paper tackles an important problem (learning from aggregate responses, with connections to privacy) and brings a novel theoretical lens (regularization view + precise asymptotics). The asymptotic analysis is technically sound and validated by simulations, representing a genuine contribution. However, the algebraic error in Lemma 1 undermines several explicit interpretive claims and requires correction. The paper should not be accepted in its current form, but the core contribution is recoverable with a correction that does not change the paper's structure or qualitative conclusions.
+The paper makes genuine contributions: a clean new connection between bag-level and instance-level losses, precise asymptotic theory for the interpolating estimator, and a novel DP application with interesting qualitative insights. The DP sensitivity error is real but fixable with a straightforward correction, and the remaining issues are relatively minor. The theoretical core and the main experiments (synthetic verification) are solid. I recommend acceptance contingent on the authors correcting the DP noise scale and addressing the $\psi$ scope inconsistency.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

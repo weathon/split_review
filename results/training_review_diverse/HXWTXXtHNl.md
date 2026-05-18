@@ -1,78 +1,62 @@
-Now I have a thorough understanding of the paper. Let me produce the consolidated review.
-
 ## Summary
 
-This paper proposes Transition-aware weighted Denoising Score Matching (TDSM), the first formal treatment of label noise in conditional diffusion models. The key theoretical insight is that the noisy-label conditional score decomposes into a convex combination of clean-label conditional scores via instance-wise, time-dependent weights (Theorem 2). The TDSM objective is proved to recover the clean conditional score at optimality under class-conditional noise with an invertible transition matrix (Theorem 3). Experiments on MNIST, CIFAR-10/100, and Clothing-1M show that TDSM substantially improves conditional generation metrics over standard DSM across symmetric and asymmetric noise settings, and also helps on clean benchmark datasets, suggesting these contain noisy/ambiguous labels.
+This paper proposes Transition-aware weighted Denoising Score Matching (TDSM), the first principled method for training conditional diffusion models under label noise. It proves that the noisy-label conditional score is a convex combination of clean-label conditional scores with instance-wise, time-dependent weights, and derives a modified training objective whose minimizer provably recovers the clean conditional score under an invertible transition matrix. Experiments across MNIST, CIFAR-10/100, and Clothing-1M with synthetic and real label noise show substantial and consistent improvements on conditional generation metrics (CW-FID, CAS, CW-Density, CW-Coverage).
 
 ## Strengths
 
-- **First principled treatment of label noise in diffusion models.** The paper provides the theoretical derivation (Theorem 2) showing that noisy-label conditional scores are convex combinations of clean-label conditional scores, a result that is novel to the diffusion model literature and cleanly motivates the proposed objective.
+1. **First formal treatment of noisy labels in diffusion models**: Theorem 1 establishes the linear decomposition of noisy-label conditional scores into clean-label conditional scores via transition-aware weights, and Theorem 2 guarantees that the TDSM minimizer recovers the clean conditional score. This is the first work to theoretically and empirically address label noise specifically for diffusion models, going beyond prior GAN-based approaches that rely on simpler class-prior weighting.
 
-- **Principled objective with optimality guarantee.** Theorem 3 proves that minimizing the TDSM objective recovers the clean-label conditional score. The paper also proves that the naïve S-weighted DSM (instance-independent weights) fails to do so (Theorem 4), establishing the necessity of instance- and time-dependent weights.
+2. **Strong and consistent conditional metric gains**: In Table 1, TDSM substantially outperforms the DSM baseline on every conditional metric across all datasets and noise settings. For example, on CIFAR-10 with 40% symmetric noise, CW-FID drops from 30.45 to 15.92 and CAS rises from 47.21% to 62.28%. The improvement grows with noise rate, confirming the method targets the right problem. These gains are not marginal — they are practically meaningful.
 
-- **Consistent and often dramatic conditional metric improvements.** In Table 1, TDSM improves CW-FID, CAS, CW-Density, and CW-Coverage over DSM in *every* noise setting across MNIST, CIFAR-10, and CIFAR-100 — often substantially (e.g., CIFAR-10 symmetric 40%: CW-FID 30.45→15.92, CAS 47.21→62.28). These gains are the paper's core empirical claim and are well-supported.
+3. **Ablation isolating the key contribution**: Table 4 cleanly separates the effect of instance- and time-dependent weights (TDSM) from time/instance-independent transition matrix weighting (**S**-DSM) and from the naive baseline (DSM). TDSM outperforms **S**-DSM on conditional metrics (e.g., CW-FID 15.92 vs. 16.26), confirming that the instance- and time-dependence — the paper's core theoretical insight — is empirically necessary, not just a mathematical curiosity.
 
-- **Effectiveness on real-world noise and orthogonality to label correction.** Results on Clothing-1M (Table 3) show FID improvement from 6.67→4.94. Combining TDSM with label-corrected outputs from DISC/VolMinNet (Table 4) consistently improves over corrected labels alone, demonstrating that TDSM addresses a distinct dimension of the noise problem.
+4. **Orthogonality to existing label correction methods**: Table 5 shows that TDSM applied on top of corrected labels from VolMinNet or DISC yields further improvement. This demonstrates that TDSM addresses a distinct source of noise (score-matching bias) not handled by classifier-based corrections, and that the two paradigms are complementary.
+
+5. **Real-world validation**: On Clothing-1M (1M images, 61.54% label accuracy), TDSM improves FID from 6.67 to 4.94 and CAS from 46.52% to 47.79%, demonstrating effectiveness beyond synthetic noise settings.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **The practical training algorithm (Algorithm 1) departs from the theoretically analyzed objective without justification.** Theorem 3's guarantee holds for the exact TDSM objective (Eq. 6). However, Algorithm 1 introduces two approximations: (i) `.detach()` is applied to all score outputs except the one corresponding to the observed noisy label, stopping gradient flow through non-dominant terms; (ii) network evaluations are entirely skipped for classes whose weight falls below τ=0.01. The paper motivates these solely as computational shortcuts and provides no analysis — theoretical or empirical — of how they affect the optimization fixed point or whether Theorem 3's guarantee still meaningfully applies to the implemented algorithm. While the strong empirical results suggest these approximations are not catastrophic, the paper should at minimum provide an ablation comparing the full TDSM objective (enabled via gradient checkpointing or alternative memory management) against the reduced version on at least one setting, or discuss why the approximations are theoretically benign.
-
-- **The conclusion overclaims unconditional improvement.** The conclusion states that TDSM "outperform[s] baseline models in both conditional and unconditional performance" (line 430). This is imprecise: unconditional FID on CIFAR-100 symmetric 40% degrades from 3.36 to 6.85, on CIFAR-100 symmetric 20% from 2.96 to 4.26, and on CIFAR-10 symmetric 40% from 2.07 to 2.43. The paper's own discussion in Section 4.1 more accurately says "our models beat the baseline models in most cases" (line 280). The unconditional degradation should be acknowledged, analyzed (e.g., does the weighting distort the marginal score?), and contextualized as an acceptable trade-off for the primary goal of conditional generation quality. This does not invalidate the contribution but the framing needs correction.
+None.
 
 ### Minor
 
-- **No confidence intervals or multiple-seed results.** Diffusion training involves randomness from noise sampling, data sampling, and initialization. The main results (Table 1) report only point estimates. Without error bars, it is difficult to assess whether the observed differences (especially the smaller ones, e.g., CIFAR-100 asymmetric 40% FID 2.73→2.81) are reliable. Standard practice in this community (single-run evaluation) makes this a minor concern, but reporting at least 2–3 seeds for the main settings would strengthen the paper.
+1. **Overclaimed unconditional performance in the conclusion**: The conclusion states that TDSM "outperform[s] baseline models in both conditional and unconditional performance." The body text is more careful ("in most cases," line 280), and the data bear this out: unconditional metrics on CIFAR-100 under symmetric noise degrade noticeably (e.g., FID 2.96→4.26 at 20%, 3.36→6.85 at 40%). The same pattern appears on CIFAR-10 FID under symmetric noise (2.00→2.06, 2.07→2.43). This does not weaken the contribution — the paper's strength is in conditional generation, and a trade-off is entirely plausible — but the conclusion should honestly reflect that unconditional improvements are dataset- and setting-dependent, not uniform. The abstract and conclusion should be revised to match the paper's own more measured in-text claims.
 
-- **Dependence on the noisy-label classifier is not characterized.** The weight estimator uses a time-dependent noisy-label classifier trained on the same noisy data. While Table 6 shows the method works with an estimated transition matrix, the paper does not report classifier accuracy, calibration, or sensitivity of downstream generation to classifier quality. This does not undermine the results, but diagnostic experiments (e.g., oracle classifier vs. learned classifier on a synthetic 2D case, or varying classifier quality) would help users understand when the method might fail.
-
-- **No limitations or failure-case discussion.** The paper lacks a dedicated limitations section. The method relies on assumptions (class-conditional noise, invertible transition matrix) that are standard but not universally applicable. The computational overhead of multiple score network evaluations per step (even with the skip threshold) is only briefly discussed. Adding a limitations paragraph would improve completeness and scientific maturity.
+2. **Clothing-1M transition matrix estimated from clean subset**: The paper estimates the transition matrix using the 25K clean labeled subset of Clothing-1M (line 353). While the ablation in Table 4 on CIFAR-10 shows that an estimated matrix (via VolMinNet without clean data) works comparably to the true matrix, this experiment is not repeated on Clothing-1M. The reliance on clean data for real-world deployment is a limitation that should be acknowledged and ideally addressed with noise-only estimation results on Clothing-1M.
 
 ### Trivial
-None.
+
+1. **Gradient flow through non-dominant terms**: Algorithm 1 detach()es gradients for non-dominant weight terms (those below threshold τ) and only backpropagates through the noisy-label class output. The paper mentions this reduces memory but does not discuss whether it could lead to undertraining for rare or hard classes whose weights rarely exceed τ. This is unlikely to be a serious problem given the ablation on τ in the appendix, but a brief discussion would be helpful.
 
 ## Nice-to-Haves
 
-- An ablation comparing the full TDSM objective (full backprop, no detach/skip) against the efficient version on at least one small-scale setting.
-- Reporting classifier accuracy on clean labels (where available) and analyzing sensitivity to classifier errors.
-- Error bars (2–3 seeds) for at least the main settings (CIFAR-10/100 symmetric 40%).
+- **Comparison with robust-classifier-guided sampling**: A natural alternative is to train a standard conditional diffusion model on noisy labels and use an off-the-shelf noise-robust classifier for classifier guidance at sampling time. This would provide a useful point of reference for understanding whether TDSM's training-side fix is complementary to or supersedes a sampling-side fix. The paper discusses guidance in the appendix but does not compare against this baseline.
+- **Analysis of unconditional degradation on CIFAR-100**: The paper could strengthen its own narrative by investigating why unconditional FID degrades more on CIFAR-100 than CIFAR-10 — e.g., whether weight estimation becomes noisier with 100 classes, or whether the convex combination approximation introduces systematic errors in high-class-count settings. A qualitative analysis (e.g., visualizing weight distributions) would deepen understanding of the method's limitations.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **Harsh critic's framing of Issue 1 as "under-reported" and "critical"**: The abstract correctly specifies "samples aligned with given conditions" (conditional focus) and the main text uses the accurate "most cases" qualifier. The conclusion's overstatement is real, but the critic's claim that the abstract is misleading is unsupported. The issue is minor (conclusion wording) rather than critical.
-
-- **Harsh critic's framing of Issue 3 as a "methodological gap"**: The paper provides ablation with estimated transition matrix (Table 6, column w_hat_S) showing the method works with learned components. Requesting further ablation (oracle classifier) is a nice-to-have, not a core gap.
-
-- **Harsh critic's note about Proposition 2 being "slightly overblown"**: The paper states the specific probability $p_t(Y=y|\ttY=\tty,\rvx_t)$ is "first application to the deep generative model community," which is accurate — GAN-based methods used instance-independent $p(Y=y|\ttY=\tty)$. This is not an overclaim.
-
-- **Strength Finder's generic/unsubstantiated strengths**: None found — all listed strengths are specific and supported by the paper.
+- **Criticism about theoretical guarantees relying on idealized assumptions** (the minimizer uniqueness, sufficient capacity): These are standard idealizations used throughout the score-matching literature and are not specific weaknesses of this paper. The paper appropriately provides practical ablation (Table 4) showing the method works with estimated components. This point applies to essentially every theory-motivated ML paper and is not a meaningful discriminator.
+- **Criticism about missing theory on failure modes** (classifier collapse at high noise levels): The paper addresses invertibility (lines 142–143) and provides empirical validation. The requested depth of failure-mode analysis exceeds what is standard for a conference paper of this type.
+- **Generic strength from Strength Finder** (e.g., "improvement on clean benchmark datasets" — the paper's Table 2 on clean data is a side finding, not a core contribution, and the critic notes some metrics degrade on clean CIFAR-100 FID, so this strength conflicts with verified weaknesses).
 
 ## Novel Insights
 
-The key insight that emerges across the reviews is the tension between theoretical elegance and practical expedience. The paper derives a clean convex-combination relationship between noisy- and clean-label scores (Theorem 2) and proves that minimizing the exact TDSM objective recovers the clean score (Theorem 3). But the implemented algorithm introduces gradient blocking and truncation that are not accounted for in the theory. This is not unusual in ML — approximations are often necessary for computational tractability — but the paper would benefit from explicitly discussing the gap: does the detach operation change the fixed point? Under what conditions does it approximate the full objective well? The empirical results suggest the approximations are effective, but connecting theory and practice more tightly would elevate the contribution from "empirically works" to "empirically works for reasons we understand."
+The harsh critic's observation that the unconditional–conditional trade-off may be inherent — that shifting the learning objective to prioritize conditional alignment through a weighted convex combination of scores could hurt unconditional distributional fidelity — is a genuinely insightful point that goes beyond what the paper discusses. If correct, it suggests fundamental architectural or objective-level changes may be needed to improve both simultaneously, rather than simply tuning the weighting scheme. The paper would benefit from explicitly engaging with this hypothesis. None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Reconcile the practical algorithm with the theory.** Either (a) provide an ablation comparing the exact TDSM (full backprop, no detach, possibly via gradient checkpointing) against Algorithm 1 on a small-scale setting to validate that the approximations do not change the solution, or (b) provide a theoretical argument that the detach+skip approximations preserve the fixed point under reasonable conditions (e.g., when the weight for the detached class is subdominant).
-
-2. **Correct the conclusion and discuss the unconditional trade-off.** Acknowledge the unconditional FID degradation observed on CIFAR-100 and CIFAR-10 symmetric noise, analyze why it occurs (e.g., does the weighting bias the marginal score away from the true data distribution?), and frame it as an acceptable trade-off given the primary goal of conditional generation quality. This would improve scientific credibility.
-
-3. **Add error bars.** Report 2–3 seeds for at least the main CIFAR-10/100 symmetric 40% settings to establish statistical significance of the reported gains.
-
-4. **Add a limitations paragraph.** Discuss assumptions (class-conditional noise, invertible transition matrix), computational overhead, and potential failure modes (e.g., high noise where weights spread out and the skip threshold becomes aggressive).
+1. Revise the conclusion and abstract to accurately reflect that conditional metrics improve robustly while unconditional metrics improve in most (but not all) settings, with the largest unconditional degradations occurring on CIFAR-100 symmetric noise.
+2. Add a brief discussion of the unconditional–conditional trade-off, including a hypothesis about why CIFAR-100 (100 classes) shows larger unconditional degradation than CIFAR-10 (10 classes).
+3. Either replicate the estimated-transition-matrix experiment on Clothing-1M, or clearly state the reliance on clean data as a limitation and discuss when practitioners can and cannot rely on such a subset being available.
+4. Include at least one comparison with a robust-classifier-guided sampling baseline in the main paper or appendix to contextualize the complexity/benefit trade-off.
 
 ## Score and Decision
 
-The paper addresses a timely and underexplored problem with a sound theoretical foundation, a well-motivated objective, and impressive empirical results on conditional metrics across diverse settings. The two main weaknesses — the algorithm-theory gap and the imprecise unconditional framing in the conclusion — are substantive but fixable. The contribution is strong enough to warrant publication pending revisions.
-
-**Score**: 7.0
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

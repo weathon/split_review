@@ -1,20 +1,18 @@
-Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and the reviews. Let me write the consolidated final review.
 
 ## Summary
 
-This paper proposes SVE-Math, a vision-centric approach to improving multimodal LLM performance on mathematical reasoning. The key contributions are: (1) a systematic analysis showing GPT-4o misperceives geometric entities ~70% of the time, (2) GeoGLIP, a geometric-grounded visual encoder trained for shape grounding, boundary, and junction detection on small-scale synthetic/available data without human annotation, and (3) a dynamic feature router that weights hierarchical visual features before fusing with CLIP tokens. The method achieves competitive results on MathVerse, GeoQA, and MathVista while using substantially less training data than comparable approaches.
+This paper identifies that fine-grained visual perception of geometric primitives (lines, circles, angles, boundaries, junctions) is a bottleneck for MLLMs in mathematical reasoning, and proposes SVE-Math to address it. SVE-Math adds a geometric-grounded vision encoder (GeoGLIP) — trained via multi-task objectives (shape grounding, junction detection, boundary detection) on synthetic/pseudo-labeled data — alongside the standard CLIP encoder, with a learned feature router that dynamically weights hierarchical visual features into "soft prompts" for the LLM. On MathVerse, SVE-Math-7B outperforms G-LLaVA (same backbone, same instruction data) by +7.7%; on GeoQA it gains +2.8% and matches MAVIS despite using ~8× less instruction data. The paper also reports compatibility with GPT-4V on MathVista.
 
 ## Strengths
 
-1. **Well-motivated problem diagnosis**: The paper manually analyzes 100 images from Geo170K and finds GPT-4o misperceives geometric entities ~70% of the time (Fig. 1a). Controlled experiments show that correcting these errors yields a ~12% accuracy improvement, while inaccurate visual cues cause a 13.6% drop (Fig. 1b). This directly establishes that fine-grained visual perception is a significant bottleneck in mathematical MLLMs.
+- **Principled architecture targeting a real bottleneck.** The paper goes beyond the trend of scaling instruction data and instead improves the visual encoder itself. The GeoGLIP design — a Swin-based feature pyramid trained on shape grounding, junction detection, and boundary detection — is well-motivated by the observation that standard CLIP lacks fine-grained geometric perception. The feature router that dynamically weights pyramid levels (rather than feeding all visual information indiscriminately) is validated by the ablation showing that soft routing outperforms constant and sparse routers (Table 5a).
 
-2. **Controlled apples-to-apples comparison isolates the visual encoder's contribution**: SVE-Math-7B vs. G-LLaVA uses the *same* LLM backbone (LLaMA2-7B) and the *same* instruction-tuning dataset (Geo170K). The +7.7% on MathVerse, +12.3% on MathVista, and +2.8% on GeoQA (line 135) can be attributed to the GeoGLIP encoder and feature router, not to larger models or more instruction data.
+- **Controlled gains on MathVerse and GeoQA.** On MathVerse, SVE-Math-7B beats G-LLaVA by +7.7% under controlled conditions (same LLM backbone LLaMA2-7B, same Geo170K instruction dataset). On GeoQA, the controlled gain is +2.8%. These are clean apples-to-apples comparisons that isolate the effect of GeoGLIP.
 
-3. **Data efficiency is convincingly demonstrated**: SVE-Math uses only 40K samples for visual training (synthetic + FigureQA + Geo170K) vs. the 588K+834K used by MAVIS. Despite this, SVE-Math-7B outperforms MAVIS on GeoQA by 2.8% (line 134) and FunctionQA (Table 4). This supports the paper's central thesis that improving visual perception is more efficient than scaling instruction data.
+- **Data efficiency.** SVE-Math-7B achieves performance comparable to MAVIS on GeoQA and FunctionQA despite MAVIS using an ≈8× larger mathematical instruction dataset (588K+834K vs. 60K+110K), while GeoGLIP itself is trained on only 40K synthetic/pseudo-labeled images. This makes a practical argument that investing in better visual encoders can substitute for scaling instruction data.
 
-4. **Thorough ablation study**: The paper systematically ablates the cross-resolution mixture design (mAP 95.3%→92.4% without attention), router types (soft > constant > sparse), fusion strategies (channel-wise vs. sequence-wise), the number of projection experts, and the necessity of CLIP features (~2% drop without CLIP). These ablations validate the design choices and provide practical guidance.
-
-5. **Plug-and-play architecture**: GeoGLIP integrates without modifying the LLM's reasoning components, and the paper demonstrates consistent gains with both LLaMA2-7B and DeepSeek-Math-7B backbones, showing general applicability.
+- **Comprehensive ablations on connector design.** The paper systematically evaluates channel-wise vs. sequence-wise fusion, multi-expert projectors, the impact of removing CLIP features, and the cross-resolution mixture for boundary/junction detection. These ablations (Figs. 5b–c, Tables 5a) isolate the contributions of individual components and support the design choices.
 
 ## Weaknesses
 
@@ -22,57 +20,49 @@ This paper proposes SVE-Math, a vision-centric approach to improving multimodal 
 None.
 
 ### Major
-None.
+
+- **MathVista comparison confounds GeoGLIP with additional training data.** The paper reports +12.3% over G-LLaVA on MathVista and claims this comparison "ensures that both G-LLaVA and our model utilize the same LLM backbone (LLaMA2-7B) and the instruction training dataset." However, SVE-Math's MathVista evaluation incorporates MathV360k in addition to Geo170K (stated in §4.1), whereas G-LLaVA (Gao et al., 2023a) was originally trained on Geo170K only. The paper does not clarify whether G-LLaVA was re-trained on MathV360k for this comparison. If it was not, then the +12.3% gain conflates the effect of GeoGLIP with the effect of a larger, more diverse instruction dataset. This is the paper's most serious weakness because it inflates the headline MathVista number and undermines the attribution claim. The core thesis (GeoGLIP improves reasoning) is still supported by the controlled MathVerse (+7.7%) and GeoQA (+2.8%) results, but the MathVista claim needs either clarification that G-LLaVA was indeed trained on the same data, or a direct ablation controlling for instruction data.
 
 ### Minor
 
-1. **No direct measurement of visual perception improvement**: The paper's central motivation is that MLLMs make geometric entity perception errors (70% for GPT-4o), yet it never directly measures whether SVE-Math/GeoGLIP reduces such errors on real diagrams. The evaluations measure only downstream benchmark accuracy. While the controlled G-LLaVA comparison (same LLM, same instruction data) indirectly supports the claim, a direct evaluation — e.g., running GeoGLIP's detection pipeline on the same 100 images used in Fig. 1a and measuring entity recognition accuracy — would directly substantiate the core thesis. Without this, the attribution of accuracy gains to *improved perception* (vs. other factors like the feature router or higher resolution) is partially inferential.
+- **The 70% GPT-4o error rate motivation lacks methodological rigor.** This motivating observation rests on manual review of only 100 images from Geo170K, with no detail on how geometric entities were defined, what constituted a "misperception," whether multiple annotators were used, or how the sample was selected. As a quantitative claim (70%), the support is thin. The paper would be stronger if this were either (a) replaced with a more systematic evaluation (e.g., on synthetic data with known ground truth) or (b) explicitly labeled as a qualitative pilot observation, not a precise measurement. That said, this is a motivation, not a core experimental result; the paper's contribution does not collapse without this exact figure.
 
-2. **Abstract wording is slightly imprecise**: The abstract states "SVE-Math-Deepseek-7B outperforms other 7B models by 7.7% on MathVerse." The +7.7% is the improvement over G-LLaVA specifically (11.6% → 19.3%). The phrase "other 7B models" (plural) could be read as outperforming *all* other 7B models by 7.7%, which is broader than what the data supports. The main text (line 135) correctly clarifies this is vs. G-LLaVA. The abstract should be rephrased for precision.
+- **GeoGLIP's detection accuracy on boundaries and junctions is not directly validated against human annotations.** The paper reports 95.3% mAP for shape detection on the synthetic test set, which is helpful, but does not provide equivalent metrics for boundary (e.g., pixel-level F1) or junction (recall/precision at tolerance) detection against human-annotated data. The visualizations in Fig. 4 are qualitative. Since the pseudo-labels come from off-the-shelf models with known limitations, and downstream reasoning accuracy is the only proxy, the paper would benefit from direct detection metrics on a held-out set with human annotations (even a small one) to substantiate that GeoGLIP's intermediate predictions are actually accurate.
 
-3. **Feature router design partially misaligned with stated motivation**: The paper argues that providing *all* visual cues harms performance (Fig. 1c shows a 4.2% decrease with all cues), motivating *selection* of key information. However, the soft router still uses all four feature maps with non-zero weights — it dynamically adjusts weights but does not suppress any feature to zero. The sparse router (hard selection of one feature) and constant router (equal weights) both perform worse than the soft router, so the benefit appears to come from better *integration* rather than *suppression* of redundant cues. Testing a variant that thresholds low weights to zero or removes the lowest-weighted feature would better align the design with the stated intuition. This is a methodological gap rather than a flaw — either outcome would be informative.
+- **"Compatible with GPT-4V on MathVista" is vague.** The phrase "compatible" appears in both the abstract and main text but is not standard evaluation language — it is unclear whether it means "comparable to," "competitive with," or something else. The actual GPT-4V reference number should be reported alongside SVE-Math's in the same sentence rather than deferred to the table.
 
-4. **GeoGLIP evaluation on real diagrams is limited**: GeoGLIP's detection performance is reported as 95.3% mAP on a synthetic test set, and Fig. 4 shows a single qualitative example of boundary/junction detection on a real diagram. Quantitative precision/recall or F1 scores on a held-out set of *real* geometric diagrams (e.g., from GeoQA) would substantially strengthen the claim that GeoGLIP generalizes beyond synthetic data.
-
-5. **No statistical significance or confidence intervals**: The main results and ablations are reported as single numbers without multiple runs or confidence intervals. Some ablation differences are small (e.g., ~0.4% between fusion strategies), making it unclear whether they reflect genuine improvements or noise.
+- **Ablation analysis is limited to GeoQA.** The connector ablations (router types, fusion strategies, cross-resolution mixture) are all conducted on a single benchmark (GeoQA). Given that the paper makes general claims about mathematical reasoning, running key ablations on MathVerse or a subset of MathVista would strengthen the generality of the conclusions.
 
 ### Trivial
 
-1. **Sample size for motivating analysis**: The manual review of 100 images (Fig. 1a) is a reasonable starting point but modest. No inter-annotator agreement is reported. This does not affect the paper's validity since it is a motivating observation, not a formal evaluation.
-
-2. **Minor naming inconsistency**: The text on line 135 attributes the +7.7% MathVerse improvement to "SVE-Math-7B" (which uses LLaMA2-7B), while the abstract correctly attributes it to SVE-Math-Deepseek-7B. Since SVE-Math-7B (LLaMA2) shows a smaller improvement (5.5%), this needs alignment.
+- Computational cost (parameters, FLOPs, inference latency) of the additional GeoGLIP encoder relative to the baseline is not reported. Since this is an architectural addition, this information matters for practical deployment. The paper does mention that channel-wise fusion improves computational efficiency, but gives no concrete numbers.
 
 ## Nice-to-Haves
 
-- A discussion of failure cases where SVE-Math still struggles (e.g., overlapping geometry, very small features) would strengthen credibility.
-- A variant of the feature router that explicitly masks or thresholds out low-weight features to align more closely with the "selective" motivation.
-- The claim about "no human annotations" for GeoGLIP training could acknowledge that the off-the-shelf junction/boundary detectors (Huang et al., 2018; Verbin & Zickler, 2021) were originally trained on human-annotated data, making the statement technically true but indirect.
-- Controlling for the MathV360K training data on MathVista comparisons would clarify whether SVE-Math's advantage there stems from GeoGLIP or from additional instruction data.
+- The comparison with MAVIS showing data efficiency (8× less instruction data) is interesting but unexplained. Analyzing whether GeoGLIP's improved visual representations reduce the LLM's need for visual instruction data (e.g., by comparing scaling curves with and without GeoGLIP) would turn a suggestive observation into a mechanistic insight.
+
+- A failure case analysis — on which GeoQA questions does SVE-Math still underperform G-LLaVA, or where does GeoGLIP's detection quality degrade — would add depth to the contribution.
 
 ## Removed Points
 
-- **MathVista results unverifiable (Table 2)**: The reviewer claimed Table 2's content is absent and the comparison is opaque. The table exists in the original submission as an image; the parser stripped its content. This is a parser artifact, not a paper flaw. **Removed per instructions.**
-- **Criticism that off-the-shelf models for ground truth mean "no human annotations" is indirect**: This is a trivial observation about the training data provenance. The paper's claim is correct — GeoGLIP's training data generation did not involve new human annotation. **Removed as nitpick.**
-- **Claim that the abstract's +7.7% is "demonstrably misleading" and "structural"**: The reviewer overstated the severity. The abstract compares against G-LLaVA (another 7B model). The phrasing is slightly imprecise but not misleading — the main text clarifies the comparison. **Downgraded to Minor.**
-- **Claim about SVE-Math-7B (LLaMA2) showing only 1.6% improvement over G-LLaVA**: The reviewer's specific numbers for the LLaMA2 variant cannot be verified from the extracted text (the table is an image). The paper text states a 5.5% improvement for LLaMA2-7B models (line 133), which may include more baselines than just G-LLaVA. **Insufficiently verifiable from extracted text.**
+- **"Uncontrolled comparison on MathVista undermines the central claim" (harsh critic's framing):** Retained and downgraded from "Fatal/Central" to "Major" — because the central claim is supported by controlled MathVerse and GeoQA results. The MathVista issue is real but does not invalidate the paper as a whole.
+- **"Feature router is a standard MLP" (harsh critic):** Not a weakness — simplicity of a component is not a flaw; the paper's contribution is in the overall pipeline, not the router's complexity.
+- **"The 70% error rate claim is not rigorously established" (harsh critic's framing):** Retained but downgraded to Minor — it is a motivating observation, not a core result.
+- **"MAVIS comparison is underanalyzed" (harsh critic):** Moved to Nice-to-Haves — interesting direction but not a weakness of the current contribution.
+- **Strength Finder generic claims about "addressing an important problem" or "interesting question":** Removed as generic; the actually specific strengths from Strength Finder are retained in the Strengths section above.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews did not produce any observation about the paper not already discussed by the authors.
+A genuinely novel observation that emerges across the review: the paper's data efficiency result (matching MAVIS with 8× less instruction data) is potentially its most impactful contribution, but it is currently treated as an afterthought rather than the centerpiece. If the paper reframed itself around "you can substitute better visual encoders for more instruction data," the MathVista confound would become less central, and the contribution would be both more novel and cleaner to evaluate. The current framing asks the reader to accept that visual perception improvements drive all gains, but the direct evidence for this is strongest on MathVerse and GeoQA, not MathVista.
 
 ## Suggestions
 
-1. **Add a direct perception evaluation**: Run GeoGLIP's detection pipeline on the same 100 images used in Fig. 1a and report the entity recognition accuracy. Even a small-scale comparison showing that SVE-Math reduces the 70% error rate to X% would directly validate the paper's central claim.
-
-2. **Clarify the abstract**: Replace "outperforms other 7B models by 7.7% on MathVerse" with "outperforms G-LLaVA (a 7B model) by 7.7% on MathVerse" to avoid potential misinterpretation.
-
-3. **Add a router ablation with explicit feature suppression**: Include a variant that thresholds the lowest routing weight to zero (or removes the lowest-weighted feature map entirely) to test whether the benefit of the soft router comes from suppression of redundant information or from better integration.
-
-4. **Report GeoGLIP quantitative results on real diagrams**: Add a table with detection mAP, boundary F1, or junction recall on a held-out sample of GeoQA images.
+- **For the MathVista claim:** Explicitly state whether G-LLaVA was re-trained on MathV360k for the comparison. If not, either (a) run the controlled experiment (SVE-Math without MathV360k vs. G-LLaVA on MathVista) or (b) remove the +12.3% attribution and present the MathVista results only as a combined contribution of GeoGLIP + MathV360k data.
+- **For the motivation:** Either expand the 100-image analysis with multiple annotators and explicit rubrics, or replace the "70%" claim with synthetic-data-based automatic evaluation, or soften the language to "qualitative observation."
+- **For GeoGLIP validation:** Report boundary F1 and junction recall/precision on a small held-out set with human annotations (even 50–100 images with manual labels).
+- **Report inference cost:** Provide the total number of visual tokens (CLIP + soft prompts) fed to the LLM and wall-clock time or FLOPs relative to the baseline.
 
 ## Score and Decision
 
-The paper identifies a real and important bottleneck (poor geometric perception in MLLMs), proposes a sensible and data-efficient solution, and provides controlled comparisons that support its effectiveness. The weaknesses are addressable — the most significant is the lack of direct perception evaluation, but the controlled G-LLaVA comparison provides reasonable indirect evidence. No fatal or major flaws undermine the core contribution. The paper makes a solid contribution to the field.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Borderline Accept</orange>

@@ -1,77 +1,99 @@
-Now I have all the information needed. Let me produce the final consolidated review.
-
----
+Now I have a thorough understanding of the paper and all the reviewer claims. Let me write the final consolidated review.
 
 ## Summary
 
-This paper introduces Neural Predictive Ensemble Sampling (NeuralPES), a scalable deep neural network-based contextual bandit algorithm for non-stationary environments. The algorithm combines three ensembles — reward models, sequence models (which predict future reward model parameters), and predictive models — to strategically prioritize the acquisition of information with lasting value. The paper provides regret bounds for a linearized version (LinPS) showing that the algorithm's exploration naturally avoids investing in transient information, and validates the approach empirically on an AR(1) synthetic environment and two real-world recommendation datasets (MIND, KuaiRec), where NeuralPES significantly outperforms neural bandit baselines and their sliding-window variants.
+This paper proposes NeuralPES, a deep-ensemble-based algorithm for non-stationary contextual bandits. The core idea is to combine (a) an ensemble of reward models, (b) a sequence model that predicts future reward model weights, and (c) a predictive model that uses those predicted weights to estimate rewards — with the aim of prioritizing exploration toward information that remains useful beyond a single timestep. The paper provides theoretical analysis of an idealized linear version (LinPS) and evaluates NeuralPES on a synthetic AR(1) logistic bandit and two real-world recommendation datasets (MIND, KuaiRec), showing statistically significant improvements over neural bandit baselines.
 
 ## Strengths
 
-1. **Novel algorithm design that explicitly targets lasting-information seeking at scale.** NeuralPES is the first algorithm to combine deep neural network-based scaling with a principled exploration mechanism designed for non-stationary environments (Section 4, Algorithm 2). The three-ensemble architecture (reward, sequence, predictive models) is clearly motivated and differentiated from prior heuristic methods that simply discount or window past data. The theoretical intuition (Section 4.4.1) — that targeting θ_{t+2} rather than θ_{t+1} strategically prioritizes enduring information — provides a clean conceptual grounding.
+- **Novel and well-motivated algorithm design.** NeuralPES is, to my knowledge, the first algorithm that jointly achieves neural-network scalability and exploration that targets "lasting information" in non-stationary environments. The architecture — combining reward models, sequence models that predict future weights, and predictive models that gate which information propagates — is a thoughtful integration of ideas from ensemble sampling and predictive sampling. The paper clearly explains why each component is needed.
 
-2. **Theoretical regret bounds that quantitatively connect algorithm design to information durability.** Theorem 1 and Corollaries 1–2 provide upper bounds on the regret of LinPS (the linearized version) under abrupt-change and AR(1) models. The bounds smoothly interpolate between the stationary TS bound (when changes are absent) and a vanishing bound (when parameters are redrawn each step), formally confirming that LinPS stops investing in transient information. This goes beyond the heuristic discounting/windowing of prior non-stationary methods and directly supports the algorithm's design rationale.
+- **Consistent and significant empirical outperformance on real-world data.** Table 1 shows NeuralPES achieving the highest average reward/CTR/rating across all three experiments with non-overlapping confidence intervals (e.g., 0.1552±0.0013 vs. next-best 0.1513±0.0012 on MIND; 1.3421±0.0016 vs. 1.3172±0.0023 on KuaiRec). Figures 2b–2d confirm this advantage holds over the entire time horizon, not just at the endpoint. These experiments preserve temporal order, directly testing natural non-stationarity (e.g., day-of-week patterns in MIND).
 
-3. **Strong and consistent empirical results on real-world datasets.** Table 1 shows NeuralPES achieving the highest average reward/CTR/rating across all three experiments (AR(1) logistic: 0.5850 ± 0.0023; MIND 1-week CTR: 0.1552 ± 0.0013; KuaiRec 2-month rating: 1.3421 ± 0.0016), outperforming all six baselines including sliding-window variants designed for non-stationarity. The experiments span 1 week and 2 months of real user interaction data, demonstrating both relevance and longevity of the advantage. The MIND experiment (Figure 3b,c) shows adaptation to day-of-week seasonality, while the KuaiRec experiment (Figure 4) shows sustained advantage.
+- **Ablation studies validate the key components.** Figure 2e shows that removing the predictive model ("Neural Sequence Ensemble") causes performance to collapse, and that regularization for continual learning (Eq. 4) consistently improves results. This provides direct empirical support for the two main design choices.
 
-4. **Computation-aware design.** The paper explicitly avoids the matrix inversion required by Neural UCB/Neural TS (Section 5), making the algorithm feasible with modern architectures on a single A100 GPU. This practical consideration is meaningful for deployment.
-
-5. **Informative ablation studies.** Figure 5 shows that removing the predictive model (Neural Sequence Ensemble) causes performance collapse, and that the regularization term (Equation 6) for addressing loss of plasticity is critical — providing clear evidence that both components are essential to the algorithm's success.
+- **Realistic evaluation setup.** The MIND experiment feeds data in chronological order over 1 week and visualizes day-of-week CTR patterns; the KuaiRec experiment uses 12-hour windows over 2 months. This directly tests performance under natural, pronounced non-stationarity rather than relying solely on synthetic shifts.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None.
+
+None. The algorithm specification issues are concrete but fixable, and none invalidates the paper's core claims.
 
 ### Minor
 
-1. **Overclaimed interpretation of regret bounds in the i.i.d. limit.** The paper states (line 381) "then the regret of LinPS is zero that LinPS achieves optimal" and (line 431) "achieves 0 regret and is such optimal" when θ_t is i.i.d. or changes every step. While this conclusion *does* follow mathematically from the stated Theorem 1 bound (which becomes Regret(T) ≤ 0, hence Regret(T) = 0), the bound itself relies on information-theoretic techniques (Russo & Van Roy 2016, Liu et al. 2022) that capture the *cost of learning* but may not capture the irreducible one-step prediction error in such rapidly-changing environments. The practical claim of "optimal" is thus stronger than the bound can support. The authors should either (a) clarify that the bound captures information-theoretic regret from learning about future parameters, which is zero when there is nothing to learn, and that this does not mean the algorithm incurs zero *actual* regret, or (b) qualify "optimal" as meaning "optimal with respect to the bound's scope." This does not undermine the algorithm's empirical success or its theoretical grounding, but the presentation oversells the result.
+1. **Pseudocode/text inconsistency in action selection (Algorithm 4, line 266).** The text description (Section 4.3, step 3) clearly states: sample a single particle *m*, use the *m*-th predictive model, and pick the action maximizing that model's output. However, the pseudocode sums over *all* predictive models `i = 1 to M` while using the predicted weights and base features only from the sampled particle *m*:
+   ```
+   A_t ∈ argmax_{a ∈ A_t} Σ_{i=1}^M f^{pred}(w^{pred}_{i,t}; (ŵ_{m,t+2} ⊙ b(ψ_m; C_t, a)))
+   ```
+   This is a concrete inconsistency that prevents unambiguous re-implementation. The authors should align the pseudocode with the text description (or explain if the aggregation is intentional).
 
-2. **Missing experimental comparison with predictive sampling (Liu et al. 2023).** The paper frames NeuralPES as addressing the scalability limitations of predictive sampling — the direct predecessor that also seeks lasting information. Yet no experimental comparison is provided, even on the synthetic AR(1) setting where predictive sampling might be computationally tractable. While the paper's primary empirical contribution is demonstrating scalability (by comparing against scalable neural baselines), a direct comparison on a small-scale version would help substantiate the claim that NeuralPES retains predictive sampling's information-seeking property while scaling. As it stands, the reader must take this on faith from the theory.
+2. **Sequence model trained one-step-ahead, used two-steps-ahead without explanation.** The sequence model is trained via Eq. 6 to predict w_{m,j+1} from w_{m,j-L+1:j}. During inference (Algorithm 4, rollout), it is directly asked to produce ŵ_{m,t+2}. The parameter `x=2` is passed to `TrainSequenceNN` but never appears in the training objective (Eq. 6 always targets the immediate next step). If the model is meant to be applied recursively for two steps, this is not stated or implemented in the pseudocode. If a direct two-step prediction is intended, the training objective must match. This needs clarification.
 
-3. **Practical considerations not discussed.** The algorithm requires storing historical last-layer weights w_{m,1:t-1} for each particle (used by TrainSequenceNN and TrainPredictiveNN). This memory cost grows linearly with time and is not discussed. Additionally, several hyperparameters (M, L, τ, τ_seq, τ_pred, K, K') are introduced without sensitivity analysis, and the paper does not report wall-clock time or computational overhead relative to baselines. These are standard practical concerns that could affect deployment decisions.
+3. **Predictive model training data provenance.** The predictive model is trained using w_{m,j+2} (Eq. 8) as part of its input. The replay buffer stores (c, a, r, j) tuples. The algorithm passes historical weights w_{m,1:t-1} as a separate argument to `TrainPredictiveNN`, making this feasible via a lookup table, but the paper does not explain this mechanism. The memory cost of storing per-timestep per-particle weights (O(MK), which is modest) should be stated for completeness and reproducibility.
 
-4. **Justification for two-step-ahead prediction.** The algorithm predicts two steps ahead (θ_{t+2}) via the sequence model and trains the predictive model using w_{m,j+2}. The paper provides some intuition (Section 4.4.1: "θ_{t+2} better represents valuable information"), but a more explicit theoretical or empirical argument for two steps versus one would strengthen the presentation.
+4. **Sliding window baselines are underspecified.** The paper compares against "sliding window versions" of Neural Ensemble, Neural LinUCB, and Neural Linear but does not specify the window size used, how it was chosen, or whether it was tuned per baseline or per dataset. This is a standard experimental detail that should be provided. The current level of description makes the comparison difficult to reproduce.
+
+5. **Theory-algorithm gap.** The theoretical analysis (Section 4.4) studies LinPS, an idealized linear version with known features φ, fixed action sets, and known posterior structure. The paper acknowledges this provides "intuition and evidence" for NeuralPES and describes how each neural component approximates its LinPS counterpart (e.g., base networks ≈ posterior over φ, sequence models ≈ posterior over θ_{t+2}). However, no analysis or empirical diagnostic is given to verify that the approximation preserves the "lasting information" property. This is a common and often acceptable level of theoretical grounding in ML papers, but the paper's overall claim that "NeuralPES emphasizes the acquisition of lasting information" conflates the idealized algorithm's property with the real one's.
+
+6. **Regret vs. average reward in the synthetic experiment.** The paper reports average reward (Table 1) for the AR(1) logistic bandit but shows regret only in the spoiler figure (Figure 1). Given that the ground-truth parameters are known in this synthetic setup, including regret in the main table would be more informative and would directly connect to the theoretical analysis. This is a minor presentation choice.
 
 ### Trivial
-- None.
+
+- Line 28: "envrionment" → "environment"
+- The paper uses both `\mathrm{TrainNN}` (Algorithm 4) and `\mathrm{TrainRewardNN}` (Algorithm 2) for the same function; the naming should be consistent.
 
 ## Nice-to-Haves
 
-- A direct comparison with predictive sampling on a small-scale synthetic experiment, even if only on the AR(1) logistic setting with reduced dimensionality, would strengthen the central thesis.
-- Hyperparameter sensitivity analysis on M (ensemble size) and L (sequence length) would improve reproducibility guidance.
-- Cumulative regret curves (in addition to the running average figures) would provide a different lens on the results.
-- A brief wall-clock time comparison with baselines would help practitioners assess the computational trade-off.
+- **Comparison to the original predictive sampling algorithm (Liu et al. 2023) on the synthetic AR(1) environment.** The paper cites predictive sampling as the direct inspiration and notes it "does not scale," but a small-scale comparison on the low-dimensional (d=10, 10 actions) synthetic setup would directly test whether the neural approximation retains the benefit of the linear version. Since scalability is not a concern here, this would strengthen the empirical story.
+
+- **Inclusion of a non-neural non-stationary baseline** (e.g., SW-UCB, D-UCB, or change-point TS) on the synthetic experiment. While the paper's scope is neural methods, a single non-neural baseline on the small synthetic setup would ground the "state-of-the-art" claim more broadly.
+
+- **Empirical diagnostic for the "lasting information" property.** For example, tracking the predictive variance on actions whose value is about to change, or comparing LinPS vs. TS regret on a linear variant of the AR(1) environment — this would bridge the theoretical analysis and the neural algorithm.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviewers are flagged to be removed; treat them with caution:
 
-1. **"Misleading interpretation of the regret bound — the bound being zero does not imply the algorithm actually incurs zero regret."** Removed because this claim is mathematically incorrect: if a proven upper bound says Regret(T) ≤ 0 and regret is non-negative by definition, then Regret(T) = 0 follows. The real issue is whether the bound's scope captures all sources of regret (upgraded to Minor above as an interpretive overclaim). 
-2. **"The evaluation protocol for KuaiRec may suffer from counterfactual bias."** Removed because KuaiRec (Gao et al. 2022) is a well-known full-interaction dataset providing ratings for nearly all user-item pairs in the observed windows. The paper states "set of videos alongside with their corresponding ratings," consistent with this property. The critic's concern stems from a misunderstanding of the dataset.
-3. **"Figure 1 caption issue — spoiler figure referenced before algorithm defined."** Removed as a format/style nitpick. Teaser figures are standard practice in ML papers.
-4. **"The paper reports only average performance at the end of the experiment."** Removed as factually inaccurate. The paper provides figures showing performance over time (Figure 3a–e).
-5. **"The literature review could be more precise / missing non-stationary neural methods."** The critic acknowledges "if there are none, that is fine," making this not a genuine weakness.
-6. **Strength Finder claim about computational practicality** — kept but downgraded from standalone strength to a supporting note; it's addressed adequately in the paper.
-7. **"The theoretical novelty is limited to framing"** (from Section-by-Section). Removed as a subjective negative framing of what is a standard way of building on prior proof techniques; the corollaries are new and non-trivial.
+- The harsh critic's claim that the theoretical bounds "do not contain any explicit term that quantifies *difference* between LinPS and TS" — The paper explicitly compares bounds in prose (Lines 377–381, 408–410) and recovers the TS bound as a special case. The bounds structure (I(θ₃;θ₂|θ₁) vs. H(θ₁)) does support the qualitative claim. This is a reasonable presentation choice, not a flaw.
+
+- The critic's complaint that "average reward conflates inherent difficulty with algorithm performance" — The paper shows *both* average reward (Table 1) and regret (Figure 1) for this experiment.
+
+- The critic's framing of the state-of-the-art claim as unsupported — The paper claims to outperform "state-of-the-art **neural** contextual bandit learning algorithms" (Line 30), which is narrower than the critic implies. Comparisons against sliding-window variants of the same neural baselines are appropriate for this scope claim.
+
+- Various minor formatting critiques and "the paper should also cover Y domain" complaints that represent scope creep.
 
 ## Novel Insights
 
-The reviewers raise an interesting tension that the paper does not fully resolve. The bound says zero regret when θ_t is i.i.d., but intuitively, a learner faced with completely unpredictable parameters should still incur positive regret from guessing. The resolution — that the bound captures the *learning* component of regret but not the irreducible prediction error from a stochastic environment — is implicitly present in the information-theoretic framework (Russo & Van Roy 2016) but the paper glosses over this subtlety. This suggests a general caveat for information-theoretic regret bounds in non-stationary settings: they primarily measure the efficiency of *adaptation*, not the absolute performance ceiling.
+None beyond the paper's own contributions. The review process did not produce a genuinely novel observation that the paper itself does not articulate.
 
 ## Suggestions
 
-1. In the theoretical discussion (lines 381, 431), replace "achieves 0 regret and is such optimal" with something like: "the information-theoretic component of regret vanishes, indicating that LinPS does not waste effort on transient information." Add a sentence noting that this does not imply zero *actual* regret since the irreducible one-step prediction error is outside the bound's scope.
-2. Add a small-scale comparison against predictive sampling on the AR(1) logistic experiment, even if only for a short horizon, to empirically verify that NeuralPES retains the information-seeking behavior of its predecessor.
-3. Briefly discuss the memory cost of storing w_{m,1:t-1} and note whether this poses a practical bottleneck.
-4. Provide a brief intuitive justification for why two-step-ahead (rather than one-step) is the right choice — e.g., a small ablation or a theoretical argument that two steps is sufficient to filter transient noise in the parameter process.
+1. **Fix the action-selection pseudocode** in Algorithm 4 (line 266): either remove the summation over `i` to match the text, or if the ensemble aggregation is intentional, explain the rationale and update the text accordingly.
+
+2. **Align sequence model training with inference.** Either train with two-step targets (or recursive application) to match the inference-time use of predicting ŵ_{m,t+2}, or explain why one-step training is sufficient for two-step prediction (e.g., Markov property of the weight process).
+
+3. **Specify the sliding window sizes** used for all "Window" baselines, and state whether they were tuned separately per baseline/dataset or fixed uniformly.
+
+4. **Add a brief statement** explaining how w_{m,j+2} is obtained during predictive model training (e.g., stored in a timestamp-indexed array of historical weights) and the memory cost (O(MK)).
+
+5. **Tone down the theoretical claim** in the conclusion (line 548: "We theoretically demonstrated that the algorithm effectively prioritizes exploration for enduring information") to match the paper's own framing as "intuition and evidence" (line 325) for LinPS, which is an idealized version.
 
 ## Score and Decision
 
-The paper makes a genuine contribution: a scalable neural bandit algorithm with a principled exploration mechanism for non-stationary environments, supported by theoretical analysis and strong empirical results on real-world data. The identified weaknesses are minor — interpretive caution in the theory, a missing-but-not-fatal comparison, and some practical documentation gaps. None undermine the core contribution.
+**Originality:** Good. The combination of ensemble sampling with sequence prediction of future weights and a predictive model for gating information is genuinely novel in the neural non-stationary bandit literature.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+**Importance:** High. Scaling non-stationary bandit algorithms to neural-network-based systems is a practically important problem with clear applications in recommendation systems.
+
+**Claims:** Partially supported. The empirical claims are well-supported. The theoretical claims about "lasting information" are supported for the idealized linear version but not directly for NeuralPES.
+
+**Soundness:** Moderate. The empirical methodology is sound (20 seeds, non-overlapping CIs, temporal-order preservation, ablation studies). The algorithm specification has several inconsistencies that weaken reproducibility as written.
+
+**Clarity:** Moderate. The high-level ideas are clearly communicated, but the pseudocode inconsistencies and missing experimental details reduce clarity.
+
+**Value:** High if the algorithm specification issues are resolved. The combination of neural scalability with lasting-information exploration addresses a real gap in the literature.
+
+**Overall:** The paper proposes a well-motivated algorithm with strong empirical evidence of effectiveness on real-world non-stationary data. The main concerns are concrete fixable issues in the algorithm specification (pseudocode inconsistency, sequence model training/inference mismatch) and underspecified experimental details (window sizes). These do not undermine the core contribution but must be corrected for reproducibility.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

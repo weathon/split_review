@@ -1,0 +1,307 @@
+\title{Out-of-Distribution Detection & Applications With Ablated Learned Temperature Energy}
+
+\begin{abstract}
+As deep neural networks become adopted in high-stakes domains, it is crucial to be able to identify when inference inputs are Out-of-Distribution (OOD) so that users can be alerted of likely drops in performance and calibration \citep{ovadia2019can} despite high confidence \citep{nguyen2015deep}. Among many others, existing methods use the following two scores to do so without training on any apriori OOD examples: a learned temperature \citep{hsu2020generalized} and an energy score \citep{liu2020energy}. In this paper we introduce Ablated Learned Temperature Energy (or "{\fontfamily{qcr}\selectfont AbeT}" for short), a method which combines these prior methods in novel ways with effective modifications. Due to these contributions, {\fontfamily{qcr}\selectfont AbeT} lowers the False Positive Rate at 95\% True Positive Rate (FPR@95) by $35.39\%$ in classification (averaged across all ID and OOD datasets measured) compared to state of the art without training networks in multiple stages or requiring hyperparameters or test-time backward passes. We additionally provide empirical insights as to how our model learns to distinguish between In-Distribution (ID) and OOD samples while only being explicitly trained on ID samples via exposure to misclassified ID examples at training time. Lastly, we show the efficacy of our method in identifying predicted bounding boxes and pixels corresponding to OOD objects in object detection and semantic segmentation, respectively - with an AUROC increase of $5.15\%$ in object detection and both a decrease in FPR@95 of $41.48\%$ and an increase in AUPRC of $34.20\%$ on average in semantic segmentation compared to previous state of the art.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+In recent years, machine learning models have shown impressive performance on fixed distributions \citep{lin2017focal, ren2015faster, girshick2015fast, liu2016ssd, redmon2016you, dai2016r, radford2021learning, feichtenhofer2020x3d, devlin2018bert, dosovitskiy2020image}. However, the distribution from which examples are drawn at inference time is not always stationary or overlapping with the training distribution. In these cases where inference examples are far from the training set, not only does model performance drop, all known uncertainty estimates also become uncalibrated \citep{ovadia2019can}. Without OOD detection, users can be completely unaware of these drops in performance and calibration, and often can be fooled into false trust in model predictions due to high confidence on OOD inputs \citep{nguyen2015deep}. Thus, identifying the presence of examples which are far from the training set is of utmost importance to AI safety and reliability.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[scale = 0.3]{figures/Places365_CIFAR100_histogram.png}
+    \caption{Histograms showing the separability between OOD scores on OOD inputs (red) and ID inputs (blue) for different methods. The goal is to make these red and blue distributions as separable as possible, with OOD scores on OOD inputs (red) close to 0 and OOD scores on ID inputs (blue) of high-magnitude (away from 0). (\textbf{Center}) Our first contribution is replacing the Scalar Temperature in the Energy Score \citep{liu2020energy} with a Learned Temperature \citep{hsu2020generalized}. This infusion leads to Equation \ref{eqn:two_temperature}, with the Learned Temperature showing up in the Exponential Divisor Temperature (overlined in Equation \ref{eqn:two_temperature}) and Forefront Temperature Constant (underlined in Equation \ref{eqn:two_temperature}) forms. (\textbf{Right}) The Forefront Temperature Constant contradicts the desired property of scores being close to 0 for OOD points (red) and of high magnitude for ID points (blue). (\textbf{Left}) Therefore, our second contribution is to ablate this Forefront Temperature Constant, leading to our final Ablated Learned Temperature Energy ({\fontfamily{qcr}\selectfont AbeT}) score. This ablation increases the separability of the OOD scores vs. ID scores, as can be seen visually and numerically (in terms of AUROC) comparing the center and left plots - where the only difference is this ablation of the Forefront Temperature Constant. Higher AUROC means more separability.}
+    \label{fig:ablate}
+\end{figure*}
+
+Aimed at OOD detection, existing methods have explored (among many other methods) modifying models via a learned temperature which is dynamic depending on input \citep{hsu2020generalized} and an inference-time post-processing energy score which measures the log of the exponential sum of logits on a given input, scaled by a scalar temperature \citep{liu2020energy}. We combine these methods and provide improvements. Due to these contributions, we demonstrate the efficacy of {\fontfamily{qcr}\selectfont AbeT} over existing OOD methods. We establish state of the art performance in classification, object detection, and semantic segmentation on a suite of common OOD benchmarks spanning a variety of scales and resolutions. We also perform extensive visual and empirical investigations to understand our algorithm. Our \textbf{key results and contributions} are as follows:
+\begin{itemize}
+    \item We combine the learned temperature \citep{hsu2020generalized} and post-processing energy score \citep{liu2020energy} by simply using the learned temperature in the calculation of the energy score.
+    \item We resolve a contradiction in the energy score \citep{liu2020energy} by ablating one of the learned temperature terms. We deem this "Ablated Learned Temperature Energy" (or "{\fontfamily{qcr}\selectfont AbeT}" for short) and it serves as our ultimate OOD score.
+    \item We provide visual and empirical evidence to provide intuition as to why our method is able to achieve superior OOD detection performance without being exposed to explicit OOD inputs at training time via OOD samples resembling misclassified ID samples.
+    \item We show the efficacy of using {\fontfamily{qcr}\selectfont AbeT} in identifying predicted bounding boxes and pixels corresponding to OOD objects in object detection and semantic segmentation, respectively.
+\end{itemize}
+
+
+\section{Background}
+
+Let $X$ and $Y$ be the input and response random variables with realizations $x \in \mathbb{R}^D$ and $y \in \{1,2,...,C-1,C\}$, respectively, where $C$ is the number of output classes. Typically $X$ has some information about $Y$ and we'd like to make inferences about $Y$ given $X$ using a learned model $\hat{f}: \mathbb{R}^D \to \mathbb{R}^C$. In practice, a learner only has access to a limited amount of training examples in this data-set on which to train $\hat{f}$
+\begin{align}
+\label{eqn:dataset}
+    D^{train}_{in} = \{(x_i, y_i)\}_{i=1}^N
+\end{align}
+ which are examples drawn from $(X, Y)$ (or a subset thereof). 
+\subsection{Problem Statement}
+Let $D_{in}^{test}$ and $D_{out}^{test}$ represent the ID and OOD datasets, respectively defined similarity to the dataset definition in Equation \ref{eqn:dataset} that are unseen at training time. In our evaluations, we define $D^{test}_{out}$ as any dataset that has non-overlapping output classes with the output classes of $D^{train}_{in}$, as is standard in OOD detection evaluations \citep{huang2021importance, hsu2020generalized, liu2020energy, djurisic2022extremely, sun2021react, hendrycks2016baseline, liang2017enhancing, sun2022out, katz2022training}. The goal of Out-of-Distribution Detection is to define a score $S$ such that $S(x_{out})$ and $S(x_{in})$ are far from each other $\forall \hspace{1mm} x_{out} \in D_{out}^{test}, x_{in} \in D^{test}$. 
+
+\subsection{Standard Classification Model Optimization}
+In OOD detection, $\hat{f}$ serves a dual purpose: its outputs are directly optimized to classify among outputs $\{1,2,...,C-1,C\}$ and functions of the network are used as inputs to $G$. Though we use $\hat{f}$ for both purposes, our aim is for {\fontfamily{qcr}\selectfont AbeT} to neither have OOD data at training time nor significantly modify training to account for the ability to detect OOD data. Therefore, we train our classification models in a standard way: to minimize a risk function $$\mathcal{R} = \sum_{i=1}^N\mathcal{L}(\hat{f}(x_i; \theta), y_i)$$where $\mathcal{L}$ is a loss function and $(x_i, y_i) \in D^{train}_{in}$. In deep learning classification settings, the Cross-Entropy loss function is normally used for training: $\mathcal{L}_{CE}(\hat{f}(x_i; \theta), y_i) = -\log\hat{f}_{y_i}(x_i; \theta)$, where $\hat{f}_{y_i}(x_i; \theta)$ is the output of the model $\hat{f}$ corresponding to the ground truth class $y_i$ on input $x_i$. Our method is theoretically compatible with other loss functions, but we did not explicitly test our method in conjunction with any loss function other than Cross-Entropy.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[scale = 0.2]{figures/our_architecture_diagram.png}
+    \caption{Architecture of the forward pass of a classification network with a learned temperature.}
+    \label{fig:our_architecture}
+\end{figure}
+
+\subsection{Model Output}
+To estimate $\hat{f}_{y_i}(x_i; \theta)$, models typically use logit functions per class which calculate the activation of class $c$ on input $x_i$ as $L_c(x_i; \theta) = \hat{g}_c(x_i; \theta)$. $\hat{g}_c$ will be defined below in Section \ref{section:logit}. Often employed to increase calibration, Temperature Scaling \citep{guo2017calibration} geometrically decreases the logit function $L$ by a single scalar $T$. That is, $\hat{f}$ has a logit function that employs a scalar temperature $L_c(x_i ; \theta, T_{\mathrm{scalar}}) = \hat{g}_c(x_i; \theta) / T_{\mathrm{scalar}}$. Introduced in \citet{hsu2020generalized}, a learned temperature $T_{\mathrm{learned}} : \mathcal{X} \rightarrow (0, 1)$ is a temperature that depends on input $x_i$. That is, $\hat{f}$ has a logit function that employs a learned temperature
+\begin{align}
+    L_c(x_i ; \theta,  T_{\mathrm{learned}}) = \hat{g}_c(x_i; \theta) / T_{\mathrm{learned}}(x_i)
+    \label{equation:logit-function}
+\end{align}
+
+The softmax of this tempered logit serves as the final model prediction
+\begin{align}
+    \hat{f}_{y_i}(x_i; \theta) = \dfrac{ \exp \left(\hat{g}_{y_i}(x_i; \theta) / T_{\mathrm{learned}}(x_i) \right)} {\sum_{c=1}^C \exp \left( \hat{g}_c(x_i; \theta) / T_{\mathrm{learned}}(x_i)\right)}
+\end{align}
+which is fed into the cross entropy loss during training. In this formulation, the model has two mechanisms by which it can reduce loss: increasing confidence (via high $\hat{g}_{y_i}(x_i; \theta)$ or low $T_{\mathrm{learned}}(x_i)$) when correct or decreasing confidence via high $T_{\mathrm{learned}}(x_i)$ when incorrect.
+
+We provide a visual architecture of our forward pass in Figure \ref{fig:our_architecture}.
+
+\subsubsection{Learned Temperature Details}
+
+For all {\fontfamily{qcr}\selectfont AbeT} models, our learned temperature function is architecturally identical to that in \citet{hsu2020generalized}: a single fully connected layer which takes inputs from the penultimate layer and outputs a single scalar per input, passes these scalars through a Batch Normalization layer, then activates these scalars via a sigmoid which normalizes them to $(0, 1)$. The learned temperature is automatically trained via the gradients induced by the back-propagation of the network's optimization since the learned temperature modifies the logits used in the forwards pass of the model. In this way, it is updated like any other layer which affects the forwards pass of the network, and thus requires no tuning, training, or datasets other than the cross-entropy-based optimization using the training dataset. The only requirement to train the learned temperature is this one-line architectural change prior to training. In our experimentation, our method only worked well if this learned temperature was learned in conjunction with the rest of the layers \textit{from scratch}. Therefore, this requirement of an architectural change means our method has a limitation in that it can only be used by those who can train a new model from scratch with our one-line architectural change, which is not a requirement of OOD methods which can be used on pre-trained models \textit{post-hoc}.
+
+\subsubsection{Memory and Timing Costs Due To Learned Temperature}
+The time and memory costs due to the operations of the learned temperature are relatively light-weight in comparison to that of the forward pass of the model without the learned temperature. For example, with Places365 \citep{7968387} as the inference OOD dataset, the forward pass of our method took $0.94$ seconds while the forward pass of the baseline model (without the learned temperature) took $0.92$ seconds, a difference of less than $3\%$. As an example of insignificant additional space costs necessary for the use of our method, the baseline ResNet20 (without the learned temperature) used in our CIFAR experiments has $275572$ parameters, and our learned temperature adds a mere $64$ parameters to this. This increases memory usage by less than $1\%$.
+
+\subsubsection{Logit Function}
+\label{section:logit}
+Let $w$ and $b$ represent the weights and biases of the final layer of a classification network (mapping penultimate space to output space) respectively and $f^p(x_i)$ represent the penultimate representation of the network on input $x_i$. Normally, deep classification networks use the inner product of the $w$ and $x_i$ (plus the bias term) as the logit function
+\begin{align}
+    \label{eqn:inner_product_head}
+    \hat{g}_c(x_i; \theta) = w_c^Tf^p(x_i) + b_c
+\end{align}
+However, \citet{hsu2020generalized} found that a logit function based on the cosine similarity between $w$ and $f^p(x_i)$ was more effective when training logit functions that serve this dual-purpose of classifying among outputs $\{1,2,...,C-1,C\}$ and as an input to $G$ 
+
+\begin{align}
+    \label{eqn:cosine_head}
+    \hat{g}_c(x_i; \theta) = \dfrac{w_c^Tf^p(x_i)}{||w_c^T||||f^p(x_i)||}
+\end{align}
+We therefore use this cosine-similarity score as our logit function $\hat{g}$.
+
+
+
+\section{Our Approach}
+
+The following post-processing energy score was previously used for OOD detection in \citet{liu2020energy}:
+$\mathrm{E}(x_i; L, T_{\mathrm{scalar}}, \theta) = -T_{\mathrm{scalar}}\log\sum_{c=1}^{C}e^{L_c(x_i;\theta,T_{\mathrm{scalar}})}$
+. This energy score was intended to be highly negative on ID input and close to $0$ on OOD inputs via high logits on ID inputs and low logits on OOD inputs. 
+
+Our first contribution is replacing the scalar temperature with a learned one:  
+\begin{align}
+    &\label{eqn:two_temperature}
+    \mathrm{E}(x_i; L, T_{\mathrm{learned}}, \theta) =  \nonumber\\
+    &-\underbrace{T_{\mathrm{learned}}(x_i)}_\text{Forefront Temperature Constant}\log\sum_{c=1}^{C}e^{L_c(x_i;\theta,\overbrace{T_{\mathrm{learned}})}^\text{Exponential Divisor Temperature}}
+\end{align}
+By introducing this learned temperature, there become two ways to control the OOD score: by modifying the logits and by modifying the learned temperature. We note that there are two different operations that the learned temperature performs in terms of modifying the energy score. We deem these two operations the "Forefront Temperature Constant" and the "Exponential Divisor Temperature", which are underlined and overlined, respectively, in Equation \ref{eqn:two_temperature}. Our second contribution is noting that only the Exponential Divisor Temperature contributes to the OOD score being in adherence with this property of highly negative on ID inputs and close to $0$ on OOD inputs, while Forefront Temperature Constant counteracts that property - we therefore ablate this Forefront Temperature Constant. To see this, we note that the learned temperature is trained to be higher on inputs on which the classifier is uncertain - such as OOD and misclassified ID inputs - in order to deflate the softmax confidence on those inputs (i.e. increase softmax uncertainty); and the learned temperature is trained to be lower on inputs on which the classifier is certain - such as correctly classified ID inputs - in order to inflate the softmax confidence on those inputs  (i.e. increase softmax certainty). Thus, the temperature term being high on OOD inputs and low on ID inputs leads to the energy score being closer to $0$  on OOD inputs and more highly negative on ID inputs when used in the Exponential Divisor Term, as desired. However, the temperature term being high on OOD inputs and low on ID inputs leads to the energy score being more highly negative on OOD inputs and closer to $0$ on ID inputs when being used in the Forefront Temperature Constant, which is the opposite of what we would like. We therefore (as previously mentioned) simply ablate the Forefront Temperature Constant, leading to the following Ablated Temperature Energy score:
+\begin{align*}
+    \mathrm{{\fontfamily{qcr}\selectfont AbeT}}(x_i; L, T_{\mathrm{learned}}, \theta) = -\log\sum_{c=1}^{C}e^{L_c(x_i;\theta,T_{\mathrm{learned}})}
+\end{align*}
+We visualize the effects of this ablation in Figure \ref{fig:ablate}, using Places365 \citep{7968387} as the OOD dataset, CIFAR-100 \citep{Krizhevsky09learningmultiple} as the ID dataset, and a ResNet-20 \citep{7780459} trained with learned temperature and a cosine logit head as the model.
+
+
+
+\section{Classification Experiments}
+
+
+\label{experiments}
+In the following sections, we evaluate our OOD score and compare with recent methods on a variety of OOD benchmarks in classification. We describe our experimental setup in Section \ref{section:experimental_setup}. In Section \ref{section:experimental_performance}, we show the superior performance of {\fontfamily{qcr}\selectfont AbeT} over existing approaches.
+\subsection{Classification Experimental Setup}
+\label{section:experimental_setup}
+\subsubsection{Classification Datasets}
+\label{section:datasets}
+
+\setlength\tabcolsep{1pt}
+\begin{table*}[t]
+\centering
+\begin{tabular}{ c | c c | c c | c c} 
+  \hline
+  $D_{in}^{test}$ & \multicolumn{2}{c}{CIFAR-10} & \multicolumn{2}{c}{CIFAR-100} & \multicolumn{2}{c}{ImageNet-1k} \\
+  \hline
+  Method & FPR@95 $\downarrow$ & AUROC $\uparrow$ & FPR@95 $\downarrow$ & AUROC $\uparrow$ & FPR@95 $\downarrow$ & AUROC $\uparrow$\\
+  \hline
+   MSP & 60 $\pm$ 15 & 89 $\pm$ 3 & 82 $\pm$ 11 & 71 $\pm$ 7 & 63 $\pm$ 8 & 79 $\pm$ 5 \\
+   ODIN & 39 $\pm$ 24 & 92 $\pm$ 4 & 73 $\pm$ 31 & 75 $\pm$ 13 & 72 $\pm$ 7 & 82 $\pm$ 5 \\
+   Mahalanobis & 37 $\pm$ 35 & 86 $\pm$ 17 & 72 $\pm$ 22 & 77 $\pm$ 18 & 81 $\pm$ 19 & 62 $\pm$ 11 \\
+   Gradient Norm & 28  $\pm$ 24 & 93 $\pm$ 6 & 56 $\pm$ 38 & 81 $\pm$ 13 & 54 $\pm$ 7 & 86 $\pm$ 4 \\
+   DNN & 49 $\pm$ 11 & 83 $\pm$ 5 & 66 $\pm$ 13 & 78 $\pm$ 5 & 61 $\pm$ 6 & 82 $\pm$ 3 \\
+   GODIN & 26 $\pm$ 10 & 94 $\pm$ 2 & 47 $\pm$ 7 & 90 $\pm$ 2 & 52 $\pm$ 5  &  83 $\pm$ 4 \\
+   Energy & 39 $\pm$ 24 & 92 $\pm$ 4 & 70 $\pm$ 32 & 78 $\pm$ 12 & 71 $\pm$ 7 & 82 $\pm$ 5 \\
+   Energy + DICE  &  20 $\pm$ 1 &  95 $\pm$ 1 &  49 $\pm$ 1 &  87 $\pm$ 1 & 34* & 90* \\
+   Energy + ReAct & 39 $\pm$ 15 & 93 $\pm$ 2 & 62 $\pm$ 17 & 86 $\pm$ 6 & 31* & 92* \\
+   Energy + ASH & 20 $\pm$ 21 & 95 $\pm$ 5 & 37 $\pm$ 34 & 89 $\pm$ 12 & 16 $\pm$ 13 & 96 $\pm$ 2 \\
+   \hline
+   {\fontfamily{qcr}\selectfont AbeT}  & \textbf{12 $\pm$ 2} & \textbf{97 $\pm$ 1} & \textbf{31 $\pm$ 12} & \textbf{94 $\pm$ 1} & 40 $\pm$ 11  & 91 $\pm$ 3 \\
+   {\fontfamily{qcr}\selectfont AbeT} + ReAct  &  \textbf{12 $\pm$ 1} &  \textbf{97 $\pm$ 1} &  \textbf{26 $\pm$ 7} &  \textbf{94 $\pm$ 2} & 38 $\pm$ 11 & 92 $\pm$ 3 \\
+   {\fontfamily{qcr}\selectfont AbeT} + DICE  &  \textbf{11 $\pm$ 2} &  \textbf{97 $\pm$ 1} & \textbf{31 $\pm$ 13} &  \textbf{94 $\pm$ 2} &  30 $\pm$ 15 & 93 $\pm$ 3 \\
+   {\fontfamily{qcr}\selectfont AbeT} + ASH  & \textbf{10 $\pm$ 5} & \textbf{97 $\pm$ 1} & \textbf{30 $\pm$ 12} & \textbf{94 $\pm$ 2} &  \textbf{7 $\pm$ 3}  &  \textbf{97 $\pm$ 1} \\
+   \hline
+\end{tabular}
+
+* Results where a ResNet-50 is used as in their corresponding papers instead of ResNet-101 as in our experiments. This is due to our inability to reproduce their results with ResNet-101
+\caption{\textbf{Comparison with other competitive OOD detection methods in classification.} OOD detection results on a suite of standard datasets compared against competitive methods which are trained with ID data only and require only one stage of training. All results are averaged across 4 OOD datasets, with the standard deviations calculated across these same 4 OOD datasets. $\uparrow$ means higher is better and $\downarrow$ means lower is better.}
+\label{table:experimental_performance}
+\end{table*}
+   
+We follow standard practices in OOD evaluations \citep{huang2021importance, hsu2020generalized, liu2020energy, djurisic2022extremely, sun2021react, hendrycks2016baseline, liang2017enhancing, sun2022out, katz2022training} in terms of metrics, ID datasets, and OOD datasets. For evaluation metrics, we use AUROC and FPR@95. We measure performance at varying number of ID classes via CIFAR-10 \citep{Krizhevsky09learningmultiple}, CIFAR-100 \citep{Krizhevsky09learningmultiple}, and ImageNet-1k \citep{huang2021mos}. For our CIFAR experiments, we use 4 OOD datasets standard in OOD detection: Textures \citep{cimpoi2014describing}, SVHN \citep{37648}, LSUN (Crop) \citep{yu2015lsun}, and Places365 \citep{7968387}. For our ImageNet-1k experiments we also evaluate on four standard OOD test datasets, but subset these datasets to classes that are non-overlapping with respect to ImageNet-1k as is common practice \citep{huang2021importance, sun2022out, sun2021react, sun2021effectiveness}: iNaturalist \citep{van2018inaturalist}, SUN \citep{5539970}, Places365 \citep{7968387}, and Textures \citep{cimpoi2014describing}. 
+\subsubsection{Classification Models and Hyperparameters}
+For all experiments with CIFAR-10 and CIFAR-100 as ID data, we use a ResNet-20 \citep{7780459}. For all experiments with ImageNet-1k as ID data, we use a ResNetv2-101 \citep{he2016identity}. We also show OOD performance for DenseNet-121 \citep{huang2017densely} on ImageNet-1k in Table \ref{table:densenet_performance}. This network was trained similarly to the ResNetv2-101, to achieve a top-1 accuracy of $72.51\%$ on the ImageNet-1k test set. Our method maintains top OOD performance.
+\begin{table}
+\centering
+\begin{tabular}{ c c c c  } 
+  \hline
+  Method & FPR@95 $\downarrow$ & AUROC $\uparrow$\\
+  \hline
+   MSP \citep{hendrycks2016baseline} & 64.47 $\pm$ 10.68 & 82.11 $\pm$ 4.77 \\
+   ODIN \citep{liang2017enhancing} & 53.18 $\pm$ 11.04 & 87.04 $\pm$ 4.25 \\
+   Energy \citep{liu2020energy} & 51.29 $\pm$ 10.28 & 87.30 $\pm$ 4.10 \\
+   Mahalanobis \citep{lee2018simple} & 89.18 $\pm$ 16.94 & 46.80 $\pm$ 7.01 \\
+   Gradient Norm \citep{huang2021importance} & 41.00  $\pm$ 12.51 & 88.30 $\pm$ 4.17 \\
+   DNN \citep{sun2022out} &  68.85 $\pm$ 8.98  &  73.90 $\pm$ 9.27 \\
+   GODIN \citep{hsu2020generalized} & 53.23 $\pm$ 6.90 & 86.00 $\pm$ 2.92 \\
+   ReAct \citep{sun2021react} & 67.51 $\pm$ 7.28 & 81.30 $\pm$ 4.12 \\
+   DICE \citep{sun2021effectiveness} & 68.14 $\pm$ 6.68 & 80.98 $\pm$ 4.22 \\
+   {\fontfamily{qcr}\selectfont AbeT} (Ours) & \textbf{32.99 $\pm$ 12.54} & \textbf{92.85 $\pm$ 3.30} \\
+   \hline
+\end{tabular}
+\caption{\textbf{Comparison with other competitive OOD detection methods on large-scale datasets using an alternative architecture.} Results use ImageNet-1k \citep{Krizhevsky09learningmultiple} as the ID dataset with a DenseNet-121 \citep{huang2017densely} as the architecture. Results of our method are compared against competitive methods which are trained with ID data only and require only one stage of training. All results are averaged across 4 OOD datasets, with the standard deviations calculated across these same 4 OOD datasets. $\uparrow$ means higher is better and $\downarrow$ means lower is better.}
+\label{table:densenet_performance}
+\end{table} All models are trained from scratch. For all CIFAR experiments, we trained with a batch size of 64 and - identical to \citet{huang2021importance} - with an initial learning rate of $0.1$ which decays by a factor of $10$ at epochs $50\%, 75\%, $ and $90\%$ of total epochs. For all Imagenet experiments, we trained with a batch size of 512 with an initial learning rate of $0.1$ which decays by a factor of $10$ at epochs $20$ and $30$. For our CIFAR and ImageNet experiments we train for 200 and 40 total epochs respectively without early stopping or validation saving. For CIFAR experiments, we use Horizontal Flipping and Trivial Augment Wide \citep{muller2021trivialaugment}.
+\subsubsection{Previous Classification Approaches} \label{section:previous_approaches}
+We compare against previous methods with similar constraints, training settings, and testing settings. We note that we do not compare against other methods that are trained on OOD data \citep{pmlr-v162-ming22a, katz2022training, hendrycks2018deep} or methods that require multiple stages of training \citep{khalid2022rodd}. Principally, we compare against Maximum Softmax Probability \citep{hendrycks2016baseline}, ODIN \citep{liang2017enhancing}, GODIN \citep{hsu2020generalized}, Mahalanobis \citep{lee2018simple}, Energy Score \citep{liu2020energy}, Gradient Norm \citep{huang2021importance}, ReAct \citep{sun2021react}, DICE \citep{sun2021effectiveness}, Deep Nearest Neighbors (DNN) \citep{sun2022out}, and ASH \citep{djurisic2022extremely}. 
+\subsection{Performance On Standard OOD in Classification Suite}
+\label{section:experimental_performance}
+In Table \ref{table:experimental_performance}, we compare against the aforementioned methods outlined in Section \ref{section:previous_approaches}. All results are averaged across the four previously mentioned OOD test datasets per ID dataset outlined in Section \ref{section:datasets}, with the standard deviations calculated across these same 4 OOD datasets. All OOD methods keep accuracy within $1\%$ of their respective baseline methods without any modifications to account for OOD. Results from MSP \citep{hendrycks2016baseline}, ODIN \citep{liang2017enhancing}, Energy \citep{lee2018simple}, and Gradient Norm \citep{huang2021importance} are taken directly from \citet{huang2021importance}, as their models, datasets, and hyperparameters are identical to ours. 
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[scale = 0.35]{figures/LSUN_CIFAR10_tsne.png}
+    \caption{(\textbf{Left}) Scatter plot of OOD LSUN examples (red) and ID test CIFAR-10 examples (blue). (\textbf{Center}) ID test CIFAR-10 examples correctly classified (blue) and incorrectly classified (red). (\textbf{Right}) ID test CIFAR-10 examples colored by their {\fontfamily{qcr}\selectfont AbeT} score. Red is estimated to be more OOD. The learned temperature increasing on misclassified points leads OOD scores inflating towards 0 on misclassified points. The presence of a comparatively higher proportion of points in the center which are misclassified therefore leads to the relationship that our OOD scores inflate towards 0 as distance to the center decreases, which can be visually seen on ID points in the right plot. In combination with OOD points lying in the center (as can be seen on the left plot), this means that our OOD scores are close to 0 on OOD points - thus providing intuition (but not proof) as to why our method is able to achieve superior OOD detection performance.}
+    \label{fig:triplot}
+\end{figure*}
+
+ We note that our method achieves an average reduction in FPR@95 of $53.46\%$ on CIFAR-10, $33.72\%$ on CIFAR-100, and $20.61\%$ on ImageNet. We additionally note that not only is the mean performance of our method superior in all settings, but the standard deviation of our performance across OOD datasets is relatively low in nearly all cases, meaning our method is \textbf{consistently} performant.
+
+For results of {\fontfamily{qcr}\selectfont AbeT} without the Forefront Temperature Constant ablation, please see Table \ref{table:ablation}.
+\begin{table}
+\centering
+\begin{tabular}{ c c c c } 
+  \hline
+  $D_{in}^{test}$ & Method & FPR@95 $\downarrow$ & AUROC $\uparrow$\\
+  \hline
+   CIFAR-10 & {\fontfamily{qcr}\selectfont AbeT} & 12.51 $\pm$ 2.01 & 97.81 $\pm$ 1.43 \\
+   CIFAR-10 & {\fontfamily{qcr}\selectfont AbeT} w/o Ablation & 17.56 $\pm$ 1.69 & 96.33 $\pm$ 1.83 \\
+  \hline
+   CIFAR-100 & {\fontfamily{qcr}\selectfont AbeT} & 31.19 $\pm$ 12.37 & 94.05 $\pm$ 1.88 \\
+   CIFAR-100 & {\fontfamily{qcr}\selectfont AbeT} w/o Ablation & 76.08 $\pm$ 4.95 & 82.10 $\pm$ 2.26 \\
+  \hline
+   ImageNet-1k & {\fontfamily{qcr}\selectfont AbeT} & 43.42 $\pm$ 10.42  & 91.89 $\pm$ 1.77 \\
+   ImageNet-1k & {\fontfamily{qcr}\selectfont AbeT} w/o Ablation & 57.75 $\pm$ 15.39 & 88.58 $\pm$ 4.51 \\
+  \hline
+\end{tabular}
+\caption{\textbf{Our method with and without the ablation of the Forefront Temperature Constant.} All results are averaged across 4 OOD datasets, with the standard deviations calculated across these same 4 OOD datasets. $\uparrow$ means higher is better and $\downarrow$ means lower is better.}
+\label{table:ablation}
+\end{table}This table shows that this singular ablation contribution leads to a reduction in FPR@95 of $28.76\%$, $59.00\%$, and $24.81\%$ with CIFAR-10, CIFAR-100, and ImageNet as the ID datasets respectively (averaged across their 4 respective OOD datasets) compared to {\fontfamily{qcr}\selectfont AbeT} without the Forefront Temperature Constant ablation (i.e. if {\fontfamily{qcr}\selectfont AbeT} were to be defined as Equation \ref{eqn:two_temperature}).
+
+Some previous OOD techniques, like  ODIN \citep{liang2017enhancing} and GODIN \citep{hsu2020generalized}, improved OOD detection with input perturbations (using the normalized sign of the gradient from the prediction). We tried applying this to our method and found that this hurt performance. Specifically, we evaluated using a ResNetv2-101 on ImageNet-1k \citep{Krizhevsky09learningmultiple}. Across the four OOD datasets, average FPR@95 was $41.83$ (an increase of $4.58\%$), and AUROC was $91.34$ (a decrease of $0.5\%$) when compared to {\fontfamily{qcr}\selectfont AbeT} without any input perturbation. The perturbation magnitude hyperparameter was chosen using a grid search based off of GODIN \citep{hsu2020generalized}. 
+
+We also experimented with replacing the Cosine Logit Head (defined in Equation \ref{eqn:cosine_head}) with the standard Inner Product Head (defined in Equation \ref{eqn:inner_product_head}) and found that the Cosine Logit Head improves the AUROC of our method by $3.50\%$ and FPR@95 of our method by $58.90\%$, reaffirming the finding of \citet{hsu2020generalized} that the Cosine Logit Head is preferable over the Inner Product Head in OOD Detection.
+
+
+
+\section{Understanding {\fontfamily{qcr}
+
+\label{sec:understanding}In Section \ref{sec:understanding}, we provide intuition-building evidence to suggest that the superior OOD performance of {\fontfamily{qcr}\selectfont AbeT} despite not being exposed to explicit OOD samples at training time is due to exposure to misclassified ID examples during training.  Towards building intuition we provide visual evidence in Figure \ref{fig:triplot} based on TSNE-reduced \citep{van2008visualizing} embeddings to support the following two hypotheses:
+\begin{enumerate}
+    \item Our method learns a representation function such that the proportion of ID points near OOD points which are misclassified is higher than the proportion of misclassified ID points overall
+    \item Our OOD scores are comparatively higher (closer to 0) on misclassified ID examples
+\end{enumerate}
+These combined hypotheses suggest that the OOD score behavior learned on misclassified points applies to OOD points more than ID points overall. OOD scores are therefore close to 0 on OOD points due to the OOD points learning this inflation of OOD scores (towards 0) of the (sparse) misclassified points near them, while this inflation of OOD scores doesn't apply as much to ID points overall - as desired. This is learned without ever being exposed to OOD points at training time. 
+
+We additionally performed two experiments to support these hypotheses that do not use dimensionality reduction. For the following experiments, our embeddings are based on the penultimate representations of a ResNet-20 \citep{7780459} trained with learned temperature and a Cosine Logit on CIFAR-10 \citep{Krizhevsky09learningmultiple}:
+
+\begin{enumerate}
+    \item To empirically support that the proportion of points which are near OOD and misclassified is higher than the proportion of points which are misclassified overall, we took the single nearest neighbor in the entire ID test set for each of the OOD Places365 \citep{7968387} points in embedding space, and found that the ID accuracy on this set of OOD-proximal ID test points was $76.42\%$ compared to $91.89\%$ on all points.
+    \item To empirically support that misclassified ID test points have OOD scores closer to 0 than correctly classified ID test points, we found that the $99\%$ confidence intervals of the OOD scores on misclassified and correctly classified ID CIFAR-10 \citep{Krizhevsky09learningmultiple} are as follows, respectively: $-20.88 \pm 0.57$ and $-33.29 \pm .93$.
+\end{enumerate}
+ 
+
+
+\section{Applications in Semantic Segmentation \& Object Detection}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[scale=0.24]{figures/semseg_abet_matrix_viz_short.png}
+    \caption{Qualitative comparison of OOD scores for semantic segmentation. The top row and bottom row contain examples from the datasets RoadAnomaly \citep{lis2019roadanomaly} and LostAndFound \citep{pinggera2016laf}, respectively. Pixels corresponding to OOD objects are highlighted in red in each image in the leftmost column, which are cropped to regions where we have ID/OOD labels. Scores for each example (row) and technique (column) are thresholded at their respective 95\% True Positive Rate and then normalized $[0,1]$ in the red channel, with void pixels (which have no ID/OOD label) set to 0. Bright red pixels represent high OOD scores, which should cover the same region as the pixels which correspond to OOD objects in the leftmost column. We invert the scores of Standardized Max Logit, Max Logit, and MSP to allow these methods to highlight OOD pixels in red. }
+    \label{fig:semseg-scores-visualization-matrix}
+\end{figure*}
+
+\subsection{Semantic Segmentation}
+
+In Table \ref{table:semseg-results}, we compare against competitive OOD Detection methods in semantic segmentation that predict which pixels correspond to object classes not found in the training set (i.e. which pixels correspond to OOD objects). We report evaluation metrics over FPR@95, and AUPRC and compare against methodologies which follow similar training, inference, and dataset paradigms. For our experiments with {\fontfamily{qcr}\selectfont AbeT}, we replace the Inner Product per-pixel in the final convolutional layer with a Cosine Logit head per-pixel and a learned temperature layer per-pixel. For datasets, we use Mapillary \citep{neuhold2017mapillary} and Cityscapes \citep{cordts2016Cityscapes} as the ID datasets and LostAndFound \citep{pinggera2016laf} and RoadAnomaly \citep{lis2019roadanomaly} as the OOD datasets. All results from Standardized Max Logit (SML) \citep{jung2021standardized}, Max Logit (ML) \citep{hendrycks2022maxlogit}, and PEBAL \citep{yu2022pixel} are taken from \citet{yu2022pixel}. Mahalanobis (MHLBS) \citep{lee2018simple} results for LostAndFound and RoadAnomaly are taken from \citep{chan2021entropy} and \citep{yu2022pixel}, respectively. Additionally, we compare to entropy \citep{chan2021entropy} and Max Softmax Probability (MSP) \citep{hendrycks2016baseline}. Similar to classification, we do not compare with methods which fine-tune or train on OOD (or OOD proxy data like COCO \citep{lin2014coco}) \citep{chan2021entropy, yu2022pixel} or with methods which significantly change training \citep{mukhoti2018evaluating}. We additionally do not compare with methods which involve multiple stages of OOD score refinement by leveraging the geometric location of the scores \citep{jung2021standardized, chan2021entropy}, as these refinement processes could be performed on top of any given OOD score in semantic segmentation. We do not compare to these methods as our approach is task-agnostic, does not require any OOD data or refinement of the OOD scores, and requires minimal changes to the training and inference of existing deep learning models. Notably, our method reduces FPR@95 by $78.02\%$ on LostAndFound and increases AUPRC by $63.96\%$ on RoadAnomaly compared to competitive methods.
+
+We also present visualizations of pixel-wise OOD predictions for our method and methods against which we compare on a selection of images from OOD datasets in Figure \ref{fig:semseg-scores-visualization-matrix}.
+
+\setlength\tabcolsep{1pt}
+\begin{table*}
+\centering
+\begin{tabular}{c | c | c c | c c} 
+  \hline
+   \multicolumn{2}{c}{$D_{in}^{test}$} & \multicolumn{2}{c}{LostAndFound}  & \multicolumn{2}{c}{RoadAnomaly} \\
+  \hline
+  Method & ID Cityscapes mIOU & FPR@95 $\downarrow$ & AUPRC $\uparrow$  & FPR@95 $\downarrow$ & AUPRC $\uparrow$  \\
+  \hline  % cs moiu  FPR95            AUPRC          AUROC         |   fpr95     auprc           auroc
+   Entropy & 81.39 & 35.47         & 46.01                    & 65.26         & 16.89          \\ 
+   MSP   & 81.39  & 31.80         & 27.49                    & 56.28         & 15.24           \\
+   SML  &  81.39  & 44.48         & 25.89                    & 70.70         & 17.52           \\
+   ML    & 81.39 & 15.56         & 65.45                    & 70.48         & 18.98           \\
+   MHLBS  & 81.39 & 27            & 48                           & 81.09         & 14.37            \\
+   {\fontfamily{qcr}\selectfont AbeT} & 80.56 & \textbf{3.42} & \textbf{68.35} & \textbf{53.5} & \textbf{31.12}  \\
+   \hline
+   PEBAL & 80 & 0.81 & 78.29  & 44.58 & 45.10  \\
+   \hline
+\end{tabular}
+\caption{\textbf{Comparison with other competitive OOD detection methods in semantic segmentation.} OOD detection results on a suite of standard datasets compared against competitive methods which are trained with ID data only, only require one stage of training, and which do not perform any inference-time OOD score refinement based on geometric location. We present PEBAL \citep{yu2022pixel} which trains on OOD data to provide context as to current performance of methods which \textbf{do} have access to OOD samples at training time, rather than presenting it as a competitive method against which we directly compare. $\uparrow$ means higher is better and $\downarrow$ means lower is better.}
+
+\label{table:semseg-results}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\begin{tabular}{lllll}
+\hline
+Method      & ID AP $\uparrow$        & FPR@95 $\downarrow$         & AUROC $\uparrow$         & AUPRC $\uparrow$           \\ \hline
+Basline     & 40.2          & 91.47          & 60.65          & 88.69          \\
+VOS \citep{du2022vos}         & 40.5          & \textbf{88.67} & 60.46          & 88.49          \\
+{\fontfamily{qcr}\selectfont AbeT} (Ours) & \textbf{41.2} & 88.81         & \textbf{65.34} & \textbf{91.76}\\
+\hline
+\end{tabular}
+\centering
+\caption{\textbf{Comparison with other competitive OOD detection methods in object detection.} ID model performance and OOD performance of baseline model, state of the art OOD object detection method Virtual Outlier Synthesis \citep{du2022vos}, and our method, all of which do not have access to OOD at training time. $\uparrow$ means higher is better and $\downarrow$ means lower is better.
+}
+\label{table:object_detection_performance}
+\end{table*}
+\subsection{Object Detection}
+For evaluating {\fontfamily{qcr}\selectfont AbeT} on object detection tasks we use the PASCAL VOC dataset \citep{voc} as the ID dataset and COCO \citep{coco} as the OOD dataset. The learned temperature and Cosine Logit Head are directly attached to a FasterRCNN classification head's penultimate layer as described in the above sections. Our method is compared with a baseline FasterRCNN model and a FasterRCNN model using the state of the art VOS method proposed by \citet{du2022vos}\footnote{When computing metrics on VOS, we use the post-processing Energy Score \citep{liu2020energy} as the OOD score, as in the original paper.}. For evaluation metrics we use the ID AP and OOD metrics FPR@95, AUROC, and AUPRC. ID AP is calculate as standard object detection algorithm across all ID classes. OOD metrics are calculated by treating ID box predictions as positives and OOD box predictions as negatives. These evaluation metrics are calculated without thresholding detections based on any of the ID or OOD scores. Results can be viewed in Table \ref{table:object_detection_performance}.
+
+We note that our method shows improved performance on ID AP (via the learned temperature decreasing confidence on OOD-induced false positives), AUROC, and AUPRC with comparable performance on FPR@95. Our method provides the added benefit of being a single, lightweight modification to detectors' classification heads as opposed to significant changes to training with additional Virtual Outlier Synthesis, loss functions, and hyperparameters as in \citet{du2022vos}.
+
+
+
+\section{Conclusion}
+
+
+
+
+\nocite{langley00}
+
+
+
+
+

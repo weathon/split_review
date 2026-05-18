@@ -1,22 +1,26 @@
-Now I have a thorough understanding of the paper and all reviewer inputs. Let me construct the final consolidated review.
+Now I have a thorough understanding of the paper and can verify reviewer claims systematically. Let me construct the final review.
 
 ---
 
 ## Summary
 
-This paper presents three integrated contributions: (1) **PPIRef**, the largest non-redundant dataset of 3D protein–protein interfaces (322K structures, 46K unique interfaces), built using a new scalable deduplication algorithm **(iDist)** that is 480× faster than iAlign with 99% precision and 97% recall; (2) **PPIformer**, an SE(3)-equivariant transformer pre-trained on PPIRef via structural masked modeling; and (3) a thermodynamically motivated fine-tuning strategy using log-odds ratios of predicted amino acid probabilities to predict ΔΔG. The model is evaluated on non-leaking splits of SKEMPI v2.0 and two realistic case studies (SARS-CoV-2 antibody optimization and staphylokinase engineering), showing improved generalization over existing ML methods.
+This paper addresses generalization in ML-based protein-protein interaction (PPI) design. The authors make three contributions: (1) **PPIRef**, the largest non-redundant dataset of 3D PPI interfaces (46K unique interfaces from 322K raw PDB entries), enabled by (2) **iDist**, a fast algorithm for PPI structural deduplication (480× faster than iAlign with 99% precision/97% recall); and (3) **PPIformer**, an SE(3)-equivariant transformer pre-trained on PPIRef via masked modeling and fine-tuned for ΔΔG prediction using a log-odds-ratio formulation. The model achieves strong performance on non-leaking splits of SKEMPI v2.0 and two independent case studies (SARS-CoV-2 antibody optimization and staphylokinase engineering).
+
+---
 
 ## Strengths
 
-1. **PPIRef is the largest non-redundant PPI dataset by a substantial margin.** The dataset contains 322K PPI structures (PPIRef300K), deduplicated to 46K unique interfaces (PPIRef50K) — roughly 5× more unique interfaces than DIPS (9K) and 9× more than MaSIF-search (5K) — filling a genuine gap in available training data for PPI learning.
+1. **Largest non-redundant PPI dataset (PPIRef).** PPIRef50K contains 46K unique interfaces — roughly 5–10× more than DIPS (9K) or MaSIF-search (5K) — and demonstrably removes structural redundancy that plagued prior datasets. The 53–88% test-set leakage the authors identify in existing splits (Section 3.2) makes clear that earlier evaluations were optimistically biased. This is a substantial, independently useful resource.
 
-2. **iDist enables structural deduplication at unprecedented scale.** The paper validates iDist against the established iAlign algorithm on 1,646 PPIs (2.7M pairwise comparisons), achieving 99% precision and 97% recall while being 480× faster. This scalability is what makes the PPIRef dataset construction feasible and enables the revealing analysis of data leakage in existing benchmarks (53–88% of test examples in prior DIPS splits have near-duplicates in training data).
+2. **iDist: scalable PPI deduplication with validated accuracy.** iDist is 480× faster than the gold-standard iAlign while achieving 99% precision and 97% recall (Section 3.1). Without this efficiency gain, constructing a dataset the size of PPIRef with structural deduplication would be infeasible for academic groups. This is a well-engineered contribution in its own right.
 
-3. **On non-leaking SKEMPI splits, PPIformer substantially outperforms existing ML methods.** On five held-out PPIs (Table 1), PPIformer achieves Spearman correlation 0.44 ± 0.03 vs. GEMME (0.38, +16%) and RDE-Network (0.24, +83%). The non-leaking split design directly addresses the data leakage problem the paper identifies, making this a more realistic estimate of generalization than prior evaluations.
+3. **Log-odds-ratio fine-tuning with inherent antisymmetry.** Unlike prior ML methods that require two forward passes to enforce ΔΔG(wt→mut) = −ΔΔG(mut→wt) (e.g., RDE-Network), PPIformer's log-odds-ratio prediction satisfies this property by construction (Equation 4). This is a clean, principled design choice regardless of how strongly one interprets the thermodynamic motivation.
 
-4. **Thermodynamically principled fine-tuning via log-odds ratio.** The formulation (Equation 5) derives ΔΔG prediction directly from the pre-training cross-entropy loss, enforcing antisymmetry (ΔΔG_wt→mut = −ΔΔG_mut→wt) by construction without requiring two forward passes. This is a clean and principled adaptation of the pre-training objective.
+4. **Solid empirical results on non-leaking evaluations.** On five held-out PPIs from SKEMPI v2.0 with verified structural non-redundancy, PPIformer outperforms all ML baselines in 6 of 7 metrics (Spearman 0.44 vs. next-best GEMME 0.38, RDE-Network 0.24). The staphylokinase case study (Table 4) is notably strong: P@10% = 87.5% vs. next-best 62.5%.
 
-5. **Practical utility demonstrated in realistic design scenarios.** In the SARS-CoV-2 antibody case study, PPIformer ranks a favorable mutation at rank 0.20% (P@1=100%); in the staphylokinase case, it ranks two strongly favorable mutations at top-1 and top-2 positions (P@1=100%, P@5%=75%, P@10%=87.5%). Both cases show superiority over baselines in ranking quality.
+5. **Coarse-grained representation with deliberate design rationale.** The choice of Cα positions and virtual Cβ directions (ignoring side-chain rotamers) is explicitly motivated by interface flexibility (Section 4.1). This avoids overfitting to static crystal-structure conformations and suits the mutation-prediction task.
+
+---
 
 ## Weaknesses
 
@@ -24,56 +28,78 @@ This paper presents three integrated contributions: (1) **PPIRef**, the largest 
 None.
 
 ### Major
-
-1. **No ablation isolating the effect of pre-training (structural gap).** The paper's central claim is that self-supervised pre-training on PPIRef improves downstream ΔΔG prediction. However, no experiment compares the full pipeline to an otherwise identical model trained *from scratch* on the SKEMPI fine-tuning data alone. Without this control, the reported gains could be attributed to the PPIformer architecture, the coarse-grained representation, or the thermodynamic fine-tuning loss — not necessarily to pre-training. Since the pre-training claim is a highlighted contribution, this omission weakens the evidence for it. This is fixable and does not invalidate the full pipeline's performance, but it prevents the paper from supporting a key advertised benefit.
+None.
 
 ### Minor
 
-2. **Baseline comparison protocol is insufficiently specified for the SKEMPI evaluation.** Table 1 does not state whether the baseline methods (particularly RDE-Network, which requires supervised fine-tuning on SKEMPI) were retrained on the same non-leaking split used for PPIformer. For zero-shot methods (GEMME, MSA Transformer, ESM-IF), the comparison is naturally fair since they do not require training data. However, for RDE-Network, if its numbers are taken from prior work using a different (potentially leaking) split, the comparison is not controlled. The gap is large (0.44 vs 0.24 Spearman), so the conclusion is unlikely to reverse, but the paper should clarify this explicitly. The SARS-CoV-2 case study caption transparently states baseline values are reproduced from prior work, but the main SKEMPI evaluation lacks a similar statement.
+1. **Miscalculated headline improvement.** Line 90 claims "a 183% relative improvement... compared to... RDE-Network, as measured by Spearman correlation." The correct calculation is (0.44 − 0.24) / 0.24 ≈ 83%. This is a 100-percentage-point overstatement of a headline number. While the method still outperforms RDE-Network, this error inflates the reported gain and should be corrected.
 
-3. **Test set is small and per-PPI variance is not reported.** The main SKEMPI evaluation averages over only 5 held-out PPIs. Standard deviations across random seeds are reported for PPIformer, but not the variation *across individual PPIs*. A single PPI with many mutations could dominate the aggregate. Per-PPI Spearman correlations (with error bars) would substantially strengthen the evaluation and reveal whether improvements are consistent or driven by a single favorable case.
+2. **Baseline retraining protocol not stated in main text.** The paper defers baseline training details to the appendix (Section 3, referenced as `\Cref{sec:baselines}`). Whether RDE-Network, GEMME, ESM-IF, and MSA Transformer were retrained on the same non-leaking training folds (or, for methods that cannot be retrained, evaluated in a way that accounts for data distribution shift) is a central methodological question. The main text should state this explicitly. The appendix almost certainly addresses it, but the omission from the main text makes the evaluation harder to assess at a glance. *(Note: this is a presentation concern, not a fatal flaw — see Removed Points for the related but overblown criticism.)*
 
-4. **iDist threshold and deduplication procedure are underspecified.** The paper states the iDist threshold is "estimated to approximate iAlign" but does not provide the exact threshold value or detail the calibration procedure. The number of clusters formed during PPIRef deduplication is also not reported — only the final count (322K → 46K). These details are needed for reproducibility.
+3. **No limitations section.** The paper closes with a conclusion but includes no discussion of its own limitations. Important points to acknowledge include: (a) flex ddG still achieves higher correlation (0.55) than any ML method (Table 2); (b) the iDist recall of 97% means a small fraction of near-duplicates may persist between train and test; (c) the SARS-CoV-2 case study results are mixed — PPIformer detects 2/5 favorable mutations in the top-10% vs. 3/5 for some baselines. Adding a limitations paragraph would strengthen the paper's scientific rigor.
 
-5. **No statistical significance tests for any comparison.** The paper claims superiority over baselines but reports no significance tests (e.g., bootstrap, Wilcoxon) for the Spearman correlation or other metrics. Given the small test set (5 PPIs), this would help assess whether the observed differences are reliable.
+4. **Thermodynamic motivation is heuristic, not a derivation.** Equations 2–4 connect ΔΔG to log-probability ratios via the decomposition ΔΔG = RT(log K_wt − log K_mut). The paper then proposes to estimate log K_wt as Σ log p(ĉ_i = c_i | c_{\M}) and similarly for the mutant. While this is a plausible heuristic (and the log-odds ratio is a standard zero-shot scoring method in protein language modeling), equating masked-model probabilities to equilibrium constants is not thermodynamically justified — the derivation assumes a direct correspondence without argument. The paper hedges somewhat ("we reason that during pre-training PPIformer learns the correlates of ΔG values," line 163) but the abstract and introduction frame this as "thermodynamically motivated" more strongly than the derivation supports. This does not invalidate the method (it works empirically), but the framing should be dialed back to avoid overclaiming.
+
+5. **Residual leakage risk from 97% iDist recall.** The paper reports 97% recall for iDist against iAlign, meaning ~3% of near-duplicates may go undetected. The authors do not quantify the minimum iDist distance between the five test PPIs and any training PPI, nor discuss whether any test PPI could be a near-duplicate below the threshold. Given that the paper's central evaluation claim rests on non-leaking splits, a brief empirical check would be reassuring. This is a minor oversight.
 
 ### Trivial
 
-6. **Abstract framing could be misinterpreted.** The abstract states "outperforming other state-of-the-art methods on new, non-leaking splits," but the force-field method flex ddG outperforms PPIformer on all metrics (Spearman 0.55 vs 0.44). The body correctly clarifies this refers to ML methods and acknowledges flex ddG's superiority, but a reader skimming the abstract could over-interpret the claim.
+- None that survive filtering. Minor labeling conventions and presentation details are parser artifacts, not author errors.
 
-7. **Virtual β-carbon choice is stated but not empirically justified.** The paper uses virtual Cβ directions instead of real Cβ coordinates for flexibility, but provides no ablation or analysis supporting this design choice over alternatives.
+---
 
 ## Nice-to-Haves
 
-- An ablation removing label smoothing and/or inverse-frequency weighting from the pre-training loss to show whether these regularizations contribute to downstream performance.
-- Per-PPI breakdown of results for the 5 test PPIs, showing consistent trends.
-- Reporting PPIformer's own inference/training time (beyond noting flex ddG is 5 orders of magnitude slower) to help readers judge practical applicability.
-- Additional dataset statistics for PPIRef (e.g., number of unique PDB entries, interface size distribution, protein family diversity).
+- **Ablation of pre-training data size.** An experiment showing performance with, e.g., 25%, 50%, and 100% of PPIRef (or without pre-training at all) would strengthen the claim that larger non-redundant data drives improvement.
+- **Sensitivity of iDist threshold.** Showing how downstream ΔΔG prediction performance varies with stricter/looser deduplication thresholds would inform how much redundancy actually hurts generalization.
+- **Full baseline retraining details in main text.** A one-sentence statement in Section 5.1 clarifying the retraining protocol would preempt the central objection without requiring readers to consult the appendix.
+
+---
 
 ## Removed Points
 
-These points are flagged to be removed per the rules; treat them with caution.
+These points were flagged for removal with justification:
 
-- **"The paper does not report how many near-duplicates were identified within PPIRef during deduplication"** — The paper *does* report this: PPIRef300K (322K) deduplicated to PPIRef50K (46K). The size reduction (from 322K to 46K) is explicitly stated. Removed as factually incorrect.
-- **"Precision and recall can be misleading"** — The paper already acknowledges this: "we emphasize that these metrics can be misleading when selecting a model for a practical application" (line 180). Removed as already addressed by the paper.
-- **"Exact split sizes not in main text"** — Per rule: remove weaknesses about missing appendix content, as the parser strips appendix sections.
-- **"Missing related works"** — Per rule: do not mention missing related works without external sources to confirm their existence.
-- **"Missing hyperparameters in main text (batch size, learning rate, etc.)"** — Per rule: remove nitpicks about reproducibility details that are standard to place in appendix.
+1. **"Evaluation fairness — baselines might not have been retrained."** While the methodological concern is legitimate, the reviewer's framing that "Without explicit confirmation... the central claims... are unverifiable" is an overstatement that ignores the appendix (Section 3, referenced in the paper as `\Cref{sec:baselines}`). The paper defers baseline details to the appendix, which the parser strips. The concern is kept in Minor (point 2 above) but at reduced severity. The "fatal collapse" framing is removed as disproportionate.
+
+2. **"SARS-CoV-2 results are less one-sided than claimed."** The paper already acknowledges this honestly: "Our model detects 2 out of 5 annotated mutations... The best among the other methods detect 3 out of 5 mutations. However... PPIformer achieves superior performance when considering the ranks of all 5 mutations collectively." The paper does not claim superiority on every metric. This criticism misreads what the paper actually states.
+
+3. **"Table label `\label{fig:skempi_test}` despite being a table."** This is a LaTeX naming convention issue — pure formatting. Removed per instructions.
+
+4. **"The 183% claim is miscomputed."** Kept in Minor — it is a real numerical error, not a formatting issue.
+
+5. **Missing appendix content / missing related works.** Removed per instructions (parser strips appendix; we cannot confirm missing references).
+
+---
 
 ## Novel Insights
 
-A genuinely novel observation from synthesizing the reviews is that the paper's evaluation strategy — constructing a non-leaking split and independently verifying that prior splits have 53–88% leakage — creates a tension in the baseline comparison. The very claim that prior splits leak makes it *harder* for PPIformer to outperform baselines whose numbers were obtained on those easier (leaking) splits, because the leaking splits inflate their apparent performance. This means PPIformer's superiority is likely *understated* rather than overstated, a point the paper does not explicitly leverage. Conversely, the lack of a from-scratch ablation means we cannot separate how much of PPIformer's success comes from pre-training vs. the architecture and fine-tuning loss. The paper would be strengthened by explicitly addressing this asymmetry.
+Beyond the paper's own contributions, the most notable meta-insight is the quantification of data leakage in existing PPI splits: 53–88% of test examples have near-duplicates in training (Section 3.2). This finding, corroborated by the companion paper (Bushuiev et al., 2024), suggests that many published performance numbers in the PPI mutational prediction literature are optimistically biased, and that the gap between ML methods and physics-based simulators (flex ddG) may be smaller than previously believed when leakage is controlled for. The paper's own results (ML still lagging flex ddG on non-leaking splits) reinforce this sobering picture.
+
+---
 
 ## Suggestions
 
-1. **Add a from-scratch baseline**: Train PPIformer on the SKEMPI fine-tuning data alone (no PPIRef pre-training), keeping architecture and loss identical. If the pre-trained version outperforms it, the pre-training contribution is confirmed.
-2. **Clarify baseline evaluation protocol**: Explicitly state whether each baseline was retrained on the same non-leaking split or whether numbers are transferred from prior work. If transferred, note the expected bias direction.
-3. **Report per-PPI results**: Provide a table or figure showing Spearman correlation (with seed-based error bars) for each of the 5 held-out PPIs individually, so readers can assess consistency.
-4. **Release the exact iDist threshold**: Document the calibrated threshold value that approximates iAlign, and report deduplication statistics (number of clusters, cluster size distribution) for PPIRef.
+1. **Correct the 183% → ~83% relative improvement.** This is a clear factual error in a headline number.
+2. **Add a limitations paragraph** acknowledging (a) flex ddG outperforms ML methods on the non-leaking split, (b) iDist's 97% recall implies residual leakage risk, and (c) the SARS-CoV-2 results are mixed on the top-10% criterion.
+3. **Move baseline retraining confirmation to the main text.** One sentence stating that all baselines were retrained on the same folds (or explaining the protocol for methods that cannot be retrained) would strengthen the evaluation.
+4. **Dial back the thermodynamic framing.** Present the log-odds-ratio as a practical heuristic that naturally enforces antisymmetry, rather than a thermodynamically derived estimator. The method's empirical performance stands on its own without this framing.
+
+---
 
 ## Score and Decision
 
-The paper makes three genuine contributions (PPIRef dataset, iDist algorithm, PPIformer with thermodynamically motivated fine-tuning) and presents convincing evidence that the full pipeline outperforms existing ML methods on non-leaking splits. The main weakness — absence of a from-scratch ablation for the pre-training claim — is a real gap but does not invalidate the pipeline's demonstrated performance; the dataset and iDist contributions stand independently. The baseline comparison concern is mitigated by the large performance margins and the fact that most ML baselines are zero-shot methods unaffected by training split differences. These issues are addressable in a revision.
+**Originality:** 7/10 — iDist and PPIRef are genuinely useful resources; the PPIformer architecture adapts Equiformer with masked modeling to the PPI domain, which is novel in application though architecturally straightforward.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+**Importance of research question:** 9/10 — Reliable PPI design is a central challenge in protein engineering and therapeutic development. The focus on generalization and non-leaking evaluation addresses a real and recognized problem.
+
+**Claims supported:** 6.5/10 — The core empirical claims are broadly supported, but the miscalculated headline number (183% vs. 83%) and the absence of a limitations section weaken the presentation. The thermodynamic framing overclaims slightly.
+
+**Soundness of experiments:** 7.5/10 — The non-leaking evaluation is carefully constructed. The case studies are appropriate. The baseline retraining protocol should be explicit in the main text, but is likely detailed in the appendix.
+
+**Clarity of writing:** 7/10 — Generally clear and well-structured. The main weakness is the lack of a limitations section and the overconfident thermodynamic framing.
+
+**Value to community:** 8/10 — PPIRef and iDist are immediately useful resources. The non-leaking evaluation protocol sets a higher standard for future work.
+
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

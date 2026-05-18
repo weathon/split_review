@@ -1,20 +1,18 @@
-Now I have carefully verified all claims against the paper. Let me synthesize the final review.
-
-## Final Review
+Now I have all the information I need. Let me compose the final consolidated review.
 
 ## Summary
-This paper introduces Scrubbed Conditional VAEs (SC-VAE), a framework for disentangling nuisance variables (speed, heading direction, animal identity) from 3D animal pose sequences. The key innovation is replacing neural-network-based adversarial discriminators with analytically computed "scrubbers" — linear (MALS), polynomial (MAQS/MACS), quadratic discriminant (QD), and kernel-density mutual information (MI) estimators — whose sufficient statistics are maintained via exponential moving averages. The method is evaluated on disentanglement metrics, motion synthesis, behavioral clustering, and disease detection in a mouse model of Parkinson's disease, with the PD application providing the most compelling evidence of practical value.
+
+This paper presents SC-VAE (Scrubbed Conditional Variational Autoencoder), a framework for disentangling nuisance variables (speed, heading direction, animal identity) from 3D animal pose dynamics. The core technical contribution is replacing adversarial neural-network-based disentanglement with parametric "scrubbers" (linear least-squares, quadratic, quadratic discriminant, and mutual information estimators) that use adaptive exponential moving averages of sufficient statistics, avoiding the training difficulties of adversarial methods. The paper demonstrates that SC-VAE variants reduce decodability of nuisance variables from latent representations, improve conditional motion synthesis consistency, reduce over-segmentation in behavioral clustering, and enhance detection of Parkinsonian behavioral phenotypes in a mouse model.
 
 ## Strengths
-- **Novel and practical EMA-based scrubber methodology**: The idea of replacing adversarial neural networks with analytically computed scrubbers using exponential moving averages of sufficient statistics (Eqns 4-6) is clever and practically valuable. The self-tuning EMA mechanism (Section 3.5) addresses a real difficulty in adversarial training. This directly supports the paper's core methodological contribution.
 
-- **Effective disentanglement of heading direction validated against a rotationally-preprocessed gold standard**: SC-VAE-MALS achieves linear invariance matching rotationally preprocessed data, and SC-VAE-MAQS/MI reach nonlinear decodability equal to the fully preprocessed optimum (Section 4.2, Fig. 2a). This is a clean validation because the "ground truth" optimal representation (VAE Processed) is known, providing an unambiguous upper bound.
+- **Achieves targeted disentanglement beyond standard C-VAE**: The paper shows convincingly that conditional VAEs alone are insufficient for disentanglement (e.g., heading remains linearly decodable from C-VAE latents in Figure 2). SC-VAE variants significantly reduce both linear and nonlinear decodability of heading, speed, and animal identity, as quantified by R² decreases and classification accuracy drops. The heading disentanglement results approach the rotationally-preprocessed oracle baseline (VAE Processed).
 
-- **Enhanced disease detection in a Parkinsonian mouse model provides strong biological validation**: Scrubbing animal identity with SC-VAE-QD increases the effect size between healthy and PD sessions, improves healthy-vs-disease classification accuracy, and strengthens the correlation between behavioral change and dopamine denervation extent (Section 4.5, Table 2). The "Reverse Control" (scrubbing disease label) further supports the specificity of the effect. This experiment demonstrates real biological utility beyond synthetic metrics.
+- **Improves conditional motion synthesis fidelity**: SC-VAE scrubbers boost the consistency of generated sequences when conditioned on random heading or speed. SC-VAE-ND achieves R²=0.93 for heading and SC-VAE-MI achieves 0.40 for speed (Table 1), substantially outperforming vanilla C-VAE (0.48 and 0.05 respectively). This demonstrates that scrubbing residual information actually strengthens the conditional generation capability.
 
-- **Nuanced treatment of disentanglement strength**: The paper demonstrates that different nuisances require different levels of disentanglement — heading admits complete removal, while speed requires weaker scrubbing to preserve behavioral semantics (Section 4.4, Fig. 3). This insight goes beyond the typical "fully invariant" approach and is a genuine strength of the empirical analysis.
+- **Enhances detection of Parkinsonian behavioral phenotypes**: Scrubbing animal identity with SC-VAE-QD increases effect size (d=1.52) and healthy-vs-disease classification accuracy (82%) relative to C-VAE (1.38, 77%), while also strengthening correlation of behavioral change with dopamine denervation extent (r=0.67, Table 2). The reverse control (scrubbing disease label) confirms improvements are not artifacts. This is a compelling real-world application.
 
-- **Improved conditional motion synthesis**: All scrubbed models improve the $R^2$ between conditioned inputs and generated sequence properties compared to a vanilla C-VAE (Table 1), showing that disentanglement does not harm — and can improve — generative fidelity.
+- **Introduces hyperparameter-free parametric scrubbers as an alternative to adversarial neural networks**: The adaptive EMA-based MALS, MAQS, and QD scrubbers avoid the architecture and hyperparameter tuning difficulties of gradient reversal and neural discriminator approaches. The paper provides evidence (Figure 2) that SC-VAE-GR and SC-VAE-ND are less reliable in producing representations that are even linearly invariant to nuisance variables, whereas the parametric scrubbers achieve more consistent disentanglement.
 
 ## Weaknesses
 
@@ -22,48 +20,56 @@ This paper introduces Scrubbed Conditional VAEs (SC-VAE), a framework for disent
 None.
 
 ### Major
-- **Fairness of comparison to adversarial baselines is not fully established**: The paper frames neural-network-based adversaries (SC-VAE-GR, SC-VAE-ND) as unreliable and hard to tune (Sections 1, 3.4, 5), and uses their relatively poor performance as partial motivation for the EMA methods. However, no evidence is provided of systematic hyperparameter search (learning rates, architectures, training schedules) for these baselines. The paper acknowledges they "can work if one carefully tunes separate learning rates" (line 91) but does not document the tuning effort. The EMA methods, by contrast, benefit from dedicated algorithmic design (self-tuning filters, closed-form solutions). Without evidence of symmetric tuning effort, the claimed superiority of EMA scrubbers over neural adversarial methods is suggestive but not conclusive. The paper's core contribution (EMA scrubbers) stands independently, but the comparative claims should be softened or better supported.
+
+- **Core quantitative results lack error bars or statistical assessment**: Figure 2 (decodability R² and classification accuracy) and Table 1 (motion synthesis R²) present only single-point estimates without confidence intervals, standard errors, or significance tests. The PD analysis in Table 2 correctly includes mean ± SEM, making its absence in the other figures conspicuous. This is a structural concern because the paper's central claim—that SC-VAE parametric scrubbers are *more reliable* than adversarial alternatives—depends on stable, reproducible comparisons. Without measures of variability (across random seeds, training runs, or cross-validation folds), the reader cannot distinguish systematic advantage from lucky initialization. Adding error bars would substantially strengthen the paper's claims.
+
+- **Disentanglement experiments use data from only n=3 animals**: The main evaluations of heading, speed, and identity scrubbing (Section 4.2, Figures 2–3) draw from 3 mice (324k frames each). Although the frame count is large, the frames are not independent—they come from three individuals. The paper's own PD dataset (n=36) and analysis demonstrate that individual differences matter, so the generalizability of the disentanglement results beyond these three animals is unclear. Per-animal breakdowns or validation on additional subjects from the PD dataset would address this concern.
 
 ### Minor
-- **The "hyperparameter-free" claim (Section 5, line 181) is overstated**: The MALS scrubber has an L2 regularization constant β (Equation 4, line 101), and the self-tuning EMA mechanism uses "a small, fixed difference" between parallel smoothing factors (line 107) — both are hyperparameters. The method genuinely has far fewer hyperparameters than neural-network adversaries (no architecture choices, no separate learning rates), which is a genuine advantage. But claiming it is strictly "hyperparameter-free" is imprecise and invites deserved skepticism. The paper would be stronger by saying "effectively hyperparameter-free" or "requiring minimal hyperparameter tuning."
 
-- **Disease analysis (Section 4.5, Table 2) lacks uncertainty quantification for some key metrics**: Classification accuracy and Pearson r are reported without confidence intervals, standard errors, or p-values. With 36 mice, the accuracy values could benefit from bootstrap-resampled confidence intervals. The correlation magnitudes (r = 0.29–0.38 across models) are similar, and the claim that SC-VAE-QD "strengthened the correlation" is not assessed for statistical significance. The effect size (d) does include SEM, which is good, but the other metrics need similar treatment. The "Reverse Control" results should be reported with comparable numerical values alongside the other models for direct comparison.
+- **Missing scrubber variants from the PD analysis**: Table 2 reports results for VAE, C-VAE, SC-VAE-GR, SC-VAE-QD, and Reverse Control but omits SC-VAE-MALS, SC-VAE-MAQS, SC-VAE-MI, and SC-VAE-ND without explanation. If these variants were tested, the results should be shown; if not, the paper should explain their exclusion given they are central to the method's taxonomy.
 
-- **The clustering evaluation (Section 4.4) demonstrates nuisance removal but does not directly validate that the resulting clusters correspond to semantically meaningful behaviors**: The walking clusters are identified from a vanilla VAE and defined by their speed/heading distributions. The evaluation shows that scrubbing collapses these clusters — which measures nuisance removal (already shown by decodability). The stronger claim that scrubbing reveals "typical coarse behavioral labels (e.g., walking, rearing, grooming)" (line 159) is asserted but not directly validated with ground-truth annotations. This does not undermine the paper's main contribution, but a small set of human-annotated labels would strengthen the behavioral interpretability claim.
+- **Clustering analysis has a mild circularity**: Section 4.4 identifies "walking clusters" using a separate vanilla VAE to define reference labels. Since the vanilla VAE representations may themselves be contaminated by nuisance variables, the reference clusters are not ground-truth behavioral labels. The analysis remains informative (it shows that scrubbing merges clusters that were split by nuisance variation), but the interpretation that these merged clusters correspond to "true" walking behaviors should be tempered.
 
-- **SC-VAE-MAQS not affecting speed disentanglement is acknowledged but unexplained**: The paper notes that MAQS "did not affect speed disentanglement" (line 142) without speculation on why — e.g., whether speed has strong nonlinear interactions with pose not captured by quadratic features, or whether the polynomial augmentation requires a different λ. A brief discussion would improve scientific completeness.
+- **No systematic guidance for choosing among scrubber variants**: The paper finds empirically that for heading (independent of behavior), MI scrubbing works best; for speed (partially dependent), MALS is preferable to avoid destroying behavioral clustering; for identity, QD works. This is useful but the paper does not distill a diagnostic procedure or rule of thumb for a practitioner encountering a new dataset and nuisance variable. The conclusion acknowledges this, but it remains a practical limitation.
 
 ### Trivial
-- **Notation clarity**: $I_f$ is defined in Equation 2 (line 65) as a max over ψ, then used as $L_{\mathrm{scrub}}(\phi)$ (line 68). After maximization it is a constant w.r.t. ψ but still a function of φ, which is clear in context but could be stated explicitly.
-
-- **Session pairing**: The PD dataset (36 mice, before and after lesion) should state explicitly whether sessions from the same animal are kept paired during evaluation (e.g., leave-one-animal-out for the k-NN classifier).
+None.
 
 ## Nice-to-Haves
-- A β-VAE baseline (without explicit conditioning) would contextualize the benefit of using explicit nuisance variables, though this is not essential given the paper's focus on supervised disentanglement.
-- A sweep of λ (the scrubber weight) for a single nuisance (e.g., speed), plotting decodability vs. a behavioral metric, would concretely illustrate the controllable disentanglement the paper claims as an advantage.
-- Bootstrapped confidence intervals or permutation tests for the classification accuracy and correlation in Table 2.
-- Human-annotated behavior labels (even a few hundred frames) to ground-truth the claim that scrubbing produces semantically coherent clusters.
+
+- A sensitivity analysis for the "self-tuning" smoothing factor in the EMA-based scrubbers, showing that the adaptive scheme actually reduces sensitivity to the fixed difference parameter.
+- Qualitative examples (e.g., videos or pose sequences) of generated motions conditioned on different nuisance variable values, to give a concrete sense of what "consistent motion synthesis" means.
+- Reporting the latent dimension D used for each model and a brief robustness check showing results are not sensitive to its choice.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution:
-- **Missing appendix content (self-tuning EMA details, architecture specs)**: Removed per hard rules — the parser strips appendix sections from all papers; they exist in the original submission.
-- **"β is never discussed"**: The paper explicitly states β is the L2-regularization constant (line 101), though the chosen value is not given. The critic's claim of "never discussed" is inaccurate.
-- **"C-VAE heading R² is 0.17 — surprisingly low"**: This is consistent with the paper's own claim that C-VAE does not fully exploit conditioning, and actually supports the paper's motivation for needing stronger disentanglement.
-- **"MAQS shows higher linear decodability than C-VAE for speed"**: The paper states MAQS "did not affect speed disentanglement" (line 142). The critic's claim of *higher* decodability is not verifiable from the text and may misread Figure 2b, which is not visible in the text.
-- **Missing related work on β-VAE**: Removed per hard rules — do not mention missing related works.
+
+- **R² metric misinterpretation (critic: "could it reflect trivial collapse"):** Removed because higher R² in this setup corresponds to better conditioning (the generated sequence's speed/heading matches the conditioned input). Trivial collapse (ignoring the input) would produce low R², not high. The criticism reflects a misunderstanding of the metric.
+- **Latent dimension D not reported:** Removed because the paper references Appendix C.1 for model architecture details, which the parser strips. This information exists in the original submission.
+- **Self-tuning smoothing factor sensitivity analysis:** Downgraded to Nice-to-Have. The paper describes the adaptive scheme and references Appendix A.2 for details. Requesting a new sensitivity analysis is a wishlist item, not a core flaw.
+- **Strength claim about "principled guidance":** Removed because it conflicts with the verified weakness that no systematic diagnostic procedure is provided. The weaker, accurate formulation ("demonstrates empirically that scrubbing level depends on variable-behavior dependence") is retained in Strengths.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews identify evidential gaps (asymmetric tuning, missing error bars) but do not reveal structural problems or unforeseen implications not already discussed by the authors.
+
+The reviews surface one genuinely novel insight beyond the paper's own contributions: the finding that the *degree* of scrubbing nonlinearity needs to be matched to the dependency structure between the nuisance variable and the behavioral semantics creates a design principle that could extend beyond animal pose analysis. Specifically, variables approximately independent of behavior (heading direction, camera angle, illumination) admit aggressive nonlinear scrubbing (MI), while variables with inherent behavioral entanglement (speed, vigor) require constrained scrubbing (linear/polynomial) to preserve semantic structure. This insight—that perfect invariance is not always desirable—challenges the default assumption in adversarial disentanglement that more scrubbing is always better, and could inform disentanglement practice in other domains (e.g., removing confounders from medical images where some confounders carry legitimate clinical signal).
 
 ## Suggestions
-- Document the hyperparameter search attempted for SC-VAE-GR and SC-VAE-ND (learning rate ranges, architectures tried, compute budget) or soften the comparative claims to "in our experience" rather than presenting failure as an inherent property of the methods.
-- Add confidence intervals (bootstrap) for the classification accuracy and Pearson r in Table 2; report the "Reverse Control" with comparable numerical values.
-- Qualify the "hyperparameter-free" claim (Section 5) to "effectively hyperparameter-free" or "requiring minimal hyperparameter tuning" and explicitly list the residual parameters (β, EMA delta) and their chosen values.
-- Add a brief speculation for why SC-VAE-MAQS did not affect speed disentanglement (e.g., nonlinear interactions beyond quadratic, or an interaction with the choice of λ).
-- Include a small human-annotated validation set for the clustering analysis to strengthen the behavioral interpretability claims.
+
+1. **Add error bars or confidence intervals** to all key quantitative results (Figures 2, 3; Table 1). At minimum, report results across 3–5 random seeds or training runs. This directly addresses the paper's own emphasis on *reliability* as a distinguishing feature of the proposed method.
+2. **Report per-animal variability** for the n=3 disentanglement experiments, or validate on additional animals from the PD dataset (which already has n=36). A scatterplot showing individual animal decodability would help assess generalizability.
+3. **Include all scrubber variants in the PD analysis** (Table 2) or explicitly justify why MALS, MAQS, MI, and ND were excluded. Even a brief statement ("MALS/MAQS/MI were not designed for categorical variables") would suffice.
+4. **Add a brief diagnostic guideline** for practitioners: even a rule of thumb (e.g., "if the variable is approximately independent of action semantics, start with MI; if partially dependent, start with linear scrubbing; if categorical, start with QD") would significantly increase the paper's utility.
 
 ## Score and Decision
-The paper presents a novel, well-motivated framework with compelling empirical validation across multiple tasks and a real biological application. The method is clearly described and the experiments are extensive. The weaknesses — primarily concerning the fairness of the adversarial baseline comparison, an overclaimed "hyperparameter-free" statement, and missing error bars in one table — are fixable without undermining the core contribution. The paper makes a clear contribution to behavioral representation learning.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+**Originality**: Good — the parametric scrubber approach with adaptive EMA is a novel and practical contribution to the disentanglement literature.
+**Importance**: High — nuisance variable disentanglement is a recognized bottleneck in behavioral neuroscience.
+**Claims support**: Moderate — the core claims are supported but weakened by the absence of error bars and limited N.
+**Soundness**: Good methodology, but the evaluation would benefit from statistical rigor.
+**Clarity**: Well-written and clearly structured.
+**Value**: Valuable contribution that will be of interest to the behavioral neuroscience community.
+
+The paper presents a practical, well-motivated framework with a compelling real-world application. The main weaknesses (missing error bars, n=3 sample size) are addressable and do not invalidate the core contribution. The method's novelty and potential impact outweigh these limitations.
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

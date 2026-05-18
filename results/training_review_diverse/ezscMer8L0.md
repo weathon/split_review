@@ -1,18 +1,18 @@
-Now I have all the information I need. Let me produce the final consolidated review.
+Now I have all the information needed. Let me construct the final review.
 
 ## Summary
 
-This paper proposes Conv‑LoRA, a parameter-efficient fine-tuning method that inserts lightweight convolution layers (guided by a Mixture-of-Experts mechanism for dynamic scale selection) into LoRA's bottleneck within SAM's ViT encoder. It is evaluated on ten binary and two multi-class segmentation benchmarks across medical, natural, agricultural, and remote sensing domains, consistently outperforming existing PEFT methods (LoRA, VPT, Adapter, SSF, etc.) with negligible parameter overhead (≈0.02M extra parameters). The paper also provides analysis of SAM's local prior (via attention distance) and its limited high-level semantic understanding (via linear probing) to motivate the approach.
+This paper proposes Conv-LoRA, a parameter-efficient finetuning method for SAM that inserts lightweight convolutional layers inside LoRA's bottleneck structure and uses Mixture-of-Experts (MoE) for dynamic scale selection. The method aims to inject local priors into SAM's plain ViT encoder and recover high-level semantic learning capacity that SAM's binary-mask pretraining suppresses. Experiments across binary and multi-class segmentation benchmarks spanning medical, natural, agricultural, and remote sensing domains show consistent but modest improvements over LoRA and other PEFT baselines.
 
 ## Strengths
 
-1. **Novel and well-motivated integration of convolution into LoRA's bottleneck.** The paper inserts lightweight $3\times3$ convolutions between LoRA's encoder and decoder (Section 3.1, Fig. 2), directly addressing the plain ViT's lack of vision-specific local inductive bias. The design is clean and parameter-efficient (4.02M trainable parameters, 0.63% of SAM's total), and the effectiveness is demonstrated across all benchmarks in Table 1 where Conv‑LoRA consistently outperforms LoRA, VPT, Adapter, SSF, and others.
+- **Consistent improvement over all PEFT baselines across multiple domains with negligible parameter overhead.** Conv-LoRA (4.02M parameters) outperforms LoRA (4.00M) — and all other PEFT methods, including LST with 11.49M parameters — on every metric across all datasets in Table 1 (binary) and Table 2 (multi-class). The improvement is consistent in direction, not cherry-picked. The parameter overhead over LoRA is only 0.02M (≈0.5%), which genuinely preserves parameter efficiency.
 
-2. **MoE-based dynamic scale selection is both effective and efficient.** The paper uses a Mixture-of-Experts mechanism to select the appropriate feature-map scale for convolution, rather than fusing all scales or using a fixed scale. The ablation (Table 4) shows that MoE outperforms multi-scale fusion (e.g., Jaccard 77.9 vs. 77.4 on ISIC) while being 1.54× faster and using 1.7GB less memory. Table 5 further validates the need for dynamic selection by showing that the optimal scaling ratio varies across datasets (ratio 4 for Leaf vs. ratio 2 for ISIC).
+- **Diagnostic evidence for SAM's semantic limitation and its recovery via PEFT.** The linear probing experiment (Sec. 4.2) cleanly shows that SAM's ViT-B encoder achieves only 54.2% on ImageNet-1K vs. MAE's 67.7%, confirming SAM's pretraining suppresses high-level semantics. The mIoU jump from decoder-only tuning (~50%) to PEFT methods (≥67%) on Trans10K-v2 multi-class segmentation (Table 2) directly supports the claim that finetuning the encoder recovers semantic understanding.
 
-3. **Empirical evidence that SAM's foreground-background pretraining suppresses high-level semantics, and that encoder fine-tuning recovers it.** Linear probing on ImageNet-1K shows SAM's encoder (54.2% accuracy) significantly underperforms an MAE-initialized encoder (67.7%) (Section 4.2). In multi-class segmentation (Table 2), PEFT methods dramatically improve mIoU over decoder-only fine-tuning (e.g., from 49.97 to 66.01 with LoRA and 67.09 with Conv‑LoRA on Trans10K‑v2), demonstrating recovery of high-level semantic information.
+- **Attention distance analysis validates the design motivation.** Figure 5 shows SAM's deep layers have many short-mean-distance attention heads compared to MAE, confirming SAM acquires a local prior through segmentation pretraining — justifying why additional convolutions could further exploit this property.
 
-4. **Comprehensive evaluation across diverse domains.** Conv‑LoRA is evaluated on medical imaging (Kvasir, CVC-612, ISIC), natural images (CAMO, SBU), agriculture (Leaf), remote sensing (Road), and multi-class transparent objects (Trans10K). In all cases (Table 1 and Table 2), Conv‑LoRA achieves the best or tied-best results among PEFT methods with negligible parameter overhead, demonstrating generality.
+- **MoE is more efficient than multi-scale fusion.** Table 3 (MoE vs. multi-scale) shows MoE achieves higher Jaccard (77.9 vs. 77.4) on ISIC 2017 while being faster (1.22 vs. 0.79 iters/s) and more memory-efficient (21.7 vs. 23.4 GB), supporting the efficiency motivation.
 
 ## Weaknesses
 
@@ -20,58 +20,59 @@ This paper proposes Conv‑LoRA, a parameter-efficient fine-tuning method that i
 None.
 
 ### Major
-None.
+
+- **The MoE gating mechanism — a central design contribution — is not analyzed at all.** The paper claims the gating network learns to dynamically select experts at appropriate scales for different inputs, but provides no evidence for this. There is no analysis of: (a) expert selection frequency/distribution across a dataset, (b) correlation between selected scale and object size in the input, (c) whether the gating collapses to a single expert, or (d) visualization of gating probabilities on representative images. Table 3 shows MoE outperforms multi-scale sum on one dataset, but this does not demonstrate that the gating is doing anything meaningful — it could simply be that sparsity acts as a regularizer. Without this analysis, the MoE component risks being over-engineered: a simple per-dataset grid search over scales (which the paper itself shows works reasonably well in Table 4) might match or exceed performance at lower complexity.
+
+- **Gains over LoRA are modest and statistical significance is not established.** The improvements on most metrics range from 0.3 to 1.5 points (e.g., Road IoU: 62.6 vs. 62.2; CAMO S_α: 88.3 vs. 88.0; Leaf Dice: 84.3 vs. 83.6). Given that multiple comparisons are made across many datasets and metrics, the absence of any statistical significance testing (paired tests or confidence intervals) is a real gap. Some differences (e.g., Leaf Dice: 84.3±0.34 vs. 83.6±0.13) appear significant at ~2 SE, but others (e.g., Road Dice: 76.8±0.27 vs. 76.5±0.18) do not. The paper's claim of a "clear performance boost" (Table 1 caption) is stronger than the evidence warrants, especially for the smaller-gap datasets. This matters because the baseline (LoRA) already achieves strong performance, and the added MoE+convolution complexity raises the question of whether the practical benefit justifies the complexity.
 
 ### Minor
 
-1. **The contribution of convolution vs. MoE is not isolated in a single explicit comparison.** The paper's core claim is that *convolution* injects local prior, yet the MoE simultaneously introduces dynamic scale selection. While the data to support the convolution effect exists across tables (e.g., LoRA achieves Jac=76.6 on ISIC in Table 1, while a single-expert fixed-scale variant achieves Jac=77.3 in Table 5 — confirming convolution alone helps), the paper does **not** present a direct head-to-head comparison of "LoRA baseline" vs. "LoRA + single fixed-scale convolution (no MoE)" vs. "Conv‑LoRA (with MoE)" in a single table. An explicit three-way ablation would cleanly separate the effect of the convolution operation from the MoE routing and strengthen the causal narrative.
+- **Novelty is incremental relative to Convpass.** The paper acknowledges Convpass (Jie & Deng, 2022) which also inserts convolutions into LoRA's bottleneck for ViT image classification. The main differentiators are (a) application to SAM/segmentation rather than image classification, and (b) the multi-scale MoE extension. While these are legitimate extensions, the conceptual delta from Convpass is modest. The paper would benefit from a more explicit discussion of what novel technical challenges arise in the SAM + segmentation setting that Convpass did not address.
 
-2. **The multi-class segmentation tables lack error bars.** The binary segmentation results (Table 1) report standard errors from 3 runs, but the multi-class results (Table 2) do not. Since the improvements of Conv‑LoRA over LoRA in multi-class are modest (e.g., +0.19 mIoU on Trans10K‑v1 easy, +0.42 on hard), error bars are necessary to assess whether the gains are statistically significant.
+- **The specific rank *r* used for LoRA/Conv-LoRA is not stated.** The paper defines *r* symbolically (line 137) but never gives the numerical value used in experiments, making the parameter counts (4.00M vs. 4.02M) less interpretable and harming reproducibility.
 
-3. **The mechanistic link between the attention-distance analysis and Conv‑LoRA's effect is asserted, not directly verified.** The paper shows that SAM already has a local prior (via attention distance analysis in Fig. 4) and argues that convolution further reinforces this prior. However, no experiment directly measures whether Conv‑LoRA *actually modifies* attention distances or feature localization compared to LoRA. Similarly, the claim that Conv‑LoRA helps "revive" high-level semantic understanding is supported by mIoU improvements, but the linear probing evidence compares SAM vs. MAE encoders (before fine-tuning), not Conv‑LoRA vs. LoRA after fine-tuning. These are presentation gaps that make the narrative feel less tightly coupled to the evidence.
+- **The "optimal scale" ablation (Table 4) is limited to only 2 datasets.** While the results do show that the best scale varies (ratio 4 for Leaf, ratio 2 for ISIC 2017), this is thin evidence for the claim that scale preference varies "across different datasets" in general. Expanding this to more datasets would strengthen the motivation for MoE.
 
-4. **Inference overhead is not reported.** The paper reports training speed/memory savings of MoE over multi-scale fusion (Table 4), but does not report inference FLOPs, throughput, or latency for Conv‑LoRA vs. LoRA. For a PEFT method, the forward-pass overhead is directly relevant to practitioners choosing which method to use.
-
-5. **The claim that Conv‑LoRA "revives" high-level semantic learning is slightly overstated.** The abstract states that Conv‑LoRA "revives [SAM's] capacity of learning high-level image semantics." However, the multi-class experiments show that *LoRA itself* already drives most of the recovery (e.g., 49.97 → 66.01 mIoU on Trans10K‑v2), and Conv‑LoRA adds a much smaller increment (66.01 → 67.09). The revival is a property of encoder fine-tuning generally, not Conv‑LoRA specifically. The claim should be softened to reflect this.
-
-6. **The expert balancing loss weight (1.0/2.0) is not ablated.** While the settings section states these values, no sensitivity analysis is provided to show how sensitive results are to this hyperparameter.
+- **The "domain-specific" baselines in Table 1 are not identified by name.** The placeholder "*Domain Specific*" is explained in the caption as referring to methods "specifically designed for the tasks," but the specific methods are not named in the main text. This makes the comparison opaque.
 
 ### Trivial
-
-- The "Domain Specific" row in Table 1 is vague — it is a placeholder without naming which specific methods were used.
-- Equation 4 uses the same variable name $x$ for the output of an interpolation step, which is slightly confusing.
+None beyond those listed as minor.
 
 ## Nice-to-Haves
 
-- **Convpass baseline**: The paper mentions Convpass in Related Work as the closest related method (convolutional bottleneck for ViT PEFT) and states that its approach "distinguishes" from Convpass, but does not include Convpass as a baseline. While the paper's focus on multi-scale local priors for segmentation does distinguish it, including an adapted Convpass would strengthen the empirical comparison.
-- **Attention distance after fine-tuning**: Providing attention-distance plots for Conv‑LoRA vs. LoRA fine-tuned models would directly validate the claim that Conv‑LoRA modifies the local prior.
-- **Hyperparameter sensitivity on expert count and loss weight**: An ablation varying the number of experts and the balancing loss weight would strengthen the method's characterization.
+- **Demonstrate MoE gating is meaningful.** A visualization of gating probabilities per expert for sample images, or a check of whether selected scale correlates with average mask area, would substantially strengthen the paper.
+- **Fixed-scale per-dataset comparison.** For each dataset, compare Conv-LoRA (with MoE) to the best single-scale version found by validation sweep. If the fixed-scale version matches MoE on most datasets, the MoE complexity is harder to justify.
+- **Statistical significance tests** for the core Conv-LoRA vs. LoRA comparison across datasets would clarify where the method is most impactful.
 
 ## Removed Points
 
-These points were flagged but are inconsistent with the paper or reviewer guidelines. Treat them with caution:
+These points were identified by reviewers but flagged for removal per the review guidelines:
 
-- *"Missing appendix/proofs"* — The parser strips appendix sections; they exist in the original submission.
-- *"Convpass not included as baseline is a major gap"* — The paper explains Convpass targets image classification and their own focus is on multi-scale local priors for segmentation. The paper already includes 8 baselines. This is scope creep.
-- *"Data augmentation too weak (only horizontal flip)"* — All methods share the same augmentation; this does not affect relative rankings.
-- *"The gating network details relegated to appendix"* — Appendix content is stripped by the parser; the main text appropriately references the appendix for details.
+- **"Base ViT size not stated"** — Removed because line 281 explicitly states "SAM's ViT-B encoder." Factually wrong.
+- **"Structure loss not defined in main text"** — Removed because line 188 defines it as "the combination of weighted IoU loss and binary cross entropy loss." Factually wrong.
+- **"Missing ablation with scale=1 (convolution at default scale)"** — Removed because Table 4 *includes* scale=1 for both Leaf and ISIC 2017 datasets. The reviewer overlooked this.
+- **"Paper should show LoRA/Conv-LoRA improves ImageNet accuracy after finetuning"** — Removed as scope creep. The paper's claim is about SAM's limitation, supported by linear probing. Requiring full ImageNet finetuning is beyond the paper's scope and would require resources disproportionate to the claim.
+- **"The paper should also cover Y / domain Z / additional tasks"** — Not present in these reviews, but the critic's demands for broader baselines beyond what is standard for the paper's class were filtered.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a novel observation about the paper that the authors themselves did not identify.
+None beyond the paper's own contributions. The reviews surface well-known concerns (statistical rigor, ablation completeness) that apply broadly to PEFT papers reporting incremental gains, but do not reveal any novel perspective on the method or problem.
 
 ## Suggestions
 
-1. **Add an explicit three-way ablation**: LoRA baseline vs. LoRA + single fixed-scale convolution (no MoE, optimal scale per dataset) vs. full Conv‑LoRA (with MoE). This cleanly isolates the effect of convolution from the effect of dynamic scale selection and directly supports the paper's central design rationale.
-2. **Add error bars to the multi-class tables** and comment on statistical significance, especially given the modest margins over LoRA.
-3. **Report inference FLOPs or throughput** for Conv‑LoRA vs. LoRA so practitioners can assess the computational overhead.
-4. **Tone down the "revives high-level semantics" claim** to more precisely attribute the recovery to encoder fine-tuning in general, with Conv‑LoRA providing an additional boost.
+1. **Add MoE gating analysis.** This is the single most impactful addition. Show expert selection distributions for at least 2–3 datasets, and check whether the selected scale correlates with a simple proxy for object scale (e.g., average mask area ratio). Without this, the MoE contribution is purely architectural — a gating network is proposed but never shown to gate.
+
+2. **State the rank *r* numerically.** This is a one-line fix critical for reproducibility.
+
+3. **Acknowledge the modest gain magnitude explicitly** and provide statistical testing (even a simple paired bootstrap or 95% CI) for the Conv-LoRA vs. LoRA comparison across all datasets. If the gains are not significant on some datasets, say so and discuss implications.
+
+4. **Name the domain-specific baselines** (or add a footnote) so readers can assess the comparison.
+
+5. **Expand the optimal-scale ablation** to more datasets, or alternatively remove the claim that scale preference "varies across datasets" as a general finding if it's only tested on two.
 
 ## Score and Decision
 
-The paper presents a clean, well-motivated PEFT method with comprehensive experiments across diverse domains. Conv‑LoRA consistently outperforms existing PEFT methods, the MoE design is justified by ablations, and the analysis of SAM's limitations provides useful context. The weaknesses are addressable (missing explicit ablation, missing error bars on multi-class tables, no inference overhead reported) and do not undermine the core contribution — the method works and the results are reproducible. No fatal or major flaws exist.
+The paper addresses a real problem — adapting SAM to downstream segmentation — and the broad, consistent experimental evaluation is a genuine strength. However, the core limitations are significant: the gains over LoRA are modest across the board, and the MoE component — which is half of the claimed contribution — is completely unanalyzed. The paper would need substantially stronger evidence (gating analysis, statistical significance, clearer separation of convolution vs. multi-scale benefits) to support its central claims. In its current form, the evidence is thin enough to tilt toward rejection, though the method has potential merit.
 
-**Score**: 7.0 — A solid empirical contribution that would be strengthened by addressing the minor gaps above.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

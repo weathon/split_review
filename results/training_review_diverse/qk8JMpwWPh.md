@@ -1,18 +1,18 @@
-Now I have a thorough understanding of both the paper and the reviews. Let me synthesize the final consolidated review.
+I've now thoroughly verified all claims against the paper. Let me write the final consolidated review.
 
 ## Summary
 
-The paper introduces MPIRL, a method for few-shot inverse reinforcement learning that decomposes the reward into two components: (1) a multi-task discriminator trained on offline multi-task demonstrations to generalize across task variations, and (2) a learned proximity reward that provides dense shaping in non-expert states. Experiments on Maze2D, Block Stacking, and FactorWorld tasks show MPIRL outperforming several baselines, with a claimed average 33% improvement. The problem formulation (few-shot IRL leveraging multi-task offline data without requiring multi-task training environments or reward labels) is well-motivated and practically relevant.
+This paper introduces MPIRL, a few-shot inverse reinforcement learning method that learns a reward function and policy from too few demonstrations by leveraging an offline multi-task demonstration dataset. The core idea is a two-part reward decomposition: (1) a multi-task adversarial discriminator trained across tasks to recognize expert behavior across task variations, and (2) a proximity reward that estimates temporal distance to expert states, shaping the reward in non-expert regions. The method is evaluated on maze navigation, block stacking, and FactorWorld manipulation tasks across 9 task settings, achieving an average 33% improvement over the next-best baseline. The ablation study (Figure 6a) confirms both reward components are necessary, and qualitative visualizations (Figures 6b, 6c) show they provide complementary signals.
 
 ## Strengths
 
-- **Novel two-part reward decomposition validated by ablation.** The paper demonstrates in Figure 6a that neither the multi-task discriminator alone nor the proximity reward alone achieves the combined method's performance. This ablation directly supports the claim that the two-component design is necessary and complementary. The qualitative visualization (Figures 6b, 6c) further illustrates how the discriminator provides dense coverage across the state space while the proximity reward concentrates near expert trajectories.
+- **Novel problem formulation with principled reward decomposition**: The paper identifies a realistic but underexplored setting — few-shot IRL where demonstrations are too few to cover all task variations — and proposes a clean two-part reward (multi-task discriminator for generalization + proximity reward for shaping) that separately addresses "what is expert behavior across variations" and "how to guide the policy in non-expert states." The decomposition is validated by the ablation (Figure 6a), which shows each component alone underperforms but together they yield the best results.
 
-- **Practical problem formulation relaxes assumptions of prior meta-IRL methods.** MPIRL requires only access to the target task environment and an offline multi-task demonstration dataset, whereas prior meta-learning approaches (Xu et al., 2019; Yu et al., 2019) need multi-task training environments or reward labels (Section 2.2). This distinction is clearly articulated and makes the setting more realistic.
+- **Strong and consistent empirical improvement across diverse domains**: MPIRL achieves an average 33% success rate improvement over the next best baseline across nine tasks in three distinct environments (Figure 4). On Block Stacking, MPIRL reaches 50% success while the next best (SQIL) is below 25%; on FactorWorld tasks, MPIRL consistently outperforms all baselines while methods like DVD and SQIL often stagnate near zero. The paper further shows MPIRL scales with additional target demonstrations (Figure 5a) and benefits from a larger multi-task dataset up to a point (Figure 5b).
 
-- **Evidence that the method leverages multi-task data for generalization.** The analysis in Section 6.2 (Figure 5b,c) shows that MPIRL's performance scales with the number of tasks in the multi-task dataset up to a saturation point, and—importantly—that performance is insensitive to how similar the auxiliary tasks are to the target task (SAME-PICK, SAME-PLACE, DIFFERENT-ALL all perform similarly). This supports the claim that the discriminator learns to recognize expert behavior across task variations rather than relying on task-specific overlap.
+- **Ablation and qualitative analysis confirm complementary mechanisms**: The ablation (Figure 6a) proves both reward terms are necessary. The qualitative reward visualizations (Figures 6b, 6c) concretely illustrate the claim: the discriminator provides dense coverage over the entire state space while the proximity reward creates a gradient that steers the policy away from unrecoverable regions — directly supporting the paper's core claim about the reward structure.
 
-- **Consistent qualitative improvement across diverse domains.** The learning curves (Figure 4) show MPIRL outperforming or matching baselines in 9 tasks across 3 environments. In Block Stacking, a particularly challenging task where errors are unrecoverable, MPIRL reaches roughly double the success rate of the next best baseline, demonstrating that the method works where simple approaches fail.
+- **Practical data assumptions**: Unlike meta-learning IRL approaches that require multi-task training environments or access to reward functions across tasks, MPIRL only needs an offline multi-task demonstration dataset and access to the target task's environment. Figure 5c shows the method is robust to the similarity of tasks in the multi-task dataset (SAME-PICK, SAME-PLACE, DIFFERENT ALL, MIXED all yield similar results), confirming the method does not require semantically related tasks — only shared structural variations.
 
 ## Weaknesses
 
@@ -21,74 +21,59 @@ None.
 
 ### Major
 
-- **The contribution of multi-task training is not isolated; a single-task discriminator ablation is missing.** The ablation study (Figure 6a) compares the full MPIRL against "Discriminator Only" (multi-task) and "Proximity Only," but does not include a variant that uses a *single-task* discriminator (trained only on the few target-task demonstrations) combined with the same proximity reward. Without this comparison, a critical question remains unanswered: does the multi-task structure actually contribute to generalization, or would a single-task discriminator (which is much simpler and requires no multi-task data) achieve similar results when paired with the proximity reward? The paper claims the multi-task discriminator "generalizes across task variations" (Section 4.1), but this claim requires showing that multi-task training outperforms single-task training. While the "Discriminator Only" ablation outperforms GAIL (which uses a single-task adversarial discriminator), GAIL lacks the proximity reward, making this an indirect comparison. A direct single-task-discriminator + proximity ablation is necessary to attribute the gains to multi-task data.
+1. **The claim that the multi-task discriminator "generalizes across task variations" is undersupported mechanistically.**
 
-- **The headline 33% improvement is stated without a supporting numerical results table.** The paper reports success-rate learning curves (Figure 4) but provides no table of final performance numbers with means and standard errors across seeds. The 33% figure appears in the abstract (line 19) and conclusion (line 192) without derivation. Given visible variance in the curves (especially FactorWorld tasks with only 4 seeds), the reader cannot verify whether this improvement is consistent, statistically meaningful, or computed against the best baseline per task. A table reporting mean±std final success rates for all methods across all tasks is essential to substantiate the central quantitative claim.
+   The paper states (Section 4.1): "By incorporating D_multitask, the discriminator is able to learn a reward function for the target task that generalizes across task variations by observing similar task variations in other tasks." However, the discriminator's training objective is explicitly task-discriminative: for a given demonstration, it must classify whether a state-action belongs to that *same* task. This appears to encourage task-specific features, not generalizable ones. While the method works empirically, the paper provides no analysis of *why* or *how* multi-task training produces generalization — no embedding visualizations (e.g., t-SNE of discriminator features across task variations), no diagnostic showing the discriminator assigns high reward to expert states from the target task in *unseen* initial conditions not present in the few demonstrations, and no test where a specific task variation is withheld from the demonstrations and the method's success on that variation is measured. Without such evidence, the generalization mechanism remains an asserted intuition rather than a demonstrated property. The strong task-similarity result (Figure 5c) is consistent with generalization but does not reveal the mechanism.
 
-- **The proximity reward pseudo-labeling mechanism is insufficiently analyzed.** The pseudo-labeling procedure (Section 4.2) involves recursively relabeling states using the current learned proximity function, with a random-sampling and backwards-relabeling strategy to avoid degenerate solutions. The paper does not analyze: (a) the quality of the learned proximity function (e.g., correlation with ground-truth temporal distance on held-out trajectories), (b) sensitivity to the key hyperparameters (the threshold \(c_{\text{thresh}}\), the discount \(\gamma\), the scaling factor \(\lambda_{\text{prox}}\)), or (c) training stability across random seeds. These gaps make it difficult to know whether the proximity reward is robust or fragile in practice.
+2. **The circular dependency between the discriminator and proximity reward is acknowledged but not characterized.**
+
+   The proximity reward's pseudo-labeling relies on the discriminator to detect "expert states" via a threshold c_thresh (Section 4.2). If the discriminator is inaccurate early in training — a real concern given the adversarial objective and few target demonstrations — the expert-state detection will be noisy, and the proximity model will learn to predict distance to a wrong distribution. Worse, the discriminator and proximity reward are jointly trained with the policy in a three-way loop, creating potential for reward drift or collapse. The paper acknowledges the degenerate training issue (line 76: "directly relabelling each state recursively... causes P(s) to predict itself") and proposes a mitigation (random sampling + backwards re-labeling), but provides *no diagnostic analysis* of: how often the threshold condition is triggered during training, how pseudo-labels evolve, or whether results are sensitive to the threshold value. Most adversarial IRL methods have similar dynamics, but the paper's claim that the two rewards are "complementary" would be much stronger with evidence that they remain stable under realistic training conditions.
 
 ### Minor
 
-- **Baseline comparisons have confounds.** (a) GAIL is provided the multi-task demonstrations labeled as *non-expert* samples—this design choice likely harms GAIL's discriminator (which must treat expert data from other tasks as negative), potentially overstating MPIRL's relative advantage. (b) SQIL uses SAC (off-policy) while all other online methods use PPO (on-policy), as acknowledged by the authors, introducing a confounding algorithmic difference. (c) The paper claims that adding an "online adversarial objective" improves DVD (Section 6.1), referring to Section 6.3, but Section 6.3 shows a "Discriminator Only" ablation trained from scratch adversarially—not a fine-tuned DVD, so the claimed improvement is not clearly presented as a controlled comparison.
+1. **Missing comparison to meta-learning IRL baselines.** The paper correctly notes that meta-learning IRL methods (Xu et al., 2019; Yu et al., 2019; Seyed Ghasemipour et al., 2019) have different assumptions (requiring multi-task environments/transition functions). However, given that the paper's multi-task dataset was collected by training RL policies (line 45: "rewards are available using a well-trained RL policy"), reward labels are available that could potentially be used for meta-training. Even if a full comparison is infeasible, the paper would benefit from a more detailed argument about *why* the assumption gap is insurmountable, or from comparing against a simplified meta-learning baseline (e.g., learning a context-conditioned reward from the multi-task data). Without this, the reader cannot fully gauge whether MPIRL's advantage comes from its specific design or from the fact that it exploits online interaction while meta-learned rewards are often frozen.
 
-- **Discriminator architecture details are underspecified.** Section 4.1 states the discriminator takes "a task demonstration, the current state and action" as input, but does not describe how the demonstration \(\tau\) is encoded or how it is combined with \((s,a)\). This is a reproducibility gap.
+2. **The discriminator's conditioning mechanism on the task demonstration is not described.** The paper says the discriminator "takes as input a task demonstration, the current state and action" (Section 4.1) but does not specify how the demonstration is encoded, whether it is concatenated with the state-action, processed via cross-attention, or otherwise integrated. This is a significant reproducibility gap. The authors state code is included as supplementary material, but the architecture design choice should be described in the paper itself.
 
-- **No comparison to an oracle using the true reward function.** The paper does not bound MPIRL's performance by comparing to an agent trained with the ground-truth task reward, making it unclear how much room for improvement remains.
+3. **Figure 5c (task similarity analysis) shows no significant difference across conditions but is under-analyzed.** The result that SAME-PICK, SAME-PLACE, DIFFERENT-ALL, and MIXED all yield similar performance is interesting and supports the claim that task similarity does not matter. However, no confidence intervals or statistical tests are reported, and the slight mean differences are not discussed. The paper's interpretation (line 166-167: "our method does not require that these demonstrations share goals or behaviors") is plausible but the analysis is thin for such a potentially important result.
 
-- **Qualitative visualizations are limited.** The heatmaps in Figures 6b and 6c show a single snapshot from one task (Maze2D). More systematic visualization across tasks and training stages would strengthen the claim that the two reward components play complementary roles throughout learning.
+4. **The pseudo-labeling strategy (random sampling + backwards re-labeling) would benefit from an ablation** comparing it to simpler alternatives (e.g., full-trajectory relabeling with more aggressive regularization, or a temporal-difference-style approach). The paper explains *why* it is needed (to avoid degenerate training where P predicts itself), but does not show the alternative fails, which would strengthen the methodological contribution.
 
-- **The number of target demonstrations varies (2–25) without explanation of how these were determined to be "too few"** for each specific task setting.
+5. **PPO vs SAC discrepancy for MPIRL vs SQIL.** The paper acknowledges (line 118) that MPIRL and all other online methods use PPO while SQIL uses SAC, noting SQIL "converges more quickly and takes longer to run." This makes cross-method comparisons of sample efficiency and wall-clock time difficult, especially since MPIRL's sample efficiency is one of its claimed advantages.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
 
-- A systematic hyperparameter sensitivity analysis for \(\lambda_{\text{prox}}\) and \(c_{\text{thresh}}\) would increase confidence in the method's robustness.
-- The analysis of how performance scales with number of target demonstrations (Figure 5a) is shown for only one task; replicating on another task would strengthen the claim.
-- A brief discussion of the computational overhead of the pseudo-labeling process (which stores trajectories and recomputes labels) would be useful for practitioners.
+- A sensitivity analysis of the threshold parameter c_thresh used for expert-state detection in the proximity reward.
+- A controlled experiment testing generalization directly: train the discriminator on the target task with few demonstrations, withhold one specific variation (e.g., a particular initial condition), and test whether MPIRL can succeed in that held-out variation.
+- Analysis of how the discriminator reward and proximity reward interact during training (e.g., mutual information over time, fraction of states detected as expert by D, how often the policy reaches states with low D but high P).
+- Reporting of training time / wall-clock time alongside sample efficiency.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviewer inputs were identified as inconsistent with the paper, factually incorrect, or otherwise inappropriate to include as weaknesses:
 
-- The harsh critic's complaint about the pseudo-label equation being "garbled" is a parser artifact from PDF extraction, not an author error. Removed per hard rule on formatting artifacts.
-- The critic's note that "the paper does not compare to an oracle that uses the true reward function" — this is a nice-to-have, not a weakness. Many IRL papers do not include such a comparison, and its absence does not undermine any claim. Downgraded from weakness to nice-to-have.
-- The critic's note that "missing appendix, missing proofs in appendix" — parser strips these sections; they exist in the original. Removed per hard rule.
-- The critic's claim that the paper "does not discuss... computational cost of the pseudo-labeling process" — this is a minor wishlist item, not a weakness that affects the paper's validity. Moved to nice-to-have.
-- The critic's point about the proximity reward pseudo-label equation being "ambiguous" is partially a formatting artifact (garbled equations) and partially addressed by the verbal description in Section 4.2. Weakened to minor.
+- **"Equation 3 is garbled in the parser output"** — This is a PDF parsing artifact, not a paper error.
+- **"Cannot be independently verified" / "not yet released" type reproducibility concerns** — The paper states code and data are included as supplementary material (line 194-198); the parser strips attachments.
+- **"The paper should also cover Y / domain Z" style scope-creep demands** — The paper's scope (few-shot IRL with multi-task datasets) is clearly defined and the evaluations cover three distinct domains; demands for additional domains beyond this are scope creep.
+- **Reviewer's claim that the paper's setting "provides a multitask environment"** — This is incorrect. The paper provides access to the *target task's* environment only, not the environments of all multi-task tasks, which may differ (e.g., different objects in FactorWorld).
 
 ## Novel Insights
 
-The most insightful observation across the reviews is that the paper's central claim about multi-task generalization would be much more strongly supported by a direct single-task vs. multi-task discriminator ablation. The existing ablation (Figure 6a) shows both reward components are necessary, but it cannot distinguish whether the multi-task data matters because a standard adversarial discriminator (trained only on target demos) might perform similarly when combined with the proximity reward. This methodological gap is the single issue that most limits confidence in the paper's contribution, and it is cleanly addressable without changing the method's core.
+The most interesting observation emergent from the review is the tension between the paper's two core claims. The task similarity analysis (Figure 5c) shows MPIRL is *robust* to task dissimilarity — DIFFERENT-ALL works as well as SAME-PICK — which the paper interprets as evidence of generalization. However, this same result could be read as evidence that the multi-task discriminator is not actually leveraging task-specific structure at all, and is instead learning a relatively generic "expertness" signal that happens to be good enough. If that is the case, the claimed mechanism (generalization via observing similar variations across tasks) may be overstated, and the method's real contribution could be the proximity reward + any reasonable discriminator, not the multi-task training per se. The ablation (Figure 6a) partially addresses this by showing the multi-task discriminator alone outperforms a proximity-only variant, but a DISCRIMINATOR ONLY (single-task) vs DISCRIMINATOR ONLY (multi-task) comparison would resolve this ambiguity. This is worth investigating as it could simplify the method or sharpen the understanding of where multi-task training actually helps.
 
 ## Suggestions
 
-1. **Add a single-task discriminator ablation.** Train MPIRL with a discriminator trained only on the few target-task demonstrations (no multi-task data) while keeping the proximity reward. If performance drops significantly compared to the full MPIRL, the multi-task contribution is validated. If not, the paper's central claim about generalization is unsupported.
-
-2. **Add a numerical results table.** Report final success rates (mean ± std over seeds) for all methods on all tasks, with the per-task best baseline clearly marked. Show the derivation of the 33% average improvement.
-
-3. **Analyze the proximity reward.** Include: (a) correlation of learned proximity with ground-truth temporal distance on held-out trajectories, (b) ablation over \(\lambda_{\text{prox}}\) and \(c_{\text{thresh}}\) to show robustness, (c) training curves of the proximity loss to demonstrate stability.
-
-4. **Fix the GAIL baseline.** Either provide GAIL without the multi-task data (testing the strict few-shot setting) or provide it with the multi-task data used as additional expert demonstrations with task conditioning, to avoid unfairly harming its discriminator.
-
-5. **Specify the discriminator architecture.** Describe how the task demonstration \(\tau\) is encoded and combined with \((s,a)\) to enable reproduction.
+1. Add a direct test of generalization: withhold a specific task variation from the target task demonstrations and test whether MPIRL succeeds on that variation. This would directly validate the generalization claim.
+2. Provide an architecture diagram or description of how the discriminator conditions on the task demonstration (concatenation? cross-attention?).
+3. Report the c_thresh value used and include a sensitivity analysis showing performance over a range of values.
+4. Add an analysis of how the discriminator and proximity rewards interact during training (e.g., fraction of expert states detected, pseudo-label distribution over time).
+5. If feasible, include a simplified meta-learning IRL baseline or a more detailed justification for why it is infeasible given the paper's assumptions.
+6. Add a DISCRIMINATOR ONLY (single-task, no multi-task data) ablation to isolate whether the benefit comes from multi-task training specifically or from having a discriminator at all.
 
 ## Score and Decision
 
-The paper addresses a valuable problem (few-shot IRL with multi-task data) and proposes a well-motivated two-component reward decomposition. However, the experimental evaluation has significant gaps that prevent full confidence in the claimed contributions: the 33% improvement is not backed by a numerical table, the role of the multi-task data is not isolated from the proximity reward, and the proximity reward mechanism lacks sufficient analysis. These issues are addressable but require substantial revision.
-
-**Originality:** 3/5 — The two-part reward decomposition is novel, though each component builds on existing ideas (GAIL, DVD, proximity-based rewards).
-
-**Importance of research question:** 4/5 — Few-shot IRL with offline multi-task data is practically relevant and under-explored.
-
-**Claims support:** 2/5 — The headline 33% improvement lacks tabular support; the multi-task generalization claim lacks the necessary ablation.
-
-**Soundness:** 2/5 — Baseline comparisons have confounds; the proximity reward is insufficiently analyzed.
-
-**Clarity:** 3/5 — Method description is clear conceptually, but discriminator architecture and pseudo-label update procedure need more detail.
-
-**Value to community:** 3/5 — The problem formulation is valuable. The method's effectiveness is plausible but not yet convincingly demonstrated.
-
-MY FINAL SCORE: <pineapple>2.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

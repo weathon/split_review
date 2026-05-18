@@ -1,20 +1,18 @@
-Now I have a thorough understanding of the paper. Let me produce the consolidated review.
+Now I have all the information I need. Let me carefully synthesize the review.
 
 ## Summary
 
-This paper evaluates three categories of baseline defenses—perplexity filtering, paraphrasing/retokenization, and adversarial training—against the GCG jailbreaking attack on aligned LLMs. Its core contribution is the empirical finding that filtering and preprocessing defenses are substantially more effective in the LLM domain than in computer vision, because discrete text optimizers are orders of magnitude more expensive than continuous optimizers, making adaptive white-box attacks genuinely difficult. The paper also introduces a compute-budget threat model as an alternative to traditional ℓₚ constraints.
+This paper evaluates three categories of baseline defenses—perplexity filtering (detection), paraphrasing/retokenization (preprocessing), and data augmentation with red-teaming examples (under "adversarial training")—against the GCG jailbreaking attack on 7B LLMs. Its core findings are that perplexity filtering and paraphrasing are surprisingly effective against this attack (perplexity filtering catches 100% of black-box GCG prompts; paraphrasing reduces Vicuna-7B ASR from 0.79 to 0.05), and that the high computational cost and discrete nature of text optimization make adaptive white-box attacks substantially harder than in computer vision. The paper also discusses why the LLM threat model requires different conventions (computational budget rather than ℓ_p norm).
 
 ## Strengths
 
-- **First systematic evaluation of multiple defense categories against a state-of-the-art LLM jailbreak attack.** The paper evaluates perplexity filtering (standard + windowed), paraphrasing (via ChatGPT), retokenization (BPE-dropout), and an adversarial training approximation across five 7B models, providing the first side-by-side comparison. Table 1 shows the original GCG attack achieves 0% pass rate against both perplexity filters, and Table 3 shows paraphrasing drops ASR from 0.79→0.05 on Vicuna-7B and 0.96→0.33 on Guanaco-7B.
+1. **Novel quantitative evidence that simple detection/preprocessing defenses are effective against GCG attacks, departing from computer vision expectations.** Table 1 shows perplexity filtering blocks 100% of black-box GCG attack prompts across five 7B models. Table 2 shows paraphrasing reduces Vicuna-7B ASR from 0.79 to 0.05 (matching the no-attack baseline). These results directly support the paper's central thesis that the LLM security landscape differs from vision.
 
-- **White-box adaptive attacks are tested for each defense.** The paper systematically probes whether stronger attacks (perplexity-aware optimization in §4.1, two-stage surrogate paraphrasing in §4.2, character-level retokenization in §4.3) can bypass each defense. Figure 2 is particularly striking: when the attacker adds a perplexity weighting to the GCG objective, ASR collapses to near-baseline (~5%) as α_ppl exceeds 0.1—a stark departure from vision, where such multi-objective optimization would be quickly solved.
+2. **Clear demonstration that the GCG optimizer cannot simultaneously satisfy low-perplexity and jailbreaking objectives.** Figure 2 (ASR vs. α_ppl) shows that as the perplexity weight increases to α=0.6, attack success rate drops to the no-attack baseline (~0.05). Figure 3 (left) further shows that windowed perplexity catches ~80% of adaptive attacks even at the optimal α=0.1 tradeoff point. This provides concrete evidence for the claim that discrete optimization's high cost makes adaptive attacks genuinely difficult for this specific defense.
 
-- **Rigorously quantifies the robustness–performance trade-off for every defense.** The paper reports AlpacaEval win-rate drops: 6–12% false-positive rate for perplexity filtering (Table 2), ~10% drop for paraphrasing (Figure 5), and ~6–7 point drop for 0.4 BPE-dropout (Table 6). These numbers enable practitioners to weigh protection against usability.
+3. **Careful quantification of the robustness–performance tradeoff for each defense.** The paper reports AlpacaEval win-rate drops (~10% for paraphrasing, ~7% for BPE-dropout) and false-positive rates for perplexity filtering (~9% of benign prompts flagged, Table 3). This grounds the discussion in practical deployment costs rather than just security metrics.
 
-- **Introduces and defends a compute-budget threat model for LLMs.** Section 3 argues convincingly that ℓₚ norms are ill-suited for text and that the high cost of discrete optimization (513k model evaluations for GCG, 5–6 orders of magnitude more than vision attacks) makes computational budget the natural constraint. This reframing is supported by the finding that increasing the token budget from 5→20 does not linearly improve attack success (Figure 4).
-
-- **Honest self-assessment of limitations and open questions.** The paper repeatedly notes that its findings depend on today's optimizers, explicitly lists five open questions in the discussion (§5.2), and transparently describes why true adversarial training is currently infeasible.
+4. **A principled threat-model discussion that reframes the attacker constraint from ℓ_p norm to computational budget.** Section 3 argues convincingly that LLM inputs are not checked by humans (so invisibility constraints are irrelevant), and that the 5–6 orders-of-magnitude higher cost of GCG attacks vs. vision attacks makes compute budget the meaningful constraint. This framing is a genuine conceptual contribution.
 
 ## Weaknesses
 
@@ -23,58 +21,47 @@ None.
 
 ### Major
 
-- **Evaluated against only one attack family (GCG).** All defenses are tested exclusively against the GCG optimizer (Zou et al., 2023). While the paper appropriately hedges ("existing discrete optimizers," "currently available optimizers"), the abstract and discussion occasionally use language suggesting broader conclusions (e.g., "evaluate baseline defense strategies against leading adversarial attacks on LLMs" uses the plural). The paper would be substantially stronger with at least one structurally different attack (e.g., AutoDAN's genetic algorithm, a hand-crafted jailbreak baseline, or a transfer attack from another discrete optimizer). As is, we cannot tell whether the observed defense effectiveness is a general property of the LLM domain or specific to GCG's search strategy. This is the most significant limitation and should be acknowledged more prominently in the abstract and conclusion.
+- **Claims about defense effectiveness are tested against a single attack type (GCG).** The paper frames perplexity filtering and paraphrasing as "promising" defenses and states that "adaptive attacks against such defenses are non-trivial" (Section 5), but the entire empirical evaluation uses only the GCG optimizer. While the paper is transparent about this (line 95: "using...the attack of Zou et al."), the generalization from "GCG fails against this defense" to "these defenses are promising" is broader than the evidence supports. A handcrafted low-perplexity jailbreak, a different discrete optimizer (e.g., PEZ, AutoPrompt), or a prompt-level optimization could trivially bypass some of these defenses. The paper acknowledges this in the conclusion but does not test any alternative attack.
 
-- **Paraphrasing adaptive attack lacks quantitative results.** Section 4.2 demonstrates a two-stage white-box attack on the paraphrasing defense using LLaMA-2-7B-chat as a surrogate paraphraser, but provides only a single qualitative example. No attack success rate is reported for this adaptive attack, making it impossible to assess how severely the defense is degraded under white-box conditions. For retokenization, quantitative results are provided (Table 7); the same standard should be applied here.
+- **The adaptive attack analysis for the paraphrasing defense is too preliminary to support any conclusion.** The paper demonstrates that an adversarial suffix can be crafted for a surrogate paraphraser (LLaMA-2-7B-chat), but does **not** report an end-to-end attack success rate on the target model after paraphrasing. The text says "existing optimizers seem up to the tasks of adaptively attacking this defense" (line 205), which is an unsupported claim given the absence of quantitative end-to-end results. This is in tension with the paper's broader narrative that adaptive attacks are hard.
 
 ### Minor
 
-- **The "adversarial training" section (§4.4) is mislabeled.** The section is titled "Robust Optimization: Adversarial Training" but does not perform online adversarial example generation. Instead, it mixes static human-crafted harmful prompts from a red-teaming dataset into the training data—which is data augmentation, not adversarial training. The paper is transparent about this ("our best efforts to sidestep these difficulties by focusing on *approximately* adversarial training"), but the section heading and framing suggest a stronger connection to the adversarial training literature than is warranted. Renaming the section (e.g., "Data Augmentation with Harmful Prompts") would eliminate this mismatch.
+- **BPE-dropout retokenization increases the baseline (no-attack) refusal failure rate, making the model *less* safe on benign harmful instructions.** The paper reports this honestly (line 366: "this type of augmentation leads to higher baseline ASR as Guanaco converges to around the same ASR for both the attack and unattacked"; from 0.31 to 0.33 in Table 4), but the framing still presents BPE-dropout as a "defense." A defense that makes the model more likely to comply with harmful instructions (even without an adversarial suffix) is counterproductive. The paper suggests training with BPE-dropout as a fix, but does not test it. The baseline ASR increase should be stated more prominently as a failure mode rather than buried in the results section.
 
-- **Compute-budget threat model is not operationalized in experiments.** Section 3 compellingly argues that the key attack constraint is computational budget, but the experiments do not measure how much each defense increases the attacker's cost. Reporting ASR as a function of GCG iterations (e.g., early-stopping curves) for each defense would directly support the paper's central claim that these defenses are valuable because they "dramatically increase computational burden."
-
-- **Retokenization adaptive attack is limited in scope.** The character-level token attack is one obvious variant, but more sophisticated attacks (e.g., optimizing with a BPE-dropout-aware objective, or targeting specific frequent token decompositions) are not explored. The paper acknowledges this implicitly but does not discuss what a stronger adaptive attacker could do.
+- **The "adversarial training" section (Section 4.4) does not test actual adversarial training.** The paper uses a data-augmentation procedure—mixing human-crafted red-teaming examples into the training data—rather than generating adversarial examples with an optimizer during training (the defining feature of adversarial training). The paper is transparent about this substitution (line 389: "approximately adversarial training"), but the section title and the introduction's claim that "adversarial training methods from vision are not directly transferable" (line 33) misleadingly suggest that actual adversarial training was attempted and failed. The paper's real contribution on this front is the computational-infeasibility argument (the cost of generating one GCG attack), which is valid, but the empirical experiment tests a different procedure.
 
 ### Trivial
-- The paper could more prominently flag its temporal scope (evaluated against mid-2023 attacks) in the abstract.
+
+- Figure references in the text are slightly confusing: the retokenization results are presented in a figure labeled "brokentoken" (lines 276–282) and a table labeled "bpe_adapative_attack" (line 374), but the text refers to them with generic figure numbers.
 
 ## Nice-to-Haves
 
-- **Test a combined defense system.** The paper suggests that perplexity filtering could be used as a triage mechanism with paraphrasing as a fallback (§4.1), but no combined system is evaluated. A system-level evaluation would address the false-positive problem and provide a more realistic deployment scenario.
-
-- **Analyze defense variance across models.** The results vary substantially by model (Falcon is almost unaffected by retokenization; ChatGLM and MPT have very low baseline ASR). A deeper analysis of *why*—different tokenizer characteristics, differing RLHF strength—would strengthen the contribution.
-
-- **Measure attacker cost directly.** Instead of just ASR, report the minimum number of GCG iterations needed to achieve a given ASR against each defense. This would operationalize the compute-budget threat model the paper advocates.
+- Running even one additional attack type (e.g., a handcrafted low-perplexity jailbreak for the perplexity filter, or AutoPrompt) would substantially strengthen the external validity of the claims.
+- For the paraphrasing defense, reporting the end-to-end adaptive attack success rate (suffix optimized for paraphraser → paraphraser output → target model → jailbreak success) would turn a qualitative demonstration into quantitative evidence.
+- For BPE-dropout, a simple experiment training Vicuna/Guanaco with BPE-dropout applied during fine-tuning could test whether the increased baseline ASR is fixable, as the paper speculates.
 
 ## Removed Points
 
-These points were flagged by reviewers but are removed after verification:
+These points from the reviewer inputs are removed or downgraded per the rules:
 
-- **"Perplexity filter false-positive rate still called 'promising'."** Removed because the paper already states: "perplexity filtering alone is heavy-handed... dropping 1 out of 10 benign user queries would be untenable" (lines 166–167). The criticism misreads the paper.
-
-- **"No evaluation of recent adaptive attacks (perplexity-aware GCG variants)."** Removed because the paper already tests perplexity-aware optimization with varying α_ppl weights in Section 4.1 (Figures 2–4). This criticism reflects a failure to read the white-box attack section.
-
-- **"Code and hyperparameter details insufficient for reproducibility."** Removed per instructions—the paper provides the meta-prompt, temperature, max length, BPE-dropout rates, and training mixing rates, which are standard for the field. Requests for complete training logs or exact meta-prompt strings are nitpicks.
-
-- **"Missing related works / missing appendix / formatting issues."** Removed per instructions. The parser strips appendix content from all papers; these issues are artifacts of the extraction, not author errors.
-
-- **"Adversarial training section is entirely uninformative / should be cut."** Downgraded from "structural issue" to minor mislabeling. The section honestly describes an attempted approach that failed, which is useful negative information for the community. The problem is only the section title.
+- **"The retokenization defense undermines the credibility of the whole evaluation"** (Harsh Reviewer #2 closing sentence) — Overstated. The paper reports the side effect transparently. A weak defense does not undermine the evaluation of other defenses or the paper's core claims about perplexity filtering and paraphrasing.
+- **"Table 5 suggests the adaptive attack is not more effective..."** (Harsh Reviewer #4 re: paraphrasing) — The table referenced (Table 4, labeled `tab:bpe_adapative_attack`) concerns the BPE-dropout defense, not paraphrasing. The reviewer conflated two separate defenses. The paraphrasing adaptive attack section lacks an end-to-end ASR table entirely, which is a real weakness, but the specific table reference is mistaken.
+- **"Could start from a low-perplexity initialization (e.g., a natural sentence with a small adversarial suffix)"** (Harsh Reviewer #4) — The paper tests exactly this by varying attack token length (5, 10, 20 tokens in Figure 4) and shows the 10-token attack achieves at most 52% ASR while being caught 68% of the time by windowed perplexity. The reviewer's suggestion was partially addressed.
+- **"The paper should test at least two or three qualitatively different attacks"** and **"include a handcrafted jailbreak"** — Handcrafted jailbreaks are explicitly scoped out (line 24: "we specifically focus on attacks that are algorithmically crafted using optimizers"). The suggestion is scope creep for the paper's own stated focus. However, testing additional *optimization-based* attacks remains a valid limitation.
 
 ## Novel Insights
 
-The key insight from the reviewer corpus that goes beyond the paper's own contributions is that the paper's core thesis—that filtering/preprocessing defenses are viable because discrete optimizers are weak—would be much more convincing if the authors measured *attacker cost* directly rather than just ASR. The paper argues that defenses increase computational burden, but never actually measures computational burden. This gap between the threat model (§3) and the experimental design (§4) is noted by multiple reviewers. Additionally, several reviewers independently noted that the adversarial training experiment, while negative, is actually a useful data point—it demonstrates that even crude approximations to adversarial training fail in ways that inform future research—but the mislabeling undermines this value.
+The most interesting observation that emerges from the reviews is the asymmetry between the perplexity filter and the paraphrasing defense in terms of adaptive attack difficulty. For the perplexity filter, the paper convincingly shows that the GCG optimizer cannot simultaneously optimize for low perplexity and high attack success—the optimizer fundamentally lacks the degrees of freedom to satisfy both objectives. For paraphrasing, the preliminary evidence suggests the optimizer *can* handle the two-stage attack, implying that the source of defense effectiveness is defense-specific rather than a general property of discrete optimization. This distinction is worth highlighting because it suggests that not all preprocessing/detection defenses benefit equally from the difficulty of discrete optimization.
 
 ## Suggestions
 
-1. **Rename Section 4.4** to "Data Augmentation with Harmful Prompts" or "Approaches Toward Robust Optimization" to avoid misrepresenting the method.
-2. **Add quantitative ASR results for the paraphrasing adaptive attack** (Section 4.2) using the same standard as the retokenization section.
-3. **Test at least one additional attack family** (e.g., AutoDAN, PEZ, or a manual red-teaming baseline) or, barring that, change the abstract to specify "against the GCG attack" and more prominently caveat the generality of conclusions.
-4. **Report ASR as a function of GCG iteration budget** for each defense to operationalize the compute-budget threat model.
-5. **Add a brief analysis of cross-model variance** for retokenization—why is Falcon largely unaffected? A sentence on tokenizer vocabulary differences would suffice.
+1. **Broaden the attack zoo.** Add at least one other optimization-based attack (AutoPrompt, PEZ, or a transfer attack from a different model). This is the single highest-leverage change because it addresses the main threat to the paper's external validity.
+2. **Complete the paraphrasing adaptive attack experiment.** Report the end-to-end ASR when the attacker optimizes a suffix against a known paraphraser and runs the full pipeline against the target model.
+3. **Reframe the "adversarial training" section.** Rename it to "Data Augmentation with Red-Teaming Examples" or "A Proxy for Adversarial Training" to avoid the expectation that actual adversarial training was conducted. Keep the computational-infeasibility argument (lines 388–389), which is the paper's genuine contribution on this front.
+4. **Elevate the BPE-dropout baseline ASR increase** to a prominent caveat at the start of Section 4.3 rather than a sentence in the results.
 
 ## Score and Decision
 
-This paper makes a genuine contribution: it provides the first systematic evaluation of standard adversarial defense categories against LLM jailbreak attacks, documents the surprising effectiveness of simple filtering/preprocessing defenses, and introduces a more realistic threat model for this domain. The weaknesses are real—single-attack evaluation, incomplete adaptive attack quantification, a mislabeled section—but they are limitations, not invalidations. The paper is honest about its scope, appropriately hedges its claims, and lays out clear open questions for the field. With the (actionable) revisions suggested above, this would be a strong benchmark reference.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

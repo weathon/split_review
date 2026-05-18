@@ -1,91 +1,69 @@
-Now I have a thorough understanding of the paper. Let me construct the final review.
+Now I have all the evidence I need. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper introduces Hieros, a hierarchical reinforcement learning agent that combines multi-level hierarchical imagination with S5 structured state space sequence world models (S5WM). The agent learns world models at multiple temporal abstraction levels, uses S5 layers for parallel training and iterative next-state prediction, and proposes an efficient time-balanced sampling (ETBS) method. The approach is evaluated on the Atari100k benchmark, where it achieves competitive mean/median normalized human scores against DreamerV3, TWM, IRIS, and SimPLe, with particular strength on games involving level transitions and distribution shifts.
+The paper proposes Hieros, a hierarchical model-based RL agent that combines (1) a multi-layer hierarchical policy where each layer learns its own S5-based world model and actor-critic, (2) a novel S5-based world model (S5WM) that enables parallel training and iterative imagination, and (3) efficient time-balanced sampling (ETBS) with O(1) complexity. Evaluated on the Atari 100k benchmark, Hieros claims state-of-the-art mean and median human-normalized scores among model-based methods without look-ahead search (mean 1.56, median 0.74), while training in ~14 hours per game — competitive with DreamerV3 and faster than Transformer-based alternatives.
 
 ## Strengths
 
-- **New state-of-the-art results (within stated scope)**: Hieros achieves the highest reported mean and median normalized human scores among the compared model-based methods without look-ahead search on Atari100k. The paper also reports improvements on IQM and optimality gap, and sets new best scores on 9 of 25 games. The claim is appropriately scoped to "model-based RL agents without look-ahead search" (lines 226, 314).
+- **State-of-the-art Atari 100k results**: Hieros achieves a mean human-normalized score of 1.56 and median of 0.74, substantially outperforming DreamerV3 (0.94, 0.54), TWM (0.91, 0.42), IRIS (0.50, 0.39), and SimPLe (0.34, 0.13). The paper additionally reports interquartile mean (IQM) and optimality gap per Agarwal et al. (2021), following best practices for robust aggregation.
 
-- **First demonstration of hierarchical imagination with more than two layers**: Unlike prior hierarchical RL work (e.g., Director with two levels), Hieros scales to multi-layer hierarchies. Section 3.1 describes how each layer learns its own world model and subgoal autoencoder, and the paper provides evidence (via hierarchy depth ablation, referenced in the appendix) that deeper hierarchies can be beneficial.
+- **Efficient S5WM training**: The S5-based world model trains in ~14 hours per Atari game, on par with DreamerV3 (0.5 days) and substantially faster than Transformer-based TWM (0.8 days) and IRIS (7 days). The S5WM also demonstrates lower world model loss than RSSM on complex dynamics games like Krull (Figure 4), validating its prediction advantage on shifting-state environments.
 
-- **Novel S5-based world model (S5WM) with practical advantages**: The S5WM leverages S5 layers' dual-mode operation — parallel training (via convolution mode) and iterative autoregressive prediction (via recurrent mode). The paper validates that using the S5 internal state directly as the deterministic component of the world state outperforms using the sequence model output (ablated in appendix). The design is principled and contrasts meaningfully with RSSM, Transformer-based, and S4-based alternatives.
+- **Honest diagnostic analysis**: The paper candidly identifies where Hieros underperforms (Breakout, Pong) and provides evidence-backed explanations: sparse subgoal rewards in simple games, and S5WM's weakness on short-term dynamics. This transparency strengthens the credibility of the claims about where the method excels (Frostbite, PrivateEye, Krull).
 
-- **Interpretability via subgoal decoding**: The subgoal autoencoder can decode proposed subgoals into image space, making the agent's intentions visible. Examples are shown in the appendix illustrating how subgoals guide exploration (e.g., building an igloo in Frostbite).
-
-- **Thorough ablation scope**: The paper references ablation studies covering world model choice (S5WM vs. RSSM), hierarchy depth, sampling procedure, intermediate encoding, compressed vs. decompressed subgoals, and model size — all in the appendix. This demonstrates systematic evaluation of design decisions.
+- **Novel technical contributions**: The multi-layer hierarchical framework (architecturally generalizable beyond two layers, unlike Director) and the ETBS O(1) sampling method are clean, well-motivated contributions with practical value.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None that threaten the core claims. The paper's contributions are supported by its experimental design, though several claims would benefit from tighter evidence.
+
+- **Undocumented 25-game subset undermines direct comparability**. The paper states it evaluates on "a subset of 25 of those games" (Section 4, line 225) but never identifies which game from the standard 26-game Atari 100k suite is omitted, nor provides any justification. Since the main SOTA claim (mean and median human-normalized scores) is computed over this undocumented subset, the numbers are not directly comparable to prior results reported on the full 26-game suite (DreamerV3, TWM, IRIS, SimPLe). This is a transparency issue that weakens the central empirical contribution. The paper either needs to evaluate on the full standard suite, or explicitly identify and justify the subset (e.g., citing a prior work that uses the same 25 games), and then compare only to methods evaluated on the same subset. The per-game results in the appendix partially mitigate this but do not resolve the comparability issue for aggregate claims.
 
 ### Minor
 
-- **Training efficiency claim is not fully supported by the data**: The abstract states S5WM enables "more efficient training than RNN-based world models," but the reported runtime shows Hieros (0.6 days) is *slower* than DreamerV3 (0.5 days), which uses an RNN-based RSSM. The authors argue S5 layers have theoretical efficiency advantages (parallel training), and Hieros is a more complex hierarchical system with multiple world models, which partially explains the gap. However, the blanket claim in the abstract overstates what the empirical evidence shows. The comparison against Transformer-based world models (TWM 0.8 days, IRIS 7 days) is better supported.
+- **Hierarchy depth used in main experiments is unspecified**. The paper's first contribution claims "more than two layers" (Section 1), and Figure 1 depicts three layers, but the main experimental section never states how many hierarchy levels were actually used for the Atari 100k results. The ablation on depth is referenced to the appendix. If the main results use only two layers, the "more than two layers" novelty claim is not supported by the main experimental evidence. This is easily clarified but currently ambiguous.
 
-- **Statistical uncertainty for headline results is opaque**: The paper reports aggregate metrics (mean, median, IQM, optimality gap) averaged over 3 seeds but does not provide per-game standard deviations, confidence intervals, or any variance measure in the main table. While 3 seeds and IQM are standard practice in Atari100k work, the absence of any error representation makes it difficult to assess whether the reported improvements over baselines are robust or driven by a few runs. The full table (referenced in appendix) likely addresses this, but the main presentation should include variance information.
-
-- **Limited baseline completeness even within the stated scope**: The paper compares against DreamerV3 (2023), TWM (2023), IRIS (2023), and SimPLe (2019). While the scope is clearly bounded ("model-based without look-ahead search"), the set of included baselines is small and somewhat dated relative to the presumed submission window. Several model-based methods from the 2023–2025 period exist (e.g., STORM, REMO, or variants of Dreamer) that could strengthen the comparison. The paper does not claim to beat *all* model-based methods, but the "state of the art" terminology invites a broader comparison than what is presented.
-
-- **ETBS contribution is described but its empirical impact is deferred**: The Efficient Time-Balanced Sampling (ETBS) method is listed as a contribution and derived mathematically (Section 3.3, O(1) time complexity), but the main paper only mentions that an ablation on "sampling procedure" exists in the appendix. Given that ETBS is one of the three named contributions, its effect on final performance should be shown prominently, not relegated to supplementary material.
-
-- **No direct comparison with Director as a hierarchical baseline**: The paper states it builds on Director (Hafner 2022) and DreamerV3, but does not include Director as a direct baseline in the Atari100k results table. Since the hierarchical architecture is the paper's primary novelty, showing how Hieros's multi-layer hierarchy compares against Director's two-layer hierarchy on the same benchmark would sharpen the contribution.
-
-- **Per-game analysis of weaker results is qualitative, not quantitative**: The discussion of why Hieros underperforms on Breakout and Pong (lines 246–248, 260–263) is plausible and the paper provides loss comparisons (Figure 4) and hierarchy depth references. However, the claims that "subgoals only propose to increase the level score" and "rare events make ball dynamics hard to model" are not backed by quantitative evidence (e.g., subgoal prediction accuracy, event frequency statistics). This is more of a presentation gap than a methodological flaw.
+- **Per-game standard deviations not reported**. The paper reports means over three seeds and follows Agarwal et al. (2021) by reporting IQM and optimality gap for aggregate metrics, which is good practice. However, per-game standard deviations (or individual run scores) are not provided. While not a fatal omission given the robust aggregate metrics, adding per-game variability measures would strengthen the reliability assessment of individual game results.
 
 ### Trivial
 
-- Line 115 cites "Hafner_learning_nodate" for Director; the correct citation is Hafner 2022 (Director paper published at ICLR 2023).
-- "SimpPLe" (line 225) should be "SimPLe."
+- None.
 
 ## Nice-to-Haves
 
-- Include per-game mean ± std (or bootstrapped CIs) in the main results table so readers can assess variability at a glance.
-- Add a single-layer S5WM baseline in the main paper (not just the appendix) to directly quantify the value added by the hierarchy. The paper references hierarchy-depth experiments in the appendix; elevating this to the main paper would strengthen the core claim.
-- Compare directly against Director on the same subset of Atari100k games to ground the hierarchical contribution.
-- Show a simple ablation comparing ETBS vs. uniform sampling vs. O(n) time-balanced sampling in the main paper, not just the appendix.
-- Temper the "more efficient training than RNN-based world models" claim given that Hieros (0.6 days) is slower than DreamerV3 (0.5 days), or clarify that the efficiency refers to per-layer theoretical complexity rather than end-to-end wall time.
+- The S5WM vs. RSSM comparison (Section 4.2) on four games is informative but could be extended to a few more diverse games (beyond Krull and Breakout) to strengthen the evidence for the claim that S5WM excels on complex dynamics and RSSM on simple dynamics.
+- The ETBS method's improvement over prior work could be briefly demonstrated in the main text rather than deferred entirely to the appendix, given its status as a listed contribution.
+- The runtime comparison (wall-clock time on different GPUs) would benefit from a statement about the hardware used for DreamerV3 and TWM baselines (are the times from the original papers or re-measured?).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-1. **"No ablation isolates the impact of the hierarchical architecture"** (Harsh Critic #2) — The paper explicitly references hierarchy depth ablation in \Cref{sec:appC:model_hierarchy_depth} (line 246), showing that a single-subactor variant performs significantly worse on complex games and better on Breakout. The critic's claim that no such comparison exists is factually incorrect; the appendix (stripped by the parser) contains these experiments.
-
-2. **"ETBS not empirically validated; main text does not even allude to an experiment"** (Harsh Critic #4) — The paper states in line 51 that ablation studies include testing "sampling procedure," and ETBS is described with a full mathematical derivation in Section 3.3. The paper does allude to experiments; the results are deferred to the appendix (which is parser-stripped).
-
-3. **"S5 layers claims without citation"** (Section-by-section note) — Line 184 discusses S5 properties in context of well-established prior work (Gu et al. 2022, Smith et al. 2023, Lu et al. 2023) cited earlier in Section 2.3. The relevant citations are present.
-
-4. **"S4 models on short-term tasks attribution"** (Section 4.2 note) — The paper does cite zuo2022efficient, mehta2022long, dao2022hungry for this claim (line 262). The critic's claim that it's "attributed to prior work but not shown" misreads the paper.
-
-5. **Criticisms about missing appendix sections, proofs, or content** — Per policy, these are parser artifacts; the original submission contains the appendix.
+- **"No uncertainty quantification" (from Harsh Critic's Critical Issue #2)**: The reviewer claims "no uncertainty quantification for the main results." This is factually incorrect — the paper explicitly states: "Adhering to \citet{agarwal2021deep}, we also report the optimality gap and the interquartile mean (IQM) of the human normalized scores" (line 242). IQM and optimality gap are precisely the robust aggregate metrics recommended by Agarwal et al. (2021). The reviewer's suggestion for stratified bootstrap confidence intervals is the same protocol the paper already follows. Downgraded to a Minor point about per-game standard deviations being a nice addition, not a fatal omission.
+- **S5WM vs RSSM comparison too limited (from Other Observations)**: The paper acknowledges this is a focused controlled study. Four games is acceptable for a targeted comparison. Not a weakness.
+- **ETBS not demonstrated in main text (from Other Observations)**: The ablation is in the appendix, which is standard paper structure. Deferring secondary ablations to the appendix is expected.
+- **Runtime comparison not controlled (from Other Observations)**: The paper reports wall-clock times from the literature and its own runs. This is standard practice and the paper does not overclaim on this front.
+- **Missing appendix content references**: The reviewer complains about missing details that are in the appendix. The appendix exists in the original submission.
+- All formatting/style nitpicks removed per instructions.
+- Strength Finder's generic strengths (e.g., "this paper addressed an important problem") removed as they lack specific content.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews primarily surface gaps between the paper's claims and its supporting evidence; they do not identify novel analytical perspectives on the method itself.
+None beyond the paper's own contributions. The combination of S5 state-space models with hierarchical world models is the paper's key insight, and the reviews offer no additional synthesis beyond what the paper itself presents.
 
 ## Suggestions
 
-1. Tighten the efficiency claim in the abstract and introduction to accurately reflect the empirical comparison (Hieros: 0.6 days vs. DreamerV3: 0.5 days). A more precise statement would be "competitive training efficiency with RNN-based world models and substantially better than Transformer-based alternatives."
-
-2. Bring at least one key ablation into the main paper — specifically, a comparison of Hieros against a single-level S5WM variant on a representative set of games. This directly supports the central claim that the hierarchy provides value.
-
-3. Add per-game standard deviations (or bootstrapped intervals) to the main results table. Atari100k readers expect some measure of variability for 3-seed experiments.
-
-4. Include Director as a direct baseline or explicitly explain why it is not comparable (e.g., different world model base, different benchmark version).
-
-5. Show the ETBS vs. uniform sampling comparison for at least 2–3 games in the main paper to validate this contribution at a glance.
-
-6. Qualify the "state of the art" language by naming the comparison class more prominently in the abstract: "state of the art among model-based RL agents without look-ahead search on Atari100k." (The paper does this in the conclusion but could be clearer in the abstract.)
+1. **Run on all 26 Atari 100k games** (or clearly state which game is omitted and why, and compare only to methods on the same subset). This is the single most important fix — without it, the SOTA claim lacks a proper basis.
+2. **Explicitly state the number of hierarchy layers used** in the main experiments in the main text (not just the appendix). If three or more layers were used, state it clearly. If only two were used, adjust the novelty claim accordingly.
+3. **Add per-game standard deviations or individual run scores** to the full results table. This is standard in most Atari 100k evaluations and removes any doubt about result stability.
+4. **Briefly summarize the hierarchy depth ablation findings** in the main text (even one sentence) to support the "more than two layers" novelty claim without requiring readers to consult the appendix.
 
 ## Score and Decision
 
-This paper makes a meaningful contribution by combining hierarchical RL with S5-based world models and achieving competitive results on Atari100k. The core ideas are well-motivated and the experimental design is reasonable. The main issues are overclaimed efficiency benefits, some missing variance reporting, and a baseline set that could be broader — none of these are fatal. The contribution is solid but incremental, and the paper would benefit from more precise claim calibration and a few key ablations moved from the appendix to the main text.
+The paper presents a well-motivated combination of hierarchical RL with S5 state-space world models. The core technical contributions (multi-layer hierarchical framework, S5WM, ETBS) are sound, and the results on Atari 100k are promising. The primary issue — the undocumented 25-game subset — is a significant transparency problem for the SOTA claim but is fixable. The uncertainty quantification concern is largely addressed by the paper's use of IQM and optimality gap. The hierarchy depth ambiguity is minor. Overall, the paper's contributions are real and the methodology is solid, but the evaluation transparency issue prevents unconditional acceptance in its current form.
+
+**Score**: 6.0
+
+**Decision**: Weak Accept (with revisions to address the evaluation transparency issue)
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL DECISION: <orange>Reject</orange>

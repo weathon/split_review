@@ -1,88 +1,96 @@
-Now I have all the information needed. Let me carefully construct the final review, cross-referencing each claim against the actual paper.
-
----
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes EnvBridge, a framework for cross-environment knowledge transfer in LLM-based robotic manipulation agents. The method stores successful robot control code from source environments in a memory bank, retrieves task-relevant code via similarity search, adapts it to the target environment through LLM-mediated knowledge transfer, and uses the adapted code for in-context replanning. Experiments on RLBench, MetaWorld, and CALVIN show that EnvBridge consistently outperforms code-generation-only baselines and simple retry strategies.
+EnvBridge proposes a cross-environment knowledge transfer framework for LLM-based robotic manipulation agents. The method stores successful robot control codes from source environments (CALVIN, MetaWorld), retrieves the most similar ones via cosine similarity when the agent fails on a target environment task (RLBench), adapts them via an LLM-based "knowledge transfer" step, and uses them as in-context examples for replanning. The core claim is that transferring knowledge **across** environments improves performance over in-domain replanning. The main experiment on RLBench (10 tasks, 20 trials each) shows EnvBridge achieving 69% success rate vs. 62.5% (Self-Reflection) and 47% (Retry). Ablations confirm both the knowledge transfer and similarity-based retrieval components are essential.
 
 ## Strengths
 
-- **Substantial and consistent performance gains on RLBench**: EnvBridge achieves 69% average success rate on 10 RLBench tasks, substantially outperforming the VoxPoser baseline (36.5%), Retry (47%), and Self-Reflection (62.5%). Gains are especially large on tasks the baseline never solves — e.g., TakeLidOffSaucepan goes from 0% to 85%, PushButton from 15% to 80%, OpenWineBottle from 15% to 95%. These are not marginal improvements.
+1. **Cross-environment transfer yields clear gains on RLBench against reasonable baselines.**  
+   EnvBridge achieves 69% on 10 RLBench tasks (3 trials) vs. 62.5% (Self-Reflection), 47% (Retry), and 36.5% (VoxPoser baseline). On tasks where the baseline fails nearly completely (PushButton at 15%, TakeLidOffSaucepan at 0%), EnvBridge reaches 80% and 85% respectively. This directly validates that transferring code from CALVIN (a different benchmark) can substantially improve performance in RLBench.
 
-- **Cross-environment memory outperforms in-domain memory**: On RLBench, using memory built from CALVIN (a different environment) yields 69% success, while memory from the same environment (RLBench) yields only 65.5%. This counterintuitive result directly supports the paper's core premise that diverse cross-environment knowledge can be more valuable than same-environment experience.
+2. **Ablation studies isolate the contribution of each component.**  
+   Removing Knowledge Transfer drops success from 69.0% to 61.5% on RLBench, and replacing similarity-based retrieval with random selection produces a similar drop (Figure KT-figure). These controlled comparisons provide causal evidence that both mechanisms drive the improvement, not simply the benefit of multiple retries.
 
-- **Ablation confirms the necessity of Knowledge Transfer**: Removing Knowledge Transfer drops RLBench performance from 69% to 61.5% (EnvBridge w/o KT). This controlled experiment isolates the contribution of adapting source-environment code to the target environment and proves the transfer mechanism is essential, not decorative.
-
-- **Unified memory yields best results on MetaWorld**: Combining memory from both MetaWorld (in-domain) and RLBench (transferred) gives 56% average success, which is higher than in-domain-only (48%) or transferred-only (37%). This demonstrates EnvBridge can effectively fuse knowledge from multiple sources.
-
-- **Improvement under instruction variation on CALVIN**: When evaluated with paraphrased instructions, EnvBridge achieves 63% success versus Retry's 57.5%, showing robustness to linguistic variation — a practical advantage for deployment.
+3. **Cross-environment memory can match or exceed in-domain memory.**  
+   On RLBench, memory from CALVIN (different environment, 26 planner codes) yields 69.0%, while memory from RLBench itself (same environment, 50 planner codes) yields 65.5% (Table memory-comparison-table). This empirical result supports the paper's motivating insight: diverse source knowledge can be more useful than homogeneous in-domain examples, even if the mechanism behind it is not fully explained.
 
 ## Weaknesses
 
 ### Fatal
-None.
+None. The core claim is supported by evidence; the issues below are substantial but addressable.
 
 ### Major
 
-1. **Unspecified origin of target-environment code examples used in Knowledge Transfer**. The Knowledge Transfer step (Section 3.4.1, line 180) states: "code examples from the target environment are provided as prompts, and the retrieved code is adapted to suit the target environment by LLMs." The paper never states where these target-environment code examples come from. If they require hand-crafting for each new target environment, this directly conflicts with the paper's claim of operating "without human-initiated prompt adjustments" (line 43). If they are automatically generated (e.g., from a single successful baseline execution in the target environment), that process is never described. This gap makes it impossible to determine how much of the method is genuinely automated. The contribution is framed around fully automated cross-environment transfer, so this is a structural ambiguity that must be resolved. The paper needs to either (a) clarify the automatic process for obtaining these examples, or (b) acknowledge and discuss the human effort involved.
+1. **The cross-environment transfer claim rests on a narrow empirical base.**  
+   The paper's central claim is that knowledge can be transferred *across* environments. Yet the clean cross-environment demonstrations are limited to two directions: (a) CALVIN → RLBench (10 tasks, the main result), and (b) RLBench → MetaWorld (5 tasks, a secondary evaluation). The CALVIN experiment (Section 4.3) uses in-domain memory from CALVIN itself and tests instruction robustness, not cross-environment transfer. The MetaWorld experiment shows a 12-point gain over baseline (37% vs 25%) using RLBench memory, but on only 5 tasks with one instruction each. For a paper whose identity hinges on "bridging diverse environments," the evidence is thinner than the title and claims suggest. The reader cannot tell whether the method generalizes to other cross-environment pairs (e.g., MetaWorld → CALVIN, RLBench → CALVIN) or whether its success is specific to the particular source-target combinations tested.
 
-2. **No uncertainty quantification for any result**. All benchmark results are reported as point estimates from 20 trials per task with no confidence intervals, standard errors, or multiple seeds. With 20 binary trials, a shift of 2–3 outcomes changes the percentage by 10–15 points. Several large per-task gains (e.g., OpenWineBottle: 15% → 95%; TakeLidOffSaucepan: 0% → 85%) may be real, but the reader cannot assess whether they are statistically reliable. This is not a fatal flaw — the overall pattern across tasks and benchmarks is clear — but it reduces the paper's evidential quality. Bootstrap confidence intervals or a simple statistical test would substantially strengthen the claims.
+2. **The most interesting finding—cross-environment CALVIN memory outperforming in-domain RLBench memory on RLBench—is presented without analysis.**  
+   The paper notes that MetaWorld's memory has only 10 planner codes vs. 26 (CALVIN) and 50 (RLBench), and attributes MetaWorld's lower score to small code variation. But this logic would predict RLBench's memory (50 codes) to outperform CALVIN's (26 codes), which it does not (65.5% vs. 69.0%). The paper offers no hypothesis for this reversal—whether CALVIN's codes are qualitatively more diverse, whether the similarity metric favors different instruction distributions, or whether the knowledge transfer step works differently when source and target are more dissimilar. The paper's most striking result therefore lacks a supporting explanation, which weakens the claim that cross-environment transfer itself (rather than an artifact of memory composition) is responsible.
 
 ### Minor
 
-1. **Different LLMs used across benchmarks without justification**. RLBench and CALVIN use GPT-4o-mini while MetaWorld uses GPT-4o (lines 232, 364, 401). No rationale is given. While within-benchmark comparisons (EnvBridge vs. baselines) use the same LLM and are therefore valid, the inconsistency raises the question of whether the advantage generalizes. A brief justification or a calibration experiment on one benchmark with both models would address this.
+1. **The Self-Reflection baseline is underspecified, making the main comparison less informative.**  
+   The paper states only that prompts were "created ourselves" using images from RLBench as observations (line 237). No details are given on how many reflection cycles were attempted, what the prompt template was, or whether any tuning was done. The paper acknowledges that Self-Reflection requires manual prompt engineering while EnvBridge does not (line 242), which is a valid framing. However, the lack of specification means the reader cannot assess whether the 6.5-point gap (69% vs. 62.5%) represents an advantage of the transfer mechanism or simply suboptimal tuning of the baseline. The paper would be stronger with either prompting details or a sensitivity analysis.
 
-2. **Limited evaluation scope on MetaWorld**. Only 5 tasks with 1 instruction each are evaluated on MetaWorld, compared to 10 tasks on RLBench and 200 on CALVIN. The average improvement from 25% (baseline) to 37% (transferred) is modest. A larger set of tasks would strengthen the claim of cross-environment transfer generalizability.
+2. **The knowledge transfer step is a black box.**  
+   The paper states that "code examples from the target environment are provided as prompts, and the retrieved code is adapted to suit the target environment by LLMs" (line 180). It does not specify which examples are used, how many, whether they are fixed or retrieved, or what the LLM prompt looks like. The ablation shows a 7.5-point drop without knowledge transfer, making this a critical component, yet it cannot be reproduced or assessed from the description. A concrete example showing a raw retrieved code, the target example, and the transferred output side by side would substantially improve the paper.
 
-3. **MCIL comparison on CALVIN is not contextualized**. MCIL (a learning-based method) obtains only 32%, far below Retry (61%) and EnvBridge (60.5%). The paper notes it chose single tasks rather than long-horizon tasks, but does not discuss that MCIL was designed for long-horizon tasks — making the comparison potentially misleading. The discrepancy should be acknowledged.
+3. **Different LLMs are used across experiments without discussion.**  
+   GPT-4o-mini is used for RLBench and CALVIN (lines 232, 401), while GPT-4o is used for MetaWorld (line 364). If the cheaper model was used for the main evaluation, that is fine, but the paper does not acknowledge this asymmetry or discuss whether it could affect cross-experiment comparability.
 
-4. **Memory Comparison explanation is speculative**. The paper attributes the finding that CALVIN memory (26 codes) outperforms RLBench memory (50 codes) on RLBench to "code variation" without providing diversity metrics or qualitative evidence. While the finding itself is interesting and plausible, the explanation lacks supporting analysis.
+4. **Confidence intervals or standard errors are missing.**  
+   With only 20 trials per task in RLBench and MetaWorld, binomial 95% confidence intervals are roughly ±10 percentage points for rates in the 60-70% range. The paper reports point estimates only, which overstates the precision of the findings. This is a standard reporting gap.
 
-5. **Knowledge Transfer prompt details are underspecified**. The prompt template, number of target-environment examples used, and selection criteria for Knowledge Transfer are not provided. This makes reproduction harder than necessary.
+5. **No failure analysis is provided.**  
+   When EnvBridge fails, is it because no similar code was retrieved, because knowledge transfer produced faulty code, or because the task is genuinely out of distribution relative to the memory? Answering this would guide future improvements and make the ablation results more interpretable.
 
 ### Trivial
-None.
+
+- The paper uses d=3 trials for the main RLBench comparison but shows ablation curves up to 5 trials (Figure num_try_figure). This is not contradictory (the ablation explores a wider range) but should be explicitly clarified.
+- The MetaWorld evaluation uses only 5 tasks with a single instruction each, limiting the conclusions that can be drawn from that experiment. (Noted here as a presentation issue rather than a core flaw.)
 
 ## Nice-to-Haves
 
-- **Computational cost reporting**: The number of LLM calls per task, memory size, and overhead of Knowledge Transfer would help practitioners assess deployment feasibility.
-- **Failure analysis**: A qualitative analysis of what insights are actually transferred — e.g., which retrieved codes were used and how they were adapted — would strengthen the claim that cross-environment transfer is the mechanism, not just random re-prompting.
-- **Statistical significance tests**: A chi-square test comparing success proportions across conditions would be straightforward and informative.
+- **Expand cross-environment evaluations** to at least one more properly crossed pair (e.g., MetaWorld → CALVIN or RLBench → CALVIN) to show the method generalizes beyond the specific source-target pair selected as the flagship result.
+- **Analyze why CALVIN memory outperforms RLBench memory on RLBench.** A few case studies comparing planner outputs with and without cross-environment transfer, or a qualitative diversity analysis of each memory's codes, would turn the paper's most surprising finding from a curiosity into a genuine insight.
+- **Provide a concrete example** of the knowledge transfer pipeline: raw retrieved code, target environment example, transferred code, and final generated code. This would help readers assess whether the adaptation is syntactic (variable names, API calls) or semantic (different decomposition strategies).
+- **Report per-task breakdowns with confidence intervals** to allow readers to assess the reliability of the improvements.
 
 ## Removed Points
 
-These points were flagged during review but are removed or downgraded per policy; treat them with caution:
+These points from the reviewers were removed or downgraded per the instructions:
 
-- **"First" claim in contributions**: The reviewer claimed the paper makes an unjustified "first" claim about being the first embodied agent functioning across diverse environments. This text appears only in a commented-out block (`\begin{comment}`...`\end{comment}`, lines 31–37) and is not part of the published paper's contributions.
-- **Self-Reflection modality asymmetry is an unfair comparison**: The reviewer argued Self-Reflection has an unfair advantage because it receives visual observations while EnvBridge receives only text. Per policy, asymmetry favoring the baseline (not the author's method) is a strength, not a weakness — EnvBridge outperforms Self-Reflection despite having less information.
-- **Missing related works**: Per policy, we cannot verify the existence of missing citations and do not penalize for their absence.
-- **Commented-out "Self-Reflection + Ours" table row**: The reviewer references a table row showing Self-Reflection+Ours at 62.5% (lower than EnvBridge alone). This appears only in commented-out content and is not part of the paper.
-- **Figure axis labeling**: Formatting nitpick.
-- **Reproducibility nitpicks about prompt templates and trivial implementation details**: These are standard details that can be addressed in supplementary material; they do not threaten reproducibility.
-- **Criticism about across-benchmark LLM incomparability**: The paper does not compare results across benchmarks; within-benchmark comparisons use the same LLM, so this concern is overstated.
+- **"CALVIN experiment uses in-domain memory, not cross-environment"** — This is technically correct, but the CALVIN experiment is explicitly scoped as an "Evaluation on Instruction Robustness" (Section 4.3), not as a cross-environment test. The paper never claims it is cross-environment. Removing this as a strawman.
+- **"6.5-point gap could shrink or reverse if Self-Reflection prompts were optimized"** — Speculative and unfalsifiable. The paper acknowledges the asymmetry and treats it as a feature of EnvBridge (no manual prompt engineering). Keeping the underspecification criticism (Minor #1) but removing this speculative extrapolation.
+- **"The memory was bootstrapped from the Retry baseline"** — This is a standard practice (using successes from a weaker method to build a memory). Not a weakness.
+- **"Algorithm trials inconsistency (d=3 vs d=5)"** — Addressed in Trivial; the main experiment fixes d=3 and the ablation explores the effect of more trials. This is not an inconsistency.
+- The harsh critic's mention of comparing against "wrong class of expectations" is not applicable here.
+- Some phrasing from the Strength Finder was generic ("this paper addressed an important problem") — filtered out.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The reviews converge on a key observation that goes beyond the paper's own framing: the paper's most interesting result—that cross-environment memory outperforms in-domain memory—is presented as an unanalyzed empirical fact. This reversal of the intuitive expectation (more in-domain data should help more) is potentially the paper's most important contribution, but treating it as a black-box phenomenon leaves the paper in a weaker position than if it had attempted an explanation. The reviews collectively suggest that the paper would be significantly stronger if it leaned into this finding rather than glossing over it.
 
 ## Suggestions
 
-1. **Clarify the provenance of the target-environment code examples** used in Knowledge Transfer. If they are automatically obtained (e.g., from a single successful VoxPoser execution in the target environment), describe the process explicitly. If they require human effort, acknowledge this and qualify the "no human-initiated prompt adjustments" claim accordingly.
-
-2. **Add uncertainty estimates** to all main results. Bootstrap confidence intervals from the 20 trials per task would be straightforward and would allow readers to assess whether observed gains are reliable.
-
-3. **Use the same LLM across all benchmarks**, or include a calibration experiment showing that relative rankings are preserved when switching models.
-
-4. **Expand MetaWorld evaluation** to include more tasks, or acknowledge the limited scope more prominently.
-
-5. **Discuss the MCIL comparison** on CALVIN to explain why a learning-based method performs poorly on single-step tasks.
+1. Add at least one more cross-environment evaluation direction (e.g., RLBench → CALVIN) to broaden the empirical foundation for the core claim.
+2. Investigate and discuss why CALVIN memory outperforms RLBench memory on RLBench—analyze qualitative diversity, instruction coverage, or code complexity differences between the two memories.
+3. Specify the knowledge transfer prompt template and include a concrete example showing the transformation from source code to transferred code.
+4. Report confidence intervals for all main results and add per-task breakdowns with error bars.
+5. Provide more detail on the Self-Reflection baseline: prompt template, number of reflection cycles, and whether any tuning was performed.
+6. Acknowledge and justify the use of different LLMs (GPT-4o-mini vs. GPT-4o) across experiments.
 
 ## Score and Decision
 
-The paper presents a practical and sensible method for cross-environment transfer in LLM-based robotic manipulation. The experimental evidence is strongly suggestive: EnvBridge shows large and consistent gains across three benchmarks, an informative ablation study confirms the necessity of the transfer mechanism, and the finding that cross-environment memory outperforms in-domain memory is genuinely interesting. The core idea has clear practical potential.
+This paper proposes a well-motivated approach with a clear mechanism and positive experimental results. The main contribution—cross-environment knowledge transfer for LLM-based robotic agents—is validated on RLBench with meaningful gains over baselines. However, the evidence for the central claim is narrower than the paper's framing suggests (only two cross-environment directions, one on just 5 tasks), the most interesting finding is left unexplained, and key components are underspecified. These are fixable issues that do not invalidate the contribution but limit its strength as the paper currently stands.
 
-However, the paper has two significant issues in its current form. First, the Knowledge Transfer pipeline relies on target-environment code examples whose origin is never specified — if these require human crafting, the central claim of fully automated transfer is undermined. Second, the complete absence of uncertainty estimation makes it impossible to assess the reliability of the reported gains. These are fixable issues — clarification and additional analysis could resolve them — but in their current state they limit confidence in the results.
+**Originality**: 6/10 — The idea of retrieving and adapting code across environments is a practical extension of existing retrieval-augmented generation and replanning ideas rather than a fundamentally new paradigm.  
+**Importance**: 7/10 — Cross-environment transfer is a practically important problem for embodied AI.  
+**Claims support**: 5/10 — The central claim is supported but the evidence is thinner than the framing suggests.  
+**Soundness**: 6/10 — Experiments are reasonably designed but missing confidence intervals and have specification gaps.  
+**Clarity**: 6/10 — The pipeline is clearly described at a high level but key details (knowledge transfer prompt, Self-Reflection prompt) are missing.  
+**Value**: 6/10 — The approach is sensible and the positive results are useful, but the paper's insights are limited by the lack of analysis of its own most surprising finding.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Weak Accept</orange>

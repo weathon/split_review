@@ -1,113 +1,78 @@
-Now I have all the information needed. Let me synthesize the final review.
+Now I have all the information needed. Let me synthesize the final consolidated review.
 
 ## Summary
 
-2-3 sentence summary of the paper's contribution.
-
-## Strengths
-- strength 1 with evidence
-- strength 2 with evidence
-
-## Weaknesses
-### Fatal
-
-### Major
-- weakness 1 — why it matters
-- weakness 2 — why it matters
-
-### Minor
-- weakness 1 — why it matters
-
-### Trivial
-- weakness 1
-
-## Nice-to-Haves
-
-## Removed Points
-
-## Novel Insights
-
-## Suggestions
-
-## Score and Decision
-
----
-
-Here is my consolidated review:
-
----
-
-## Summary
-
-This paper presents Video Language Planning (VLP), a tree-search algorithm that composes vision-language models (VLMs) and text-to-video models for long-horizon robot planning. The VLM serves as both a policy (proposing text actions) and a heuristic function (estimating distance to goal), while the video model serves as a dynamics model (simulating visual outcomes of actions). The tree search explores multiple action and video branches to synthesize long video plans that can be executed via goal-conditioned policies. VLP is evaluated on simulated and real robot tasks across three hardware platforms (Language Table, 7DoF mobile manipulator, 14DoF bi-manual ALOHA).
+This paper presents Video Language Planning (VLP), an algorithm that integrates vision-language models (as policies and value/heuristic functions) with text-to-video models (as dynamics models) via tree search to generate long-horizon video plans for robotic manipulation. VLP uses a VLM to propose text actions, a video model to simulate outcomes, and a VLM-based heuristic to evaluate progress, then performs search over action sequences. The method is evaluated on both simulated and real robots across three hardware platforms, showing strong improvements over baselines including PaLM-E, RT-2, UniPi, and LAVA on long-horizon tasks (e.g., 89.3% vs. 35.7% success on Language Table tasks).
 
 ## Strengths
 
-1. **Significant execution gains over strong baselines**: In long-horizon simulated tasks (~1500 steps), VLP achieves substantially higher task success rates compared to PaLM-E, UniPi, LAVA, and RT-2. The paper reports that baseline methods "would become 'stuck' and stop acting effectively," while VLP maintains coherent execution over the full horizon. This is the paper's strongest evidence, directly supporting the claim that VLP improves long-horizon task completion.
+- **Novel and well-motivated integration of VLMs + video models via tree search.** The paper clearly articulates the complementary strengths of VLMs (high-level semantic planning) and video models (low-level visual dynamics) and shows how forward search combines these into a system that can plan over hundreds of frames. This composition is explicitly distinguished from prior work like HiP, which plans only one step ahead. The algorithmic description (Section 2.2 and Algorithm 1) and qualitative video plans (Figures 4–6) support the novelty.
 
-2. **Scaling with increased search budget**: The paper demonstrates that plan quality improves monotonically with larger computational budgets — increasing video branching, language branching, and number of beams each "substantially increases the success of synthesized long horizon plans." Execution results further confirm that increasing both planning horizon and branching factor improves task success. This directly validates a central claim.
+- **Clear evidence that plan quality scales with computation budget.** Tables 2 and 4 quantitatively show that increasing branching factors (video branching, language branching, number of beams) substantially improves both video plan success rates and execution task success rates. This is a key property not demonstrated in prior video-based planning methods and is the kind of scaling behavior expected of a search-based planner.
 
-3. **Effective use of incomplete training data**: The paper articulates a concrete advantage: VLP "benefits from training on incomplete language-labeled video data, which may contain short-horizon snippets (that can be re-composed and sequenced into long-horizon ones), or segments of videos with missing language labels (but contain dynamics that the video model can still learn from)." This is a practical advantage over methods requiring fully labeled long-horizon demonstrations.
+- **Substantial and consistent improvement over strong baselines on real robot execution.** VLP achieves large margins over PaLM-E, RT-2, UniPi, and LAVA on Language Table environments (Table 3: 89.3% vs. 35.7% for the next best method). The method is validated on three distinct hardware platforms (Language Table, 7DoF mobile manipulator, 14DoF bimanual ALOHA), lending credibility to the generality of the approach. The execution metric (actual task completion) is objective and not subject to the concerns that apply to the video plan metric.
 
-4. **Multi-view consistent plan generation for dexterous manipulation**: On the 14DoF bi-manual ALOHA platform, VLP synthesizes multiview-consistent plans (by concatenating camera views channelwise) for stacking bowls, cups, and utensils — demonstrating applicability to complex, high-DoF domains beyond simple pick-and-place.
+- **Useful ablations isolating component contributions.** The paper ablates the effect of the heuristic function (Table 1: VLP vs. VLM+Video without heuristic vs. direct video generation), planning horizon, branching factors, and goal-conditioned policy variants (Tables 4–5). These help the reader understand why each component matters and confirm that the search procedure, not just the component models, drives performance.
 
 ## Weaknesses
 
 ### Fatal
-None. The paper's core contribution — a planning algorithm that composes VLMs and video models via tree search — is novel and well-motivated. The execution results provide quantitative evidence of improved task completion.
 
-### Major
-
-1. **Generalization claims lack quantitative support**. The paper lists generalization to new objects, lighting conditions, and tasks as a key advantage (Section 3.3), but provides only qualitative image sequences with no success rates, baseline comparisons, or experimental controls. The text states "we found that this enables \model to generalize well" — a claim that cannot be evaluated from anecdotal examples. Given that generalization is listed as one of three main contributions (line 37: "ablations that study modes of generalization"), this is a significant evidential gap. Even a small-scale quantitative study (e.g., 20 trials per condition) would substantially strengthen this claim.
-
-2. **The primary video plan quality metric is human visual assessment without reproducibility safeguards**. In Section 3.1, plan quality is measured by generating 50 videos per method and having someone "visually assess[] the percentage of time the video successfully solved the given task." No inter-rater reliability, blinded evaluation, or automated metric is reported. This makes the plan quality evaluation subjective and not independently reproducible. While human evaluation is common in video generation, the absence of basic rigor (multiple raters, blinding) weakens confidence in the quantitative plan-quality comparisons. (Note: execution success rates in Section 3.2 provide stronger objective evidence, but they measure the combined planning+control system, not planning quality in isolation.)
-
-### Minor
-
-1. **The "fixed threshold" for preventing exploitative dynamics is unspecified and unablated**. The paper mentions (line 80) that videos causing the heuristic estimate to increase "above a fixed threshold" are discarded, but the threshold value is never reported nor ablated. Since this mechanism directly affects which plans are selected, the threshold choice could substantially influence results.
-
-2. **Baseline training details are underdocumented**. The execution experiments compare VLP against PaLM-E, RT-2, UniPi, and LAVA, but the paper does not report how much data, compute, or which hyperparameters were used to fine-tune each baseline. This makes it difficult to assess whether the comparison is calibrated. This is a documentation gap rather than a structural flaw — the baselines are being used in their intended modalities — but it does limit reproducibility.
-
-3. **The heuristic function's training target is underspecified**. The VLM heuristic is trained to predict "the number of steps left until the end of the trajectory snippet" (line 64), but it is unclear whether this is measured in absolute timesteps, action steps, or relative to trajectory length. This matters for interpreting the heuristic's behavior.
-
-4. **The goal-conditioned policy training horizon *h* is not reported**. The paper states (line 89) that the controller is trained by sampling "a random timestep t, a corresponding state x_t, and future state x_{t+h}," but the value of *h* is never given. Since *h* controls how far ahead the policy must plan, it likely matters for controller robustness.
-
-5. **The compute-scaling claim lacks wall-clock time measurements**. The paper demonstrates that larger branching factors improve plan and execution quality but provides no plot of success rate vs. wall-clock time or number of model calls. This makes it difficult for practitioners to assess the cost-benefit tradeoff.
-
-### Trivial
 None.
 
+### Major
+
+None. The weaknesses below are important but fixable and do not invalidate the paper's core contributions.
+
+### Minor
+
+- **Heuristic threshold for suppressing exploitative dynamics is unspecified and unanalyzed (Section 2.2, line 80).** The paper mentions discarding generated videos if the heuristic estimate rises above "a fixed threshold" to prevent the planner from exploiting model irregularities (e.g., objects teleporting), but does not report: (i) what the threshold value is, (ii) how it was set (task-specific? manually tuned? cross-validated?), (iii) how sensitive results are to its value, or (iv) what failure modes it is meant to suppress. The paper does acknowledge the underlying issue in the Limitations (line 183: "synthesized videos would make objects spontaneously appear or teleport"), and a threshold is a reasonable engineering fix, but the lack of documentation makes this hard to reproduce or assess for robustness. This is a missing implementation detail rather than a structural flaw — the execution results are not dependent on this threshold being perfectly tuned.
+
+- **Video plan evaluation (Section 3.1, line 117) relies on subjective visual assessment without blinding or inter-annotator agreement.** The paper reports "the percentage of 50 videos per method that successfully solved the given task as judged by visual inspection" without specifying who performed the assessment, whether they were blinded to method identity, or whether multiple raters were used. This is a genuine methodological gap for this particular metric. However, this weakness is limited in scope: the paper's core claims about execution success (Section 3.2) rely on objective task completion, not visual inspection. The video plan metric is a secondary supporting analysis.
+
+- **Generalization results are only qualitative (Section 3.3).** The paper claims generalization to new objects, lighting conditions, and tasks, but provides only illustrative examples (Figures 10–11) without success rates or systematic evaluation. For example, "generalizes to three new objects, a rubber donut and cupcake and a wooden hexagon" is accompanied by example images only. Given that generalization is listed among the contributions (line 37), quantitative evidence would substantially strengthen this claim. This does not undermine the main execution results, which are on in-distribution tasks.
+
+- **Missing practical implementation details.** The paper does not report wall-clock planning times or computational costs for any experiment, even though the scaling analysis claims "plan quality scales with increasing computation budget" — without reporting actual costs, the practical trade-off is hard to assess. Additionally, the choice of horizon \(h\) for the goal-conditioned policy (Section 2.3) and how horizon mismatch affects execution is not discussed. These are addressable in a revision.
+
+### Trivial
+
+- **Parallel hill climbing and beam sharing risk (Section 2.2).** The paper uses a beam search with periodic resampling (discarding the lowest-value beam and replicating the highest). This is standard practice for this kind of search, and no evidence of premature convergence is shown. This is a theoretical observation that does not rise to the level of an experimental weakness.
+
+- **View consistency for multi-camera ALOHA.** The paper generates multi-view videos by concatenating views channelwise and claims "multiview consistent plans" without analyzing cross-view artifacts. This is a minor omission for a system-level paper.
+
 ## Nice-to-Haves
 
-- **Failure analysis**: The paper acknowledges that the video model can produce unrealistic dynamics (teleportation). A systematic categorization of failure modes — e.g., what fraction of generated plans contain such artifacts, and how often the heuristic catches them — would help readers trust the planning procedure.
-- **Data-source details**: The paper mentions training on "incomplete language-labeled video data" but gives no specifics on data volume, domain composition, or whether the VLM and video model were trained on the same mixture.
-- **Wall-clock time vs. success rate plot**: Would directly validate the scaling claim and help practitioners understand the cost-benefit tradeoff.
+- A brief sensitivity analysis on the heuristic threshold (e.g., over 3–5 values) would address the main reproducibility concern without requiring architectural changes.
+- Adding 10–20 quantitative generalization trials per condition (unseen objects, lighting) would substantially strengthen the generalization claims.
+- Reporting wall-clock planning times for each branching factor configuration would make the scaling claims practically meaningful.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points were raised by reviewers but are removed or downgraded based on verification against the paper:
 
-- **Harsh Critic's claim that "RT-2 was originally trained for short-horizon visuomotor control; fine-tuning it for 1500-step tasks may not be a fair test"**: The paper fine-tunes RT-2 on long-horizon text and actions. RT-2 is a generalist vision-language-action model; fine-tuning it on the target domain is a standard and reasonable baseline comparison. The criticism speculates about unfairness without evidence that the authors disadvantaged the baseline.
+1. **"Unfair baseline comparison" (Critical Issue 3).** The reviewer claims baselines are disadvantaged because they lack replanning/search. This is not a fair criticism — comparing a new method against existing methods as-is is standard practice. The paper provides ablations that isolate the contribution of search (Table 1: VLP vs. VLM+Video no-heuristic), and the baselines (PaLM-E, RT-2, UniPi, LAVA) are standard architectures compared in their intended operating mode. The criticism that "baselines should be given comparable compute/search" would effectively require re-implementing baselines as versions of VLP, defeating the purpose of comparison. The existing ablations already address the component contributions.
 
-- **Harsh Critic's claim that "PaLM-E as a planner requires a separate text-conditioned policy (not described in detail)"**: The paper explicitly describes the PaLM-E baseline (line 133): "using PaLM-E to plan short horizon text snippets to execute, which are converted to actions using a text-conditioned policy." This description is commensurate with how the baseline would be described; the policy itself is a standard component cited from prior work.
+2. **"Heuristic threshold shows fundamental fragility."** The reviewer characterizes the threshold as a sign of "fundamental fragility." This is overblown — many planning systems use simple engineering heuristics (e.g., cost thresholds, timeout limits) to handle edge cases without constituting a structural flaw. The paper acknowledges the underlying problem in its Limitations section. The execution results do not depend on this threshold being perfectly set.
 
-- **Strength Finder's claim about "Robust generalization to novel objects and conditions"**: This conflicts with the verified weakness that generalization lacks quantitative support. The paper shows only qualitative examples; characterizing this as "robust" is an overclaim given the evidence provided.
+3. **"Premature convergence of parallel hill climbing."** This is a theoretical speculation about beam search behavior that is not experimentally demonstrated. The paper's ablation results show that increasing search breadth consistently improves performance, which is inconsistent with premature convergence being a practical problem.
+
+4. **Complaints about missing appendix/proofs content.** These are parser artifacts; the original submission contained these materials.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface any insight about the method or its evaluation that the paper itself does not already acknowledge or imply.
+None beyond the paper's own contributions. The review process confirms that the paper's primary novel claim — that combining VLMs and video models through tree search enables effective long-horizon planning — is well-supported by the execution experiments, though the evaluation has some secondary methodological gaps.
 
 ## Suggestions
 
-1. **Add a quantitative generalization experiment**: Even a small-scale study (e.g., 20 trials on held-out objects, lighting conditions, or tasks) with success rates and comparisons would transform the generalization claim from an anecdotal observation into a credible contribution.
-2. **Strengthen the video plan quality evaluation**: Report inter-rater agreement (e.g., Cohen's κ over 2-3 raters) or supplement with an automated metric (e.g., a learned task-completion classifier). This would make the plan quality results reproducible.
-3. **Report the unspecified hyperparameters** (heuristic threshold *τ*, goal-conditioned horizon *h*) and add ablations showing their sensitivity.
-4. **Provide execution success rates with variance** (e.g., over multiple episodes) in the main paper, if this data is already in the tables.
-5. **Add a compute-scaling plot** showing success rate vs. wall-clock time or number of video model calls, to directly validate the scaling claim.
+1. Report the heuristic threshold value and include a brief sensitivity analysis (3–5 values) over a representative task.
+2. Add quantitative success rates for generalization experiments (at minimum 10–20 trials per condition).
+3. Include a supplementary table of wall-clock planning times for each branching factor configuration and note the horizon \(h\) value and how it was chosen.
+4. For the video plan evaluation, add at minimum a brief note on whether ratings were blind and whether multiple raters were used, or provide automatic verification using the VLM itself.
+5. When discussing the heuristic threshold, clarify whether the same threshold was used across all tasks and environments, or whether it was tuned per task.
 
 ## Score and Decision
 
-This paper proposes a well-motivated algorithm that genuinely combines VLMs and video models via tree search for long-horizon planning. The core idea is timely and the method is clearly described. The execution results provide credible evidence that VLP outperforms strong baselines on long-horizon tasks. However, the evaluation has notable gaps: (1) the generalization claims — listed as a main contribution — are entirely qualitative; (2) the primary plan quality metric lacks reproducibility safeguards; (3) several important hyperparameters are undisclosed. These are real weaknesses but none are fatal — they do not invalidate the approach, and the execution results remain the paper's strongest evidence. The paper would be significantly strengthened by addressing the generalization and plan-quality evaluation gaps.
+The paper presents a novel and well-executed approach to long-horizon robot planning by composing foundation models via tree search. The core contribution is significant, the execution results are strong and validated across multiple platforms, and the ablations provide insight into the method's behavior. The main weaknesses — missing specification of the heuristic threshold, subjective video plan metrics, qualitative-only generalization evidence, and a few missing experimental details — are genuine but fixable, and none invalidate the central claims. The paper is a solid contribution to the robotics and foundation-model planning literature.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

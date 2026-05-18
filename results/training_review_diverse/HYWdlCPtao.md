@@ -1,84 +1,77 @@
-Now I have all the information needed. Let me construct the final consolidated review.
+Now I have all the information I need. Let me compose the final consolidated review.
+
+---
 
 ## Summary
 
-The paper proposes Curvature Enhanced Manifold Sampling (CEMS), a data augmentation method for regression that generates synthetic points using a second-order Taylor approximation of the data manifold, extending the first-order FOMA approach. CEMS captures local curvature by estimating the Hessian of the embedding map via neighborhood SVD and least-squares solving, then samples isotropic Gaussian noise in the tangent space and un-projects it. The method is evaluated on nine in-distribution and out-of-distribution benchmarks, achieving best or second-best RMSE/R² in every case.
+This paper introduces Curvature Enhanced Manifold Sampling (CEMS), a data augmentation method for regression tasks that generates synthetic samples from a second-order (curvature-aware) approximation of the data manifold. The method extends prior first-order approaches (FOMA) by estimating local gradient and Hessian information within tangent-normal coordinates, sampling new points in the tangent space, and mapping them through the learned second-order model. The paper provides a theoretical error bound (Theorem 4.1: second-order error decays as O(‖u−u₀‖³) vs. O(‖u−u₀‖²) for first-order) and evaluates CEMS on four in-distribution and five out-of-distribution benchmarks, showing competitive or best performance.
 
 ## Strengths
 
-- **Consistent empirical advantage across the full benchmark suite**: CEMS attains the best or second-best result on all nine datasets in Tables 1 and 2, spanning tabular, time-series, and image regression. On SkillCraft it improves the second-best RMSE by a relative 8% on the worst-domain metric. This consistency across diverse settings is the paper's strongest piece of evidence.
+1. **Principled second-order formulation with provably tighter error bounds.** Theorem 4.1 formally establishes that CEMS's second-order Taylor approximation has sampling error O(‖u−u₀‖³) compared to O(‖u−u₀‖²) for first-order methods, providing a clear theoretical motivation for the approach.
 
-- **Principled second-order extension with clear motivation**: The paper explains why first-order approximation fails near high-curvature regions (Figure 1) and formalizes why second-order sampling reduces the local approximation error from O(‖u−u₀‖²) to O(‖u−u₀‖³) (Theorem 4.1). The connection between curvature and sampling quality is intuitive and well-illustrated.
+2. **Competitive empirical performance across diverse benchmarks.** On the in-distribution benchmark (Table 1), CEMS achieves best or second-best results on all four datasets. On the out-of-distribution benchmark (Table 2), CEMS obtains the best result in 6/9 metrics, including up to 8% relative improvement on SkillCraft worst-domain performance. Results are averaged over three seeds.
 
-- **Practical batch-wise implementation with efficiency analysis**: The ablation study (Table 3) shows that reusing a single SVD basis per batch (CEMS) yields nearly identical RMSE to computing a separate basis per point (CEMS_p), while drastically reducing compute. The complexity analysis bounds per-batch cost at O(b²D), and the memory analysis explains why the reduced SVD variant is practical when b ≪ D.
+3. **Efficient batch-wise computation with negligible accuracy loss.** The ablation study (Table 3) demonstrates that re-using a single basis per batch (CEMS) yields nearly identical error to per-point SVD (CEMSₚ) while substantially reducing computational cost, validating the practical feasibility of the approach.
 
-- **Domain-independent and fully differentiable design**: CEMS operates on the joint input-output space, making it applicable to any data modality (tabular, time series, images). The entire pipeline (SVD, least squares, sampling) is differentiable, enabling potential integration with gradient-based meta-learning or end-to-end training of sampling parameters.
+4. **Domain-independent and broadly applicable.** CEMS works on tabular, time-series, and image data without domain-specific transformations, and its complexity analysis (O(b²D) time) shows that it scales with the intrinsic dimension d ≪ D rather than the ambient dimension, making it practical for high-dimensional settings.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-- **Baseline results imported from different publications, not re-run under controlled conditions**. The paper explicitly states (Section 5.2) that "The results of all previous methods are reported as they appear in the corresponding original papers." This is a significant methodological gap. Differences in training procedures, hyperparameter tuning, seeds, and software versions can produce non-trivial variance in regression metrics. Since some improvements are small (e.g., 0.001 RMSE on Exchange-Rate), the reader cannot determine whether CEMS is genuinely better or whether the differences reflect uncontrolled experimental conditions. The paper does disclose the practice and states it "closely replicates" the setup from Yao et al., 2022, but this does not substitute for a unified re-implementation. This is the most serious weakness — it undermines the central empirical claim that CEMS "surpasses other augmentation strategies."
-
-- **Complexity analysis contains a mathematically sloppy step.** In Section 4, the paper writes: "Using the manifold hypothesis, we assume that d≪D therefore d∈O(D²) and thus, the overall time complexity of CEMS is given by O(b²D)." The conclusion O(b²D) requires d² ∈ O(D) (i.e., d ∈ O(√D)) or that the SVD term dominates. The statement d∈O(D²) is technically true (since d ≤ D, any O(D) function is also O(D²)) but vacuous, and the reasoning chain from d∈O(D²) to O(b²D) is incoherent as written — if d were O(D²), then O(b²d²) would be O(b²D⁴), not O(b²D). The intended claim (complexity linear in D) is likely correct under standard manifold assumptions, but the sloppy presentation undermines the credibility of the technical analysis.
+None.
 
 ### Minor
 
-- **No standard deviations or error bars in the main tables.** Tables 1 and 2 report only mean values over three seeds. The paper defers full statistics to Appendix H, but the main body should include variance information — especially when differences between methods are at the 0.001 level (e.g., Exchange-Rate in Table 1). Without this, the reader cannot assess whether CEMS is reliably better or simply noisier. (The paper does promise detailed results in the appendix, so this is a presentation gap rather than an absent analysis.)
+1. **Abstract overstates the empirical results relative to what the main body reports.** The abstract claims CEMS is "superior in in-distribution and out-of-distribution tasks." However, the main text (Section 5.2) honestly reports that on Electricity and Exchange-Rate, CEMS is *comparable* with FOMA and sometimes second-best. The paper's own results show a near-tie with FOMA on in-distribution datasets (each winning on 2 of 4 datasets). For OOD, the results are stronger (best in 6/9 metrics), but margins are small on several metrics (e.g., RCF RMSE: 0.248 vs. 0.250 for FOMA). The empirical evidence supports "competitive with frequent best results" more accurately than blanket "superior."
 
-- **Theoretical contribution is a standard Taylor remainder bound, not a novel result.** Theorem 4.1 is a textbook error bound (cited to Fowkes et al., 2013) for twice-differentiable functions. While its application to motivate second-order manifold sampling is reasonable, the abstract's claim of "providing the fundamental theory" and "foundational theory and practice" overstates what is a standard calculus fact. The paper's real contribution is the algorithmic and engineering design of CEMS, not the theoretical bound.
+2. **The "fully differentiable" claim is stated but never leveraged.** The paper lists "fully differentiable" as a contribution and implements CEMS with differentiable SVD and least-squares operations. However, in standard data augmentation, gradients do not flow back through the augmentation process. The paper provides no scenario (meta-learning, differentiable hyperparameter tuning, end-to-end learned sampling) that actually uses this differentiability, making the claim functionally vacuous as presented.
 
-- **The isotropic Gaussian noise sampler is not justified.** The paper samples η ∼ 𝒩(0, σI_d) in the tangent space without analyzing why this distribution matches the manifold structure. No ablation or discussion of the noise scale σ or alternative sampling distributions is provided. While a simple sampler is pragmatically defensible, the paper does not discuss how the shape or scale of the noise affects the quality of generated points.
+3. **"FOMA as a special case of CEMS" is imprecisely framed.** The paper states that FOMA "can be interpreted as a special case of CEMS" (Section 4). However, the paper's own description shows that FOMA operates by scaling the normal components of *existing* projected neighbors, whereas CEMS estimates gradient and Hessian to sample entirely *new* points in tangent space and map them through the learned second-order model. These are structurally different sampling strategies that share only the initial SVD/projection steps; setting hyperparameters in CEMS does not recover FOMA's operation. A more accurate characterization would be that they share a common manifold-learning foundation but differ fundamentally in their sampling mechanisms.
 
-- **No analysis of how batch-wise basis sharing affects Hessian estimation quality.** The ablation (Table 3) only checks final RMSE, not whether the shared-basis approximation actually yields accurate curvature estimates. The paper correctly notes that sharing "may come at the cost of accuracy" but does not measure this cost directly.
+4. **Computational overhead is not empirically characterized.** The paper provides asymptotic complexity analysis (O(b²D) time) and memory analysis, but reports no wall-clock time or GPU memory benchmarks. Given that CEMS involves per-point least-squares solves and SVD per batch, actual runtime comparisons against FOMA and simpler baselines (Mixup) would substantiate the "mild overhead" claim and help readers assess the practical trade-off.
 
-- **No hyperparameter sensitivity analysis.** Key parameters (number of neighbors k, noise scale σ, estimated intrinsic dimension d) are not ablated. The method's sensitivity to these choices is therefore uncharacterized.
+5. **No discussion of when CEMS underperforms.** CEMS is second-best on Electricity and Exchange-Rate (Table 1), but the paper does not analyze why. Understanding when the second-order approximation fails (e.g., noisy curvature estimates, insufficient neighbors, non-smooth manifolds) would help delineate the method's scope of applicability and is a natural complement to the positive results.
 
 ### Trivial
-
-- The phrase "mabient dimension" (line 102) is almost certainly "ambient dimension" — a parser artifact, not an author error, mentioned here only for completeness.
+- The sine wave example (Figure 1) is qualitative only; a quantitative measure of sampling fidelity (e.g., average distance to the true manifold) would strengthen the toy illustration.
 
 ## Nice-to-Haves
-
-- Re-run all baselines in a unified framework with reported standard deviations (5–10 seeds). This would address the central evidential weakness.
-- Measure and report the actual runtime/memory overhead of CEMS relative to FOMA and other methods to ground the complexity claims empirically.
-- Include a failure-case analysis: datasets or settings where CEMS performs worse than FOMA or the baseline.
-- Add an ablation of the hyperparameters (k, σ, d) to characterize sensitivity.
-- Discuss or analyze how the isotropic Gaussian sampler relates to the assumed manifold structure.
+- Reporting wall-clock time per epoch (or per batch) for CEMS vs. FOMA vs. Mixup on the largest dataset would ground the complexity analysis.
+- A sensitivity analysis of the neighborhood size k and its interaction with the intrinsic dimension d would clarify robustness to this key hyperparameter.
+- Adding standard deviation bars or confidence intervals directly on the main-text tables (even for a subset of comparisons) would address readability concerns about the point estimates.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution:
-
-- **Criticism that Eq. 9 is undefined in the main text / relies on Appendix A.** Removed per rule: the parser strips appendix sections; the equation is defined in the appendix that exists in the original submission.
-- **Criticism about missing appendix, proofs, or references.** Removed per rule: these sections exist in the original submission and are stripped by the parser.
-- **Criticism that the sine example is "purely qualitative."** Removed: this is an illustrative toy example, which is standard practice; expecting quantitative improvement metrics from a visualization defeats its purpose.
-- **Criticism that the paper does not exploit differentiability.** Removed: having a differentiable pipeline is a design property, and the paper is not obligated to demonstrate every possible downstream use.
-- **Criticism that the paper should cover additional tasks/domains.** Removed: this is scope creep; nine datasets across three modalities is a reasonable evaluation.
-- **Strength from Strength Finder about "provably lower sampling error"** — kept but noted as standard math; the strength is in the application, not the theorem itself. Adjusted in phrasing above.
-- **Strength from Strength Finder about "Consistent empirical superiority"** — kept with the caveat about baseline comparisons, as reflected in the Major weakness above.
+These points were flagged by reviewers but removed after verification against the paper; treat them with caution and do not propagate:
+- **"Standard deviations are relegated to the appendix"**: This is standard practice in ML publications. The paper explicitly states three seeds are used and directs readers to Appendix H for full variance information.
+- **"The differences may not be statistically significant even with three seeds"**: Speculative without the appendix data. The paper reports three seeds and std devs in Appendix H; the reviewer's concern is about information not available in the main text rather than an actual flaw.
+- **"The main text is underspecified without the appendix"**: Referencing appendix for detailed equations (Eq. 9, matrix formation) is standard practice.
+- **"The paper should include Alg. 2 in the main text"**: Standard to put detailed algorithms in the appendix.
+- **"No comparison with third-order methods"**: Third-order manifold sampling does not exist as a standard baseline; this is scope creep.
+- **Requests for quantitative toy metric**: A nice-to-have, not a weakness.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews surface the central tension clearly: the paper's main strength (consistent empirical results) and its main weakness (uncontrolled baseline comparisons) are two sides of the same coin. The reviews' most useful insight is that if the baseline comparison issue is resolved (by re-running all methods in a unified framework) and the results hold, CEMS would be a solid contribution; if the results shift, the paper's core claim collapses. This framing is more precise than any individual reviewer's assessment.
+None beyond the paper's own contributions. The reviews surface the gap between the paper's stated contributions ("superior," "fully differentiable," "FOMA as special case") and what is actually demonstrated, but these are calibrations of existing claims rather than novel observations.
 
 ## Suggestions
-
-1. **Re-implement all baselines in a unified experimental framework** and report means and standard deviations over at least 5–10 seeds. This is the single change that would most strengthen the paper. Without it, the empirical claims remain unverifiable.
-2. **Fix the complexity analysis**: clarify the relationship between d and D that leads to O(b²D) complexity. Replace the vacuous/incoherent "d∈O(D²)" with a correct statement about d being O(√D) or that d² ∈ O(D), or simply state the total complexity as O(b²d² + min(bD², Db²)) and then discuss the regime b ≪ D, d ≪ D.
-3. **Add standard deviations to the main tables**, or at least include a compact visualization (e.g., a bar chart with error bars). Relying solely on an appendix for variance information weakens the in-line argument.
-4. **Add a hyperparameter sensitivity analysis** for k, σ, and d. At minimum, show how RMSE varies with these choices on one or two datasets.
-5. **Tone down the "fundamental theory" language** in the abstract and introduction to match the actual contribution (a standard Taylor remainder bound used for motivation).
+1. Tone down the abstract to match the measured language of the main text: replace "superior" with "competitive" or "strong empirical performance."
+2. Either drop the "fully differentiable" claim or provide a concrete use case (e.g., learning the sampling noise σ or the neighborhood size k via gradients).
+3. Correct the "FOMA as special case" framing to accurately reflect that the two methods share projection steps but diverge in sampling strategy.
+4. Add a brief runtime comparison (wall-clock per epoch) between CEMS, FOMA, and a non-augmented baseline on at least one dataset.
 
 ## Score and Decision
 
-The paper proposes a sensible and well-motivated extension to manifold-based data augmentation for regression. The core idea — using second-order approximations to capture curvature when sampling synthetic points — is clear and supported by an intuitive toy example. The consistent empirical trend (best or second-best across all nine datasets) is encouraging. However, the uncontrolled baseline comparison methodology (importing results from separate publications) is a significant evidential weakness that prevents the reader from trusting the quantitative claims. Until the baselines are re-run in a unified setting, the paper's central empirical contribution cannot be verified. The complexity analysis also contains a sloppy step that needs correction.
+**Originality**: Good — second-order manifold sampling specifically for regression DA is novel.  
+**Importance of question**: Important — DA for regression is underexplored relative to classification.  
+**Claims support**: Mostly supported, but the abstract overclaims relative to the actual results.  
+**Soundness**: Reasonable — theoretical bound is standard calculus, experiments use 3 seeds and standard benchmarks.  
+**Clarity**: Clear, though some framing (FOMA special case, fully differentiable) is imprecise.  
+**Value to community**: Positive — the method is domain-independent, empirically competitive, and the code/ablations make it reproducible.
 
-The paper has real potential but requires a major experimental revision to substantiate its claims. I recommend rejection in the current form with a clear path to revision.
+The paper makes a genuine contribution: a novel, theoretically motivated data augmentation method for regression with competitive empirical results across nine benchmarks. The weaknesses are all minor — overclaim in the abstract, unused differentiable claim, imprecise framing — and addressable in revision. No weakness undermines the core validity of the method or results.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

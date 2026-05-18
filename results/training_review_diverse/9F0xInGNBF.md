@@ -1,81 +1,105 @@
-Now I have verified the key claims against the paper. Let me produce the final consolidated review.
+Now I have all the evidence needed. Let me construct the final consolidated review.
+
+---
 
 ## Summary
 
-The paper introduces VideoPrompter, a training-free framework that improves zero-shot video understanding by combining a frozen VLM with two generative models: a video-to-text model (Video-ChatGPT) that produces descriptive captions of the query video, and an LLM (GPT-3.5) that generates richer class-label descriptors including a Tree Hierarchy of Categories for high-level action context. The method is evaluated across three zero-shot settings (action recognition, video-text retrieval, time-sensitive tasks) on up to seven datasets, showing consistent improvements over base VLMs.
+This paper proposes VideoPrompter, a training-free framework that combines a video-to-text model (Video-ChatGPT) with an LLM (GPT-3.5) to boost the zero-shot performance of existing vision-language models (VLMs) for video understanding. The framework enriches both sides of the VLM: (1) query video features are enhanced by fusing them with video-to-text descriptions, and (2) classifier representations are enriched by LLM-generated video-specific descriptors and high-level action context. The paper evaluates across three settings (action recognition, retrieval, time-sensitive tasks) on 7 datasets with 4 different VLMs, reporting consistent improvements.
 
 ## Strengths
 
-- **Consistent zero-shot gains across multiple VLMs and datasets**: Table 2 shows VideoPrompter improves *every* base VLM (CLIP, ViFi-CLIP, AIM, ActionCLIP) on HMDB-51, UCF-101, SSv2, and K400. CLIP gains +13.29% on HMDB-51 and +11.05% on UCF-101, directly supporting the claim that the framework boosts zero-shot performance. These improvements are substantial and consistent, not cherry-picked.
+1. **Consistent zero-shot gains across multiple VLMs and benchmarks (Table 2).** The framework improves top-1 accuracy for CLIP (HMDB +13.29, UCF +11.05, SSv2 +2.15, K400 +4.64), ViFi-CLIP, AIM, and ActionCLIP across four action recognition datasets. This directly supports the core claim of plug-and-play adaptability.
 
-- **Generalization to three distinct zero-shot settings**: The paper demonstrates improvements not only in action recognition but also video-to-text/text-to-video retrieval (Table 3, R@1 gains of +3.11 and +1.8) and time-sensitive video tasks (Table 4, +10% on synthetic data). This breadth demonstrates that the framework is not narrowly tailored to a single task.
+2. **Complementary dual enhancement validated by ablation (Figure 4).** The paper shows that removing either the video-to-text module (VGPT) or the text-to-text module (GPT-3.5) yields suboptimal performance compared to their combination, and this pattern holds across benchmarks. This supports the claim that both visual feature enrichment and classifier refinement contribute.
 
-- **Plug-and-play design validated across four VLMs**: VideoPrompter is applied without modification to CLIP, ViFi-CLIP, AIM, and ActionCLIP, improving all of them. This supports the claim that the approach is a general-purpose module rather than a method that only works with one specific backbone.
+3. **Descriptor efficiency demonstrated vs. CUPL (Table 5).** VideoPrompter outperforms CUPL (which uses 50 prompts per class) with only 3 language descriptors plus video textual descriptions, showing that carefully designed video-specific prompts are more effective than large descriptor ensembles.
 
-- **Efficient descriptor design validated against CUPL**: Table 5 shows VideoPrompter outperforms CUPL (an image-focused descriptor method) on HMDB-51, UCF-101, and SSv2 while using only 3 language descriptors versus CUPL's 50, indicating the video-specific prompt design is both more efficient and more effective.
+4. **Evaluation across diverse settings (3 zero-shot settings, 7 datasets, 4 VLMs).** The paper extends beyond standard action recognition into retrieval and time-sensitive video tasks, demonstrating the framework's breadth and providing evidence of generality.
 
-- **Ablation studies confirm design rationale**: Figure 3 (left) validates that combining video and video-textual-description embeddings outperforms either alone; Figure 3 (middle) shows CLIP-based filtering further boosts performance; Figure 4 demonstrates that VGPT and GPT-3.5 complement each other.
+5. **Ablation on design choices (Figure 3).** The paper investigates fusion strategies, CLIP-based filtering of erroneous descriptions, and temperature-driven diversity, providing practical guidance for deployment.
 
 ## Weaknesses
 
-### Major
+### Fatal
 None.
+
+### Major
+
+1. **"On par with fully fine-tuned methods" claim is not supported by the evidence.** The paper states that VideoPrompter + CLIP "performs on par with the various existing fully fine-tuned methods." On HMDB-51, VP+CLIP achieves 50.79, which is below ViFi-CLIP's baseline of 51.82. On UCF-101, VP+CLIP achieves 72.77, which is well below ViFi-CLIP's 77.50. The only fine-tuned method VP+CLIP clearly matches or exceeds is ActionCLIP (49.20 on HMDB, 69.52 on UCF). The better numbers (57.12 on HMDB) are from VP applied on top of ViFi-CLIP itself, which is a different comparison. This overclaim needs correction.
+
+2. **Narrow baseline set relative to the submission date.** The paper compares against methods spanning 2021–2023 (CLIP, ViFi-CLIP, AIM, ActionCLIP, CUPL) but does not situate itself against stronger zero-shot video methods from the 2024–2026 period. The core claim—that VP improves the base VLM—is not undermined, but the broader claim about effectiveness is uncalibrated. Without knowing how VP + a 2021 VLM compares against a 2025/2026 VLM alone, the reader cannot assess whether the framework provides practical value beyond what newer models already deliver.
 
 ### Minor
 
-1. **Partially overstated comparison with fine-tuned methods**: The paper claims (lines 231, 460) that CLIP+VideoPrompter "performs on par with the fully-finetuned methods like ViFi-CLIP and ActionCLIP." While this is accurate for ActionCLIP (VideoPrompter outperforms it on all datasets) and for HMDB/SSv2 vs ViFi-CLIP, on UCF-101 the gap is notable: CLIP+VideoPrompter achieves 72.77 vs ViFi-CLIP's 77.5 (~5% gap). The claim should be qualified to match the actual numbers precisely. This does not undermine the paper's core contribution — the consistent improvements over base VLMs are real — but the phrasing unnecessarily invites skepticism.
+1. **Novelty framing overstates the contribution.** The paper frames its two modifications as novel, but both draw heavily on established ideas:
+   - Using a generative model to describe a query and fusing that description with embeddings is a known strategy in visual-language fusion.
+   - LLM-enriched class descriptors are established by Menon et al. (2022) and Pratt et al. (2022), which the paper cites.
+   - The "Tree Hierarchy of Categories" (Section 3.2.3) is a straightforward prompt asking GPT-3.5 to group semantically similar classes. It is not a hierarchical structure—it produces a flat list of categories (Table in the paper). Calling it a "Tree Hierarchy" and claiming it as "a novel way" overstates what is essentially a simple grouping operation.
+   
+   The paper's actual contribution—demonstrating that an ensemble of off-the-shelf generative models can boost VLMs for video—is reasonable but should be characterized as an engineering/system contribution, not as algorithmic novelty.
 
-2. **No variance estimates for stochastic generative components**: The method uses Video-ChatGPT at temperature 0.5 and GPT-3.5 at temperature 0.2, both of which produce non-deterministic outputs. All experiments appear to be single-run. Without multiple seeds or confidence intervals, the reader cannot assess whether observed improvements (e.g., +1.4 on Charades) are systematic or within noise. This is a real evidential gap, though single-run evaluations are common in the field for large-scale benchmarks.
+2. **Missing analysis of video-to-text description quality.** The framework's visual enhancement depends entirely on the quality of Video-ChatGPT's descriptions. The paper mentions CLIP-based filtering to remove erroneous descriptions (Section 3.2.2) but does not quantify how often errors occur, what types of errors dominate (e.g., hallucination, incomplete coverage), or how much filtering improves versus harms performance. Without this, practitioners cannot assess the reliability of the approach.
 
-3. **Time-consistency metric undefined**: The "time-consistency score" in Table 4 is never defined in the paper. While it is presumably from Bagad et al. (2023) [bagad2023test], the paper does not explain what the score measures, what "50.0 (chance)" means, or why a +10% gain on the synthetic dataset is meaningful. The Charades improvement (+1.4) is small and lacks variance estimates. The temporal understanding claims rest on thin evidence.
+3. **Time-sensitivity results gap not discussed.** The framework gains +10% on the synthetic temporal benchmark but only +1.4% on Charades (Table 4). The paper frames only the 10% gain ("substantial gain") without explaining why real-world gains are an order of magnitude smaller. This asymmetry warrants analysis.
 
-4. **High-level action context ablation not isolated from "any additional context"**: Table 6 shows that adding action context improves accuracy, but there is no comparison to simpler baselines such as a single generic context ("action," "video") or human-defined fixed categories. Without these controls, it is unclear whether the *hierarchical grouping* per se drives the gain, or whether any additional contextual information would produce similar improvements.
+4. **CUPL comparison lacks controlled ablation.** Table 5 compares VideoPrompter against CUPL, but the improvements are small (HMDB: 50.44→52.51; UCF: 73.54→73.88; SSv2: 4.81→4.87). Since CUPL uses GPT-3 while VP uses GPT-3.5, and CUPL without VGPT achieves 49.14 vs. VP with VGPT at 52.51, the source of the gain (GPT model version, VGPT addition, or prompt design) is confounded. A controlled comparison isolating each factor would strengthen the claim.
 
-5. **Fusion strategy not ablated**: The weighted-average fusion in Eq. (3) uses cosine similarity as the weight β₂. The paper does not compare this to alternative fusion strategies (e.g., concatenation + projection, learned scalar, gating). While the chosen method is simple and reasonable, the lack of comparison leaves open whether a better fusion exists.
+5. **Computational overhead not characterized.** The framework generates 10 video descriptions per query (filtered to 3) plus LLM-generated descriptors, introducing latency and API costs. The paper does not discuss this trade-off, which is important for practical deployment.
 
 ### Trivial
 
-- **CUPL comparison caveats**: The comparison with CUPL (Table 5) is favorable to the authors' method, but CUPL was designed for images and uses GPT-3 (not GPT-3.5). The paper could briefly note that the comparison, while useful, involves different design regimes. (This does not affect the conclusion — VideoPrompter's advantage is clear.)
-
-- **Interpretability analysis is qualitative**: Figure 2 provides an illustrative example but no quantitative evaluation (e.g., overlap with human-annotated key objects/actions). This is a nice demo but not a rigorous experimental result.
+- The "performs on par with fully fine-tuned methods" claim in both Section 4 and the Conclusion should be softened to accurately reflect the results.
+- The "Tree Hierarchy" is a flat grouping, not a hierarchy; the terminology is misleading.
+- Notation: Equation (1) has minor LaTeX artifacts ("\cos" vs "cos") that should be cleaned up.
 
 ## Nice-to-Haves
 
-- Running multiple seeds (≥3) for the main action recognition results and reporting mean/std would substantially strengthen confidence in the results, especially given the stochastic generative components.
-- Adding baselines for the high-level action context: (a) single generic context, (b) human-defined categories, (c) random grouping, to isolate the value of the LLM-based hierarchical grouping.
-- Briefly defining the time-consistency score from Bagad et al. for readability.
-- Including an ablation of fusion strategies (e.g., averaging vs. concatenation vs. learned weights) would strengthen the methodological justification.
+- Evaluate with a more recent video-to-text model to demonstrate model-agnosticism beyond Video-ChatGPT (2023).
+- Report retrieval results on additional datasets beyond MSR-VTT to strengthen generality claims.
+- Quantify the per-dataset error rate of VGPT descriptions and the filtering retention rate.
 
 ## Removed Points
 
-These points were flagged but removed with justification:
+These points were flagged by reviewers but are removed per the review guidelines:
 
-1. **"The paper does not test ablating VGPT while keeping only LLM descriptors plus visual features"** — This is factually incorrect. Figure 4 (described in line 377) explicitly studies the impact of removing VGPT or GPT-3.5 individually, showing the "w/o VGPT" condition. The paper has this ablation.
-
-2. **"The 'training-free' framing should be clarified because Video-ChatGPT is pre-trained"** — "Training-free" in this context means no fine-tuning on the target task, which is standard usage in the field. The paper is consistent with community terminology.
-
-3. **"Table 2 organization is confusing because XCLIP/A5 are listed but not compared to VideoPrompter"** — The table clearly separates "Uni-modal zero-shot models" and "Adapting pre-trained image VL models" from the rows where VideoPrompter is applied. The organization is standard for a comparison table that situates the method in context.
-
-4. **"High-level action context groupings may be manually refined"** — The prompt used with GPT-3.5 is provided verbatim (line 154), making the process transparent and automatic. There is no evidence of manual post-hoc editing, and Table 1 is consistent with the prompt's output format.
-
-5. **"The paper should discuss whether CUPL's prompts were re-engineered for video"** — The paper already addresses this (lines 388-390), noting CUPL uses dataset-specific prompts and 50 descriptors. The comparison is presented as-is with the original CUPL setup.
-
-6. **Missing related works / lack of comparison to specific training-free video methods** — The paper compares to the most relevant baseline (CUPL) and provides thorough ablations. Not citing every possible related method is not a weakness.
+- **"Cannot be independently verified"** (reproducibility concern about cited models/tools): The paper states code will be released. Per hard rules, reproducibility concerns grounded in doubting cited entities are removed.
+- **"Stray \bm command," "notation formatting," "figure cannot be seen"**: These are PDF-parser artifacts, not errors in the original submission. Removed per hard rules.
+- **"No comparison to video-specific LLM-based enhancement techniques that may have appeared between 2023 and 2026"**: The paper cannot compare to unspecified methods it does not cite. Removed.
+- **"No evaluation on Ego4D, FineGym, long-form video tasks"**: Scope creep. The paper evaluates on 7 datasets across 3 settings; demanding more benchmarks turns this into a different paper. Removed.
+- **"Improvements from individual components are each modest"** (harsh critic claim): The paper shows CLIP alone at 37.5 vs. VP at 50.79 on HMDB—that is a 35% relative improvement, not modest. Factually inaccurate characterization. Removed.
+- **"Gains would likely be smaller or negative against stronger baselines"**: Speculative without evidence. Removed.
 
 ## Novel Insights
 
-The reviews surface a useful tension: the paper's core empirical contribution — that simultaneously enriching visual and text representations via two distinct generative models yields consistent zero-shot gains — is convincingly demonstrated, yet several evaluation gaps prevent the results from being fully trusted. The most insightful observation from the reviews is that the stochasticity of the generative components (VGPT at temp 0.5, GPT-3.5 at temp 0.2) is not accounted for, which is a genuine methodological concern that the authors can address with multiple runs. Beyond this, no genuinely novel synthesis emerges beyond the paper's own contributions.
+None beyond the paper's own contributions. The strength finder and harsh critic converge on the same points: the framework works and is validated, but the novelty is more about engineering integration than algorithmic invention, and the evaluation would benefit from modern baselines.
 
 ## Suggestions
 
-1. **Precisely calibrate the language around fine-tuned comparisons**: Replace "performs on par with fully-finetuned methods" with a factual statement such as "CLIP + VideoPrompter is competitive with several fully fine-tuned methods (outperforming ActionCLIP on all benchmarks and approaching ViFi-CLIP on most) while requiring no task-specific training."
-2. **Report multiple seeds** (at least 3) with mean and standard deviation for the main action recognition results to address the stochasticity concern.
-3. **Add simpler baselines for the high-level action context ablation** (single context, human-fixed categories) to isolate whether the LLM-based hierarchical grouping specifically drives gains.
-4. **Briefly define the time-consistency score** for self-contained reading, even if citing Bagad et al.
+1. **Replace "fully fine-tuned" comparisons with honest framing.** Soften the claim to: "Our framework substantially narrows the gap to fine-tuned methods while requiring no training" and show this gap honestly (VP+CLIP 50.79 vs. ViFi-CLIP 51.82 on HMDB; 72.77 vs. 77.50 on UCF).
+
+2. **Add a controlled ablation for the CUPL comparison.** Compare VP against CUPL using the same GPT model (GPT-3.5) and same VLM, with and without VGPT, to isolate whether gains come from the GPT version, the VGPT module, or the prompt design.
+
+3. **Quantify VGPT description reliability.** Report per-dataset statistics: description quality scores, filtering rates, and at least one concrete failure case. This would make the paper more useful to practitioners.
+
+4. **Address the time-sensitivity gap.** Discuss why the framework helps synthetic data far more than Charades—is it dataset difficulty, description quality, or task nature?
+
+5. **Include at least one contemporary zero-shot video baseline.** Even comparing VP + CLIP against InternVideo or a recent video-language model at zero-shot would calibrate the reader on where the framework stands relative to modern methods.
+
+6. **Renamed "Tree Hierarchy of Categories"** to something more accurate (e.g., "High-Level Action Context Grouping") to avoid overclaiming.
 
 ## Score and Decision
 
-The paper presents a clean, well-motivated training-free framework with consistent improvements across multiple VLMs, datasets, and zero-shot settings. The ablations validate the key design choices. The weaknesses are real but addressable: primarily partial overclaiming and missing variance estimates, not fundamental flaws in the methodology. The core contribution is solid and believable.
+**Originality**: 4/10 — The individual components (VGPT descriptions, LLM descriptors) are established; the contribution is in the ensemble design and its application to video, which is incremental.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Importance of research question**: 7/10 — Training-free enhancement of VLMs for video is practically valuable and well-motivated.
+
+**Claims supported**: 5/10 — The core claim (VP boosts base VLM) is supported. The secondary claims ("on par with fine-tuned," "novel Tree Hierarchy," significant time-sensitivity gain) are overclaimed or lack sufficient evidence.
+
+**Soundness of experiments**: 6/10 — Good breadth (7 datasets, 4 VLMs, 3 settings) and useful ablations, but weakened by outdated baselines and missing failure-case analysis.
+
+**Clarity of writing**: 6/10 — Generally clear, but the "Tree Hierarchy" framing is misleading and some claims are overly bold relative to the data.
+
+**Value to community**: 6/10 — Practitioners may find the framework useful as a plug-in, but the lack of contemporary calibration limits immediate impact.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

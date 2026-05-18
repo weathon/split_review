@@ -1,20 +1,20 @@
-Now I have enough information from the paper. Let me produce the final consolidated review.
+Now I have sufficient information to produce the consolidated review. Let me compile my findings.
+
+---
 
 ## Summary
 
-This paper proposes T-GAE, a transferable graph autoencoder for network alignment. The key ideas are: (1) training a GNN-based autoencoder on multiple graphs simultaneously to learn transferable node embeddings, (2) a theoretical result connecting GNN embeddings to spectral methods for alignment, and (3) data augmentation for robustness. T-GAE is trained on small graphs and applied to larger unseen graphs up to ~18k nodes, showing strong empirical performance.
+This paper proposes T-GAE, a generalized transferable graph autoencoder for large-scale network alignment. The framework learns permutation-equivariant node embeddings via self-supervised reconstruction on multiple small graphs and then transfers to larger unseen graphs without retraining. The paper provides a theoretical result (Theorem 3.2) connecting GNNs to spectral methods for alignment and demonstrates competitive empirical performance on graph and subgraph matching benchmarks including graphs with ~18k nodes.
 
 ## Strengths
 
-- **Demonstrated transfer learning from small to large graphs**: T-GAE is trained exclusively on four small graphs (Celegans, Arena, Douban, Cora, up to ~2,700 nodes) and achieves 100% matching accuracy on Dblp (~18k nodes) and Coauthor CS (~18k nodes) at 0% perturbation, and ≥97% at 0.1% perturbation (Table 3). This provides direct evidence that the framework enables alignment on graphs much larger than those in the training set without retraining, a capability not shown by prior GNN-based alignment methods.
+1. **Strong empirical demonstration of transfer learning for network alignment.** The paper trains T-GAE exclusively on four small graphs (Celegans, Arena, Douban, Cora) and achieves high matching accuracy on Dblp and Coauthor CS (~18k nodes each) at 0% and 1% perturbation without any retraining on the target graphs. This is a genuinely novel capability — most prior GNN-based alignment methods require training on each graph pair. The transfer setting is a clean and practically meaningful experimental design.
 
-- **Data augmentation yields measurable robustness gains**: Training with perturbed versions of graphs (Eq. 10) improves matching accuracy at high perturbation levels — e.g., a 15.5% improvement on Arenas at 5% testing perturbation (Table 4) — while maintaining performance at low perturbation levels (≤0.8% difference). This is a clean empirical result supporting contribution (C3).
+2. **Robustness improvement via self-supervised data augmentation is convincingly shown.** Table 4 documents that incorporating perturbed graph versions during training yields a 15.5% absolute accuracy improvement on Arenas at 5% perturbation, with negligible effect at low perturbation. This provides clear evidence that the data augmentation strategy (Eq. 10) actively improves robustness rather than merely adding regularization.
 
-- **Comprehensive evaluation across tasks, datasets, and baselines**: The paper evaluates on both graph matching (Table 3) and subgraph matching (Figure 3) across five datasets, comparing against ten baselines spanning GNN-based methods (WAlign, GAE/VGAE), embedding techniques (Spectral, DeepWalk, Node2Vec, GraphWave, LINE), and optimization-based algorithms (S-GWL, ConeAlign, FINAL). T-GAE consistently achieves top performance, often by large margins.
+3. **Comprehensive baseline coverage.** The paper evaluates against 10+ baselines spanning three categories (GNN-based, embedding-based, optimization-based) across both graph matching and subgraph matching tasks. Results are reported with means and standard deviations over 10 random perturbation samples. The paper includes a useful analysis of why certain methods fail (e.g., S-GWL on Arenas due to isolated nodes), which adds diagnostic value beyond raw accuracy numbers.
 
-- **Architectural flexibility validated**: The framework is tested with three different message-passing mechanisms (GCN, GIN, and a custom GNN_c) and consistently outperforms baselines, showing the core ideas are robust to the choice of convolution layer.
-
-- **Explicit complexity analysis**: Section 4.4 provides computational and memory complexity for each stage, showing T-GAE can achieve O(|V|²) matching with greedy Hungarian or O(|V|c²+|E|c+|V|log|V|) for large graphs using 1D embeddings and sorting.
+4. **Explicit complexity analysis.** Section 4.4 provides a breakdown of the three cost components (structural features, message-passing, assignment) with clear O(·) expressions, giving readers practical expectations for scalability.
 
 ## Weaknesses
 
@@ -23,59 +23,47 @@ None.
 
 ### Major
 
-- **Theoretical contribution (C2) is underdeveloped**. Theorem 3.2 states that there exists a GNN at least as good as the Umeyama spectral method for alignment. The proof sketch in the main text is only one paragraph and does not explain how a GNN computes the absolute values of eigenvectors, what activation functions or layer types are required, or whether the construction is realizable with standard message-passing layers. The paper does not reference an appendix containing a full proof. Since (C2) is listed as a main contribution, this lack of rigor is a significant weakness. The theorem may be correct, but the reader cannot evaluate it with the information provided.
+1. **Theorem 3.2 proves existence of *some* GNN, not that T-GAE specifically achieves the bound — the paper overclaims this connection.** The theorem states that *there exists* a GNN (with some unspecified architecture) whose alignment performance upper-bounds the spectral method using absolute eigenvectors. The proof sketch shows that GNN layers can in principle compute absolute eigenvectors. However, the paper claims in C2 that this proves "T-GAE is at least as good in graph matching as the absolute value of the graph eigenvectors." The theorem establishes no link to the specific T-GAE architecture (Eq. 9–10), its training objective (BCE reconstruction), or the optimization procedure used. The autoencoder objective has no explicit connection to alignment accuracy or to the spectral embeddings used in the theorem. The paper provides no analysis connecting reconstruction fidelity to alignment discriminability. This is a significant overclaim — the existence result is about the GNN *family*, not the particular instantiation. The paper would benefit from either (a) showing that the T-GAE architecture can realize the construction in the proof, or (b) reframing the claim as a motivation for why GNNs are well-suited to alignment rather than a proven property of T-GAE.
 
 ### Minor
 
-- **Multi-graph training advantage is not isolated from architectural contributions**. T-GAE is trained on four clean graphs simultaneously, while baselines (including GAE, WAlign) are retrained per test graph pair. This means T-GAE benefits from exposure to multiple graphs beyond what any baseline receives. The observed performance gap on small-graph experiments could partly reflect the multi-graph training paradigm rather than specific architectural choices (skip connections, dual-MLP design). Adding a baseline where a vanilla GAE is also trained on the same set of four graphs (multi-graph GAE) would cleanly separate the effect of the architecture from the effect of multi-graph training. This does not invalidate the paper's overall contributions — the framework as a whole clearly works — but it makes attribution less precise.
+2. **Training objective is reconstruction-based with no explicit alignment-aware loss, and the paper does not explain why this suffices.** The loss in Eq. (9)–(10) measures per-graph reconstruction fidelity (BCE between decoded embeddings and adjacency). There is no contrastive, pairwise, or alignment-aware term that would push embeddings of corresponding nodes closer across graphs. The paper asserts that the learned mapping is "tailored to network alignment" but provides no analysis of when or why reconstruction alone should yield cross-graph discriminability. While the empirical results are strong, this conceptual gap means the method's success on small benchmarks is not adequately explained. An ablation removing the multi-graph training component to isolate its effect would help.
 
-- **Scalability claims modestly outstrip the evidence**. The paper claims "very large scale" alignment and states "this is the first attempt that performs exact alignment on a network at the order of 20k nodes and 80k edges." While 18k-node graphs are substantial for the network alignment literature, 20k nodes is not "very large" by modern graph standards (social/bio networks often reach millions). The paper does not report wall-clock runtime or memory usage for the largest graphs, nor test on graphs beyond 20k nodes, which would substantiate the complexity claims. The limitations section partly acknowledges this (noting O(|V|²) is limiting), which somewhat undercuts the earlier "very large scale" language.
+3. **Transferability argument rests on an unverified assumption about substructure overlap.** Remark 4.1 invokes the transferability theory of Ruiz et al. (2020), which requires that testing graphs' local substructures were "partially observed during training." The paper does not verify that Dblp or Coauthor CS share motifs with the training graphs (Celegans, Arena, Douban, Cora). Without this verification, the theory provides forward motivation but not a guarantee. A controlled experiment varying graph size within a fixed graph family (e.g., synthetic graphs from the same random model) would strengthen the transferability claim.
 
-- **Subgraph matching protocol is underspecified**. The paper reports hit-rate results for ACM-DBLP and Douban Online-Offline (Figure 3) but does not describe how subgraphs are extracted, how ground-truth alignments are defined, or what the size/structure of the matched subgraphs is. This makes the results difficult to reproduce or compare against future work.
+4. **Complexity analysis includes an unvalidated 1D-sorting path for large-scale claims.** Section 4.4 mentions that for large graphs, nodes can be embedded in 1D and alignment performed via sorting (O(|V| log |V|)), but the paper does not specify how the 1D embedding is obtained, what accuracy trade-off this entails, or whether it was used in any experiment. All reported results use greedy Hungarian (O(|V|²)). The paper also reports no runtime/memory measurements at scale, so the scalability claim remains qualitative.
 
-- **No error bars for Table 4**. While Table 3 reports means and standard deviations, Table 4 (perturbed training results) does not report any variance estimates. It is unclear whether the reported gains are statistically significant.
-
-- **No ablation of architectural components**. The encoder uses skip connections, concatenation of all GNN layer outputs, and two MLPs. No experiment removes these components to test whether they are essential or whether the performance is primarily driven by the multi-grain training and transfer learning paradigm.
+5. **Proof sketch for Theorem 3.2 is too brief for the claimed result.** The "proof" is a single paragraph stating that a GNN with white random input can compute absolute eigenvectors by measuring variance of filter output. Given that eigenvectors are global graph properties while GNN layers are local message-passing operators, this claim requires substantially more rigor. The paper should provide (or the appendix should contain) a complete derivation.
 
 ### Trivial
-
-- The proof sketch of Theorem 3.2 mentions studying a GNN with "white random input and measuring the variance of the filter output" — this sentence is unclear and would benefit from rewriting even in a sketch.
-- The paper uses the phrase "first attempt that performs exact alignment on a network at the order of 20k nodes" without defining "exact alignment" precisely (the method uses greedy Hungarian, which is approximate).
+- Line 25: "the the connection" — duplicated article.
+- Line 217: "benefti" — typo for "benefit."
+- Hit rate metric in Figure 3 is defined only by reference (Järvelin & Kekäläinen, 2000); while this is standard, stating the definition explicitly (e.g., Hit@k) would improve readability.
 
 ## Nice-to-Haves
-
-- Add a baseline where vanilla GAE is trained on the same four-graph set as T-GAE to isolate the architecture effect.
-- Report wall-clock runtime and memory for the largest graphs, and ideally test on a graph >100k nodes.
-- Provide an ablation removing skip connections or the second MLP.
-- Include hyperparameter sensitivity analysis (width c, depth, learning rate).
-- Add standard deviations to Table 4.
-- Detail the subgraph extraction protocol for ACM-DBLP and Douban.
+- Reporting training times and inference runtime scaling across graph sizes for T-GAE and at least one baseline.
+- An ablation where the multi-graph training is replaced with single-graph training to isolate the benefit of the generalized autoencoder formulation.
+- Statistical significance tests (e.g., paired t-test or Wilcoxon) comparing T-GAE against WAlign and ConeAlign on the main results.
 
 ## Removed Points
+The following criticisms from the reviewers were removed per the stated rules:
 
-These points are flagged to be removed; treat them with caution.
-
-1. **Criticism that perturbed versions of the same graph share eigenvalues** (from harsh critic's Section 3 notes): "the alignment problem is hardest for nearly-isomorphic or perturbed versions of the same graph – which often share eigenvalues." This is incorrect or at least unsupported — eigenvalues are continuous functions of the adjacency matrix entries, so a small perturbation to a graph with distinct eigenvalues almost surely yields a graph with distinct eigenvalues. The paper's citation (Haemers & Spence, 2004) about nonisomorphic graphs having distinct eigenvalues with high probability is appropriate. The critic's concern about the eigenvalue assumption being restrictive for perturbed graphs is not well-founded.
-
-2. **Criticism that Theorem 3.2 "does not directly imply better matching accuracy" because it uses Frobenius norm of edge-disagreement rather than matching accuracy**: This is technically true but standard practice in the graph matching literature — the Frobenius norm of edge disagreement is the standard theoretical objective, and matching accuracy is the practical evaluation metric. The paper's experimental evaluation already uses accuracy, so there is no disconnect between what is proved and what is claimed; the theorem provides a theoretical motivation, not a direct accuracy guarantee. This is a standard theory-to-practice gap common in virtually all graph matching theory papers.
-
-3. **Strength finder's claim of "Theoretical guarantee that GNNs are at least as good as spectral methods for network alignment"**: While presented as a strength, given the verified weakness that the proof sketch is underdeveloped, this strength is weakened. The claim exists in the paper but is not convincingly supported. Moved here from strengths due to conflict with verified weakness.
+- **Missing baselines (DGM, BB-GM, NGMv2):** Per the hard rule, I cannot cite missing related works without external confirmation of their publication status and relevance. The paper's baseline set (10+ methods across 3 categories) is already quite comprehensive.
+- **Missing experimental details (learning rate, hidden dimensions, epochs, batch size):** Per the hard rule, nitpicks about undisclosed hyperparameters in conference submissions are removed. Key architectural details (2-layer MLP, skip connections, GCN/GIN/GNN_c layers) are provided.
+- **"Subgraph matching experiments lack clarity — S-GWL and ConeAlign not shown":** The paper lists S-GWL and ConeAlign as baselines in Section 5.1 and states that Figure 3 shows "competing algorithms." The reviewer's claim that these methods are absent from the comparison is not verifiable from the text and the paper states T-GAE "consistently achieves the best performance among all competing methods."
+- **"Hit rate metric undefined":** The paper cites (Järvelin & Kekäläinen, 2000), a standard reference for hit rate / ranked retrieval metrics. The metric is defined by reference.
+- **"Dblp has ~5k nodes" (reviewer's claim):** The paper states the graph is "at the order of 20k nodes and 80k edges," which aligns with the standard Dblp citation network used in the network alignment literature.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews surface a tension between the paper's claimed theoretical contribution (C2) and the evidence provided for it, and highlight that the experimental design, while showing strong results, does not fully isolate which components drive performance. The core insight — that multi-graph training of a GNN autoencoder enables transferable alignment to larger graphs — remains the paper's most novel contribution.
+The most interesting observation across reviews is the tension between the paper's theoretical framing and its empirical contribution. The existence theorem (Thm 3.2) is presented as a guarantee, but it is actually about the GNN *family* — and the real novelty is the algorithmic design of a *transferable* autoencoder that works without retraining on target graphs. The empirical transfer result (training on four small graphs, testing on ~18k-node graphs) is the paper's strongest contribution, not the theoretical bound. The reviews collectively suggest that the paper would be more compelling if it leaned into this algorithmic novelty and softened the theoretical overclaims, rather than presenting the existence theorem as the central justification.
 
 ## Suggestions
-
-- Strengthen the theoretical contribution by providing a complete proof (or a significantly more detailed sketch) for Theorem 3.2, or downgrade it from a main contribution to a remark/observation if a rigorous proof cannot be provided within page limits.
-- Add a control experiment where a vanilla GAE is trained on the same multi-graph set as T-GAE, to disentangle the effect of the architecture from the effect of multi-graph training.
-- Moderate the "very large scale" language to match the evidence (graphs up to 18k nodes), or add experiments on larger graphs (>100k nodes) with runtime/memory measurements.
-- Provide error bars for Table 4 and clarify the subgraph matching protocol.
-- Consider adding an ablation study of architectural components (skip connections, second MLP) to understand which design choices matter most.
+1. **Reframe the theoretical claim.** Either (a) prove that the T-GAE architecture can realize the construction in Theorem 3.2, or (b) reposition Theorem 3.2 as a motivation for why GNNs are well-suited to alignment, and clearly separate this from the empirical contribution of the T-GAE framework.
+2. **Add a controlled transfer experiment.** Vary graph size within a single graph family (e.g., synthetic random graphs of increasing size) to isolate the effect of scale from the effect of domain shift.
+3. **Clarify the 1D-sorting alternative** or remove it from the complexity discussion if it was not implemented.
+4. **Provide a more rigorous proof** for Theorem 3.2 (in the appendix if necessary) or soften the claim to an observation/conjecture.
 
 ## Score and Decision
 
-The paper proposes a sensible and practically motivated framework for transferable network alignment, and the empirical results — particularly the transfer from small to large graphs — are genuinely impressive. The main weaknesses are: (1) the theoretical contribution is underdeveloped and not convincingly supported, (2) the experimental comparison does not fully isolate the multi-graph training effect from the architecture effect, and (3) the scalability claims modestly exceed what is demonstrated. These are addressable in revision but are not fatal — the core empirical contribution (transferable alignment via multi-graph training) is well-evidenced, especially on the large-graph transfer experiments where T-GAE is evaluated on graphs unseen during training.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

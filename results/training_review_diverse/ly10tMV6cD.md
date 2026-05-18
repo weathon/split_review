@@ -1,16 +1,18 @@
-Now I have all the information needed. Let me write the final consolidated review.
+Now I have a thorough understanding of the paper and can verify each claim. Let me write the consolidated review.
 
 ## Summary
 
-This paper introduces a benchmark for evaluating LLMs on structure-rich texts beyond programming languages, covering 9 structured text formats (JSON, YAML, XML, Tree, Tabular, Markdown, LaTeX, Org, Python) with 32 tasks and 2,512 procedurally generated question–answer pairs designed to be largely semantics-independent. The authors evaluate GPT-4, Minimax, Spark, and Ernie under baseline, hint-elicitation, and background-knowledge conditions.
+This paper presents a benchmark for evaluating LLMs on structure-rich text formats (JSON, YAML, XML, Tree, Tabular, Markdown, LaTeX, Python, Org) across 32 tasks and 2,512 QA pairs. Inputs are mostly procedurally generated with randomized content to isolate structural reasoning from semantic priors. The authors evaluate GPT-4, Minimax, Spark, and Ernie, finding that GPT-4 achieves near-perfect accuracy on JSON/YAML/XML but all models score poorly on Tree-structured inputs (~0.5 or below), and that common prompt engineering strategies (hint elicitation, background knowledge augmentation) fail to consistently improve performance.
 
 ## Strengths
 
-- **Broad coverage of diverse structured text formats beyond code**: The benchmark spans 9 text classes organized into fully-structured, semi-structured, abstract data structure, and programming language categories (Section 3.2), going well beyond prior benchmarks that focus almost exclusively on programming languages. This fills a genuine gap in the evaluation landscape.
+- **Broader taxonomy of structured texts beyond code**: The benchmark covers 9 text classes spanning abstract data structures, structured data, semi-structured formats, and programming languages — substantially broader than prior code-only benchmarks (Section 3.2). This directly supports the paper's stated goal of evaluating LLMs across diverse structure-rich formats.
 
-- **Systematic procedural generation pipeline**: Input texts are randomly generated with placeholder content, and ground truths are derived programmatically using parsers (Section 4). For 31 of 32 tasks, the answer is obtained without manual annotation, enabling scalable, reproducible construction that isolates structural understanding from semantic knowledge.
+- **Procedural generation with randomized content to isolate structural reasoning**: The dataset is constructed by generating placeholder content and collecting structural metadata during generation. As stated in Section 4: "Randomness is the core feature we tried to maintain during the procedural generation, since we want to mangle the semantics of our input texts and focus solely on structural information." This design cleanly separates structural inference from semantic priors for most categories.
 
-- **Most tasks are semantics-independent and test structural reasoning**: The paper explicitly targets knowledge inference from syntax and construction rules — path construction, depth calculation, syntax correction, structure traversal — which cleanly separates structural competence from natural language understanding (Sections 3.1, 3.2).
+- **Reveals a clear blind spot in current LLMs for tree-structured reasoning**: Under baseline evaluation, GPT-4 achieves only ~0.5 accuracy on Tree inputs, while Spark (0.089) and Ernie (0.133) score far lower, despite near-perfect accuracy (>0.96) on JSON/YAML/XML (Section 6.1). This finding — that even strong models struggle with simple hierarchical reconstruction — is the paper's most concrete empirical contribution.
+
+- **Negative result on prompt engineering strategies**: The hint elicitation and background knowledge experiments show that these interventions fail to consistently improve performance and sometimes degrade it (Sections 6.2–6.3). This negative result is valuable, suggesting that structural reasoning deficits are deeper than surface-level prompting can fix.
 
 ## Weaknesses
 
@@ -19,54 +21,59 @@ None.
 
 ### Major
 
-- **Evaluation metrics are not tied to reported scores**: Section 5 states that responses are evaluated by exact match, ROUGE-1, and LLM-as-judge, but Section 6.1 reports "accuracy" and "scores" without specifying which metric any particular number corresponds to. The reader cannot tell whether the reported 0.96 on JSON refers to exact match, ROUGE-1, or the judging LLM. This makes the quantitative results uninterpretable.
+1. **Underspecified evaluation methodology limits reproducibility and interpretation.** Section 5 states that responses are evaluated "by exact match, rouge-1 score and T/F result from another judging LLM," but Section 6 reports only "accuracy" or "ratio of correct answers" without clarifying which metric this corresponds to. No ROUGE or LLM-judge scores are reported, and it is never stated whether "accuracy" refers to exact match or some other criterion. Furthermore, the evaluation omits key details: prompt templates are not provided, temperature/decoding parameters are absent, the number of runs (single trial or multi-run) is unspecified, and any post-processing of model responses is not described. These gaps make it impossible to independently reproduce or fully assess the reliability of the reported numbers.
 
-- **Judging LLM is not identified**: Section 5 mentions "T/F result from another judging LLM" without naming which model was used. If the judging LLM is the same as one being evaluated (e.g., GPT-4 judging GPT-4), this raises circularity concerns. The absence of this detail makes the LLM-as-judge results non-reproducible.
+   *The critic's claim that hint-elicitation and background-knowledge results are "not shown" is inaccurate* — Sections 6.2 and 6.3 do report summary findings (e.g., "only Tree, tabular and PYTHON has seen enhancement") with detailed results deferred to the appendix, which is standard practice. The core issue is the underspecified evaluation protocol, not missing results.
 
-- **GPT-4 baseline is a mixture of GPT-4 and GPT-3.5 reported as a single entity**: Section 5.1 discloses that "due to inaccessibility of GPT-4, the experiment evaluated PYTHON and Org input on GPT3.5," yet Section 6.1 discusses "GPT-4 has gain similar scores around 0.7" for PYTHON without reminding the reader this score comes from a different, weaker model. The claim that "GPT-4 outperforms all other LLMs with a significant margin" (Section 6.1) is built partly on GPT-3.5 results for two task categories. The disclosure exists but the analysis conflates the two models, and the per-format scores should be clearly separated or footnoted throughout.
+2. **No random baseline or upper bound for calibration.** The paper reports absolute accuracy scores but provides no random baseline (e.g., always outputting a fixed answer, random guessing) and no programmatic upper bound (e.g., a simple parser's perfect accuracy). Without these anchors, it is unclear how much of the observed performance reflects genuine structural understanding versus trivial regularities in the data. This is particularly important given the small per-task sample sizes and binary exact-match evaluation.
 
 ### Minor
 
-- **Hint elicitation and background knowledge experiments lack quantitative reporting in the main text**: Section 6.2 states that "only Tree, tabular and PYTHON has seen enhancement in three LLMs" without providing magnitudes, per-LLM breakdowns, or comparison tables. Section 6.3 reports only that background knowledge was "insufficient to enhance the performance" without any numbers (even for the single JSON format tested). While details are deferred to the appendix (A.3), the main text's qualitative-only summaries cannot support the conclusions drawn (e.g., that hint elicitation "failed to address such inefficiency well").
+1. **Dataset size description is ambiguous.** The paper states "For each task, we generated 20 sample input" (Section 3.2) and also claims "32 structure-specific tasks and 2512 samples" (Section 1.5). This is not a mathematical inconsistency (32 tasks × 20 inputs = 640 input texts; 2512 QAs/640 inputs ≈ 3.9 QAs per input, which is plausible if each input text generates multiple questions). However, the paper never explains the relationship between input texts and QAs, leaving readers to guess whether each "sample" is a QA pair or an input text, and how per-task sample sizes break down. This ambiguity should be clarified.
 
-- **Task representation details are underspecified in the main text**: For Tree tasks (Section 3.2.1), the paper describes "compose a path to a specified node and decide the height or depth of a node" but does not state how the tree is represented in the input (e.g., parenthetical notation, adjacency list, edge list). For Tabular (Section 3.2.2), the "statistical tasks" and "inner join query" tasks are described without specifying which statistics or how many tables. These details are critical for understanding the benchmark's difficulty and are referenced only to the appendix.
+2. **Python data construction breaks the stated design principle.** The paper's core design choice is procedural generation with "randomly generated placeholder content" to "mangle the semantics ... and focus solely on structural information" (Section 4). However, Python inputs are explicitly *not* procedurally generated but collected from the Internet with real-world semantics (Section 3.2.4, Section 4). The algorithm identification task further uses file names (external semantic information) as ground truth. The paper acknowledges this deviation, but the inconsistency means Python results cannot be interpreted the same way as other categories, and the benchmark's clean design principle is partially compromised.
 
-- **No per-task breakdown of results**: The analysis (Section 6.1) aggregates scores by format category, but different tasks within the same format (e.g., path construction vs. depth calculation for Tree) likely have very different difficulty levels. Aggregation obscures which specific structural skills LLMs struggle with.
+3. **Analysis is shallow and lacks diagnostic depth.** Section 6 reports accuracy only at the category level (aggregated across tasks within each format), with no per-task breakdown, error analysis, confidence intervals, or discussion of partial correctness. For example, it is unclear whether Tree difficulty stems from structural reasoning demands or from prompt formatting issues. The claim that Tree tasks "require considerable calculation to rebuild the tree structure" (Section 6.1) is offered as speculation without supporting ablation or analysis. This limits the benchmark's diagnostic value.
+
+4. **The "knowledge inference" framing is overstated.** The title and abstract emphasize "knowledge inference" and "implicit information," but most tasks (path construction, depth calculation, value lookup, syntax correction) are better characterized as structural parsing and retrieval. While a few tasks (algorithm identification, statistical inference from tables) do involve inference, the benchmark is predominantly testing structural traversal and verification. The paper does not define what it means by "knowledge inference" or demonstrate that any task genuinely requires inference beyond locally derivable information.
 
 ### Trivial
-None (parser artifacts excluded per instructions).
+
+- Several minor grammatical and syntactic issues are present (e.g., "structul or logical inference" in Section 6.3, "out input texts" in Section 4), but these are likely parser artifacts and do not affect the scientific content.
 
 ## Nice-to-Haves
 
-- **Per-task results** (not just per-format aggregation) would substantially increase the diagnostic value of the benchmark.
-- **Confidence intervals or standard deviations** across samples, especially given the modest sample sizes (20 inputs per task), would help readers assess whether model differences are meaningful.
-- **A brief discussion of data contamination** — random generation mitigates memorization, but the high GPT-4 performance on JSON/YAML/XML (>0.96) could be discussed in this context.
-- **A limitations section** acknowledging the small sample size per task, the absence of statistical testing, and potential noise in the Python "purpose" task (where filenames serve as ground truth).
+- Add a random baseline and a programmatic upper bound (e.g., exact-match accuracy of a rule-based parser) to anchor LLM performance.
+- Include human performance estimates on a representative subset to calibrate the benchmark's difficulty.
+- Provide a per-task accuracy breakdown to increase the benchmark's diagnostic value (e.g., is "compute tree depth" harder than "find node value"?).
+- Add a dedicated limitations section discussing the benchmark's scope (primarily retrieval-level tasks, no generative evaluation, limited prompt sensitivity analysis).
+- Release the dataset and prompt templates to support reproducibility.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviewers were removed with justification:
 
-- **"Inconsistency between 20 samples/task and 2512 QAs"**: The reviewer claimed an inconsistency because 32 tasks × 20 samples = 640, not 2512. This is not an inconsistency — the paper says "20 sample input" were generated per task and then "2512 QAs" were constructed. One input can (and must, given 2512/640 ≈ 3.9) generate multiple questions. The reviewer misunderstood the relationship between inputs and QAs. **Removed as factually wrong.**
-
-- **"Background subsection is overly verbose"**: A style nitpick about Section 1.1. The content provides useful motivation. **Removed as a stylistic judgment that doesn't affect methodological soundness.**
+- **"Writing quality is poor"** — Removed per hard rules: grammar/typographical issues flagged as "parser errors, not author errors" and should not be held against the paper.
+- **"Results in appendix are missing"** — Removed per hard rules: appendices are stripped by the parser. The main text (Sections 6.2–6.3) does contain summary results for hint elicitation and background knowledge experiments.
+- **"The paper should also cover Y / domain Z / additional tasks"** — Removed as scope creep: the paper covers 9 formats and 32 tasks, which is a reasonable scope for a single benchmark paper.
+- **"Missing related works"** — Removed per hard rules: I cannot externally verify the existence of missing references.
+- **Generic strengths from Strength Finder that add no information** — None identified; all listed strengths are specific and evidence-backed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a pattern or observation about the paper that the authors themselves do not already state or imply.
+The most revealing pattern in the reviews is that both the supportive and critical reviewers agree on the paper's core methodological contribution (procedural generation to isolate structure) and its most striking finding (the universal failure on Tree-structured inputs). Where they diverge is on whether the underspecified evaluation and shallow analysis are fatal flaws or fixable issues. The disagreement resolves to a question of severity: the paper's design idea is sound and its main empirical result (Tree is hard for all LLMs) is likely robust, but the evaluation is presented at a level of detail that prevents readers from fully trusting the magnitude of reported scores. This is a paper whose contribution would survive stronger methodology but currently falls short of "thorough evaluation."
 
 ## Suggestions
 
-1. **Specify which metric underlies each reported number** in Section 6.1. If "accuracy" means exact match, say so. If different metrics were used for different tasks, clarify.
-2. **Name the judging LLM** and, if it overlaps with models being evaluated, discuss potential bias.
-3. **Separate GPT-4 and GPT-3.5 results** in all tables and figures, with a clear notation that PYTHON and Org scores come from GPT-3.5. The current conflation undermines the comparison's credibility.
-4. **Add at least one quantitative table** for the hint elicitation and background knowledge experiments in the main text, even if detailed breakdowns remain in the appendix.
-5. **State the exact input representation** for each format (especially Tree and Tabular) in the main text — for example, "trees are represented as parenthesized strings" or "tables are pipe-delimited." This is essential for the reader to assess task difficulty.
-6. **Report per-task scores** in a supplementary table so readers can see which specific skills (path construction, depth calculation, type inference, etc.) drive the aggregate patterns.
+1. Clarify the relationship between "20 sample input" per task and the total 2,512 QAs — specify how many QAs each input generates.
+2. Report which metric "accuracy" refers to (presumably exact match) and add a short note on whether ROUGE and LLM-judge scores were consistent.
+3. Include basic evaluation details: prompt template(s), temperature, number of runs, and any response post-processing.
+4. Add a per-task accuracy table (32 rows) to the main text or appendix to give the benchmark diagnostic value.
+5. Address the Python design inconsistency either by generating procedurally scrambled Python code (random identifiers, semantically empty functions) or by scoping the Python evaluation as a separate "code understanding" component.
 
 ## Score and Decision
 
-This is a benchmark paper whose primary contribution is the dataset and taxonomy, not the evaluation per se. The benchmark covers an underexplored area and the procedural generation pipeline is well-motivated. However, the evaluation methodology has significant problems: the reported accuracy numbers are not tied to any specific metric, the judging LLM is unnamed, and the GPT-4 baseline is inconsistently mixed with GPT-3.5 without clear separation in the analysis. These issues mean the evaluation results — which form a claimed contribution — cannot be properly interpreted or reproduced as written. The hint and knowledge experiments are reported only qualitatively in the main text, further weakening the empirical support for the paper's conclusions. The benchmark itself is potentially valuable, and the core issues are fixable, but the paper in its current form does not provide a reliable account of its evaluation.
+This paper has a genuine idea and produces an interesting negative result about LLM performance on tree-structured inputs. However, the underspecified evaluation protocol, ambiguous dataset description, and shallow analysis prevent it from being the "thorough evaluation" it claims to be. The core contribution — a diverse structure-rich benchmark — is worthwhile, but the paper needs a major revision to clean up methodological gaps and support reproducible results. It falls short of the acceptance bar in its current form.
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

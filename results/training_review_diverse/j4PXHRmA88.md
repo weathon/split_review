@@ -1,81 +1,85 @@
-Now I have all the information I need. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and can verify all claims. Let me write the consolidated review.
 
 ---
 
 ## Summary
 
-The paper proposes TraPNet, a neural network that predicts road volumes by estimating per-vehicle, per-node probability distributions over a road network and aggregating them — replacing deterministic trajectory reconstruction with a probabilistic formulation. The model uses multi-view attention to fuse incomplete observations, historical trajectories, and road network features, and produces predictions in a single non-autoregressive pass. Experiments on the Boston road network (simulated trajectories) and the Jinan dataset (real trajectories, 8,908 nodes, 23,312 edges) show that TraPNet achieves lower MAE than two baseline methods (Cam-Traj-Rec and Traj2Traj) and maintains its advantage at observation ratios as low as 20%.
+This paper proposes TraPNet, a neural network for city-scale road volume prediction from incomplete checkpoint observations. The model integrates three data modalities (current observations, historical trajectories, road network information) via multi-view attention, outputs per-time-step node probabilities for each vehicle, and derives road volumes by aggregating edge probabilities computed from these marginals. Experiments on Boston (synthetic trajectories on real network) and Jinan (real trajectories) report MAE improvements over two baselines (Cam-Traj-Rec, Traj2Traj), with claimed advantages at low observation ratios. The code will be released.
 
 ## Strengths
 
-- **Exceptional robustness at very low observation ratios.** With only 20% of checkpoints observed, TraPNet achieves lower MAE than both Cam-Traj-Rec and Traj2Traj at 50% observation (Figure 4, Section 5.2.1). This is a concrete, non-trivial empirical result that directly supports the paper's central claim about tolerance to missing data. The gap is not marginal — the paper states that at a 0.1 checkpoint ratio, TraPNet's MAE is approximately 20% lower than the baselines.
+- **Strong empirical results at very low observation ratios.** The paper reports that with 20% observation ratio, TraPNet outperforms both baselines operating at 50% ratio (Figures 4, Table 2). This is a practically meaningful result for sparse-data deployment scenarios.
 
-- **Single-step (non-autoregressive) prediction.** The architecture produces the full trajectory probability in one forward pass, avoiding the error accumulation and long inference time of autoregressive methods like Traj2Traj (Section 4.1, Section 5.2.1). This is a genuine architectural advantage for city-scale deployment, and the ablation study (Table 3) confirms that the efficiency mechanisms (discretization, multi-query attention) can be applied with minimal accuracy loss.
+- **Efficient single-step inference.** TraPNet avoids autoregressive decoding by predicting trajectory probabilities in one pass (Section 4.4). The ablation study (Table 3) isolates the contributions of multi-query attention and discretization, showing computation reductions with minimal MAE impact. The paper claims near-real-time performance on Boston, which is relevant for large-scale deployment.
 
-- **Multi-view attention that explicitly fuses three heterogeneous data sources.** The ablation (Table 3, lines 2–3) shows that including both historical trajectories and road-network data reduces MAE, with the road network playing a particularly important role. The cross-attention design (Section 4.3) provides a principled mechanism for integrating these inputs, going beyond methods that rely solely on current observations (Traj2Traj) or manual priors (Cam-Traj-Rec).
+- **Multi-view integration of heterogeneous data.** The model jointly embeds observed trajectories, historical trajectories (up to N per vehicle), and road network adjacency information. The ablation study confirms that removing the road network increases MAE from 5.67 to 6.77 on Boston (Table 3, line 3), demonstrating that the multi-view design is not decorative.
 
-- **Systematic ablation study on the contributions of architectural components.** Table 3 isolates the impact of historical data, road-network data, discretization, token shape, and multi-query attention. This provides clear empirical justification for the design choices (e.g., discretization saves computation with negligible MAE increase) and is more thorough than is typical in this domain.
+- **Evaluation on two city-scale networks of substantially different sizes.** Boston (241 nodes) and Jinan (8,908 nodes, 23,312 edges) provide distinct scales. Consistent MAE advantages across both settings suggest the method is not overfit to one regime.
 
 ## Weaknesses
 
 ### Major
 
-- **Gap between the probabilistic framing and the training objective, with no evaluation of uncertainty quality.** The paper motivates the method by arguing that existing approaches "overlook the inherent uncertainty in other potential scenarios" and claims to integrate "the joint distribution of potential trajectories." However, the model is trained with cross-entropy loss against one-hot labels of the *single true trajectory* (Section 4.4). While the output softmax can still spread probability mass at inference, the training objective does not explicitly encourage learning a distribution over multiple plausible trajectories — it simply penalizes any deviation from the one correct path. The paper never evaluates whether the predicted probability distributions are well-calibrated (e.g., reliability diagrams) or capture multiple modes (e.g., does the model assign meaningful probability to alternative routes?). This gap between the framing ("probabilistic modeling of uncertainty") and the actual evidence means that the claimed "comprehensive inference of road volumes through joint distribution of potential trajectories" is not convincingly demonstrated. The authors partially acknowledge this in Section 6.2 ("The Choice of One-Hot Labels"), but the discussion only addresses the alternative of using manual priors, not the deeper issue of whether the model actually learns to represent multiple plausible trajectories. This is the paper's most significant weakness.
+1. **Overclaimed probabilistic framing: the model does not actually model a joint distribution over trajectories.**  
+   The abstract and contribution list claim TraPNet "predicts traffic volume through the aggregation of the **joint distribution** of potential trajectories" and that "Trajectory Probability is the distribution of \(X\)" (Section 3.2). However, the model outputs \(Y[b,t,v]\) — the marginal probability that vehicle \(b\) is at node \(v\) at time \(t\) — trained with per-time-step cross-entropy against one-hot labels. The edge probability (Section 4.4) is then computed as the product of marginals:
+   \[
+   \dot{Y}[b,t,i] = Y[b,t,o_i] \times Y[b,t+1,d_i] + Y[b,t,o_i] \times Y[b,t+1,o_i]
+   \]
+   This multiplication treats the node at time \(t\) and the node at time \(t+1\) as independent — an assumption that is **never stated, justified, or discussed** in the paper. Without modeling the joint distribution \(P(v_t, v_{t+1})\), the resulting edge probabilities are not faithful to any trajectory-level distribution, and the volume obtained by summing them lacks a clear probabilistic interpretation.  
 
-- **Narrow experimental comparison relative to the strength of the claims.** The paper compares against only two baselines (Cam-Traj-Rec, Traj2Traj), both of which are trajectory-level methods that must be converted to volume predictions. While these are reasonable choices for the specific task, the paper claims TraPNet "outperforms state-of-the-art methods" — a statement that is unsupported given the absence of any direct volume-prediction baseline (e.g., a GNN that imputes missing node features, a matrix completion approach, or even a simple interpolation-then-count baseline). The related work discusses GNN-based methods, LSTM models, and checkpoint-based approaches (Sections 2.1, 2.2), but none are included as competitors. Adding even one additional baseline would substantially strengthen the evidence.
+   *Why this is Major, not Fatal:* The empirical results may still be useful — the product of well-calibrated marginals could serve as a reasonable heuristic — but the paper's central framing as a principled probabilistic model is unsupported. This requires either (a) reframing the claims and acknowledging the heuristic, or (b) actually modeling transitions (e.g., as a Markov chain).
+
+2. **Insufficient baseline comparison for the claimed state-of-the-art.**  
+   The experiments compare against only two methods: Cam-Traj-Rec (prior-based interpolation) and Traj2Traj (LSTM reconstruction). The paper's introduction (Section 1) discusses "traditional time series models, deep learning models, and GNNs" as relevant literature, but none appear in the experiments. While GNN-based methods typically require complete volumetric data (which is outside the paper's setting and thus a defensible exclusion), the checkpoint-based trajectory interpolation and volume prediction literature is broader than two methods. The claim of "state-of-the-art" performance is not convincingly supported with only two competitors, especially since neither directly targets the same volume-aggregation formulation.
 
 ### Minor
 
-- **The simulated Boston dataset limits the generalizability of the ablation study and some results.** The Boston trajectories are generated from random OD pairs, random road weights, and shortest-path routing (Section 5.1.1). This does not reflect real driver behavior (e.g., route choice preferences, congestion effects, stochastic travel times). The ablation study is performed exclusively on Boston, and while the paper acknowledges that the "BVLC" token shape is too large for Jinan, this means the key architectural analyses are conducted on the least realistic data. The Jinan results are on real data and are more convincing, but the split weakens the overall empirical package.
+3. **Headline claim (20% vs. 50%) lacks explicit numeric reporting.**  
+   The abstract states "with only 20% observations, TraPNet outperforms other models that require 50% observation ratio." This central claim is supported only visually (Figure 4) and qualitatively. Explicit MAE values for TraPNet at 20% vs. baselines at 50% should be tabulated with the exact numbers. As presented, the claim is not independently verifiable from the text alone.
 
-- **No error bars or standard deviations are reported for any metric.** The paper states that each training run is repeated 3 times and "we report the average results" (Section 5.1.2), but no variance measures are provided for any of the MAE comparisons (Table 2, Figure 4). Given that checkpoints are randomly sampled during each training iteration, this variability should be quantified. Without error bars, it is difficult to assess whether the reported differences between methods are statistically significant — especially the headline result that 20% observations outperform baselines at 50%.
+4. **Ablation study conducted only on synthetic Boston data.**  
+   Section 5.3 acknowledges this limitation ("the 'BVLC' token shape is too large for the Jinan dataset"), but it means the conclusions about computation–accuracy trade-offs have not been validated on real, large-scale data where deployment concerns are most pressing.
 
-- **The ablation does not include a variant that replaces probabilistic aggregation with deterministic trajectory prediction (e.g., argmax of the softmax).** The paper's central claim is that aggregating probabilities is superior to deterministic reconstruction, yet the ablation (Table 3) tests the removal of input modalities and efficiency mechanisms, but never compares probabilistic aggregation against taking the single most likely trajectory and counting vehicles on it. Such a variant would directly isolate the value of the probabilistic aggregation step.
+5. **No variance measures reported.**  
+   Results are averaged over three runs but standard deviations are omitted. For performance claims, this weakens the reader's ability to assess stability and significance.
 
-- **The efficiency claim lacks runtime comparisons.** The paper asserts that TraPNet is "significantly faster" (Section 5.2.1) and "can achieve almost real-time performance," but no runtime measurements (inference time per trajectory or per road network) are reported for any method. The only numbers provided are training GPU hours (8 on Boston, 100 on Jinan). The efficiency argument would be substantially stronger with wall-clock inference time comparisons against the baselines.
+6. **Inference time claim is not substantiated with wall-clock numbers.**  
+   Section 5.2.1 claims TraPNet is "significantly faster" and "can achieve almost real-time performance" but provides no quantitative runtime comparison. A simple table of inference times would support the efficiency contribution.
+
+7. **Boston dataset uses simulated trajectories, not real traffic data.**  
+   Section 5.1.1 describes that for Boston, trajectories are simulated using shortest paths on a real road network. While the Jinan dataset is real, the synthetic nature of one of the two experimental settings reduces the strength of the real-world evidence. The paper does not discuss how shortest-path trajectories compare to real traffic patterns.
 
 ### Trivial
 
-- None that survive filtering.
+- The normalizing constant in the volume aggregation (Equation for \(\mathbf{Vol}[i,t]\)) sums over all edges \(j=0\) to \(E\). Index \(j=0\) likely represents a null/departure edge, but this is not explained.
 
 ## Nice-to-Haves
 
-- An evaluation of uncertainty quality (calibration plots, entropy-vs-error analysis, or qualitative inspection of whether the model assigns probability to plausible alternative routes).
-- A simple baseline such as "impute missing observations with the road-average volume and count" to contextualize the reported gains.
-- A discussion of the limitation that training requires complete trajectory labels, which may be unavailable in many real-world settings (the paper mentions using GPS data, but this is acknowledged only implicitly).
-- Explicit specification of baseline configurations (were they reimplemented? tuned on validation sets?) for reproducibility.
+- **Explicitly model the trajectory as a Markov chain**, outputting transition distributions \(P(v_{t+1} \mid v_t, \text{history}, \text{network})\) rather than per-time-step marginals. This would make the "probabilistic" framing rigorous.
+- **Compare against at least one additional checkpoint-based interpolation or reconstruction method** (e.g., a recent GNN-based approach adapted to the partial-observation setting, or a neural interpolation method).
+- **Include a discussion of how the independence-across-time-steps assumption in the edge probability formula might affect the volume estimates**, and whether the product of marginals can be interpreted as an approximation of the expected edge occupancy.
+- **Provide explicit wall-clock inference times** for all methods across observation ratios.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- *Criticism that "the volume aggregation formula assumes independence that does not hold"* — The multiplication Y[b,t,oᵢ] × Y[b,t+1,dᵢ] is a first-order Markov assumption, which is standard and reasonable for trajectory modeling. The normalization is a sensible constraint. The critic treats this as an ad-hoc error; it is a defensible design choice, not a structural flaw. **Removed** as overclaimed.
-
-- *Criticism that "the loss function becomes cross-entropy because ground truth trajectories are assumed complete" and "this contradicts the earlier story of modeling uncertainty"* — This is acknowledged and discussed by the authors in Section 6.2. The paper is transparent about the design choice. While the lack of uncertainty evaluation is a real weakness (kept above), the existence of the one-hot training per se is not a contradiction — many probabilistic deep learning models are trained with cross-entropy. **Downgraded** from the critic's framing as a fatal contradiction; the substantive residue (no uncertainty evaluation) remains in Major.
-
-- *Criticism that "the paper should compare against GNN-based volume prediction models, LSTM models, and checkpoint-based methods"* — Those methods operate on a fundamentally different problem setting (complete volume data as input vs. incomplete trajectory checkpoints). Demanding their inclusion would require adapting them to a task they were not designed for. **Removed** as scope creep.
-
-- *Complaints about formatting, missing appendix content, and incomplete trajectories in parsed text* — These are parser artifacts. **Removed** per instructions.
-
-- *Strength Finder claim #5 about "thorough evaluation on two real-world road networks"* — The Boston trajectories are simulated (shortest-path on random OD pairs with random road weights), so calling it "real-world" is misleading. The strength is better framed as "evaluation on datasets of different scales, including one large real-world dataset (Jinan)." **Moved** to Removed Points for overclaiming.
+- **"The independence assumption across vehicles limits the model's ability to capture congestion effects"** — This is a known limitation of any independent-trajectory model and is explicitly stated in Section 3.2. The paper does not claim to model vehicle interactions, and removing this assumption would constitute a fundamentally different paper. This is scope creep.
+- **"The training objective vs. evaluation metric mismatch"** — Training on node-level cross-entropy while evaluating on volume MAE is a common and defensible surrogate-loss setup. The reviewer raises it as a concern but does not show any evidence that this mismatch actually harms results.
+- **Strength from Strength Finder: "Probabilistic formulation captures trajectory uncertainty"** — This conflicts with the verified weakness that the formulation does not actually model the joint distribution. Per instructions, when strength and weakness disagree, the weakness wins.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the most interesting observation from the reviews is the tension between the paper's probabilistic framing and its deterministic training — a gap that is common across many deep learning papers that claim to model "uncertainty" but train with standard cross-entropy. The fact that the model still performs well at low observation ratios despite this gap suggests that the multi-view attention architecture and the single-step prediction are doing the heavy lifting, and the "probabilistic" framing may be more of a useful conceptual tool than an empirically validated property. A stronger version of this paper would either (a) train with an objective that genuinely encourages multimodal trajectory distributions, or (b) drop the probabilistic framing and reframe as a deterministic node-classification model with a clever aggregation step — which would be an honest and still novel contribution.
+None beyond the paper's own contributions. The reviews surface a tension between the paper's ambitious probabilistic framing and its actual technical implementation, but this is an evaluation of the paper's internal consistency rather than a novel synthesis.
 
 ## Suggestions
 
-- Add a calibration analysis (reliability diagrams, expected calibration error) and a qualitative check of whether the model assigns probability to alternative plausible routes. This would directly address the gap between framing and evidence.
-- Report error bars or confidence intervals for all MAE values, especially for the checkpoint-ratio comparison that contains the paper's strongest claim.
-- Include an ablation that replaces probabilistic aggregation with deterministic argmax trajectory selection to isolate the value of the probability aggregation step.
-- Add inference runtime comparisons against baselines to substantiate the efficiency claim.
-- Acknowledge the limitations of the simulated Boston dataset explicitly in the main text (not just in the data preparation section) and discuss how the simulation assumptions could affect conclusions.
+1. **Reframe the probabilistic claims** to match what the model actually outputs (per-time-step marginals with a heuristic edge-aggregation step). Alternatively, redesign the output to produce transition probabilities and make the probabilistic framing rigorous.
+2. **Add a table with exact MAE values** for all methods at 10%, 20%, and 50% observation ratios, including TraPNet at 20% vs. baselines at 50% to substantiate the headline claim.
+3. **Include at least one additional baseline** — either another trajectory interpolation method or a volume-prediction approach adapted to the checkpoint setting.
+4. **Report standard deviations** across the three runs, and provide wall-clock inference times.
 
 ## Score and Decision
 
-The paper proposes a worthwhile direction and has two genuinely strong empirical results (robustness at 20% observations, and the single-step efficiency advantage). However, the gap between the ambitious probabilistic framing and the evidence provided is significant enough that the core contribution is not fully delivered. The experimental comparison is too narrow to support the claimed state-of-the-art status, and the lack of error bars, a key ablation, and runtime measurements leaves several claims undersupported. With revisions focusing on uncertainty evaluation, additional baselines, and the missing ablation, the paper could be much stronger — but in its current form, these weaknesses are material.
+The paper proposes a novel architecture for volume prediction from incomplete checkpoints, with promising empirical results and a well-designed multi-view attention mechanism. However, the overclaimed probabilistic framing is a significant issue: the paper claims to model a "joint distribution over trajectories" but actually outputs per-time-step marginals and multiplies them as if independent, without justification. This mismatch between framing and implementation, combined with the thin baseline comparison (only two methods), prevents the paper from being acceptable in its current form. The core engineering contributions (multi-view attention, efficient inference, heterogeneous data integration) are real, but the paper overstates what it achieves theoretically.
 
-**Overall Assessment:** The paper has a novel architecture and a compelling headline result, but the evidence does not yet match the strength of the claims. The probabilistic motivation is not backed by appropriate evaluation, the baseline comparison is too limited, and several secondary claims lack supporting measurements.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+**MY FINAL SCORE:** <pineapple>4.5</pineapple>
+**MY FINAL DECISION:** <orange>Reject</orange>

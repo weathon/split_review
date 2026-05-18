@@ -1,20 +1,22 @@
-Now I have all the information needed to write the consolidated review. Let me compose it.
+Now I have all the evidence I need. Let me construct the final review.
 
 ## Summary
 
-This paper uses random matrix theory (specifically, asymptotic freeness) to establish that generalized cross-validation (GCV) provides consistent risk estimation for sketched ridge regression ensembles under very mild assumptions. The authors derive an explicit bias–variance decomposition for squared risk showing the sketched ensemble risk equals an equivalent unsketched ridge risk plus a \(1/K\)-decaying variance term, prove that GCV consistently estimates this decomposition, and extend the result to general subquadratic risk functionals (enabling prediction intervals with asymptotically correct coverage). They also propose an "ensemble trick" to tune unsketched ridge regression using only small sketched ensembles, and demonstrate via a negative result that GCV consistency is non-trivial (it fails for observation sketching).
+This paper establishes a comprehensive theoretical framework for generalized cross-validation (GCV) in sketched ridge regression ensembles. The core contributions are: (1) an asymptotic bias–variance decomposition showing that sketched ensemble risk decomposes into an unsketched implicit ridge risk plus a 1/K variance term (Theorem 3.1), (2) proof that GCV consistently estimates squared risk for any ensemble size under asymptotically free sketches (Theorem 3.2, via μ' ≍ μ''), (3) extension of GCV to subquadratic risk functionals and Wasserstein-2 distributional convergence (Theorem 4.1, Corollary 4.2), (4) a practical "ensemble trick" for tuning unsketched ridge using only sketched ensembles, and (5) a negative result showing that observation sketching breaks GCV consistency — underscoring the subtlety of the main positive result. The theory is validated on both synthetic and real large-scale data (RCV1, RNA-Seq) using CountSketch and SRDCT.
 
 ## Strengths
 
-- **Precise asymptotic bias–variance decomposition for squared risk and its GCV estimator.** Theorem 2 provides explicit decompositions showing the sketched ensemble risk equals the risk of an equivalent unsketched ridge predictor plus a variance term decaying as \(1/K\), establishing the foundation for all subsequent consistency and tuning results. The decomposition applies even under out-of-distribution settings.
+- **Precise bias–variance decomposition for squared risk and GCV (Theorem 3.1).** The paper decomposes the asymptotic risk of sketched ridge ensembles into an equivalent unsketched implicit ridge risk plus a variance term decaying as 1/K, and shows GCV admits an analogous decomposition with matching inflation factors. This directly underpins the claimed squared-risk asymptotics and the mechanism by which ensemble size controls sketching variance.
 
-- **First extension of GCV consistency to general subquadratic risk functionals and distributional convergence.** Theorem 5 proves that GCV-based plug-in estimators are consistent for any pseudo-Lipschitz risk functional of order 2, and Corollary 1 establishes Wasserstein-2 convergence of the GCV-corrected empirical prediction distribution. This goes substantially beyond prior work that only handled residual-based functionals, enabling tasks like prediction-interval construction and classification error estimation.
+- **Consistency of GCV for squared risk (Theorem 3.2).** Under mild data assumptions (bounded moments, no linear model required) and for any asymptotically free sketch, the paper proves ĥR(β̂_λ^ens) ≍ R(β̂_λ^ens), establishing that GCV consistently estimates squared risk for all finite ensemble sizes K. This is the central tuning guarantee.
 
-- **Novel "ensemble trick" for tuning unsketched ridge regression using only small sketched ensembles.** Section 5 shows how to eliminate the sketched variance term by combining GCV estimates from two different ensemble sizes, yielding a consistent estimator of the unsketched ridge risk. This is validated empirically in Figure 5 and is practically significant because it allows tuning a large (unsketched) model using cheap sketched computations.
+- **Extension of GCV to subquadratic risk functionals and distributional convergence (Theorem 4.1, Corollary 4.2).** The paper proves consistency for pseudo-Lipschitz risk functionals of order 2 (including classification losses like hinge and logistic) and shows Wasserstein-W₂ convergence of the GCV-corrected prediction distribution, enabling construction of prediction intervals with asymptotically correct coverage.
 
-- **Negative result highlighting non-triviality.** Proposition 2 proves that GCV is inconsistent for finite ensembles when sketching observations instead of features, underscoring that the feature-sketching consistency is not a foregone conclusion and that the analysis is genuinely non-trivial.
+- **Practical tuning applications: ensemble trick and ridge equivalence (Proposition 5.1, Section 5).** The paper shows how to eliminate the sketching variance term from risk estimates using two different ensemble sizes, yielding a consistent estimator of unsketched ridge risk computable entirely in the sketched domain. Proposition 5.1 proves that large unregularized ensembles with tuned sketch size achieve the optimal unsketched ridge risk.
 
-- **Strong empirical validation.** Experiments on synthetic data, RCV1 (\(n=20000, p=30617\)), and RNA-Seq data validate the theory across different sketches (CountSketch, SRDCT), regularization parameters, and sketch sizes.
+- **Empirical validation on real large-scale datasets.** Figures 3 and 5 demonstrate that GCV accurately matches test risk on RCV1 (n=20000, p=30617) and RNA-Seq data with CountSketch and SRDCT, and GCV-based prediction intervals achieve correct coverage on synthetic data.
+
+- **Reveals a non-obvious failure case for observation sketching (Proposition 6.1).** The paper proves that GCV is *inconsistent* for finite-ensemble observation sketches unless K→∞, which underscores the subtlety of the main result and confirms that the feature-sketch consistency is non-trivial.
 
 ## Weaknesses
 
@@ -26,44 +28,48 @@ None.
 
 ### Minor
 
-1. **Opaque characterization of inflation factors \(\mu'\) and \(\mu''\).** Theorem 2 defines \(\mu'\) and \(\mu''\) only as "certain non-negative inflation factors" that depend on the S-transform and covariance matrices, without giving explicit expressions or even sketching their functional form. While the existence of these factors is sufficient for proving consistency (since only \(\mu' \asymp \mu''\) matters), their opacity limits the reader's insight into how the sketch family, covariance structure, and ensemble size interact in determining the variance penalty.
+- **The "first extension beyond residual-based risk functionals" claim is overly broad.** The paper states: "To the best of our knowledge, this is the first extension of GCV beyond residual-based risk functionals in any setting" (line 59). The paper cites han2023distribution in its own related work as showing GCV consistency for ridge regression. If Han et al. established distributional consistency (which would imply functional consistency via pseudo-Lipschitz-2 functionals) for *unsketched* ridge, then the claim as stated — "in any setting" — is too broad. The paper's genuine novelty is in the *sketched ensemble* setting, and the claim should be scoped accordingly. This does not diminish the contribution but is a precision issue in the novelty claim.
 
-2. **"Model-free" framing could be read as over-claiming.** The paper states (line 330) "all of our results are applicable in a model-free setting." Read in context, this means no model for \(y \mid \mathbf{x}\) is required — which is true. However, Assumption 2 (the factor model \(\mathbf{x} = \boldsymbol{\Sigma}^{1/2} \mathbf{z}\) with i.i.d. entries in \(\mathbf{z}\)) is a real structural assumption on the features. A reader skimming the text could take "model-free" to mean assumption-free, which would be misleading. The authors should clarify that "model-free" refers only to the absence of a model for the response, while the feature distribution is still constrained by the factor model.
-
-3. **No discussion of finite-sample convergence rates or practical guidance on \(n, p, q\) thresholds.** The asymptotic results hold as \(n, p, q \to \infty\) proportionally. The experiments use moderate sizes (e.g., \(n=500, p=600\) for synthetic data), and the theory works well, but the paper offers no discussion of how fast the convergence is or any practical guidance on how large \(n, p, q\) need to be for the asymptotics to be reliable.
+- **CountSketch experiments rely on an empirically-verified rather than theoretically-guaranteed assumption.** The paper's theoretical results (Theorems 3.1–4.1, Corollary 4.2) are stated under Assumption 1 (asymptotic infinitesimal freeness). The paper notes that CountSketch is *not* rotationally invariant (the sufficient condition given for Assumption 1), and instead relies on empirical verification of the subordination relation, crediting lejeune2022asymptotics and providing its own empirical support. This is a transparent and defensible practice, but the paper could more clearly separate which sketches are *theoretically* covered and which are *empirically* supported. Adding an explicit remark that "a theoretical proof for CountSketch remains an open problem and is beyond the scope of this work" (as the harsh critic suggests) would be a clean resolution. The gap does not undermine the core theory, which stands for sketches that provably satisfy Assumption 1 (e.g., Gaussian, Haar orthogonal).
 
 ### Trivial
-None.
+
+- **No heuristic explanation for μ' ≈ μ'' (Theorem 3.2) in the main text.** The paper states the result without any intuitive sketch of why the two inflation factors coincide. A brief note — e.g., that both arise from the same subordination relation and limiting spectral measures under Assumption 1 — would improve reader confidence without requiring space for the full proof. (The paper does provide the surrounding logic: unsketched GCV is known to be consistent, and both risk and GCV share the same unsketched baseline, so the only remaining step is showing the inflation factors match.)
+
+- **Asymptotic regime is mentioned in the text but not in theorem statements.** The paper states (line 239) that results apply "to a sequence of problems of increasing dimensionality proportional to n," but this scaling (n, p, q → ∞ with p/n → γ, q/p → α) is not repeated in the theorem environments themselves. An explicit sentence in each theorem or a surrounding remark would improve clarity.
+
+- **The Monte-Carlo trace estimation discussion is brief and the theory assumes exact trace.** The paper mentions Monte-Carlo estimation as a practical strategy (line 224) but the consistency theorems assume exact knowledge of tr(L_λ^ens). A brief acknowledgment that the theoretical results assume exact trace and that Monte-Carlo estimation introduces additional (unanalyzed) variance would be helpful.
 
 ## Nice-to-Haves
 
-- The claim of being the "first extension of GCV beyond residual-based risk functionals in any setting" (line 59) is strong. While it is qualified with "to the best of our knowledge" and is likely true given the paper's framing via pseudo-Lipschitz functionals, a short sentence explaining why prior work (e.g., on ALO for general losses, or GCV in classification settings) does not cover this case would strengthen the paper and make the claim more robust.
-
-- The paper could briefly address practical guidance on choosing \(K\) and sketch size \(\alpha\). Currently \(K=1\) and \(K=2\) are used in the ensemble trick without justification; the bias–variance decomposition suggests larger \(K\) might improve variance estimation, but this is not discussed.
-
-- A statement about code release would aid reproducibility, consistent with current practice.
+- Adding rates of convergence (e.g., O(1/n), O(1/√n)) under stronger concentration assumptions would strengthen the practical relevance.
+- A brief comparison with approximate LOOCV (ALO) on a synthetic setting would help position GCV's finite-sample performance relative to a gold standard.
+- A pseudo-code box for the ensemble trick algorithm would increase practical usability.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-1. **Harsh critic's criticism about ensemble trick computational cost.** The critic claimed that determining \(\mu\) from \(\lambda\) requires evaluating a \(p\)-dimensional trace, which would eliminate the computational advantage of sketching. This is factually wrong: the fixed-point equation (4) involves \(\tfrac{1}{p}\operatorname{tr}[\mathbf{S}^\top \hat{\boldsymbol{\Sigma}} \mathbf{S} (\mathbf{S}^\top \hat{\boldsymbol{\Sigma}} \mathbf{S} + \lambda \mathbf{I}_q)^{-1}]\), where \(\mathbf{S}^\top \hat{\boldsymbol{\Sigma}} \mathbf{S}\) is a \(q\times q\) matrix. Computing this trace requires \(O(q^3)\) work, not \(O(p^3)\). The critic apparently misread the matrix dimensions.
-
-2. **Harsh critic's concern about "statistical significance / variance reporting."** The critic acknowledges the existing error bars in the plots "are sufficient" — this is a non-criticism. Removed per the rule against strawman weaknesses.
+- The harsh critic's point about the gap between CountSketch and asymptotic freeness being a "critical issue" that could invalidate experiments is retained as a Minor weakness but downgraded from its original framing: the paper transparently acknowledges the empirical basis for CountSketch, and the theoretical results stand independently for sketches proven to satisfy Assumption 1.
+- The harsh critic's point about the "ensemble trick requiring K=1 and K=2" being unreliable in finite samples is moved here: the paper acknowledges this is asymptotic and the experiments confirm it works. The concern about finite-sample reliability is reasonable but the critic overstates it given the empirical evidence already presented.
+- The harsh critic's "Other Observations" about "no discussion of rates of convergence" and "no finite-sample bounds" are moved to Nice-to-Haves since these are beyond the paper's stated scope (asymptotic consistency) and typical for papers in this area.
+- The harsh critic's suggestion for "pseudo-code or algorithmic box for ensemble trick" is moved to Nice-to-Haves.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface an insight about the paper's content that the paper itself does not state.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-- Provide explicit expressions or at least a sketch of the functional form of \(\mu'\) and \(\mu''\) from Theorem 2, even if deferred to an appendix, so readers can understand their dependence on the sketch family and covariance structure.
-- Clarify in the introduction or the discussion section that while no model for \(y \mid \mathbf{x}\) is assumed, a factor model for \(\mathbf{x}\) (Assumption 2) is required for the consistency results, and that the "model-free" terminology refers strictly to the response-generating process.
-- Add a brief remark about finite-sample reliability (e.g., "simulations suggest the asymptotic approximation is reliable for \(n \gtrsim 500\)") to help practitioners gauge when the theory applies.
+1. **Scope the novelty claim precisely.** Replace "first extension of GCV beyond residual-based risk functionals in any setting" with language that clarifies the novelty is in the sketched ensemble setting (e.g., "first extension of GCV beyond residual-based risk functionals for sketched ridge ensembles").
+
+2. **Add a remark about CountSketch's theoretical status.** After stating Theorems 3.1–4.1 for sketches satisfying Assumption 1, add: "We note that Gaussian and Haar orthogonal sketches provably satisfy Assumption 1. For CountSketch and SRDCT, we provide empirical verification; a theoretical proof remains open."
+
+3. **Add a brief heuristic for μ' ≈ μ''.** A 2–3 sentence explanation in the main text (e.g., "Both μ' and μ'' arise from the same subordination relation and S-transform of the sketch; under Assumption 1 they converge to the same limiting value determined by the spectral measure of ĥΣ") would significantly help readers.
+
+4. **Explicitly state the asymptotic scaling in the theorem environments.** Add "(n, p, q → ∞ with p/n → γ, q/p → α)" to each theorem statement.
 
 ## Score and Decision
 
-The paper is technically sound, makes a significant theoretical contribution, is well-motivated, and validates its claims empirically. The weaknesses are minor presentation issues that do not undermine the core contributions. I recommend acceptance.
+This paper makes a substantial theoretical contribution: it provides the first rigorous treatment of GCV for sketched ridge ensembles, proving consistency under asymptotically free sketches, extending to subquadratic risk functionals and distributional convergence, and deriving practical tools (ensemble trick, ridge equivalence). The weaknesses are minor and addressable — they concern precision of claims and presentation, not soundness of the core results. The empirical validation is convincing.
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

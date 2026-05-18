@@ -1,18 +1,20 @@
-Now I have all the information needed. Let me produce the final consolidated review.
+I have the full paper from the initial read. Now I'll construct the final consolidated review by carefully cross-referencing each claim against the paper's actual content.
+
+---
 
 ## Summary
 
-This paper investigates the link between memorization and poor generalization on minority groups in the presence of spurious correlations. The authors show that minority-group examples require fewer neurons to flip their predictions (indicating memorization) and that dropping those memorization-critical neurons improves worst-group accuracy. They then introduce FairDropout, which scales example-tied dropout to larger architectures (ResNet-50, BERT) by allocating fixed "memorizing" neurons to each example during training and dropping them at inference. The method is evaluated on five diverse datasets (Waterbirds, CelebA, MetaShift, MultiNLI, MIMIC-CXR) and achieves consistent worst-group accuracy improvements over ERM without requiring group annotations.
+This paper studies the connection between memorization and poor generalization for minority groups in spurious-correlation settings. Through a neuron-flipping analysis (adapted from Maini et al., 2023), it shows that minority-group examples require fewer neurons to flip their prediction and that dropping those neurons improves worst-group accuracy. It then proposes FairDropout, an example-tied dropout method that allocates "memorizing neurons" to individual examples during training and drops these at test time, aiming to redirect memorization into droppable slots. The method is evaluated on five datasets (CelebA, Waterbirds, MetaShift, MultiNLI, MIMIC-CXR) from the subpopulation shift benchmark, improving over ERM on all five and achieving competitive/state-of-the-art results on MultiNLI and MIMIC-CXR, all without requiring group annotations.
 
 ## Strengths
 
-1. **Novel application of example-tied dropout to spurious correlation in large models.** The paper is the first to scale the example-tied dropout technique (previously limited to ResNet-9 / MNIST / CIFAR-10 in the label-noise setting of Maini et al. 2023) to ResNet-50 and BERT for the spurious correlation problem. This is clearly stated in Sections 1 and 3.3, which describe how FairDropout extends beyond the original by supporting intermediate-layer and projection-layer placement.
+- **Novel empirical analysis linking memorization to poor minority-group generalization in the spurious-correlation setting.** Figures 2 and 3 provide concrete evidence: (a) minority-group examples require far fewer neurons to flip their prediction than majority-group examples; (b) those neurons have less impact on training worst-group accuracy; (c) dropping those neurons improves test worst-group accuracy for ~75% of minority-group examples. This mechanistic insight is new in this context and goes beyond simply restating the known worst-group accuracy gap.
 
-2. **Consistent empirical improvements across diverse modalities.** FairDropout outperforms ERM on all five benchmark datasets and achieves competitive or superior results against methods that do not require group annotations. Gains are substantial on several datasets: MultiNLI (70.3 vs 63.7 ERM), MIMIC-CXR (70.6 vs 59.8 ERM), and CelebA (75.6 vs 64.5 ERM), averaged over 5 runs (Table 1).
+- **FairDropout improves upon ERM on all five datasets without requiring group annotations.** As shown in Table 1, FairDropout outperforms ERM on CelebA (75.6 vs. 67.2), Waterbirds (87.3 vs. 84.0), MetaShift (85.9 vs. 78.6), MultiNLI (70.3 vs. 63.6), and MIMIC-CXR (70.6 vs. 68.0). This is a genuine improvement operating in a more challenging setting than methods that require group annotations.
 
-3. **Analysis linking memorization to minority-group overfitting.** The paper provides quantitative evidence (Figures 2–3) that minority-group examples require fewer neurons to flip predictions and that dropping those memorization-critical neurons improves worst-group accuracy in ~75% of cases. This goes beyond observing a generalization gap to probing its mechanistic basis.
+- **Competitive or state-of-the-art results on MultiNLI and MIMIC-CXR.** FairDropout achieves 70.3 ± 2.4 on MultiNLI (beating all compared methods) and 70.6 ± 0.6 on MIMIC-CXR (beating or tying all methods), suggesting particular value in text and medical domains where group annotations are expensive.
 
-4. **No group annotations required during training or validation.** The method operates in the most practical setting where group labels are unavailable, unlike GroupDRO, DFR, and many prior methods that need group information at some stage. The paper clearly states this in Sections 3.1 and 4.2.1.
+- **Cross-domain validation.** The evaluation spans five datasets across three modalities (vision, NLP, medical imaging), demonstrating that the approach generalizes beyond a single domain or benchmark.
 
 ## Weaknesses
 
@@ -21,65 +23,56 @@ None.
 
 ### Major
 
-1. **The claimed redirection mechanism is unverified, weakening the paper's explanatory story.** The paper's central argument is: (a) minority examples are memorized in specific neurons → (b) dropping those neurons helps → (c) therefore, allocate *random* memorizing neurons, and the network will learn to use *those* for memorization, then drop them at test time. Step (c) is an untested hypothesis. The paper does not verify that the neurons FairDropout allocates as "memorizing" coincide with the neurons that the Maini et al. analysis would identify as critical for minority-group examples. Without this verification, the improvement could stem from generic regularization (dropping any subset of neurons) rather than the claimed redirection of memorization. The paper partially acknowledges this in Limitations ("this assumption requires further exploration"), but this is the method's core justification.
+- **The central mechanism claim — that FairDropout works by redirecting memorization into the allocated neurons — is not directly verified.** Section 3.2 elegantly identifies the *actual* neurons that flip minority-group predictions when removed, and shows dropping them helps. FairDropout (Section 3.3) then randomly allocates "memorizing neurons" during training, *hypothesizing* that the network will steer memorization into those slots. The paper does **not** provide an experiment showing that, after training with FairDropout, the randomly allocated neurons are indeed the ones that flip predictions when removed (e.g., by running the Section 3.2 analysis on FairDropout-trained models). Without this link, the motivating analysis and the method are disconnected: FairDropout could be working simply as a structured regularizer, and the "redirecting memorization" story remains unsubstantiated. The Limitations section (line 197–199) acknowledges this as a hypothesis "outside the scope of this paper," but the main text presents it more assertively, creating a gap between framing and evidence.
 
-2. **Missing critical control: comparison to standard/random dropout at the same rate and location.** Without comparing FairDropout to standard dropout (or random neuron dropping of the same proportion at the same layer), the improvement cannot be attributed to the *example-tied* mechanism. A generic dropout or simple regularization effect could explain the results. This control is essential for distinguishing FairDropout's claimed mechanism from a simpler alternative. (The training-mode vs. testing-mode comparison in Figure 4 provides some internal evidence that allocated neurons are causally important, but does not substitute for a direct random-dropout baseline.)
+- **No comparison to standard dropout.** Standard (Bernoulli) dropout is the most natural baseline for any dropout variant. FairDropout drops neurons at test time; standard dropout drops neurons stochastically during training and keeps all at test — different mechanisms, but the comparison is essential to determine whether the example-tied allocation drives the gains or simply any structured regularization would help. The paper includes many baselines (GroupDRO, DFR, JTT, Resample, CBLoss, etc.) but omits standard dropout entirely. If standard dropout at comparable effective drop rates achieves similar worst-group accuracy improvements, FairDropout's distinctive contribution is substantially weakened. This omission undermines the paper's ability to argue for the value of its specific design.
 
 ### Minor
 
-3. **The allocation mechanism (role of p_mem) is ambiguously described, harming reproducibility.** The paper states (Section 3.3): "each sample is allocated a memorizing neuron uniformly with probability $p_{\mathrm{mem}}$" and simultaneously "every example allocates the same fixed number of memorizing neurons" and "each image allocates only one memorizing neuron." If every example receives exactly one memorizing neuron, the role of $p_{\mathrm{mem}}$ is unclear—it cannot be a per-example probability. This ambiguity needs to be resolved with a precise algorithmic specification (pseudocode or a clear description of whether $p_{\mathrm{mem}}$ controls the fraction of examples that get a memorizing neuron, the pool size, or something else).
+- **No ablation on the core hyperparameters \(p_{\text{gen}}\) and \(p_{\text{mem}}\).** These control how many neurons are designated as memorizing and how often each example gets one — the very mechanism the paper claims is central. The warm-up experiment uses \(p_{\text{mem}}=p_{\text{gen}}=0.2\), and the full benchmark says these were tuned along with learning rate and weight decay, but no sensitivity analysis is reported. The reader cannot assess how robust the method is, whether performance degrades gracefully as these deviate from optimal values, or whether the optimal ratios differ meaningfully across datasets.
 
-4. **No ablation of the extra linear layer added on BERT.** For BERT, the paper adds a new linear layer before the FairDropout layer (Section 4.2.1). This changes the architecture relative to baselines. No experiment isolates the effect of this added layer from the FairDropout mechanism itself. The reported improvements on MultiNLI could partly come from the architectural change rather than the example-tied dropout.
+- **The Section 3.2 analysis has clarity issues that limit reproducibility.** Equation 1 references notation (\(\Delta \Omega_B\)) that does not appear in the equation itself. The sequential neuron removal procedure is described only in one dense paragraph, making it difficult to determine exactly how the set of "memorizing neurons" is identified and how overlapping sets are handled when different examples require dropping different neurons (relevant for Figure 3's claim about "75% of cases").
 
-5. **No hyperparameter sensitivity analysis.** The paper introduces hyperparameters $p_{\mathrm{gen}}$ and $p_{\mathrm{mem}}$ and tunes layer placement per dataset, but reports no sensitivity analysis. The text mentions $p_{\mathrm{gen}}=p_{\mathrm{mem}}=0.2$ for CelebA, but does not show how results vary with these choices or the chosen placements for each dataset. This makes it difficult to assess robustness or provide practical guidance.
-
-6. **Asymmetric baseline reporting.** Baseline results in Table 1 are sourced from Yang et al. (2023) without standard deviations for most entries, while FairDropout results include standard deviations from 5 runs. The paper does not verify that baseline numbers are reproducible in the same environment. This makes statistical comparisons unreliable.
+- **Ambiguity in the FairDropout allocation description.** The text states "each sample is allocated a memorizing neuron uniformly with probability \(p_{\text{mem}}\)" and also "every example allocates the same fixed number of memorizing neurons." These are in tension: the former implies stochastic allocation (some examples get none), the latter implies deterministic allocation. The paper also says "each image allocates only one memorizing neuron" in a figure caption. This needs clarification.
 
 ### Trivial
-
-7. **The "first time" claim is slightly overstated.** The paper claims to study the memorization-generalization link "for the first time in the context of spurious correlation." While the specific neuron-level localization technique is novel in this setting, prior work (e.g., Feldman 2020, which the paper cites) has examined memorization in related contexts. The claim should be softened to avoid overclaiming novelty.
+None beyond what is already captured in Minor.
 
 ## Nice-to-Haves
 
-- A direct comparison to standard dropout and random neuron dropping at matched rates would cleanly separate the example-tied contribution from generic regularization.
-- Verification that FairDropout-allocated neurons actually capture minority-group memorization (e.g., by running the Maini et al. analysis on FairDropout-trained models and checking overlap with allocated neurons).
-- Sensitivity plots for $p_{\mathrm{gen}}$ and $p_{\mathrm{mem}}$ on at least one dataset.
-- Reporting the chosen FairDropout layer positions for each dataset.
-- Ablation of the added linear layer on BERT.
-- Reproducing at least key baselines under the same evaluation pipeline to enable proper significance comparison.
+- A comparison to the original example-tied dropout from Maini et al. (2023) on the same spurious-correlation benchmarks would help establish whether the shift from the label-noise setting introduces new challenges or benefits.
+- An analysis of why FairDropout underperforms DFR and several other methods on Waterbirds, beyond the brief speculation about transfer learning.
+- Reporting training time or memory overhead compared to ERM would substantiate the scaling claim more concretely.
+- An investigation (perhaps in a figure) of the correlation between worst-class accuracy (used for tuning) and worst-group accuracy (used for final evaluation) to validate the tuning proxy.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+These points are flagged to be removed; treat them with caution.
 
-- **"Prior work on memorization has examined spurious features (Feldman 2020)."** — The paper cites Feldman 2020 in its Limitations section. The claim is about applying the *neuron-localization* technique from Maini et al. to spurious correlations for the first time, which is defensible. Moved because the critic's framing mischaracterizes the specific novelty claim.
-- **"The Maini et al. method was designed for label-noise and may not measure the right thing in spurious correlation."** — The paper explicitly frames this as "memorization in the context of spurious correlation" and uses the method as a diagnostic tool. The conceptual adaptation is acknowledged. This is a philosophical concern rather than a concrete flaw in the paper's analysis.
-- **"Figure 3 does not control for overlap in neurons dropped across examples."** — This is a minor methodological note about an analysis experiment that is not central to the method. It does not affect the paper's core claims.
-- **"Conversion of baseline methods changes their behavior."** — The paper follows the standard benchmark convention (Yang et al., 2023). This is a field-wide practice, not a paper-specific flaw.
-- **Pure formatting criticism about "the paper does not report how much the choice of placement affects results" framed as structural issue.** — Kept in Minor as "No hyperparameter sensitivity analysis" with proper framing; the original framing as a structural methodological gap was excessive.
+- **"The scaling claim is unsupported."** The paper demonstrates scaling to ResNet-50 and BERT with architectural descriptions (placement after residual blocks for ResNet-50; added linear layer before classifier head for BERT). The experimental results confirm that the method works at this scale. The reviewer's complaint about not identifying "technical obstacles" expects the paper to justify the difficulty of scaling, which is secondary to demonstrating that scaling succeeds. **Justification:** The criticism is a matter of framing preference — the paper shows scaling works, which is sufficient.
+
+- **"Claims of being 'first' are too strong."** Without external literature verification, I cannot confirm or deny this claim. Per instructions, I must not manufacture missing related-work criticisms. **Justification:** Requires external knowledge I do not have.
+
+- **"Figure 1 is not new."** It shows the known worst-group accuracy gap, which the paper uses as setup for the memorization analysis (the novel part). **Justification:** This is contextual framing, not a claimed novel finding.
+
+- **"The Waterbirds explanation is just speculation."** The paper offers a plausible hypothesis citing Izmailov et al. (2022). A deeper analysis would strengthen the paper, but the offered explanation is reasonable. **Justification:** Moved to Nice-to-Haves.
+
+- **"Missing reproducibility details (epochs, batch size, LR schedule)."** The paper explicitly states it uses the subpopulation shift benchmark library (Yang et al., 2023), which standardizes the training protocol. FairDropout-specific hyperparameters are described and tuned. **Justification:** Reproducibility concerns addressed by reference to the benchmark library.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The review surfaces the fundamental gap between the diagnostic analysis (memorization can be localized and dropping those neurons helps) and the proposed intervention (allocate random neurons and drop them), but this is a gap the paper itself could investigate rather than an external insight.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Verify the redirection mechanism.** Train with FairDropout, run the Maini et al. analysis on the resulting model, and check whether the allocated memorizing neurons for a given minority-group example correspond to the neurons identified as critical for that example's prediction.
-2. **Add a random-dropout baseline.** Drop the same proportion of neurons from the same layer(s) uniformly at random. If FairDropout outperforms this baseline, the example-tied allocation is responsible.
-3. **Resolve the p_mem ambiguity.** Provide a precise algorithmic description: how many memorizing neurons are assigned per example, whether assignment is probabilistic or deterministic, and what $p_{\mathrm{mem}}$ controls.
-4. **Add hyperparameter sensitivity.** Show worst-group accuracy for a grid of $p_{\mathrm{gen}}$ and $p_{\mathrm{mem}}$ on at least one dataset to demonstrate robustness.
-5. **Report chosen layer placements per dataset and ablate the BERT projection layer.**
+1. **Verify the mechanism.** Run the neuron-flipping analysis (Section 3.2) on models trained *with* FairDropout to check whether the randomly allocated "memorizing" neurons are indeed the ones that flip minority-group predictions. This single experiment would bridge the disconnect between motivation and method.
+2. **Add standard dropout as a baseline.** Compare FairDropout against standard (Bernoulli) dropout with matched effective drop rates at test time, to determine whether the example-tied allocation is responsible for the gains.
+3. **Add an ablation study** on \(p_{\text{gen}}\) and \(p_{\text{mem}}\) on at least CelebA, including extreme cases (\(p_{\text{mem}}=0\), \(p_{\text{gen}}=1\) recovers ERM), to characterize sensitivity.
+4. **Clarify the allocation rule.** Resolve the ambiguity between "probability \(p_{\text{mem}}\)" and "same fixed number" — specify explicitly whether every example always receives the same number of memorizing neurons or whether allocation is stochastic.
+
+---
 
 ## Score and Decision
 
-**Originality:** Good. Adapting example-tied dropout to spurious correlation is a novel direction, but the novelty is partially contingent on whether the mechanism differs from generic regularization.  
-**Importance of research question:** High. Reducing reliance on spurious correlations without group annotations is a practically important problem.  
-**Claims support:** Moderate. The empirical results are consistent, but the central mechanistic claim is unsupported and missing controls weaken attribution.  
-**Soundness of experiments:** Moderate. The evaluation is broad (5 datasets, multiple modalities) but missing key controls (random dropout) and sensitivity analyses.  
-**Clarity of writing:** Adequate but imprecise in the method description (p_mem ambiguity, allocation mechanism).  
-**Value to the research community:** Moderate. If the mechanism can be verified, the approach is useful; in its current form, the contributions are promising but inconclusive.
-
-The paper presents an intriguing idea and useful empirical results, but the core mechanism is unverified, and the experimental design lacks the controls needed to attribute improvements to the claimed innovation. The contribution is genuinely novel and the results are promising, but the paper would be significantly strengthened by verifying the redirection mechanism and adding a random-dropout baseline.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

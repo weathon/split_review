@@ -1,94 +1,75 @@
-Here is my consolidated final review after carefully verifying every claim against the paper.
-
----
+Now I have a thorough understanding of the paper. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes a causality-guided debiasing framework for LLMs that models how social category information influences decisions through distinct causal pathways. It derives three prompting strategies (I: nudge toward social-agnostic facts; II: counteract existing selection bias; III: nudge away from social-salient text) and combines them into Dual Directional Prompting (DDP). Experiments on WinoBias (4 models) and BBQ (GPT-4) show DDP substantially reduces bias gaps on WinoBias and improves accuracy on BBQ.
+This paper proposes a causality-guided debiasing framework for LLMs that models how social information influences LLM decisions through distinct causal pathways. From this framework, the authors derive three prompting strategies: (I) encouraging fact-based reasoning via social-agnostic fact, (II) counteracting existing selection bias via counterfactual assumptions, and (III) discouraging biased reasoning via explicit instructions. The combined method (DDP) is evaluated on WinoBias (gender bias in coreference) and BBQ (social bias in QA), showing strong empirical results across GPT-3, GPT-3.5, GPT-4, and Claude 2.
 
 ## Strengths
 
-1. **Novel causal formalization of bias pathways.** The causal graphs in Figure 3 explicitly model how social category information flows through "social-agnostic fact" and "social-salient text" representations, and how selection mechanisms in training data introduce bias. This goes beyond ad-hoc prompting approaches by providing a principled, graph-theoretic framework for understanding and designing debiasing strategies.
+- **Novel perspective that reframes debiasing as regulating causal pathways.** The paper introduces causal graphs (Figures 3a/3b) that distinguish how social information can enter LLM decisions through separate routes (social-agnostic fact vs. social-salient text, modulated by selection mechanisms). This provides a principled organizational structure for understanding different debiasing approaches, going beyond the ad-hoc prompt engineering that characterizes most prior work. The three strategies are derived from specific pathways in the graph rather than assembled through trial and error.
 
-2. **Strong empirical results on WinoBias with proper bias metrics.** On WinoBias Type I, DDP with GPT-4 achieves a bias gap of only 2.17% (pro vs. anti accuracy) compared to 21.74% for Default and 9.23% for ICL with contrastive examples (Table 1). This pattern holds across GPT-3, GPT-3.5, GPT-4, and Claude 2. The accuracy gap is the standard bias metric for this benchmark and DDP dramatically reduces it.
+- **Strong empirical results on multiple benchmarks across multiple LLMs.** On WinoBias Type I with GPT-4, DDP achieves a bias gap of only 2.17% with 94.57% accuracy on anti-stereotypical sentences, far outperforming the next best baseline (ICL: 9.23% gap; see Table 1). On BBQ, DDP achieves the highest accuracy across 8 of 9 social categories (Table 3). The results are consistent across GPT-3, GPT-3.5, GPT-4, and Claude 2, demonstrating that the practical effectiveness of the method is robust across model families and scales.
 
-3. **Informative ablation and error analysis.** Table 2 decomposes DDP into "Fact Only" (Strategy I) and "Counteract Only" (Strategy II), and categorizes errors into those caused by world knowledge (FF) vs. gender bias (TF). This provides direct evidence that the fact-based reasoning component is crucial for bias mitigation, and that improved world knowledge in stronger models translates to better debiasing.
-
-4. **Theoretical guarantee (Theorem 3.1).** The theorem proves that when all three strategies' conditional independence objectives are satisfied, the LLM's decision becomes independent of the social category. This formal result is absent in prior prompting-based debiasing work and provides a clear sufficiency condition.
+- **Ablation study that provides insight into the mechanisms.** The paper decomposes DDP into Fact Only (Strategy I) and Counteract Only (Strategy II) components and categorizes responses into TT/TF/FT/FF (Table 2). This reveals that Fact Only drives most of the gains while Counteract Only alone degrades performance, but DDP (combining both) improves over Fact Only — indicating that the strategies interact in non-trivial ways. The categorization into knowledge errors (FF) vs. bias errors (TF) provides a useful diagnostic lens.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-1. **BBQ experiments do not directly measure bias reduction.** On BBQ, the paper reports only per-category accuracy in the disambiguated setting. A higher accuracy here reflects better general reasoning, not necessarily reduced bias. On WinoBias, the authors correctly use the accuracy gap between pro-stereotypical and anti-stereotypical examples as the bias metric. The same approach should be applied to BBQ — e.g., reporting accuracy broken down by stereotype-consistent vs. stereotype-inconsistent examples, or performance in the ambiguous setting where bias can override the correct "unknown" answer. Without this, the BBQ results do not directly support the paper's central debiasing claim. This is the most significant evidential gap in the paper.
+1. **Gap between the formal causal framework and empirical validation.** The paper presents three conditional-independence conditions (Equations 1–3) and Theorem 3.1 as the theoretical backbone, asserting that if these hold, the decision Y is independent of social category A. However, these conditions are never tested or measured — we do not know whether the proposed prompts actually enforce the claimed conditional independences in the model's internal representations. The conditions are simply assumed to hold when the prompts are applied. The "prompt properly considered" (PPC) selection variable plays a central causal role in the framework but is defined abstractly (the paper asserts that "if the LLM is well-trained and well-aligned, we can expect that the model will always condition on PPC"). A framework whose central theoretical quantities are not operationalized or verified is not a causal framework in a substantive sense — it is a motivation dressed in causal vocabulary. The paper would be stronger if it either provided evidence (e.g., probing-based measurement of mutual information between representations) or openly acknowledged that the causal framework serves as an organizational intuition rather than a verified mechanism.
 
-2. **Claim of "unifying" existing prompting-based debiasing methods is unsupported.** The abstract and introduction state that the framework "unifies existing prompting-based debiasing techniques," but the paper never provides a concrete mapping of prior methods onto the three strategies. The only baselines tested are ICL with contrastive examples and zero-shot CoT. The paper does not demonstrate, for example, that Self-Debias, factual-nudge methods, or other approaches can be recovered as instances of Strategy I/II/III. This claim is asserted rather than established.
+2. **Theorem 3.1 is a straightforward restatement of the conditions.** The theorem states that if the three conditional-independence conditions (Equations 1–3) hold, then Y ⟂ A. The "proof" notes that both parents of Y are conditionally independent of A, so Y is independent — a direct consequence of d-separation given the assumed conditions. This is not a novel theoretical insight; it is a restatement of what the conditions already assert. The real scientific question is whether the prompts *achieve* those conditions, and the paper provides no evidence for that. Presenting this as Theorem 3.1 gives a false sense of theoretical depth.
 
-3. **Connection between formal causal framework and specific prompts is asserted rather than demonstrated.** The conditional independence objectives in Equations (1)–(3) involve unobservable internal representations (explicitly acknowledged by the authors). The paper shows that prompts derived from the framework empirically work, but it does not verify (or attempt to verify) whether the proposed prompts actually satisfy the formal conditions, or whether the causal graph in Figure 3(b) correctly captures the model's internal processing. This weakens the claim that the causal framework *drives* the design rather than serving as a post-hoc rationalization. The empirical contribution stands on its own, but the paper overstates the degree to which the causal framework is validated.
+3. **Inconsistent application of strategies across datasets without principled justification.** On WinoBias, DDP combines Strategies I and II (fact-based reasoning + counterfactual equal-representation assumption). On BBQ, DDP combines Strategies I and III (fact-based reasoning + "don't use social category" instruction). Strategy II is dropped and Strategy III is added, but the paper provides no explanation for why. If the framework is truly principled and the strategies are derived from causal pathways, the choice of which strategies to combine should follow from the causal structure of each task. Without this explanation, the paper reads as engineering different prompts for different datasets and then retroactively labeling them with strategy names — which weakens the claim that the framework is unifying or principled.
+
+4. **Limited baselines relative to the strength of the claim.** The paper compares against only three baselines: Default, ICL with contrastive examples (Si et al., 2022), and Zero-shot COT (Kojima et al., 2022). While these are reasonable, several prompting-based debiasing approaches exist that could have been included — for instance, fairness-specific instructions, rephrasing prompts designed to avoid stereotypical paths, or variations of the "don't be biased" instruction used in practice. Given that the paper claims DDP provides a "principled" framework and state-of-the-art results, a broader baseline comparison would be necessary to demonstrate that the causal framing actually yields practical dividends beyond reasonable prompt engineering.
 
 ### Minor
 
-1. **Only GPT-4 tested on BBQ.** WinoBias experiments use four models (GPT-3, GPT-3.5, GPT-4, Claude 2), establishing generality. BBQ experiments use only GPT-4, limiting generalizability of the BBQ conclusions.
+5. **The ablation study does not directly compare DDP vs. Fact Only on the primary evaluation metric.** Table 2 reports the TT/TF/FT/FF error categorization for Fact Only, Counteract Only, and DDP, but this does not directly translate to the bias gap (pro-anti accuracy difference) used as the main metric in Table 1. The reader cannot determine from the reported data whether DDP (I+II) improves the bias gap over Fact Only (I) alone, or by how much. Given the importance of establishing that the causal strategies contribute beyond the simple "ask about facts" approach, this comparison should be reported.
 
-2. **Selective strategy usage on BBQ without justification.** DDP on BBQ uses Strategies I and III but not Strategy II. On WinoBias, DDP uses Strategies I and II but not III. The paper does not explain why different strategy combinations are used on different benchmarks, making it harder to assess whether the framework genuinely guides the design or whether the strategies are chosen post-hoc.
-
-3. **Overclaiming around "completely removed" bias.** The conclusion states "we also prove that bias can be completely removed from LLMs' decisions when the objectives in all three strategies are satisfied" (line 251). The theorem is technically correct as a conditional statement, but the experiments show only *reduction*, not removal, and the conditions themselves are not verified to be satisfied in practice. The phrasing risks misleading readers into thinking the paper demonstrated complete bias elimination.
-
-4. **Ablation does not separately evaluate Strategy III.** The ablation on WinoBias tests Fact Only (Strategy I) and Counteract Only (Strategy II), but does not test Strategy III (discouraging biased reasoning) in isolation. Since DDP on BBQ uses Strategy III, an ablation of that component would be informative.
-
-5. **Number of ICL examples differs between benchmarks (16 on WinoBias, 8 on BBQ) without justification.** The paper says the BBQ setting "matches" Si et al. (2022), but this inconsistency makes cross-benchmark comparisons harder to interpret.
+6. **The fairness notion (statistical parity, Y ⟂ A) is adopted without sufficient discussion.** The paper defines unbiased decisions as independence between the decision and social category. This is known to be controversial — it can conflict with legitimate uses of social information (e.g., medical treatment decisions where gender or age may be relevant). The paper briefly acknowledges this in Figure 1's caption but does not engage with the normative implications. Since the entire debiasing effort targets this independence, a brief discussion of when this notion is appropriate vs. inappropriate would strengthen the framing.
 
 ### Trivial
-
 None.
 
 ## Nice-to-Haves
 
-- Reporting confidence intervals or standard deviations for main results (common in some subfields, but single-run evaluation is standard in LLM prompting papers).
-- A limitations section acknowledging: (a) the untestability of internal representation independence, (b) reliance on the specific causal graph structure, (c) restriction to U.S. English contexts, (d) dependence on the model's world knowledge which may itself be biased.
-- Testing Strategy III ablation separately on WinoBias or BBQ.
+- **Validate the causal assumptions empirically.** For instance, use activation or probing-based methods to measure whether the "Fact Only" prompt actually reduces the mutual information between gender-related representations and the model's decision. This would turn the causal story from a narrative into a testable hypothesis.
+- **Include stronger baselines** such as fairness-specific instruction prompts, or rephrasing baselines that avoid stereotypical pathways without using the causal framework.
+- **Explain the strategy selection process.** If Strategy II (counterfactual equal representation) is not used on BBQ because some social dimensions (e.g., physical appearance, religion) do not admit a natural "equal representation" counterfactual, say so explicitly. This would turn an apparent inconsistency into a principled scope condition.
+- **Compare Fact Only vs. DDP on the bias gap metric** to quantify the marginal benefit of adding the causal strategies beyond the simple fact-based reasoning prompt.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
-
-1. **"The causal framework and empirical validation are disconnected in a way that undermines the paper's central claim" (presented as fatal by the harsh reviewer).** This is downgraded from fatal to major. The paper does not need to directly verify internal representation-level conditions to validate its framework — the framework provides a *principled design space* for generating prompts, and the empirical success of those prompts is a valid form of validation. Many causal papers in ML use causal graphs as thinking tools without identifying every edge empirically. The criticism has merit (the connection is asserted rather than demonstrated) but is not fatal to the contribution.
-
-2. **"Missing appendix / Discrim-Eval results not shown."** Parser strips appendix sections; these exist in the original submission.
-
-3. **"Missing baseline Self-Debias."** Self-Debias (Schick et al., 2021) is a decoding-time method, not a prompting technique. The paper focuses on prompting-based debiasing for black-box LLMs. Demanding this baseline evaluates the paper against a different class of methods.
-
-4. **"Overlooked debiasing strategy claim is not established."** The prior works cited (Si et al., 2022; Ganguli et al., 2023) use contrastive examples and RLHF respectively — these are not equivalent to the paper's "ask about real-world likelihoods" fact-based reasoning. The claim that this specific approach was overlooked is defensible.
-
-5. **"Selection mechanisms example doesn't connect to LLM prompting."** The paper explicitly states "We will see in Section 3 that such property of selection also applies to NLP contexts" (line 65). This is a standard preliminaries exposition; the connection is made in the following section.
-
-6. **"Strategy III missing from WinoBias ablation."** DDP on WinoBias uses Strategies I+II, not III. Not ablating a strategy that isn't part of the method on that benchmark is not a flaw.
-
-7. **"Unified perspective" (from Strength Finder).** The strength claims unification, but the weakness that this claim is unsupported is verified. Per the rule "when a strength and weakness disagree, the weakness wins," this strength is removed.
+- **"Discrim-Eval mentioned but no results shown":** The paper states it conducts experiments on three benchmarks including Discrim-Eval. Results could be in the appendix, which was stripped by the parser. Removed per instruction to remove missing-appendix criticisms.
+- **"Causal graphs are ornamental / narrative dressed in causal vocabulary":** This phrasing is too harsh. The causal graphs do provide a structured way to think about distinct debiasing pathways. The genuine problem is that the formal conditions are unverified (captured in Weakness 1 above), not that the graphs are meaningless.
+- **"Fact Only alone already achieves strong results" as evidence the causal apparatus adds nothing:** DDP (I+II) does outperform Fact Only on the TT/TF/FT/FF metrics (Table 2), indicating the combined method provides benefit. This specific sub-claim is factually overstated by the critic.
+- **Point about the paper lacking cost/failure-mode discussion of base question generation:** The paper explicitly states "the generation of base questions can be done by regular expression or one additional LLM query" and suggests using a smaller LLM. This adequately addresses the concern.
+- **Formatting/style nitpicks:** Removed as parser artifacts.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The reviews surface an interesting tension not fully articulated in the paper itself: the causal framework's value may be primarily *taxonomic* rather than *mechanistic*. The paper is most convincing when it treats the causal graph as a way to systematically organize different prompting strategies (fact-based reasoning, counterfactual equalization, anti-bias instructions) into a coherent typology with distinct targets — this is genuinely useful for practitioners. The framework is least convincing when it claims to offer rigorous causal guarantees, because the theoretical conditions (Equations 1–3) and Theorem 3.1 add no empirical content beyond what the strategies already enact. The paper would be much stronger if it leaned into the taxonomic contribution and dropped or substantially downplayed the formal causal language.
 
 ## Suggestions
 
-1. **Report proper bias metrics on BBQ.** Break down accuracy by stereotype-consistent vs. stereotype-inconsistent examples in the disambiguated setting, or report results on the ambiguous setting (where the correct answer is "unknown" and bias manifests as choosing the wrong entity). This is the single most impactful improvement — without it, the BBQ experiments do not directly support the debiasing thesis.
+1. **Reframe the causal framework's role.** Present the causal graphs as an *organizational framework* for categorizing debiasing strategies by which pathway they regulate, rather than as a formally verified causal model. This would align the framing with what is actually demonstrated.
 
-2. **Either demonstrate the unification claim with concrete mappings from prior methods to the three strategies, or remove/qualify the claim.** At minimum, show how ICL with contrastive examples, zero-shot CoT, and one or two additional methods can be understood as instances of Strategy I, II, or III.
+2. **Report Fact Only vs. DDP on the bias gap.** Add a direct comparison of Fact Only (Strategy I alone) vs. DDP (I+II) on the pro-anti accuracy gap to demonstrate the marginal benefit of combining strategies.
 
-3. **Tone down the "completely removed" language.** Acknowledge that Theorem 3.1 gives a sufficient condition that is aspirational, and that the experiments demonstrate substantial *reduction* rather than elimination.
+3. **Explain the strategy selection across datasets.** Add a brief justification for why Strategy III is used on BBQ instead of Strategy II (e.g., "Strategy II's counterfactual equal-representation assumption is natural for binary categories but less straightforward for multi-faceted social dimensions like religion or appearance; we therefore use Strategy III for those cases").
 
-4. **Justify why different strategy combinations are used on different benchmarks.** If the framework is truly generative/principled, the paper should explain when to use which combination.
+4. **Include two additional baselines** — at minimum a fairness-specific instruction baseline and one more recent prompting-based debiasing method — to strengthen the empirical comparison.
 
-5. **Add a limitations section** explicitly discussing the untestability of internal representation-level conditions, the reliance on the assumed causal graph structure, and the scope of the findings.
+5. **Tone down the formal claims about Theorem 3.1.** The theorem should be presented as a straightforward consequence of the conditions rather than a substantive theoretical result. The text already partially does this ("a sufficient condition"), but the presentation as a numbered theorem invites expectations that are not met.
 
 ## Score and Decision
 
-The paper makes a genuine contribution: a novel causal framing of bias in LLM decision-making, three principled strategies derived from it, strong WinoBias results across four models, and an informative ablation. The main issues are (a) the BBQ results lack proper bias metrics, creating an evidential gap for one of the two main benchmarks, (b) the unification claim is asserted but not demonstrated, and (c) some claims are overstated. These are real but addressable weaknesses — none invalidate the core contribution. The causal framework provides genuine conceptual value even if individual causal pathways aren't directly verified, and the WinoBias results are strong and properly measured.
+This paper has a real and useful empirical contribution — the finding that prompting an LLM to reason about a social-agnostic version of a question and using that answer as context reduces decision bias. The empirical results are strong and consistent across models and datasets. However, the paper overclaims its theoretical contribution substantially: the causal framework is presented as a rigorous foundation but its central conditions are unverified, the theorem is a trivial restatement, the strategies are applied inconsistently without principled explanation, and the baseline comparison is limited. These issues are significant enough that the paper in its current form does not deliver on its stated contributions. A substantially revised version — one that reframes the causal framework as an organizational tool rather than a verified mechanism, adds baselines, and justifies the strategy choices — could be a strong paper.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

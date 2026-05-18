@@ -1,71 +1,94 @@
-Now I have a thorough understanding of the paper and can synthesize the final review.
+Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
 
-## Final Consolidated Review
+---
 
 ## Summary
-This paper develops a novel theoretical framework (Theorem 3.4) for determining equivalence of Gaussian process measures — and hence parameter identifiability — for stationary kernels that are holomorphic near zero. This class includes the squared exponential, periodic, and rational quadratic kernels commonly used in machine learning, for which the classical integral test (Stein, 1999) fails because their spectral densities decay too rapidly. The framework decomposes kernels into continuous and discrete spectral components, derives necessary and sufficient conditions for equivalence, and applies these to both individual kernels and combinations (sums and products). The headline application shows that all 11+ parameters in the Mauna Loa CO₂ kernel (Rasmussen & Williams, 2006) are identifiable under mild constraints.
+
+This paper develops a novel theoretical framework (Theorem 3.4) for determining the identifiability (microergodic functions) of Gaussian process kernel parameters, specifically for stationary kernels that are holomorphic around zero — a class that includes the widely used squared exponential (SE), periodic (Per), and rational quadratic (RQ) kernels. Prior theory (the integral test of Stein, 1999) required polynomial spectral decay and did not apply to these rapidly-decaying kernels. The paper applies its framework to prove that all 11 parameters in the Mauna Loa CO₂ kernel (a sum of SE, damped periodic, RQ, and noise components) are identifiable under a mild ordering constraint, providing the first rigorous justification for interpretations used since Rasmussen and Williams (2006). Additional results characterize identifiability for sums/products of cosine and periodic kernels, including a non-identifiability result for products of four or more cosine kernels.
+
+---
 
 ## Strengths
-1. **General equivalence theorem for holomorphic kernels (Theorem 3.4).** The paper proves a novel necessary and sufficient condition for GP equivalence based on the spectral measure's continuous and discrete components. This genuinely extends the identifiability literature beyond the Matérn family, which has dominated prior work. The theorem requires only one kernel to be holomorphic near zero and gives clean conditions: equality of continuous spectral measures, plus boundedness and square-summable relative differences on discrete components.
 
-2. **Systematic pipeline for combined kernels (Theorems 3.5–3.9).** The paper shows that identifiability of a combined kernel decouples into separate analyses of its continuous and discrete spectral components (Theorem 3.5). Applications to sums of cosines (Theorem 3.7), products of cosines (Theorem 3.8), and sums of periodic kernels (Theorem 3.9) produce non-obvious insights — e.g., that frequencies in a product of four or more cosines are not individually identifiable even though they are identifiable for m ≤ 3.
+1. **Novel general framework for holomorphic kernels.** Theorem 3.4 provides a new equivalence condition for GPs through a continuous/discrete spectral decomposition, applicable to a significant class of kernels (SE, Per, RQ) that prior tools could not handle. The paper clearly explains why the integral test (Stein, 1999) fails for these kernels — their spectral densities decay too rapidly (exponential/Gaussian) to satisfy the polynomial-tail condition — and then fills this gap with a clean alternative approach.
 
-3. **Rigorous mathematical foundations.** Definitions of microergodicity and identifiability (Definitions 3–5), the spectral decomposition lemma (Lemma 3.3), and the careful framing of the holomorphicity condition provide a clean, reusable framework that other researchers can apply to new kernels.
+2. **Proves identifiability of the widely-used Mauna Loa CO₂ kernel.** Theorem 3.2 shows that all 11 parameters in Equation (2) are identifiable under the mild constraint θ₁₀ < θ₂. This directly supports parameter interpretations that have been used for nearly two decades (Rasmussen & Williams, 2006; scikit-learn tutorial) without theoretical justification. The constraint is natural (preventing two SE components from merging), and the paper discusses this case candidly.
 
-4. **Practical relevance.** The paper addresses a concrete gap: the Mauna Loa CO₂ kernel from Rasmussen & Williams (2006) and the scikit-learn tutorial has been used for years without a rigorous identifiability proof. Theorem 3.2 (modulo the nugget issue below) is the first result to justify parameter interpretation for this widely used example.
+3. **Concrete, ready-to-use microergodic functions for multiple kernels.** Table 2 and Theorems 3.1, 3.6–3.9 give explicit identifiability results for SE, Per, RQ, Cosine, damped periodic, ARD, sums of cosine/periodic kernels, and products of cosine kernels. The non-identifiability result for products of ≥4 cosine kernels (Theorem 3.8) is a non-obvious finding with practical implications for kernel design.
+
+4. **Simulations corroborate theoretical predictions.** Section 4 shows MLEs for SE, Per, RQ, and damped Per converging to ground truth as n grows, while the cosine kernel's variance parameter fails to converge — consistent with the theory that only γ (the frequency) is microergodic for the cosine kernel. The Mauna Loa combined kernel simulation (n=500, 10 parameters) shows generally reasonable MLE behavior.
+
+---
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-1. **The nugget term in Equation (2) is not holomorphic, yet the paper applies Theorem 3.4 to this kernel without addressing the mismatch.** Theorem 3.4 requires K₁ to be holomorphic on a ball around 0 in ℂᵖ. The composite kernel in Equation (2) (and Equation (1)) contains a nugget term θ₁₁·1_{x=0} (or θ₁₁²·1_{x=x'}), which is discontinuous at zero and therefore not holomorphic. Theorem 3.5 — the pipeline theorem — explicitly requires "each of which is holomorphic on some ball around 0 in ℂᵖ" for the parametric family. The paper never discusses how the nugget is handled. The paper's note on line 42 ("all kernel functions considered in this paper are continuous functions unless noted otherwise") acknowledges the nugget is an exception, but this does not resolve the theoretical gap.
 
-   This does **not** invalidate Theorem 3.4 or the other applications (Theorems 3.6–3.9, which involve no nuggets). However, it does mean Theorem 3.2's claim — arguably the paper's most visible applied result — is not fully supported as written. The paper needs to either: (a) restrict the composite kernel to exclude the nugget and note that white noise requires separate treatment (possibly citing existing results like Loh & Sun, 2023), or (b) provide a rigorous argument extending Theorem 3.4 to handle additive discontinuous components whose spectral measures are absolutely continuous. This is a fixable gap, but it must be fixed before the contribution is reliable.
+1. **Potential conflict with existing results on SE kernel identifiability is not acknowledged or resolved.** The paper's framework implies (Theorem 3.5(a)) that for kernels with continuous spectral measures (including SE), two GPs are equivalent iff their kernels are identical as functions, which would mean all SE parameters (σ², ℓ) are separately identifiable. However, the paper cites Stein (1999) and Ibragimov & Rozanov (1978) — references that contain equivalence results suggesting that for the SE kernel, only the product σ²ℓ may be microergodic in one dimension. The paper states that the integral test (Stein's primary tool) does not apply to SE (Section 2.3), but never directly addresses whether these references contain SE-specific results that do not rely on the integral test, and if so, why the paper's conclusion differs. This is a significant gap in the related-work discussion. The paper also remarks (line 197) that "even for simple kernels like the SE and Matérn kernels, whether the MLE is consistent remains open (Loh and Sun, 2023)" — which suggests SE identifiability is not actually settled in the literature — but the paper does not reconcile this observation with the critic's claimed established result. The paper should explicitly discuss whether any prior equivalence result for the SE kernel exists that its framework would contradict, and if not, state clearly that SE identifiability has been an open problem that this work resolves.
 
-2. **The derivations linking Theorem 3.4 to the microergodic functions in Table 2 are not sketched in the main text.** Theorem 3.1 states the microergodic functions for SE, Damped Per, Per, RQ, and Cosine kernels, but the main text offers no reasoning for how the spectral conditions of Theorem 3.4 reduce to the stated parametric functions. In particular: (a) why does the Periodic kernel make σ² identifiable while the Cosine kernel does not? (b) why does the RQ kernel's microergodic function involve all three parameters (σ², ℓ, α)? The paper says the strategy is to use Fourier transform identities and then apply Theorem 3.4 (line 146, referencing Appendix B.6), but a brief sketch for even one kernel in the main text would greatly improve verifiability and reader confidence. Without it, the results in Table 2 appear as assertions rather than deductions.
+2. **Theorem 3.4's Condition 1 is stated ambiguously.** The paper says "Condition 1 means the continuous components of F₁ and F₂ are the same" — but "the same" could mean identical as measures, or equivalent (mutually absolutely continuous), which are very different conditions. Although Theorem 3.5(a) later clarifies that for continuous components the condition reduces to K₁ᶜ(x) = K₂ᶜ(x) for all x (i.e., identical kernels), the main theorem itself should state Condition 1 unambiguously rather than deferring the interpretation to a downstream result. This ambiguity makes it harder for readers to verify the theorem's correctness and to understand why the results differ from prior approaches. (Note: the missing Condition 1 text in the extracted version is a parser artifact; the paper should still tighten the phrasing.)
 
 ### Minor
-1. **True parameter values for the individual kernel simulations (Section 4.1) are not stated.** For the combined kernel (Section 4.2), Table 3 provides ground truth, which is good. But for the individual kernels (SE, DPer, Per, RQ, Cosine), the reader cannot tell what values were used to generate data. The caption of Figure 1 says "ground truth in horizontal dashed line" without stating the actual numbers in text or a table. This hinders reproducibility, even if the simulations are intended as illustrations.
 
-2. **The periodic vs. cosine identifiability distinction deserves explicit discussion.** The paper observes that σ² is identifiable for the Periodic kernel but not the Cosine kernel. This is a subtle and interesting point — it arises because the Periodic kernel has infinitely many spectral atoms (all scaled by σ²), while the Cosine kernel has a single atom. The infinite-series condition in Theorem 3.4 forces σ² to be identifiable for the former but not the latter. A few sentences of explanation in the main text would clarify the scope of the theory and help readers understand when identifiability does and does not hold.
+1. **Domain dimension not stated explicitly for each identifiability result.** The paper specifies that Per is only for p=1 (Section 2.2), and presents Theorem 3.4 on ℝ^p generally. However, Theorem 3.1 and Table 2 do not explicitly state the dimension for which the identifiability results for SE, RQ, and Cosine hold. For Matérn, identifiability famously depends on dimension (p≤3 vs p≥5), and a reader would reasonably ask whether the holomorphic framework also has dimension-dependent thresholds. The paper should state per-result whether the claim holds for all p≥1 or only specific dimensions.
 
-3. **The statement of Theorem 3.4 is missing its Condition 1 in the rendered text** (the numbering jumps to "2."), though the surrounding explanation clarifies that Condition 1 concerns equality of continuous spectral measures. This is a presentation issue in the extracted version.
+2. **Simulation adds observation noise without clarifying whether the noise variance is estimated.** Section 4.1 adds i.i.d. Gaussian noise ε=0.1 to GP realizations before fitting, but does not specify whether the noise variance is estimated alongside the kernel parameters or is treated as known. If the noise variance is estimated, the model includes a nugget, which changes the identifiability setting. If it is known, the model is misspecified (data has noise, model is noiseless), which could affect MLE convergence behavior. The paper should clarify this setup.
+
+3. **The claim that MLE non-convergence for the cosine kernel σ² is "in agreement with the microergodicity of γ" could be more precisely connected to theory.** The paper provides a nice argument about the covariance matrix having rank 2, but this is for the known-γ, ε→0 case. The simulation estimates γ and uses ε=0.1, so the connection between the theoretical microergodicity result and the simulation outcome is suggestive but not directly proven. A brief additional explanation would strengthen this.
 
 ### Trivial
-- The nugget term appears as θ₁₁² in Equation (1) and as θ₁₁ in Equation (2). The notation should be consistent.
-- The paper could state more explicitly at the outset that Matérn and exponential kernels are not covered by this framework (they are not holomorphic near zero).
+
+- The sentence "even for simple kernels like the SE and Matérn kernels, whether the MLE is consistent remains open (Loh and Sun, 2023)" is a bit imprecise — it conflates the known Matérn MLE consistency results (e.g., Kaufman & Shaby 2013 for the microergodic parameter) with SE, where the situation is genuinely open. Consider rewording to clarify the distinction.
+
+---
 
 ## Nice-to-Haves
-- A convergence plot (e.g., RMSE vs. n) for the simulations would strengthen the empirical illustration more than boxplots alone, though the paper's contribution is theoretical and the simulations are explicitly illustrative.
-- A brief remark connecting the holomorphicity condition to the Paley–Wiener theorem (relating analyticity of the kernel to decay of its spectral measure) would help readers understand why the theorem works.
-- The paper could note that the nugget's spectral density is constant (hence absolutely continuous), so the nugget variance's identifiability is already covered by classical fixed-domain results — if this is the intended handling, it should be stated explicitly.
+
+- Including a brief heuristic illustration of why the continuous-component condition in Theorem 3.4 leads to kernel equality for holomorphic kernels (perhaps contrasting with the Matérn case where kernels differ but measures are equivalent) would help readers understand why the holomorphic assumption changes the identifiability landscape.
+- A short discussion of how the framework's results for SE compare to any folklore or textbook claims about SE (non-)identifiability would preempt the reader's natural questions.
+- Adding a cross-dimension remark (e.g., "all results for SE, RQ, Cosine hold for any p≥1 because...") would improve clarity.
+
+---
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-- **Criticism about missing appendix/derivations for Table 2:** The reviewer says "the appendix is not available for review" but the parser strips appendix content from all papers. The derivations exist in the original submission (referenced as Theorem B.6 and Appendix B). The main text could benefit from a sketch, but the full proofs are present.
-- **Criticism about figure quality (boxplots too small, unreadable labels):** This is a formatting/presentation nitpick about the PDF extraction. The original submission likely has readable figures. No substantive claim is affected.
-- **Criticism about requiring confidence intervals or RMSE plots:** The paper explicitly states simulations are illustrative (lines 196–199) and that establishing MLE consistency is beyond scope. Demanding convergence metrics applies a standard the paper never claims to meet.
-- **Criticism about missing related work:** The instruction prohibits this; I cannot independently verify the existence of unmentioned works.
-- **"The paper could mention the holomorphicity condition ensures the kernel's Taylor series converges, which relates to the spectral measure's decay through the Paley–Wiener theorem":** This is a helpful suggestion (moved to Nice-to-Haves) but not a weakness.
-- **"The reference to sklearn.gaussian_process should include a stable URL or version number":** A formatting triviality that does not affect the intellectual contribution.
+
+These points from the reviewer inputs were removed or downgraded from the main weaknesses list, with brief justification:
+
+- **"Condition 1 is missing entirely"** — Parser artifact; it exists in the original submission.
+- **"Proof is relegated to the appendix and cannot be evaluated"** — Parser artifact; appendices exist in the original submission.
+- **"Table 2's content is not visible"** — Parser artifact; renders correctly in original.
+- **"The paper lacks any discussion of existing identifiability results for non-Matérn kernels"** — This is partly a missing-related-works claim that cannot be independently verified (per instructions). The paper does discuss the integral test limitation and cites the relevant references. The specific claim about Stein/Ibragimov-Rozanov SE results is addressed in the Major weakness above, which is the valid core of this concern.
+- **Several formatting/presentation nitpicks** — Parser artifacts.
+- **"Inconsistency can be slow and difficult to detect in finite samples of size 5000"** — Generic criticism applicable to any simulation study; does not identify a specific flaw in this paper's setup.
+- **"The authors should be more cautious about attributing lack of variance shrinkage to small sample size"** — The paper does acknowledge this candidly as speculation; the concern is reasonable but minor and already addressed in the Minor weaknesses.
+
+---
 
 ## Novel Insights
-None beyond the paper's own contributions. The key insight — that GP equivalence for holomorphic kernels reduces to comparison of continuous spectral measures plus a square-summable condition on discrete spectral atoms — is the paper's own creation; no reviewer has added a genuinely novel observation that extends it.
+
+The most striking observation that emerges from reading the reviews against the paper is that **the paper's core contribution — a new equivalence criterion for holomorphic kernels — produces results that appear to disagree with folklore about SE kernel identifiability, but this "disagreement" is precisely because prior folklore was based on tools (the integral test) that were never actually applicable to SE kernels.** The paper correctly identifies that existing methods require polynomial spectral decay, which SE does not satisfy. Rather than contradicting established results, the paper is addressing a genuine open problem. However, the paper's presentation does not do enough to frame this narrative explicitly — it mentions that existing tools don't apply but does not then state the implication ("therefore all prior claims about SE identifiability were not rigorously established, and our work provides the first definitive answer"). Making this narrative explicit would both strengthen the paper's novelty claims and preempt the very confusion the critic exhibited.
+
+---
 
 ## Suggestions
-1. **Address the nugget gap head-on.** Either remove the nugget from the composite kernel (noting that white noise components require separate treatment via existing fixed-domain results), or provide a rigorous argument showing that Theorem 3.4's conditions are sufficient even when a non-holomorphic nugget is present (e.g., because the nugget's spectral measure is absolutely continuous and its contribution to the continuous component is well-defined through the spectral density). This is the single most important revision.
 
-2. **Add a worked example in the main text.** Choose one kernel from Table 2 (e.g., SE for the continuous case and Per for the discrete case) and show explicitly how Theorem 3.4's conditions reduce to the microergodic function. This would make the paper self-contained and dramatically improve reader confidence.
+1. **Explicitly address the Stein/Ibragimov-Rozanov results on SE.** Add a paragraph to Section 2.3 or the Introduction stating: "Some prior work (Stein, 1999, Ch. 6; Ibragimov & Rozanov, 1978) has discussed the SE kernel. However, these analyses rely on the integral test, which requires polynomial spectral decay. Since the SE spectral density decays as exp(−ℓ²‖ω‖²/2), faster than any polynomial, the integral test's conditions are not met and its conclusions do not apply. The identifiability of SE parameters has therefore remained an open question, which our framework resolves."
 
-3. **State the true parameter values for individual kernel simulations** in a table or in the text, to match the combined kernel's Table 3.
+2. **Unambiguously state Condition 1 of Theorem 3.4.** Replace "the continuous components... are the same" with "F₁ᶜ = F₂ᶜ as measures on ℝ^p (i.e., the continuous spectral measures are identical)."
 
-4. **Explain the Periodic vs. Cosine identifiability distinction** in a short paragraph, noting that the infinite discrete spectrum of the Periodic kernel forces all spectral masses (hence σ² and ℓ) to be identifiable, whereas a single spectral atom does not constrain σ².
+3. **State the dimension for each identifiability result in Table 2 and Theorem 3.1.** A simple column or footnote ("holds for all p ≥ 1") would suffice. If the result depends on dimension, specify the range.
+
+4. **Clarify the simulation setup.** State explicitly: "The noise variance ε² is known and fixed (not estimated) in the individual kernel simulations; the MLE only estimates the kernel parameters." If it is estimated, note that.
+
+5. **Fix the garbled simulation text.** Lines 205–262 contain interspersed line numbers and broken formatting that obscure the simulation description.
+
+---
 
 ## Score and Decision
 
-This paper makes a genuine theoretical contribution — Theorem 3.4 is novel and fills a real gap in the GP identifiability literature. The framework is clean, the applications are interesting, and the practical relevance is clearly motivated. However, the paper has a significant gap: the application to the flagship composite kernel (Equation 2) involves a non-holomorphic nugget term that is not addressed by the theory, and the derivations linking the main theorem to the concrete microergodic functions are not sketched in the main text. These issues are fixable but must be addressed before the contribution is fully reliable.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

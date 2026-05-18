@@ -1,0 +1,506 @@
+\title{Contrastive Diffuser: Planning Towards High Return States via Contrastive Learning}
+
+\begin{abstract}
+
+The performance of offline reinforcement learning (RL) is sensitive to the proportion of high-return trajectories in the offline dataset. However, in many simulation environments and real-world scenarios, there are large ratios of low-return trajectories rather than high-return trajectories, which makes learning an efficient policy challenging. In this paper, we propose a method called Contrastive Diffuser (CDiffuser) to make full use of low-return trajectories and improve the performance of offline RL algorithms. Specifically, CDiffuser groups the states of trajectories in the offline dataset into high-return states and low-return states and treats them as positive and negative samples correspondingly. Then, it designs a contrastive mechanism to pull the trajectory of an agent toward high-return states and push them away from low-return states. Through the contrast mechanism, trajectories with low returns can serve as negative examples for policy learning, guiding the agent to avoid areas associated with low returns and achieve better performance. Experiments on 14 commonly used D4RL benchmarks demonstrate the effectiveness of our proposed method. Our code is publicly available at \url{https://anonymous.4open.science/r/CDiffuser}.
+
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:intro}
+Offline reinforcement learning (offline RL)~\citep{levine2020offline,prudencio2023survey} is a significant branch of reinforcement learning, where an agent is trained on pre-collected offline datasets and is evaluated online. Since offline RL avoids potential risks from interacting with the environment during policy learning, it has broad applications in numerous real-world scenarios, like commercial recommendation~\citep{xiao2021general}, health care~\citep{fatemi2022semi}, dialog systems~\citep{jaques2020human}, and autonomous driving~\citep{shi2021offline}. 
+However, the performance of offline RL methods highly depends on the proportion of the high-return trajectories in the offline dataset.
+When the dataset contains a large proportion of high-return trajectories, as is presented in Figure \ref{fig:intro}(b), offline RL methods can easily learn the pattern of high-return trajectories such that they can achieve excellent performance when interacting with the environment.
+In contrast, when the dataset has a limited number of high-return trajectories, as is presented in Figure \ref{fig:intro}(c), offline RL methods struggle to learn a good pattern from the dataset to achieve high returns.
+Unfortunately, the issue of limited high-return trajectories commonly exists in both simulation environments (\textit{e.g.}, Maze2d) and real-world scenarios (\textit{e.g.}, robotics control and medical diagnosis). As it is illustrated in Figure \ref{fig:intro}(a), we visualize the probability density of trajectories' returns in Maze2d. We can observe that the number of high-return trajectories is much limited.
+
+\begin{figure*}
+    
+    \centering
+    \includegraphics[width=1\textwidth]{figs/intro.pdf}
+    \caption{(a) The probability density of trajectories’ returns in Maze2d; (b) The learned trajectory when high-return trajectories are abundant;  (c) The learned trajectory when the number of high-return trajectories is limited; (d) The contrastive learning applied by previous RL models; (e) The example of our solution.
+    }
+    \label{fig:intro}
+\end{figure*}
+Although the number of high-return trajectories is limited in aforementioned cases, 
+there are abundant low-return trajectories. 
+Notably, few works consider developing techniques to make full use of low-return trajectories.
+As states in those low-return trajectories indicate potential areas where agents might obtain low returns,
+we assume that if an agent achieves relatively high returns during its interactions with the environment, the trajectories generated during the interaction should maintain some different states from the low-return trajectories in the offline dataset. 
+As illustrated in Figure \ref{fig:intro}(a), some states (marked in blue dot) in the trajectories that can reach the goal position
+have a clear boundary from the ones in low-return trajectories.
+Therefore, as it is illustrated in Figure \ref{fig:intro}(e), 
+one conservative solution to enable offline RL algorithms to achieve high returns is taking advantage of the state differences between high-return and low-return trajectories: keeping the states in the agent's trajectory close to high-return states, and away from low-return states. 
+
+However, there are no mature techniques to pull the states of a trajectory toward high-return states and push them away from low-return states, to the best of our knowledge. Fortunately, 
+there is an analogous case: contrastive learning,
+which aims to bring 
+a given sample close to positive ($i.e.$, similar) samples and far from negative ($i.e.$, dissimilar) samples~\citep{xiao2020should, tian2020makes, wang2022contrastive, khosla2020supervised}. Inspired by that, we propose to treat states with high return in trajectories of offline dataset as positive samples and those with low return as negative samples, and leverage contrastive learning to pull the states toward high-return states and push them away from low-return states, as Figure\ref{fig:intro}(d) illustrates. It is worth noting that, unlike previous works~\citep{qiu2022contrastive,laskin2020curl,yuan2022robust,agarwal2020contrastive}, which apply contrastive learning to constrain the states of the same trajectory to similar representations and the states of different trajectories to dissimilar representations, as is illustrated in Figure \ref{fig:intro}(c), we aim to \textbf{use contrastive learning to constrain policy toward high-return states and away from low-return states}.  
+Furthermore, the criteria for distinguishing positive and negative samples here are based on the returns rather than the labels.
+Through the contrast mechanism, trajectories with low returns can serve as negative examples for policy learning, guiding the agent to avoid areas associated with low returns. Additionally, with the guidance of high-return states, the agent ultimately achieves high returns.
+However, ordinary states are feedback from the environment rather than generated by the model, applying contrastive mechanisms to these states produces no gradient for policy optimization.
+Considering some diffusion-based RL methods generate subsequent trajectories for planning \citep{janner2022planning,ajay2023is}, in which abundant states are generated by policy model, we build our constrastive mechanism on those diffusion-based RL methods and propose a method called \textbf{Contrastive Diffuser} (\textbf{CDiffuser}). Specifically, we first group the states of the trajectories in the offline dataset into high-return states and low-return states. 
+Then, we learn a diffusion-based trajectory generation model to generate the subsequent trajectories, and apply a contrastive mechanism to constrain the states of the generated trajectories by pulling them toward the high-return states and pushing them away from the low-return states in the offline dataset.
+With the contrastive mechanism constrained states for planning, the agent makes decisions towards the high-return states.
+To evaluate the performance of CDiffuser, we conduct experiments on 14 D4RL~\citep{fu2020d4rl} benchmarks. The experiment results demonstrate that CDiffuser has superior performance.
+
+In summary, our contributions are: 
+(\romannumeral 1) We propose a method called CDiffuser, which takes the advantage of low-return trajectories by pulling the states in trajectories toward to high-return states and pushing them away from low-return states.
+(\romannumeral 2) We perform contrastive learning to constrain the states in the agent's trajectory and enhance the policy learning.
+To the best of our knowledge, our work is the first which apply contrastive learning to enhance the policy learning.
+(\romannumeral 3) Experiment results on 14 D4RL datasets demonstrate the outstanding performance of CDiffuser.
+
+
+
+\section{Preliminaries}
+
+
+
+
+\subsection{Denoising Probabilistic Models}
+Denoising Probabilistic Models (Diffusion Models)~\citep{sohl2015deep,songdenoising,ho2020denoising} are a group of generative models, which generate samples by denoising from Gaussian noise.
+A diffusion model is composed of a forward process and a backward process.
+Given the original data $\bm{x} \sim q(\bm{x})$, the forward process transfers $\bm{x}$ into Gaussian noise by gradually adding noise, \ie, $
+    q(\bm{x}^i \vert \bm{x}^{i-1}) = \mathcal{N}(\bm{x}^i; \sqrt{1 - {\beta}^i} \bm{x}^{i-1}, {\beta}^i\bm{I})$, in which $\bm{I}$ is an identity matrix, ${\beta}^i$ is the noise schedule measuring the proportion of noise added at each step, $\bm{x}^0:=\bm{x}$ is a sample from the offline dataset, $\bm{x}^1, \bm{x}^2, ...$ are the latents of diffusion. The backward process recovers $\bm{x}$ by gradually removing the noise at each step, which is formulated with a Gaussian distribution~\citep{Feller1949OnTT} parameterized by $\theta$, \ie, $
+p_{\theta}(\bm{x}^{i-1}|\bm{x}^i)=\mathcal{N}({\mu}_{\theta}(\bm{x}^i, i), {\Sigma}_{\theta}(\bm{x}^i, i))$, 
+where ${\mu}_\theta(\bm{x}^i, i )=\frac{\sqrt{\alpha^i}(1-\bar{\alpha}^{i})}{1-\bar{\alpha}^{i-1}}\bm{x}^i + \frac{\sqrt{\bar{\alpha}^{i-1}}\beta^i}{1-\bar{\alpha}^i}\psi_\theta(\bm{x}^i, i)$,
+$\bar{\alpha}^i = \prod_{j=1}^{i} (1-\beta^i)$ and $\psi_{\theta}(\cdot,\cdot)$ is a model to reconstruct $\bm{x}$.
+The objective function can be formulated as follows if we fix ${\Sigma}_{\theta}(\bm{x}^i, t) = \beta_i\bm{I}$~\citep{ho2020denoising}:
+\begin{equation}
+    \mathcal{L} = \mathbb{E}_{\bm{x}^0,\, i \sim [1, N]}\left[\| \bm{x}^0 - \psi_\theta(\bm{x}^i,i) \|^2 \right].
+\end{equation}
+\subsection{Contrastive Learning}
+Contrastive learning ~\citep{schroff2015facenet,sohn2016improved,khosla2020supervised, yeh2022decoupled,oord2018representation} is a class of self-supervised learning methods which aim at pulling similar samples together and pushing dissimilar samples away from each other.
+Specifically, given a sample $\bm{x}$ and a similarity measure, 
+the positive set $\mathcal{S}^{+}$ is defined as the collection of samples similar to $\bm{x}$, while 
+the negative set $\mathcal{S}^{-}$ is defined as the collection of samples dissimilar to $\bm{x}$. Contrastive learning minimizes the distance of between $\bm{x}$ and $\mathcal{S}^{+}$, and maximizes the distance of $\bm{x}$ and $\mathcal{S}^{-}$. That is, for each sample $\bm{x}$, select a positive sample ${\bm{x}}^{+} \in \mathcal{S}^{+}$ and negative samples ${\bm{x}}^{-} \in \mathcal{S}^{-}$. As such, the learning loss is:
+\begin{equation}
+        \mathcal{L}=-\log\left[\frac{\text{exp}( \text{sim}(f(\bm{x}), f(\bm{x}^{+})) )}{ \text{exp}( \text{sim}(f(\bm{x}), f(\bm{x}^{+})) ) + \sum_{\bm{x}^{-}\in\mathcal{S}^{-}} \text{exp}( \text{sim}(f(\bm{x}), f(\bm{x}^{-})) )  }\right],
+\label{eq:infonce}
+\end{equation}
+where $f(\cdot)$ is the function to map samples to a latent space and sim($\cdot, \cdot$) is the similarity measure.
+
+
+
+
+\subsection{Offline RL Problem Definition}
+\label{sec:preliminary:rl}
+Considering a system composed of three parts: policy, agent, and environment. 
+The environment in RL is usually formulated as a Markov Decision Process (MDP)~\citep{sutton2018reinforcement} $\mathcal{M} = \{ \mathcal{S}, \mathcal{A}, \mathcal{P}, r, \gamma \}$, where $\mathcal{S}$ is the state space, $\mathcal{A}$ is the action space, $\mathcal{P}(s' | s,a)$ is the transition function, $\gamma$ represents the discount factor, $r$ is the instant reward of each step.
+At each step $t$, the agent responds to the state of environment $\bm{s}_t$ by action $\bm{a}_t$ according to policy  
+$\pi_\theta$ parameterized by $\theta$, 
+and gets an instant return $r_t$. The interaction history is formulated as a trajectory 
+$\bm{\tau} = \{(\bm{s}_t, \bm{a}_t, r_t) | t \geq 0\}$. 
+In this paper, we define the cumulative discounted reward from step $t$ as $v_t = \sum_{i\geq t}\eta^{i-t}r_i$ and call it the return of $\bm{s}_t$.  
+
+We focus on the offline RL setting in this paper. Therefore, given an offline dataset
+$\mathcal{D}\triangleq\{(\bm{s}_t, \bm{a}_t, {r}_t, \bm{s}_{t+1})| t \geq 0\}$ consisting of transition tuples, and 
+defining the return of trajectory $\bm{\tau}$ as $R(\bm{\tau}) \triangleq \sum_{t\geq0}\gamma^tr_t$, our goal is learning 
+$\pi_\theta$ to maximize the expected return without directly interacting with the environment, \ie, 
+\begin{equation}
+    \pi_\theta = \argmax_\theta\mathbb{E}_{\bm{\tau}\sim\pi_\theta} [R(\bm{\tau})] ~.
+\end{equation}
+
+
+
+
+
+
+\section{Methodology}
+
+
+
+As we discussed previously, the performance of offline RL methods is suppressed when the number of high-return trajectories is limited. To address the challenge, we propose a method called \textbf{Constrastive Diffuser (CDiffuser)}, which introduces a contrastive mechanism to make full use of low-return trajectories and enhance the performance by constraining the states of the agent's trajectory towards high-return states and away from low-return states. As is illustrated in \cref{fig:framework},
+Our CDiffuser is composed of two modules: (1) the Planning Module, which aims to generate subsequent trajectories; (2) the Contrastive Module, which is designed to constrain the states in generated trajectories within the high-return areas and away from low-return areas.
+
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=0.9\textwidth]{figs/framework_updated.pdf}
+    \caption{The overall framework of CDiffuser. 
+    CDiffuser is composed of two modules: the Planning Module and the Contrastive Module. The Planning Module is designed to generate the subsequent trajectories, and the
+    Contrastive Module is designed to pull the states in the generated trajectories toward the high-return states and push them away from the low-return states during the training phase.
+    }
+    \label{fig:framework}
+\end{figure*}
+
+\label{sec:Methods}
+\subsection{Planning Module}
+\label{sec:base model}
+Given a state $\bm{s}_t$ at step $t$, the Planning Module first generates $H$-length subsequent trajectory $\bm{\hat{\tau}}^0_t$ by alternately denoising generated trajectories and estimating trajectory returns,
+and then extract the action to be executed from $\bm{\hat{\tau}}^0_t$, as is illustrated in Figure \ref{fig:framework}.
+Specifically, we first sample $\hat{\tau}^N_t$ from $\mathcal{N}(\bm{0},\bm{I})$, and replace $\hat{\bm{s}}_t^N$ with $\bm{s}_t$ as condition on the current observation:
+\begin{equation}
+ \hat{\bm{\tau}}^N_t = \{(\bm{s}_t, \hat{\bm{a}}_t^N), (\hat{\bm{s}}_{t+1}^N, \hat{\bm{a}}_{t+1}^N), ..., (\hat{\bm{s}}_{t+H}^N, \hat{\bm{a}}_{t+H}^N)\}~,
+\end{equation}
+in which all the elements except $\bm{s}_t$ are pure Gaussian noise. We further feed $\hat{\bm{\tau}}^N_t$ into the backward process of diffusion to generate the subsequent trajectory:
+\begin{equation} 
+    p_{\theta}(\hat{\bm{\tau}}^{i-1}_t|\hat{\bm{\tau}}^{i}_t)=\mathcal{N}({\mu}_{\theta}(\hat{\bm{\tau}}^i_t, i) + \rho\nabla \mathcal{J}_{\phi}(\hat{\bm{\tau}}_t^i, i), \beta_i\bm{I})~,  \label{eq:sample}
+\end{equation}
+\begin{equation}
+{\mu}_{\theta}(\hat{\bm{\tau}}^i_t, i) = \frac{\sqrt{\alpha^i}(1-\bar{\alpha}^{i-1})}{1-\bar{\alpha}^{i-1}}\hat{\bm{\tau}}^i_t + \frac{\sqrt{\bar{\alpha}^{i-1}}\beta^i}{1-\bar{\alpha}^i}\bm{\hat{\tau}}^{i,0}_t~.
+\label{eq:sample2}
+\end{equation}
+
+Here $\bm{\hat{\tau}}^{i,0}_t = \psi_\theta(\hat{\bm{\tau}}^i_t,i)$ represents the $\bm{{\tau}}^{0}_t$ constructed from $\hat{\bm{\tau}}_t^i$ at diffusion step $i$, $\psi_\theta(\cdot,\cdot)$ is a network for trajectory generation, $i \sim [1,N]$ is the diffusion step, $\rho$ represents the guidance scale, $\mathcal{J}_{\phi}(\cdot, \cdot)$ is a learned function to predict the return given any noisy trajectory $\bm{\tau}_t^i$.
+We abbreviate $\hat{\bm{\tau}}^0_t$ to $\hat{\bm{\tau}}_t$ for convenience, $\hat{\bm{\tau}}_t = \{(\bm{s}_t, \hat{\bm{a}}_t), (\hat{\bm{s}}_{t+1}, \hat{\bm{a}}_{t+1}), ..., (\hat{\bm{s}}_{t+H}, \hat{\bm{a}}_{t+H})\}$. $\hat{\bm{\tau}}_t$ is considered as \textbf{the subsequent trajectory} of $\bm{s}_t$. We take out the $\hat{\bm{a}}_t$ in $\hat{\bm{\tau}}$ as the action corresponding to the state $\bm{s}_t$. 
+
+
+\subsection{Contrastive Module}
+\label{sec:contrastive}
+
+
+Although the Planning Module can independently generate the action responding to the environment, its performance is suppressed when the number of high-return trajectories is limited.
+To make use of low-return trajectories, we propose a contrastive mechanism to improve the performance by constraining the states in a subsequent trajectory toward the high-return states and away from the low-return states.
+In the following parts, we first introduce the construction of contrastive sample sets (\textit{i.e.}, sampling the positive and negative samples for contrasting), and then we explain how we perform the contrastive mechanism.
+\subsubsection{Sample Positive and Negative States}
+
+
+ 
+ 
+
+
+
+
+
+\label{sec:posi_nega}
+
+The positive samples and negative samples are necessary before applying contrastive mechanism. For an arbitrary state $\bm{s}_i \in \mathcal{S}$ in the offline dataset, we compute its return $v_i$ in advance.
+Then, we propose two strategies to sample its positive sets and negative sets:
+
+\textbf{Sampling according to return (SR).} For an arbitrary state $\bm{s}_t$ in the trajectory $\hat{\tau}_t$ generated by the Planning Module, we apply the theory of \citet{thoma2020soft} to compute the possibility of an arbitrary state $\bm{s}_i \in \mathcal{S}$ in the offline dataset is sampled as the positive sample and negative sample of state $\bm{s}_t$:
+\begin{equation}
+    p^+_{\bm{s}_t}(v_i) = \frac{1}{1+e^{\sigma(\xi-v_i)}}, \label{eq:posi:hard}
+\end{equation}
+\begin{equation}
+    p^-_{\bm{s}_t}(v_i) = \frac{1}{1+e^{\sigma(v_i-\zeta)}}, \label{eq:nega:hard}
+\end{equation}
+where $v_i$ denotes the return of $\bm{s}_i$. $p^+_{\bm{s}_t}(v_i)$ and $p^-_{\bm{s}_t}(v_i)$ denotes the probability of $\bm{s}_i$ being grouped into positive sample and negative sample of $\bm{s}_t$, correspondingly. $\xi$ and $\zeta$ are the hyper-parameters extended  from \citet{thoma2020soft}. 
+\textbf{Sampling according to return and dynamic consistency (SRD).} 
+Though the strategy of \textit{sampling according to return} is easy to deploy, pulling the states toward high-return states and away from low-return states neglects the dynamic consistency. 
+Hence, for the states in the offline dataset, we additionally conduct MiniBatch K-Means clustering ~\citep{sculley2010web}, and compute the transition probability of clusters, \textit{i.e.}, the frequency of the states in one cluster transit to another cluster. For an arbitrary state $\bm{s}_t$ in the trajectory $\hat{\tau}_t$ generated by the Planning Module, we compute its cluster by K-Means, and obtain the candidate set $\mathcal{S}_t$ of the subsequent states according to the transition probability among clusters. Then for $\bm{s}_i \in \mathcal{S}_t$, we sample the positive sample of $\bm{s}_t$ by Eq.~\ref{eq:posi:hard}.  For $\bm{s}_i \in \mathcal{S}$ in offline dataset, we sample the negative sample of $\bm{s}_t$ by Eq.~\ref{eq:nega:hard}. 
+
+
+
+
+
+
+
+\subsubsection{Constrain the trajectory with contrastive learning}
+
+To constrain the states in subsequent trajectories while avoiding the cost of running the whole backward denoising process, we leverage the noised trajectory in the diffusion backward process to reconstruct a neat trajectory, \ie, $\bm{\hat{\tau}}^{i,0}_t = \{(\hat{\bm{s}}^{i,0}_t, \hat{\bm{a}}^{i,0}_t), (\hat{\bm{s}}^{i,0}_{t+1}, \hat{\bm{a}}^{i,0}_{t+1}), ..., (\hat{\bm{s}}^{i,0}_{t+H}, \hat{\bm{a}}^{i,0}_{t+H})\}$ from $\bm{\tau}^i_t$ for any arbitrary diffusion step $i$.
+Then, we extract states in $\hat{\bm{\tau}}_t^{i,0}$ as $\mathcal{S}_{\hat{\bm{\tau}}^{i,0}_t} = \{\hat{\bm{s}}_{t+1}^{i,0},\hat{\bm{s}}_{t+2}^{i,0},...,\hat{\bm{s}}_{t+H}^{i,0}\}$.
+For each state $\hat{\bm{s}}_h^{i,0} \in \mathcal{S}_{\hat{\bm{\tau}}^{i,0}_t}$, we sample $\kappa$ states as positive sample set $\mathcal{S}_h^{+}$  and $\kappa$ states as negative sample set $\mathcal{S}_h^{-}$ from the offline dataset.
+
+Inspired by \citep{schroff2015facenet} and \citep{sohn2016improved}, to apply contrastive learning to the scenario of multiple positive samples and impose aggressive constraints, we removed the positive sample term from the denominator polynomial in \cref{eq:infonce} and propose the following equation to pull the states in the generated subsequent trajectory toward the high-return states and away from the low-return states: 
+\begin{equation}
+    \mathcal{L}_{h}^i =-\log \frac{ \sum_{k=0}^{\kappa} \exp( \text{sim}( {f}(\hat{\bm{s}}_h^{i,0}),  {f}({\bm{s}}_h^{+})  ) / T ) }{ \sum_{k=0}^{\kappa} \exp( \text{sim}( {f}(\hat{\bm{s}}_h^{i,0}), {f}({\bm{s}}_h^{-}) ) / T )  }~, \label{eq:loss:contrast:sub}
+\end{equation}
+where $\bm{s}_h^{+} \in \mathcal{S}_h^{+}$, $\bm{s}_h^{-} \in \mathcal{S}_h^{-}$. ${f}(\cdot)$ represents the projection function, $T$ represents the temperature~\citep{wang2021understanding}, and $\text{sim}(\cdot,\cdot)$ denotes the cosine similarity, which is computed as
+\begin{equation}
+    \text{sim}(\bm{a}, \bm{b}) = \frac{\bm{a}^\top\bm{b}}{\|\bm{a}\|\cdot\|\bm{b}\|}~.
+\end{equation}
+It is worth noting that Eq.(~\ref{eq:loss:contrast:sub}) is different from the standard infoNCE loss \citep{oord2018representation}, we made these modifications primarily for the sake of the model's effectiveness.
+
+
+\subsection{Model Learning}
+\label{sec:model_learn}
+Recall that the action responding to state $\bm{s}_t$ is one of the elements in the generated trajectory, which is influenced by the return predictor $\mathcal{J}_\phi(\cdot, \cdot)$ and constrained by contrastive learning. Therefore, we optimize our method from the perspective of trajectory generation, return prediction, and contrastive learning constrain. 
+
+Specifically, we optimize the trajectory generation by minimizing the Mean Square Error between the ground truth and neat trajectory predicted by $\psi_\theta(\cdot,\cdot)$ given any intermediate noisy trajectories as input:
+\begin{equation}
+    \mathcal{L}_d = \mathbb{E}_{\bm{\tau}_t\in \mathcal{D}, t>0, i \sim [1, N]}\left[\| \bm{\tau}_t - \psi_\theta(\bm{\tau}^i_t,i) \|^2\right]~, \label{eq:loss:difusion}
+\end{equation}
+where $i$ denotes the step of diffusion, $\bm{\tau}^i_t$ is obtained in the $i$-th step of forward process.
+
+We optimize the return predictor by minimizing the Mean Square Error between the predicted return $\mathcal{J}_\phi(\bm{\tau}_t^i, i)$ and the ground-truth return $v_t$:
+\begin{equation}
+    \mathcal{L}_v = \mathbb{E}_{\bm{\tau}_t\in \mathcal{D}, t>0, i \sim [1, N]}[\| \mathcal{J}_\phi(\bm{\tau}_t^i, i) - v_t\|^2]~.
+\label{eq:loss:y}
+\end{equation}
+We constrain the trajectory generation with a weighted contrastive loss:
+\begin{equation}
+    \mathcal{L}_c =
+    \mathbb{E}_{t>0, i \sim [1, N]}\left[\sum_{h=t}^{t+H}\frac{1}{h+1}\mathcal{L}_{h}^i\right],
+    \label{eq:loss:contrast:all}
+\end{equation}
+in which the coefficient $\frac{1}{h+1}$ decreases as $h$ increases since the importance gradually diminishes as it approaches the end of the planning horizon.
+
+
+
+Hence, the overall objective function of CDiffuser can be written as a weighted sum of the aforementioned loss terms:
+\begin{equation}
+    \mathcal{L} = \lambda_d \mathcal{L}_d +  \lambda_v \mathcal{L}_v + \lambda_c \mathcal{L}_c~,
+    \label{eq:loss:all}
+\end{equation}
+where $\lambda_d$, $\lambda_v$, $\lambda_c$ are hyperparameters, which balance the importances of the corresponding learning targets. Please note that the return predictor $\mathcal{J}_\phi(\cdot, \cdot)$ and $\psi_\theta(\cdot,\cdot)$ are independent, thus optimizing $\mathcal{J}_\phi(\cdot, \cdot)$ and $\psi_\theta(\cdot,\cdot)$ with $\mathcal{L}$ is identical to separately optimizing $\mathcal{J}_\phi(\cdot, \cdot)$ with $\mathcal{L}_v$ and $\psi_\theta(\cdot,\cdot)$ with $\mathcal{L}_d$ and $\mathcal{L}_c$. 
+
+
+
+
+
+\section{Experiments}
+
+\label{sec:exp}
+
+In this section, we evaluate the performance of CDiffuser across a wide variety of tasks. We first demonstrate the advantages of CDiffuser on 14 standard D4RL datasets. 
+Next, we construct high variance datasets and evaluate the performance of CDiffuser and baselines on them. The results demonstrate the significant advantage of CDiffuser in scenarios with low-quality datasets, showcasing CDiffuser's ability to extract expert information.
+Further, we delve into more comprehensive experiments to analysis the key designs of CDiffuser as well as the portability of CDiffuser.
+
+\subsection{Experiment Settings}
+\label{sec:setting}
+\textbf{Environments and datasets.}
+We evaluate the performance of CDiffuser on the locomotion tasks, navigation tasks and manipulation tasks. Specifically, we evaluate the locomotion capability of CDiffuser on Halfcheetah, Hopper, Walker2d, evaluate the navigation capability of CDiffuser on Maze2d, and evaluate the ability of CDiffuser in complex tasks on Kitchen. For each environment, we train CDiffuser with various scales of offline datasets provided by D4RL~\citep{fu2020d4rl}, and test the performance of CDiffuser on the corresponding environments.
+
+\textbf{Baselines.} 
+We compare CDiffuser with diffusion-free methods such as CQL~\citep{kumar2020conservative}, IQL~\citep{kostrikov2021offline}, MOPO~\citep{yu2020mopo}, Decision Transformer (DT)~\citep{chen2021decision} and Trajectory Transformer (TT)~\citep{janner2021offline}. Further, we compare CDiffuser with diffusion-based methods  Diffuser~\citep{janner2022planning} and Decision Diffuser (DD)~\citep{ajay2023is}, which apply diffusion to model RL as sequence generation problems.
+\textbf{Implementation details.} 
+\label{sec:resource} We adopt U-Net~\citep{ronneberger2015u} as the denoise network $\psi_\theta(\cdot,\cdot)$ and the return predictor $\mathcal{J}_\phi(\cdot, \cdot)$, and adopt a linear layer with $Sigmoid$ as the activation function as the projector $f(\cdot)$. Our model is trained on a device with 4 NVIDIA A40 GPUs, Intel Gold 5220 CPU and 504G memory, optimized by Adam~\citep{kingma2014adam} optimizer.
+        
+
+
+\subsection{Benchmark Results}
+\label{sec:benchmark}
+\label{sec:overall result}
+We compare CDiffuser to baseline methods with respect to the normalized average returns~\citep{fu2020d4rl} obtained during online evaluation.
+We conducted 10 trials with different seeds and reported the average results. The results of CDiffuser and baseline methods are summarized in \cref{tab:data}, in which \textbf{CDiffuser-SR} denotes the states used for contrasting are sampled with SR strategy and \textbf{CDiffuser-SRD} denotes the states used for contrasting are sampled with SRD strategy.
+
+
+\renewcommand\arraystretch{1.1}
+\begin{table*}[t!]
+
+    \caption{The average normalized score of different methods on various environments, with $\pm$ denoting the standard deviation. The mean and standard deviation are computed over 50 random seeds. The best and the second-best results of each setting are marked as \textbf{bold} and \underline{underline}, respectively. 
+    }
+    \centering
+    \resizebox{1\linewidth}{!}{
+    \begin{tabular}{l l c c c c c | c c | c c}
+        \toprule
+         \textbf{Dataset} & \textbf{Environment}    & \textbf{CQL}      & \textbf{IQL}  & \textbf{DT}   & \textbf{TT}  &\textbf{MOPO}  & \textbf{Diffuser} & \textbf{DD} & \textbf{CDiffuser-SR} & \textbf{CDiffuser-SRD} \\
+        \midrule
+        Med-Expert & HalfCheetah                    & {91.6}            & 86.7          & 86.8          & \textbf{95.0} & 63.3   & 88.9 $\pm$ 0.3 & 90.6 $\pm$ 1.3 & \underline{92.0 $\pm$ 0.4}  &  89.9  $\pm$ 0.6  \\
+        Med-Expert & Hopper                         & 105.4             & 91.5          & 107.6         & 110.0         & 23.7 & 103.3 $\pm$ 1.3 & \underline{111.8} $\pm$ 1.8 & \textbf{112.4 $\pm$ 1.2 }  &  106.4  $\pm$ 1.3  \\
+        Med-Expert & Walker2d                       & \underline{108.8} & \textbf{109.6}& 108.1         & 101.9         & 44.6 & 106.9 $\pm$ 0.2 & \underline{108.8} $\pm$ 1.7 &  108.2 $\pm$ 0.4  &  106.7  $\pm$ 2.2  \\
+        \midrule
+        Medium & HalfCheetah                        & 44.0              &\underline{47.4}& 42.6         & {46.9}        & 42.3& 42.8 $\pm$ 0.3 & \textbf{49.1} $\pm$ 1.0 &  43.9 $\pm$ 0.9  &  42.9  $\pm$ 0.2     \\
+        Medium & Hopper                             & 58.5              & 66.3          & 67.6          & 61.1          & 28.0  & 74.3 $\pm$ 1.4 & \underline{79.3} $\pm$ 3.6 & \textbf{92.3 $\pm$ 2.6} & 75.2  $\pm$ 1.1    \\
+        Medium & Walker2d                           & 72.5              & 78.3          & 74.0          & 79.0          & 17.8 & 79.6 $\pm$ 0.55 & \underline{82.5} $\pm$ 1.4 &  \textbf{82.9 $\pm$ 0.5}  & 82.2  $\pm$ 1.1   \\
+        \midrule
+        Med-Replay & HalfCheetah                    & \underline{45.5}     &44.2 & 36.6         & 41.9          & \textbf{53.1}  & 37.7 $\pm$ 0.5 & 39.3 $\pm$ 4.1 & 40.0 $\pm$ 1.1  & 36.6  $\pm$ 2.9  \\
+        Med-Replay & Hopper                         & 95                & 94.7          & 82.7          & 91.5          & 67.5 & 93.6 $\pm$ 0.4 & \textbf{100} $\pm$ 0.7  &  \underline{96.4 $\pm$ 1.1}  &  95.5  $\pm$ 0.9  \\
+        Med-Replay & Walker2d                       & 77.2              & 73.9          & 66.6          & \underline{82.6} & 39.0       & 70.6 $\pm$  1.6 & 75 $\pm$ 4.3 & \textbf{84.2 $\pm$ 1.2}  &  75.3  $\pm$ 1.7 \\
+        \midrule
+
+        U-Maze  & Maze2d   & 5.7  & 47.4  & 9.2 & 25.4 & 13.6  & \underline{113.9} $\pm$ 3.1 & 0.0 &  \textbf{142.9}  $\pm$ 2.2  &  85.6  $\pm$ 3.2   \\
+        Medium  & Maze2d   & 5.0  & 34.9  & 9.6 & 23.3 & 33.3  & \underline{121.5} $\pm$ 2.7 & 0.0 &  \textbf{140.0}  $\pm$ 0.7  &  115.7  $\pm$ 0.7  \\
+        Large   & Maze2d   & 12.5 & 58.6  & 10.4 & 27.7 & 0.0  & \underline{123.0} $\pm$ 6.4 & 0.0 &  \textbf{131.5}  $\pm$ 3.2  &  99.7   $\pm$ 1.2   \\
+        \midrule
+        
+        Mixed   & Kitchen   & 52.4  & 51.0  & 20.9 & 31.1 & 0.0  & 42.5  $\pm$ 1.9  & \underline{65.0} $\pm$ 2.8 &  \textbf{65.0}  $\pm$ 1.3 &  32.5 $\pm$ 2.2 \\
+        Partial & Kitchen   & 51.2  & 46.3  & 35.2 & 32.9 & 0.0  & 40.0  $\pm$ 3.1  & \underline{57.0} $\pm$ 2.5 &  \textbf{58.0}  $\pm$ 1.9  &  40.0 $\pm$ 3.1 \\
+        \bottomrule
+        
+    \end{tabular}
+    }
+    \label{tab:data}
+\end{table*}
+
+
+
+
+
+From Table \ref{tab:data}, we can observe that: (1) Compared with all the baseline methods, CDiffuser achieves the best or the second-best performance on 6 out of 9 locomotion tasks (HalfCheetah, Hopper, and Walker2d) and achieves the best performance on all the two high-dimensional manipulation tasks (Kitchen), demonstrating the outstanding performance of CDiffuser under periodic settings.
+Moreover, CDiffuser achieves the best performance on all the three navigation tasks, demonstrating the excellent ability of CDiffuser in long-term planning. 
+(2) Compared to the methods with similar backbones, Diffuser outperforms Diffuser in all 14 tasks, and outperforms DD in 11 tasks, which demonstrates the benefits of introducing the constrastive mechanism. 
+We can observe that CDiffuser exhibits more improvement in Med and Med-Replay datasets than the Med-Expert datasets. Since Med-Expert datasets have more high-return samples, they offer abundant information for methods like Diffuser to learn, thus they can achieve better results. However, both Med and Med-Replay have more low-return samples than Med-Expert, which increases the difficulty of learning a good policy. These results demonstrate that CDiffuser is more effective on datasets with many low-return trajectories.
+
+\subsection{Study on the limited number of high-return trajectories.}
+\renewcommand\arraystretch{1.1}
+\begin{table*}[t!]
+
+    \caption{The average normalized score of CDiffuser and baseline methods on various datasets of Halfcheetah mixed with different ratios of expert data, with $\pm$ denoting the standard deviation. We compute the mean and standard deviation over 50 random seeds for CDiffuser, and 10 random seeds for baselines. The best and the second-best results of each setting are marked as \textbf{bold} and \underline{underline}, respectively. Ratio denotes the the ratio of trajectories from the Expert dataset.  
+    }
+    \centering
+    \resizebox{1\linewidth}{!}{
+        \begin{tabular}{@{}l|c|ccccc|cc|cc@{}}
+            \toprule
+            \multicolumn{1}{l|}{\textbf{Dataset}} & \textbf{Ratio} & \textbf{CQL} & \textbf{IQL}  & \textbf{DT} & \textbf{TT} & \textbf{MOPO} & \textbf{Diffuser} & \textbf{DD} & \textbf{CDiffuser-SR} & \textbf{CDiffuser-SRD} \\ \midrule
+            \multirow{3}{*}{M-Exp}              & 0.1              & 34.2   $\pm$ 1.1       & 51.56    $\pm$ 5.4     & 58.6    $\pm$ 2.1     & 46.7     $\pm$ 1.1    & 67.1    $\pm$ 0.3       & 71.5 $\pm$ 1.8 & 43.2   $\pm$ 0.9      & \underline{ 72.1}   $\pm$ 0.9         & \textbf{73.6}   $\pm$ 1.2      \\
+                                                 & 0.2              & 39.4   $\pm$ 1.7       & 62.9     $\pm$ 0.5      & 46.8    $\pm$ 0.5     & 46.9     $\pm$ 1.8    & 27.2    $\pm$ 3.8       & \underline{ 80.3}  $\pm$ 0.8       & 41.6    $\pm$ 2.2    & \textbf{81.3}   $\pm$ 1.3      & 77.5    $\pm$ 0.9              \\
+                                                 & 0.3                 & 63.1  $\pm$ 0.8        & 82.3    $\pm$ 2.8       & 70.9   $\pm$ 1.2      & 47.4    $\pm$ 1.1     & 38.7   $\pm$ 2.2        & \underline{ 81.7} $\pm$ 2.9        & 43.6    $\pm$ 3.3     & \textbf{82.8}    $\pm$ 1.2     & 68.3     $\pm$ 1.1             \\ \midrule
+            \multirow{3}{*}{MR-Exp}          & 0.1       & 39.8  $\pm$ 1.4        & \underline{44.2} $\pm$ 2.2 & 7.5    $\pm$ 2.1      & 42.9  $\pm$ 2.5  & \textbf{55.7} $\pm$ 0.9         & 38.1       $\pm$ 1.1        & 33.8   $\pm$ 1.6     & 42.2 $\pm$ 0.7              & 39.0      $\pm$ 0.5           \\
+                                                 & 0.2           & 37.6  $\pm$ 2.9        & 48.5    $\pm$ 1.8       & 6.7    $\pm$ 4.5      & 43.7    $\pm$ 1.7     & 40.6   $\pm$ 1.1        & 46.2              $\pm$ 0.2 & 32.8    $\pm$ 0.6    & \underline{ 50.6}   $\pm$ 1.2        & \textbf{58.4}  $\pm$ 0.9      \\
+                                                 & 0.3             & 40.3  $\pm$ 0.8        & 44.6    $\pm$ 1.8       & 6.1    $\pm$ 0.1      & 49.3    $\pm$ 2.2     & 44.1   $\pm$ 0.9        & \underline{ 57.1} $\pm$ 1.8        & 36.2    $\pm$ 1.1    & \textbf{60.3}     $\pm$ 2.7   & 55.9   $\pm$ 1.5              \\ \midrule
+            \multirow{3}{*}{Rand-Exp}              & 0.1           & 31.1  $\pm$ 4.4        & 3.9     $\pm$ 0.0       & 5.1    $\pm$ 0.0      & 7.7     $\pm$ 0.1     & 23.8   $\pm$ 5.7        & \underline{ 33.8} $\pm$ 1.8        & 13.8   $\pm$ 0.8      & 18.1      $\pm$ 1.1            & \textbf{48.0}  $\pm$ 2.9      \\
+                                                 & 0.2          & 39.4  $\pm$ 1.9        & {72.9} $\pm$ 2.6 & 10.3   $\pm$ 4.2      & 16.8    $\pm$ 1.8     & 30.6   $\pm$ 0.8        &  \underline{74.4} $\pm$ 1.5        & 8.5  $\pm$ 0.2       & 72.3   $\pm$ 0.7              & \textbf{77.6}    $\pm$ 0.9             \\
+                                                 & 0.3              & 38.4  $\pm$ 0.4        & 50.7    $\pm$ 1.1       & 27.5   $\pm$ 6.8      & 5.9     $\pm$ 0.2     & 30.6   $\pm$ 0.1        & 75.8    $\pm$ 2.3     & 13.9  $\pm$ 1.1      & \underline{ 86.6}   $\pm$ 1.8         & \textbf{88.7}     $\pm$ 0.9    \\ \bottomrule
+            \end{tabular}
+    }
+    \label{tab:data-mix}
+
+\end{table*}
+
+As we discussed previously, the proportion of high return trajectories has a significant impact on the performance of the model. To investigate the performance of CDiffuser in different ratios of high-return trajectories, we mix different trajectories from Halfcheetah and obtain three datasets:
+\begin{itemize}[leftmargin=10pt]
+
+    \item \textbf{M-Exp}: mix the the trajectories in Medium and Expert.
+    \item \textbf{MR-Exp}: mix the the trajectories in Med-Replay and Expert. 
+    \item \textbf{Rand-Exp} mix the trajectories in Expert and the trajectories sampled by random policy interacting with environment.
+\end{itemize}
+We set the ratio of trajectories from the Expert dataset to 0.1, 0.2, and 0.3, resulting in three different settings of these datasets. The visualization of returns is illustrated in Figure \ref{fig:mixed_halfcheetah}.
+
+We test the performance of the baselines and CDiffuser on the three datasets, and the results are illustrated in \cref{tab:data-mix}. From the results, we can observe that:  (1) In most cases, offline RL methods' performance declines with the ratio declines, in which a small ratio indicates fewer high-return trajectories. Moreover, compared with the performance in Med-Expert, most baselines have a performance decline when trained with Rand-Exp, which has fewer high-return trajectories than Med-Expert. These results validate that the performance of offline RL methods is influenced by the proportion of high-return trajectories in the dataset; (2) CDiffuser demonstrates more significant improvement in Rand-Exp than M-Exp and MR-Exp, for instance, it outperforms the best baseline (Diffuser) by 1.1 in M-Exp (ratio = 0.3), but it outperforms the best baseline (Diffuser) by 12.9 in Rand-Exp (ratio = 0.3). That demonstrates CDiffuser has significant superiority in the case with limited number of high-return trajectories.
+
+
+
+\subsection{Further Investigation}
+\label{sec:further investigation}
+
+
+To further investigate the performance of CDiffuser, we conduct ablation study, and analyze the state-reward distribution as well as the reward distribution.
+\paragraph{Ablation studies.}
+\label{sec:ablation}
+
+
+
+We have the following variants to conduct ablation study:
+\begin{itemize}[leftmargin=10pt]
+
+    \item \textbf{CDiffuser-N}: only apply the samples with high-return to train the model.
+    
+    \item \textbf{CDiffuser-C}: remove contrastive mechanism from CDiffuser, \ie, remove $\mathcal{L}_c$ from \cref{eq:loss:all}.
+    
+
+\end{itemize}
+
+The results are summarized in Figure \ref{fig:abla}, from which we can conclude the following key findings:
+
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=1.\columnwidth]{figs/abla_singc_singleline_.pdf} 
+\caption{Results of the ablation experiments on different variants.
+}
+\label{fig:abla}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \begin{minipage}[b]{0.55\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/reshaped-short.jpg}  % 图片路径
+    \caption{The distribution of state and reward. It is better to view in color mode. CDiffuser achieves higher rewards in out-of-distribution areas (circled with red).}
+    \label{fig: visual1}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[b]{0.43\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figs/revised_visual.pdf}  % 图片路径
+    \caption{Distribution of rewards on  (a)  Walker2d-Med-Replay and (b) Halfcheetah-Med-Replay. }
+    \label{fig:based}
+  \end{minipage}
+\end{figure}
+
+
+
+(1) \textbf{The contrastive mechanism benefits the performance.}  
+CDiffuser-C, which eliminates the contrastive mechanism from CDiffuser, exhibits poorer performance across all nine tasks than CDiffuser. This suggests that the contrastive mechanism indeed provides benefits.
+(2) \textbf{Applying only the high-return samples in training  diminishes benefits in some cases.} 
+Compared with CDiffuser, CDiffuser-N is trained solely with high-return samples. Surprisingly, it achieves a lower performance than CDiffuser in all 9 tasks, indicating that low-return trajectories offer beneficial information for model training.
+
+
+\paragraph{State-reward distribution analysis.}
+To illustrate the advantages of CDiffuser more intuitively, we randomly collect the (state, reward) pairs from the offline dataset of Walker2d-Med-Replay and the (state, reward) pairs collected when CDiffuser and CDiffuser-C interact with the environment. 
+The results are shown in \cref{fig: visual1}, in which each scatter represents a state mapped by UMAP~\citep{mcinnes2018umap}, and its color denotes the reward gained in the corresponding state. From the results illustrated in \cref{fig: visual1}, we can observe that: (1) there are more red and yellow dots in \cref{fig: visual1}(c) than (b). That indicates that the model achieves better rewards with contrasting mechanisms; (2) In out-of-distribution states (circled with red), CDiffuser gains higher rewards than CDiffuser-C, which indicates that contrastive mechanism has potential in tackling out-of-distribution issue. 
+
+
+
+\paragraph{Reward distribution analysis.} The contrast mechanism in CDiffuser plays a relatively significant role in the case of out-of-distribution and limited high-return trajectories. We believe that a deeper reason lies in the role of the contrast mechanism in the generation of the diffusion model. According to \ref{sec:model_learn}, three crucial components of CDiffuser are the trajectory generation of the diffusion model, return prediction, and the contrast mechanism. To validate our assumption, we remove the return prediction of CDiffuser and CDiffuser-C (\textit{i.e.}, remove $\mathcal{J}_{\phi}$ from \cref{eq:sample}), leverage them to generate subsequent trajectory. 
+Then we apply the actions in the generated trajectory to interact with the environment Walker2d-Med-Replay and HalfCheetah-Med-Replay, and visualize the distribution of reward during the interaction, as shown in Figure~\ref{fig:based}. It can be observed that the CDiffuser has a higher probability density on high rewards in both cases. That indicates the effect of the contrast mechanism essentially increasing the proportion of high-return trajectories generated by the diffusion model. As demonstrated in \cref{eq:sample}, with the support of both generated high-return trajectories and the return predictor, CDiffuser achieves sound performance.
+
+
+
+
+
+
+
+
+\subsection{Compatibility Study}
+
+\begin{wraptable}{r}{0.5\textwidth}
+    \centering
+    \begin{adjustbox}{width=\linewidth} % 将表格宽度设置为页面宽度的一半
+       \begin{tabular}{@{}llcc@{}}
+        \toprule
+        \textbf{Dataset} & \textbf{Environment} & \multicolumn{1}{l}{\textbf{DD$^+$}}  & \multicolumn{1}{l}{\textbf{Diffuser$^+$}}  \\ \midrule
+        Med-Expert       & Halfcheetah          & 0            &  3.1$\pm$0.4                              \\ %\midrule
+        Med-Expert       & Hopper               & 5.4$\pm$1.2   & 9.1$\pm$1.2                                             \\ %\midrule
+        Med-Expert       & Walker2d             & 6.5$\pm$0.9  &  1.3$\pm$0.4                                            \\ \bottomrule
+        \end{tabular}
+    \end{adjustbox}
+    \caption{The improvements of the normalized score after transplanting the contrastive mechanism of CDiffuser to Decision Diffuser (DD$^+$) and Diffuser (Diffuser$^+$), with $\pm$ denoting the variance.}
+    \label{tab:cdd}
+\end{wraptable}
+As we discussed in \cref{sec:base model}, our CDiffuser is build based on Diffuser. To validate the compatibility of the contrastive mechanism of CDiffuser,
+we transplant it to Decision Diffuser (DD) ~\citep{ajay2023is}, and evaluate and compare the improvement on three environments.
+The improvements are summarized in \cref{tab:cdd}, in which DD$^+$ and Diffuser$^+$ denote the improvement of introducing contrast mechanism in DD and Diffuser correspondingly.
+As we can observe, DD$^+$ achieves noticeable improvement in 2 out of 3 tasks and Diffuser$^+$ gains improvement in 3 out of 3 tasks, which demonstrates the portability of the contrast mechanism of CDiffuser.
+Interestingly, DD$^+$ is unable to achieve any improvement in Halfcheetah-Med-Expert. 
+This could be attributed to the separated training (sampling) of states and actions in DD, which results in a failure to effectively model their joint distribution.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Related Works}
+
+\subsection{Diffusion for Decision-Making}
+
+
+We group the diffusion-based methods in RL into action generation methods and trajectory generation methods. The action generation methods~\citep{ada2023diffusion,wang2022diffusion,chen2022offline,chi2023diffusion} adopt diffusion models as policies to predict the action of the current step. One of the typical works in this group is Diffusion Q-learning~\citep{wang2022diffusion}, which proposes to design the policy as a diffusion model and improve it with double Q-learning architecture. Following Diffusion Q-Learning, SRDPs~\citep{ada2023diffusion} incorporates state reconstruction feature learning into the recent category of diffusion policies to address the out-of-distribution generalization problem. The second group of methods generate the subsequent trajectory including the action to take at the current step by diffusion. For instance, Diffuser~\citep{janner2022planning} models trajectories as sequences of state-action pairs. Based on Diffuser, Decision Diffuser~\citep{ajay2023is} proposes to predict state sequences with a diffusion model conditioned on historical information, and adopts a reverse dynamic model to predict actions based on the generated state sequence. Though these methods have gain significant achievements, they neglect the differences of high-return samples and low-return samples and are limited by their plain base distribution.
+
+\subsection{Contrastive Learning in RL}
+The motivation for introducing contrastive learning in RL is to enrich the representation in the previous works. We group these works into three types. The first type of methods apply contrastive learning to enhance the state representations \citep{laskin2020curl,qiu2022contrastive}. For instance, \citet{laskin2020curl} propose to learn image representations via contrastive learning; \citet{qiu2022contrastive} propose to learn the transition with contrastive learning.
+The second type of methods apply contrastive learning to learn the representations of tasks. For instance, \citet{yuan2022robust} apply contrastive learning to enhance the representation of tuples to distinguish between different tasks; \citet{agarwal2020contrastive} apply contrastive learning to learn the representations of the environments.
+Some works apply contrastive learning in other ways. For instance, \citet{laskin2022unsupervised} utilize
+contrastive learning to learn behavior representations and maximizes the entropy to encourage behavioral diversity.
+In contrast to the methods mentioned above, CDiffuser adopts contrastive learning to constrain the generated sample, rather than learning representations.
+
+
+
+
+
+\section{Conclusion and Discussion}
+
+\label{conclusion}
+In this paper, we introduce CDiffuser for offline RL, a contrastive mechanism that uses low-return trajectories and addresses the challenge of limited high-return trajectories.
+Different from the previous works which apply contrastive learning to enhance the representation, we perform contrastive learning over the return of states. Specifically, we apply diffusion to generate the subsequent trajectory for planning, and constrain the states in the generated trajectory toward the states with high returns and away from the states with low returns to improve the base distribution. In that way, the actions taken by the agent are always toward the high-return states, which makes the agent gain better performance in the online evaluation. We evaluate CDiffuser on 14 D4RL benchmarks, where the results demonstrate that our CDiffuser achieves outstanding performance. The ablation studies and investigations further substantiated the rationality of CDiffuser.
+We currently focus on performing contrastive learning over the return of states to enhance the base distribution in this paper. Yet, this contrastive mechanism can also be applied to other levels, such as action or state-action pairs, or even at the latent of trajectories, which we leave to future work.
+
+
+
+
+
+
+
+
+
+
+
+
+

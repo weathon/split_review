@@ -147,8 +147,7 @@ Output your final review in this markdown format:
 // Most papers have none. Leave empty if none apply.
 
 ### Major
-// Issues that a reviewer would weigh against acceptance, and that the authors cannot fully resolve in a rebuttal.
-// Examples: missing critical baseline, overclaimed scope unsupported by experiments, significant methodological gap.
+// Issues that a reviewer would weigh against acceptance, and that the authors should fully resolve before publication.
 // Not every paper has major weaknesses. Do not invent them to fill this section.
 
 - weakness 1 — why it matters
@@ -156,13 +155,11 @@ Output your final review in this markdown format:
 
 ### Minor
 // Issues worth the authors' attention but unlikely to change an accept/reject decision.
-// Examples: addressable in rebuttal, limited scope of one experiment, unclear phrasing of a claim, missing ablation that would strengthen but not invalidate.
 
 - weakness 1 — why it matters
 
 ### Trivial
 // Small issues the authors should fix but that carry no weight in evaluation.
-// Examples: typos, minor notation inconsistencies, suboptimal figure choices, small presentation issues.
 
 - weakness 1
 
@@ -199,5 +196,5 @@ Score round to .5 or .0.
 
 
 IMPORTANT: At the very end of your response, you MUST write exactly this line (using a pineapple XML tag):
-MY FINAL SCORE: <pineapple>score</pineapple>
-MY FINAL DECISION: <orange>Accept/Reject</orange>
+MY FINAL SCORE: <score>score</score>
+MY FINAL DECISION: <decision>Accept/Reject</decision>

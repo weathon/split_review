@@ -1,18 +1,24 @@
-Now I have a thorough understanding of the paper to produce the consolidated review.
+Now I have thoroughly analyzed the paper and all reviewer claims. Let me write the consolidated review.
 
 ## Summary
 
-This paper identifies a failure mode in standard CoT distillation: student models imitate the teacher's reasoning *form* while making errors/omissions on the ~4.7% of steps the authors term "key reasoning steps." The authors propose EDIT, which (1) generates dual CoTs (correct–incorrect pairs with similar reasoning paths but divergent conclusions) using specially designed prompts, (2) applies minimum edit distance to locate differing tokens as "key steps," and (3) trains the student with a weighted loss that upweights correct key steps and downweights wrong ones. Experiments across BBH, BB-sub, AGIEval, ARC-E, and ARC-C show average gains of +4.7% over standard CoT distillation and +2.7% over the strongest data-matched baseline.
+This paper proposes EDIT (mistake-Driven key reasonIng step disTillation), a method for distilling chain-of-thought reasoning from large teacher LLMs to smaller student SLMs. Instead of standard supervised fine-tuning on correct CoTs alone, EDIT generates "dual CoTs" (correct–incorrect pairs) by having the teacher rectify wrong CoTs or corrupt correct CoTs using specially designed prompts, then applies minimum edit distance to identify tokens that differ between the paired CoTs. These tokens are treated as "key reasoning steps" and weighted during a second-stage fine-tuning loss. Experiments across 5 benchmarks and 6 model architectures show consistent improvements over the standard CoT distillation baseline, with a +4.7% average accuracy gain over Std-CoT and +2.7% over the strongest data-volume-controlled baseline.
+
+---
 
 ## Strengths
 
-- **Novel formulation of a real problem in CoT distillation.** The paper identifies and formalizes a specific failure mode — students mimicking reasoning surface structure while missing the decision-critical steps — that prior work on CoT distillation (Std-CoT, MT-CoT, SCOTT) does not directly address. The proposed solution of using contrasting reasoning traces to localize discriminative steps is conceptually clean and well-motivated by the human-learning analogy.
+1. **Novel problem framing with concrete evidence.** The paper identifies a genuine limitation of standard CoT distillation—that students learn to imitate the teacher's reasoning *form* while making errors on critical reasoning steps—and supports it with a clear, worked example (Figure 1) where the student reproduces the teacher's phrasing but drops a key numeric substitution. This diagnosis is compelling and well-motivated.
 
-- **Consistent empirical gains across benchmarks and architectures.** EDIT outperforms all baselines on average accuracy across 5 datasets (46.5% vs. next-best 43.8%, Table 1). Gains are largest on challenging subsets (BBH-test: +6.1%, ARC-C: +6.4% over Std-CoT). Ablations across model sizes (1.1B–13B) and architectures (LLaMA2, LLaMA3, CodeLLaMA, Mistral) confirm the benefit holds broadly (Figures on model size and architecture).
+2. **Well-specified, reproducible method design.** The pipeline is formally described with equations (1)–(8), covering dual CoT generation via the Answer Hint Prompt (AHP) and Contrastive CoT Prompt (CCP), edit-distance-based token weighting, and the two-stage fine-tuning objective. Each component is clearly delineated.
 
-- **Ablation studies cleanly isolate component contributions.** The w/o RWC (42.7%) and w/o KRSL (44.3%) ablations show that both the rectified wrong CoTs and the key-step weighting contribute to EDIT's final performance (46.5%). This attribution is stronger than in many distillation papers, and the data-matched baselines (Repeat Sampling, Dual CoTs) rule out the alternative explanation that gains simply come from more training data.
+3. **Extensive generality validation.** Ablations across model sizes (TinyLLaMA-1.1B, LLaMA2-7B/13B) and architectures (LLaMA2, LLaMA3, CodeLLaMA, Mistral) demonstrate that EDIT's benefits transfer reliably. This breadth strengthens the claim that the method addresses a general problem, not a model-specific artifact.
 
-- **CoT quality evaluation via GPT-4 scoring.** Beyond final-answer accuracy, the paper evaluates the quality of generated reasoning chains using GPT-4 scoring. The distribution analysis (Figure 3, right) shows EDIT's CoTs are closer to the teacher's distribution than Std-CoT's, supporting the claim that EDIT improves the reasoning *process*, not just the answer.
+4. **Data-volume controls rule out a trivial explanation.** The baselines Std-CoT w/ Repeat Sampling and Std-CoT w/ Dual CoTs isolate the effect of increased data from the effect of the KRSL weighting. EDIT outperforms both, confirming that the improvement is not merely from seeing more or different CoT examples.
+
+5. **Component-level ablation confirms both stages matter.** Removing either the rectified wrong CoTs (w/o RWC) or the key reasoning step learning (w/o KRSL) degrades performance on nearly all datasets (Table 1), providing evidence that both the dual CoT generation and the edit-distance weighting contribute meaningfully.
+
+---
 
 ## Weaknesses
 
@@ -21,69 +27,66 @@ None.
 
 ### Major
 
-- **The core assumption — that minimum edit distance on dual CoTs reliably identifies causally important reasoning steps — is not validated.** The method hinges on the claim that text segments differing between correct and incorrect CoTs (after alignment) correspond to the reasoning steps that *matter*. The paper provides only a single illustrative example (Figure 2, "key-step-ex"). There is no human evaluation of whether the identified spans are actually causally responsible for the answer divergence, no analysis of edit-length distributions across the dataset, and — critically — no ablation that replaces edit-distance with a random-token selection baseline. Without such evidence, it is possible that edit distance picks up irrelevant surface variation when the teacher's dual CoTs diverge in structure rather than differing at a single decision point. This leaves the mechanism undersupported relative to the weight it carries in the paper's claims.
+1. **Core mechanism lacks direct validation.** The method's central assumption is that tokens identified by edit distance between correct–incorrect CoT pairs correspond to the *causally important* reasoning steps. The paper provides no direct evidence for this: no human annotation study verifying that edit-distance-identified tokens are indeed the critical steps, no analysis measuring the similarity of reasoning paths in generated dual pairs (e.g., via BERTScore or human judgment), and no comparison to simpler alternatives like uniformly weighting all differing tokens or using only the first differing token. The ablation w/o KRSL shows that the weighting matters, but does not establish that edit distance picks the *right* tokens rather than merely any differing token. This gap is significant because if edit distance captures spurious lexical differences, the reported gains could arise from a different mechanism (e.g., effectively performing data augmentation on the loss). The paper's central contribution *is* the key-step isolation mechanism, yet the paper treats this assumption as self-evident.
 
-- **No statistical rigor in reported results.** No error bars, confidence intervals, or statistical tests are reported for any experiment. The paper does not mention running multiple seeds (single run implied). The improvement over the strongest baseline (Std-CoT w/ Dual CoTs) is +2.7% on average, but the per-dataset picture is uneven: EDIT is *worse* on BB-sub (31.1 vs. 32.9, -1.8%), makes marginal gains on AGIEval (+0.8%) and ARC-E (+1.9%), and only shows convincing gains on BBH-test (+6.1%) and ARC-C (+6.4%). Without variance estimates, it is impossible to tell whether the average improvement is consistent or driven by variance on a subset of tasks. This is a standard expectation for this type of empirical paper and is a genuine gap.
-
-- **Uneven gains and lack of discussion of negative results.** The BB-sub result (EDIT underperforming Std-CoT w/ Dual CoTs by 1.8%) is noted in the table but not discussed in the main text. The paper's framing ("EDIT outperforms the distillation baselines on both IND and OOD datasets," line 182) glosses over this counterexample. A paper that claims general-purpose improvement owes the reader an analysis of why and where the method underperforms.
+2. **No comparison to simpler key-step identification baselines.** The paper never tests whether a trivial alternative—e.g., giving the same token-level weights to *all* tokens that differ between paired CoTs, or weighting only the first differing n-gram—performs comparably. Without such a comparison, it is unclear whether the edit-distance machinery is necessary or whether any method that upweights divergent tokens would work.
 
 ### Minor
 
-- **The 4.7% "key reasoning steps" claim is misleadingly framed.** The abstract and introduction state "CoTs usually consist mainly of simple reasoning forms, with a small proportion (≈4.7%) of key reasoning steps" as if this is a general property of CoTs. The footnote clarifies this is computed on *their generated dual CoT dataset*. This is circular: they generate data designed to have small edit distances, then cite the small edit distance as evidence that key steps are rare. The claim should be caveated or re-framed as a property of the dual CoT data, not CoTs in general.
+1. **The ≈4.7% "key reasoning steps" statistic is misleadingly presented.** The abstract and introduction (lines 4, 16) state this as a general property of CoTs: "CoTs usually consist mainly of simple reasoning forms, with a small proportion (≈4.7%) of key reasoning steps that truly impact conclusions." The footnote reveals this was computed on the *dual CoT dataset* generated for this paper, not on a natural sample of CoTs. Since the dual pairs were intentionally engineered to differ minimally, this statistic reflects a property of the generation process, not of CoTs generally. It should be explicitly framed as a property of the generated dual pairs.
 
-- **DPO claim made without supporting evidence.** The paper states (line 184) that "DPO performed unexpectedly poorly in this scenario" but provides no table, figure, or even a single number to support this. Either include the DPO results with a brief discussion or remove the claim entirely. An unsupported assertion of this kind weakens trust in the presentation.
+2. **No error bars, confidence intervals, or multi-seed runs.** None of the main results (Table 1), ablations, or model-scale experiments report any measure of statistical reliability. Given that the average gain over the strongest baseline is +2.7% and that one OOD dataset (BB-sub, 31.1 vs. 32.9) shows a reversal, it is impossible to assess whether reported differences are stable or within the noise floor. Multi-seed runs (at least 3 seeds) are standard practice and would substantially increase confidence in the results.
 
-- **No hyperparameter sensitivity analysis for α and β.** The values α=1.0 and β=0.025 are chosen "empirically" with no sensitivity study. The extreme asymmetry (40:1 ratio) is a deliberate design choice that requires justification. The ablation only tests α=0 or β=0 (binary presence/absence), not intermediate values. It is unclear whether results are robust to these settings or whether they were tuned to maximize test-set performance.
+3. **Mistake-pattern analysis overinterprets negligible differences.** Table 5 reports average accuracies of 44.9% (logical errors), 44.6% (knowledge errors), and 44.5% (mathematical calculation errors)—differences of ≤0.4%. Without error bars, this is a null result, yet the paper devotes a full paragraph to interpreting it as evidence that "logical errors provide more significant benefits" (line 275). This overinterpretation weakens trust in the paper's analytical rigor.
 
-- **GPT-4 CoT quality evaluation lacks quantitative summary.** The analysis (Figure 3, right) shows kernel density estimates but reports no summary statistics (mean scores, KL divergence, etc.). The figure is small and the visual claim that EDIT's distribution is "closer to the teacher" is subjective without numbers.
+4. **BB-sub underperformance is not discussed.** EDIT underperforms Std-CoT w/ Dual CoTs on BB-sub (31.1 vs. 32.9). The paper claims that EDIT "outperforms the distillation baselines on both IND and OOD datasets" (line 182), which is contradicted by this result. The discrepancy merits an explanation (e.g., task characteristics that make edit-distance weighting less effective).
 
-- **Mistake-pattern analysis overclaims small differences.** Table 5 (right) shows LEs (44.9%) slightly ahead of KEs (44.6%) and MCEs (44.5%) — differences of 0.3–0.4 percentage points. With no error bars, these are within noise range. The conclusion that "LEs provide a broader range" and "learning key reasoning steps from logical reasoning errors is the most effective way" goes beyond what this evidence supports.
+5. **DPO comparison is mentioned but unsubstantiated.** The paper states that "DPO performed unexpectedly poorly in this scenario" (line 185) but provides no results, experimental setup, or hyperparameter details. This comparison should either be presented in full or removed.
+
+6. **GPT-4 CoT quality scoring methodology is under-described.** The scoring prompt, rubric, and aggregation procedure used to produce Figure 3 (right) are not reported. Without these details, the density plot is unverifiable and difficult to interpret.
+
+7. **Training hyperparameters are not reported.** Learning rate, batch size, number of epochs, LoRA rank, LoRA alpha, optimizer, and warmup schedule are all absent from the "Models & Implementation Details" section (lines 145–146). These are standard to report and necessary for reproduction.
 
 ### Trivial
+None.
 
-- **The negative loss term for wrong CoTs raises a stability concern.** The objective (Eq. 6) subtracts the weighted NLL of wrong CoTs, which, in principle, can drive log probabilities toward negative infinity during training. The paper does not discuss whether gradient clipping, early stopping, or the small β=0.025 is relied upon for stability. A brief note would address this.
-
-- **No success rate reported for dual CoT generation.** The paper describes prompts for rectifying wrong CoTs and corrupting correct CoTs, but does not report what fraction of attempts produce valid dual pairs (i.e., where answers actually diverge while reasoning paths remain similar). If this success rate is low, the method's data efficiency is weaker than it appears.
+---
 
 ## Nice-to-Haves
 
-- A human evaluation on ~100 pairs to measure precision/recall of edit distance for identifying causally important steps (as opposed to surface differences) would significantly strengthen the core claim.
-- Analysis of why EDIT helps most on ARC-C and BBH-test but hurts on BB-sub — e.g., whether ARC-C dual CoTs have cleaner edit-distance alignment — would deepen the paper's contribution.
-- A small sensitivity grid (even 2–3 values each) for α and β on a held-out validation set would improve robustness claims.
+- A human annotation study verifying that edit-distance-identified tokens correspond to truly key reasoning steps would substantially strengthen the paper's core claim.
+- Reporting error bars (from 3+ seeds) for all main results is standard practice that would improve the paper's reliability.
+- A comparison to a simpler baseline that uniformly weights all differing tokens (without edit distance) would isolate the contribution of the edit-distance mechanism itself.
+
+---
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- The harsh critic's claim that "the reported gains could come from some other aspect of the training procedure (e.g., simply seeing more diverse CoT examples)" is partially addressed by the paper's data-volume controls (Std-CoT w/ Repeat Sampling and Std-CoT w/ Dual CoTs). However, the broader concern about edit distance picking spurious differences remains valid (see Major #1 above). The critic's phrasing somewhat overstates the case, but the underlying concern about validation is kept.
 
-- **Criticism that a "stronger control" (training on the same data with standard NLL) is missing**: The paper already includes Std-CoT w/ Dual CoTs (the same data, trained with standard NLL with a "[Counterfactual Reasoning]" marker) and the w/o KRSL ablation. These serve as the requested control. The paper's baseline design is adequate.
+- The Strength Finder's claim of "strong and consistent empirical superiority" is tempered: gains are real on 4/5 datasets but modest overall (+2.7% over the best baseline, with one dataset showing a reversal). The strength is reframed more conservatively in the Strengths section above.
 
-- **Criticism about missing comparison to "more recent" distillation methods (fudge-style control, iterative refinement)**: This is speculative — the reviewer does not identify specific published methods — and the paper's baseline selection (Std-CoT, MT-CoT, SCOTT, plus data-matched variants) is defensible for its class. Per rules, disagreeing with the reviewer's taste in baselines is not a weakness.
+- Several of the critic's reproducibility concerns (missing hyperparameters) are kept as Minor weaknesses since learning rate, batch size, epochs, and LoRA rank are standard reporting requirements, not trivial nitpicks.
 
-- **Request for more training details (epochs, LoRA rank, learning rate)**: The parser strips appendix sections where these details likely appear. Per rules, reproducibility nitpicks about artifacts likely present in the original submission are removed.
-
-- **Criticism that "the essence of above methods is simple SFT" oversimplifies**: While SCOTT and MT-CoT are not *pure* SFT, the paper's characterization captures the dominant paradigm of training on correct teacher data. This is a presentation preference, not a substantive error.
-
-- **Strength about "insightful mistake-pattern analysis"**: The differences across mistake types (0.3–0.4%) are within noise range given no error bars, so the claimed insight conflicts with a verified weakness. The categorization itself is reasonable but the empirical support is too weak to constitute a strength.
+---
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a perspective not already present in the paper itself.
+The most interesting observation from the cross-examination of the reviews is that the paper has two distinct claims that require different kinds of evidence: (1) "EDIT improves student reasoning" (an engineering claim supported by empirical results), and (2) "edit distance identifies key reasoning steps" (a mechanistic claim that the paper assumes rather than validates). The reviews effectively surface that claim (2) drives the novelty but claim (1) carries the experiments. Strengthening the paper requires aligning these: direct validation of the edit-distance mechanism would turn a paper with interesting results into one with a verified contribution. The mistake-pattern analysis, while overinterpreted, points to a potentially productive future direction—logical errors may indeed be more informative—but this finding needs proper statistical support before it can be relied upon.
+
+---
 
 ## Suggestions
 
-1. **Run experiments with 3–5 random seeds and report mean ± std.** This is the single most impactful change. The 2.7% average gain over the best baseline is not credible without variance estimates. If the paper is accepted, the reviewers and community will want to know whether the improvements are robust.
+1. Validate the edit-distance mechanism directly: (a) have human annotators mark key reasoning steps in a sample of dual CoTs, (b) measure agreement between human judgments and edit-distance-based identification, (c) compare against a uniform-weight baseline on differing tokens to isolate edit distance's specific benefit.
+2. Report all experiments with at least 3 random seeds and provide error bars or confidence intervals.
+3. Reframe the ≈4.7% statistic as a property of the generated dual CoT pairs, not of CoTs in general.
+4. Add experimental details for the DPO comparison or remove the mention entirely.
+5. Describe the GPT-4 scoring prompt and rubric used for the quality evaluation (Figure 3, right).
+6. Report full training hyperparameters (learning rate, batch size, epochs, LoRA rank, LoRA alpha, optimizer, schedule).
+7. Discuss the BB-sub underperformance and identify what task characteristics might cause it.
 
-2. **Validate the edit-distance identification mechanism.** At minimum, replace edit-distance with random token selection in the KRSL loss to show that the edit-distance *matters* (not just that weighting helps). A human evaluation on a sample of 100 pairs would be even stronger.
+---
 
-3. **Discuss the BB-sub negative result explicitly.** A paragraph analyzing why EDIT underperforms on this dataset would improve the paper's honesty and provide guidance for future work.
-
-4. **Either show DPO results or remove the claim.** An unsupported one-sentence dismissal of a well-known method does not belong in a research paper.
-
-5. **Re-frame the 4.7% claim** as a property of the generated dual CoTs rather than a general observation about CoTs, to avoid the appearance of circular reasoning.
-
-## Score and Decision
-
-The paper presents a genuinely novel approach to CoT distillation with a well-motivated design and reasonably broad empirical evaluation. The core contribution — using dual CoTs and edit distance to focus learning on decision-critical reasoning steps — is interesting and potentially impactful. However, the empirical execution has significant gaps: the central mechanism is not validated, results lack statistical rigor, and some claims outpace the evidence. The paper merits publication provided the authors can address the major concerns (validation of edit-distance assumption and statistical rigor) in a revision. As a conference submission, the contribution is worthwhile but needs strengthening before it can be fully trusted.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

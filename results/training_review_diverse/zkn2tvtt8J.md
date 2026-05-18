@@ -1,80 +1,81 @@
-Here is the final consolidated review.
+Now I have all the verification I need. Let me produce the final consolidated review.
 
 ---
 
 ## Summary
 
-DiNO-Diffusion proposes a self-supervised method for training latent diffusion models that conditions image generation on frozen DiNO image embeddings rather than text or class labels. By eliminating the annotation requirement, the authors train on 868k unlabelled chest X-ray images from 21 public datasets. The resulting model achieves FID 4.7, yields up to 20% AUC improvement when used for data augmentation in small-data regimes, and enables zero-shot lung segmentation (84.4% Dice) — all without any manual annotation during DM training.
+This paper introduces DiNO-Diffusion, a method for training latent diffusion models on unlabelled medical images by conditioning generation on frozen self-supervised DiNO image embeddings instead of text or labels. The model is trained on 868k chest X-rays from 21 public datasets. The authors evaluate generation quality (FID 4.7), data augmentation benefits (up to ~20% AUC improvement in low-data regimes), fully synthetic classifier training, and zero-shot lung lobe segmentation (up to 84.4% Dice), comparing DiNOv1 and DiNOv2 as conditioning encoders.
 
 ## Strengths
 
-- **Self-supervised conditioning eliminates the annotation bottleneck.** The method trains on 868k unlabelled CXR images (Section 2.1, 2.3) by conditioning on DiNO global tokens. This directly addresses a core challenge in medical imaging where annotated datasets are scarce and inconsistent.
+- **Annotation-free training at scale is convincingly demonstrated.** The paper shows that a latent diffusion model can be trained on 868k unlabelled CXR images by conditioning on frozen self-supervised embeddings, with no text captions or labels required during DM training (Section 3.1, Figure 1a). This directly addresses a central bottleneck in medical imaging.
 
-- **Demonstrated downstream improvements across multiple tasks.** Data augmentation with synthetic images improves classifier AUC by up to 20% in small-data regimes (N=50, Table 1, Section 3.2). Zero-shot lung segmentation achieves 84.4% Dice on the combined dataset, outperforming vanilla SD 1.5 (80.3%) with lower variance (Table 2, Section 3.4). The paper notes this is the first application of zero-shot segmentation to a medical diffusion model.
+- **First application of zero-shot segmentation to a medical diffusion model.** The paper achieves 84.4% Dice on lung lobe segmentation (Table 3, DiNOv1-Diffusion combined) by iteratively merging UNet self-attention maps, outperforming vanilla SD 1.5 by 4–10 percentage points across three datasets. The paper explicitly notes this as a first (Section 1, bullet 4).
 
-- **Large-scale unlabelled training corpus.** The compilation of 868k images from 21 sources without label curation (Section 2.1) exceeds the scale of prior medical DMs that rely on smaller annotated datasets (e.g., RoentGen's 300k MIMIC images with captions).
+- **Consistent data augmentation gains, especially in low-data regimes.** In the N=50 regime, adding synthetic images at 1:50 ratio raises AUC from 0.548 (real-only) to 0.650 — an ~18.6% relative improvement (Table 1a, DiNOv1 reconstruction). Gains hold across multiple small-data settings and are statistically significant.
 
-- **Clean experimental design.** Five-fold cross-validation with held-out test sets, label balancing, and careful separation of training data (all non-MIMIC) from evaluation data (MIMIC for classification/quality, JSRT/Montgomery/Shenzhen for segmentation). Multiple data regimes (N=50 to 5000) and real-to-synthetic ratios (1:1 to 1:50) provide a thorough characterization.
+- **Extensive evaluation with two DiNO variants and two synthesis strategies.** The paper systematically compares DiNOv1 vs. DiNOv2 and reconstruction vs. interpolation across multiple data regimes and real-to-synthetic ratios (Tables 1a–b, Figure 3), providing actionable insights about which configurations work best.
 
-- **Clear, self-critical discussion.** The paper openly acknowledges when the interpolation strategy degrades performance in high-data regimes (Section 4) and discusses the circular dependency limitation of image-conditioned models.
+- **Architecture-agnostic framing.** The method is presented as a general recipe (frozen self-supervised encoder → conditioning signal → any DM backbone), not tied to a specific architecture or modality (Section 1).
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **Missing comparison to text-conditioned medical DMs.** The paper frames self-supervised conditioning as an alternative to text conditioning but provides no direct comparison to a text-conditioned DM (e.g., RoentGen or an equivalent) on any of the three evaluation tasks. A text-conditioned model trained on MIMIC (with its ~300k report-paired images) would provide a critical reference point for FID, classification benefits, and segmentation quality. Without this baseline, the reader cannot assess whether self-supervised conditioning yields comparable, better, or worse outcomes than a model using even weakly aligned text annotations. This gap is structural: the evaluation protocol does not test the paper's central framing.
+- **No comparison to alternative conditioning strategies, so the specific benefit of DiNO embeddings is underdetermined.** The paper never tests whether the same pipeline would work with a different frozen encoder (e.g., CLIP vision features, a RadDiNO model, a randomly initialized ViT, a ResNet-based SimCLR encoder, or even a simple PCA compression). Without such comparisons, the reader cannot tell whether DiNO's self-supervised training is critical, or whether *any* frozen image encoder would produce similar results. The core contribution — that this conditioning strategy works — is demonstrated, but the implicit claim that DiNO embeddings are especially descriptive or that the self-supervised nature matters remains unvalidated. Adding even one alternative encoder (e.g., CLIP) would substantially strengthen the paper.
+
+- **Privacy claims are not supported by privacy analysis.** The paper asserts that training classifiers on only synthetic data "holds potential for privacy preservation" (abstract), "showed potential for mitigating privacy concerns" (Section 1, bullet 3), and "demonstrated that synthetic data can replace real data while preserving privacy" (Section 5). The only evidence provided is that test-set AUCs from synthetic-only training are comparable to real-data baselines in some regimes (Table 1b). This is a *necessary* condition for privacy-preserving data sharing but is far from *sufficient*. No membership inference attacks, re-identification risk metrics, nearest-neighbor memorization checks, or differential privacy guarantees are evaluated. The paper should either include a basic privacy analysis (e.g., distance-based memorization check) or explicitly reframe these results as "utility of fully synthetic training" without claiming privacy preservation.
+
+- **Zero-shot segmentation baseline is confounded by domain shift.** The only comparison is against vanilla Stable Diffusion v1.5, which was trained on natural images and has no medical knowledge. DiNO-Diffusion was trained on CXR data. The reported improvement (80.3% → 84.4% Dice) could be driven by CXR domain training rather than the DiNO conditioning mechanism specifically. A fairer comparison would include an unconditional DM trained on the same CXR data, a text-conditioned DM trained on CXR (e.g., Roentgen if available), or at minimum a discussion of this confound with an appropriate caveat. The paper's discussion (line 273) notes the SD model's larger training set but does not address the domain shift confound.
 
 ### Minor
 
-- **Unsubstantiated privacy-preservation claim.** The abstract states DiNO-Diffusion "hold[s] potential for privacy preservation," the discussion claims it "demonstrated that synthetic data can replace real data while preserving privacy," and the conclusions list "privacy preservation" as a demonstrated result. In reality, no privacy metric is computed — no membership inference, reconstruction risk, or distance-to-nearest-neighbor analysis. Synthetic images are generated from embeddings of real training images, so whether they actually protect patient privacy is unknown. This overclaim does not undermine the core method, but it should be toned down to "potential" or supported with analysis.
+- **FID is reported without comparison to any other CXR generation model.** The paper reports FIDs of 4.7 (DiNOv1) following the methodology of Chambon et al. (Roentgen), but provides no comparison table. Without knowing the FID of Roentgen or other CXR diffusion models on comparable test sets, the reader cannot gauge whether 4.7 is state-of-the-art, competitive, or merely acceptable.
 
-- **Confounded segmentation baseline.** The zero-shot segmentation comparison pits DiNO-Diffusion (trained on 868k CXR images) against vanilla SD 1.5 (trained on LAION-2B natural images). This confounds two factors: (i) medical-domain training vs. natural-domain training, and (ii) DiNO conditioning vs. text conditioning. The reported 4–10% Dice improvement cannot be cleanly attributed to the DiNO conditioning mechanism. An unconditional LDM or a text-conditioned LDM trained on the same medical data would be needed to disentangle these factors. (That said, the improvement over SD is still a meaningful existence proof — it shows a model trained with self-supervised conditioning on unlabelled medical data outperforms a general-domain model.)
+- **No diversity metrics reported.** The paper emphasizes semantic variability introduced by the conditioning bottleneck but does not quantify diversity with standard metrics (LPIPS, recall, intra-class FID). This would strengthen the claim that generated images are not near-replicas of training data.
 
-- **Data leakage in segmentation test sets.** The training set (Section 2.1) includes "every openly accessible CXR dataset minus MIMIC-CXR," and the listed sources include JSRT, Montgomery, and Shenzhen — the same datasets used for segmentation evaluation. While the DiffSeg method uses internal UNet features (not labels) and FID is computed on MIMIC (held out), the use of test-set images during DM training is a potential leakage that should be acknowledged.
+- **Interpolation failure hypothesis is not analyzed.** The paper attributes interpolation-based generation degradation (Table 1a–b, higher data regimes) to label-feature misalignment but provides no qualitative or quantitative analysis (e.g., visualizing interpolated images with assigned labels) to confirm this.
 
-- **No analysis of synthetic image diversity/novelty.** The paper reports large AUC improvements from synthetic data augmentation but provides no analysis (e.g., LPIPS, precision/recall, or embedding-space coverage) to verify that synthetic images provide semantically meaningful variety rather than low-level augmentation effects. The concern is especially relevant for the reconstruction strategy, where images are generated from embeddings of real training samples.
-
-- **FID reported without context.** The FID scores of 4.7 (DiNOv1) and 6.4 (DiNOv2) are presented without comparison to prior work. RoentGen reports FID ~4.3 on MIMIC using a similar feature extractor; citing this would help readers calibrate the results. Confidence intervals or standard deviations for FID would also be helpful, as FID is known to be noisy with single values.
+- **Title and framing overreach slightly.** "Self-supervised pre-training" (title) implies a fundamentally new pre-training paradigm for DMs, whereas the method is better described as an *annotation-free conditioning strategy* for DMs using frozen self-supervised embeddings. The DM itself is trained from scratch with a standard conditional denoising loss. The body text is largely accurate, but the title and some framing choices (e.g., "self-supervised DM training") could mislead readers about the nature of the contribution.
 
 ### Trivial
 
-- **"Agnostic to medical imaging modality" is overstated.** Only chest X-ray is tested. The paper's claim (Introduction, line 31) of modality agnosticism is not supported by evidence. The softer statement in the abstract ("can be easily adapted") is more appropriate.
-
-- **Segmentation checkpoint inconsistency noted but unexplored.** The paper observes that the optimal checkpoint for segmentation (Section 3.4) is "significantly earlier" than the one with lowest FID (Section 3.1) but does not discuss implications. This is an interesting finding worth a brief comment.
+None.
 
 ## Nice-to-Haves
 
-- A text-conditioned LDM trained on MIMIC-CXR (or comparable data) as a baseline for all three evaluation tasks.
-- Privacy analysis: at minimum, distance-to-nearest-neighbor between synthetic and real images in embedding space, or a membership inference attack.
-- Ablation: an unconditional LDM trained on the same medical data to quantify the benefit of DiNO conditioning vs. simply training on more domain data.
-- Diversity analysis (LPIPS, recall) for synthetic images, particularly for the reconstruction strategy where overfitting is a concern.
+- Compare against at least one alternative frozen encoder (e.g., CLIP vision encoder, RadDiNO, or a randomly initialized ViT) on FID and data augmentation to isolate the value of DiNO's self-supervised training.
+- Add a basic memorization check (e.g., nearest-neighbor distances between generated and training images in a feature space) as a low-cost privacy support.
+- Include an unconditional CXR DM or a text-conditioned CXR DM as an additional segmentation baseline.
+- Add an FID comparison table with prior CXR generation work (Roentgen, etc.), even with a note on data differences.
+- Include diversity metrics (LPIPS, recall) for generated images.
 
 ## Removed Points
 
-- *Criticism that the training data (MIMIC-CXR) has free-text reports making a text-conditioned baseline "feasible on the same training data."* This is factually incorrect: the paper explicitly states (Section 2.1) that the **training set excludes MIMIC-CXR entirely**. The training data (868k images from non-MIMIC sources) do not have standardized text reports. A text-conditioned model trained on the same 868k images is **not** feasible without additional annotation. The corrected criticism (kept above) is that a text-conditioned model trained on MIMIC (~300k report-paired images) should still be compared.
+These points are flagged to be removed; treat them with caution.
 
-- *"Weakness about missing appendix / missing appendix content."* The parser strips appendix content; these exist in the original submission.
-
-- *Formatting/style nitpicks and grammar issues.* These are parser artifacts, not author errors.
-
-- *Generic strengths from the Strength Finder that lack specific evidence (e.g., "addressed an important problem" without concrete support) have been dropped.*
+- **Strength Finder claim: "Privacy-preserving potential validated by full synthetic training"** — Removed because it conflicts with the verified weakness that the privacy claim is unsupported. AUC parity is not privacy validation.
+- **Harsh critic claim: "The paper should be accepted only after... (1) retitle and reframe to accurately describe the method as 'image-conditioned diffusion using self-supervised embeddings'"** — Partially addressed above as a minor framing issue. The critic's stronger framing ("misleading... not self-supervised pre-training") overstates the problem; the DM *is* trained in a self-supervised manner (using images as their own supervision via a frozen encoder), and "pre-training" is standard terminology for training a model from scratch before downstream use. The issue is kept but downgraded to minor.
+- **Harsh critic claim: "The self-supervised component is the frozen DiNO encoder... This is not self-supervised pre-training of the DM"** — Overstated. A DM trained without labels, using a frozen self-supervised encoder for conditioning, is reasonably described as self-supervised training. The critic conflates "the DM itself uses a self-supervised objective" (which it doesn't — it uses standard MSE denoising) with "the overall method is self-supervised" (which it is, since no labels are used). Kept only the valid observation about "pre-training" overreach.
 
 ## Novel Insights
 
-The reviews surface an insightful tension: the paper's main strength (self-supervised conditioning enabling training on 868k unlabelled images) is also the source of its main evaluation gap. Because the training data has no text, a direct like-for-like comparison to text-conditioned models is structurally impossible on the same data. This means the paper is effectively arguing for a different *data regime* (unlabelled at scale) rather than a strictly better *conditioning mechanism*. The segmentation result — where DiNO-Diffusion outperforms vanilla SD despite SD being trained on vastly more (natural) data — is the strongest evidence that domain-specific self-supervised training matters, but the attribution to DiNO conditioning specifically remains entangled with domain adaptation. The privacy overclaim is a separate, avoidable weakness: the paper's actual evidence (classifiers trained on synthetic-only data achieve reasonable AUC) supports "data replacement potential" but not "privacy preservation" without further analysis.
+The most insightful observation emerging from the reviews is that the paper's framing choices systematically outpace its evidence. The title claims "self-supervised pre-training" but the method is a conditioning strategy; the paper claims "privacy preservation" but provides only utility metrics; the segmentation comparison claims superiority of DiNO conditioning but cannot disentangle it from CXR domain training. These are not fatal flaws — the underlying empirical work is solid — but they reflect a pattern of claiming more than the experiments can isolate. The strongest contribution of the paper (annotation-free DM training that actually works on 868k images) is somewhat obscured by weaker secondary claims. A version that tightened framing, added even one alternative conditioning baseline, and dropped unsupported privacy language would be notably stronger than the current submission.
 
 ## Suggestions
 
-1. **Add a text-conditioned baseline trained on MIMIC-CXR** (replicating RoentGen's setup) for FID and classification comparisons. This is the single most impactful addition and would directly address the main structural weakness.
-2. **Remove or soften privacy claims** — either add a privacy analysis (membership inference, nearest-neighbor distance) or replace "privacy preservation" with "data replacement potential" throughout.
-3. **Acknowledge the data leakage** that segmentation test images were in the DM training set and explain why this does/does not affect the DiffSeg results.
-4. **Add an unconditional LDM trained on the same medical data** as a controlled ablation for the segmentation experiment.
-5. **Report FID with confidence intervals or across seeds** and cite RoentGen's FID for context.
+1. Add at least one alternative conditioning source (e.g., frozen CLIP ViT) and compare on FID and data augmentation. This is the single highest-leverage improvement.
+2. Remove all "privacy preservation" claims that go beyond "utility of fully synthetic training," or add a basic privacy analysis (e.g., membership inference, distance-based memorization).
+3. Add an unconditional CXR-trained DM as a segmentation baseline to disentangle CXR domain effects from DiNO conditioning effects.
+4. Provide an FID comparison table with prior CXR generation work and note differences in training data.
+5. Add diversity metrics (LPIPS, intra-class FID) for generated images.
+6. Tone down the title from "Self-Supervised Pre-Training" to something like "Annotation-Free Training via Self-Supervised Conditioning."
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,22 +1,27 @@
-Now I have a complete understanding. Let me produce the final consolidated review.
+Now I have all the evidence needed. Here is the consolidated final review.
+
+---
 
 ## Summary
 
-This paper proposes PRI (Pruning-Refinement-Identification), the first model-free algorithm for best policy identification (BPI) in online Constrained MDPs. It leverages a structural property of CMDPs—that optimal policies have at most N stochastic decisions (where N is the number of constraints)—to design a three-phase algorithm that identifies where stochastic decisions are needed, learns their weights, and recovers a single near-optimal policy. For well-separated CMDPs, PRI achieves Õ(H√K) regret with zero constraint violation, improving over the prior model-free state-of-the-art Õ(K^{4/5}), and provides a matching Ω(H√K) lower bound. The regret bound's leading K-term does not depend on S or A.
+This paper proposes PRI (Pruning-Refinement-Identification), the first model-free Best Policy Identification (BPI) algorithm for online Constrained MDPs. Leveraging the "limited stochasticity" property of CMDPs (at most N stochastic decisions in an optimal policy), PRI operates in three phases: pruning unnecessary actions, refining mixing weights over greedy policies, and recovering a single near-optimal Markov policy. The paper claims an Õ(H√K) regret bound with zero constraint violation — improving over the prior best model-free bound by a factor of H³√SA·K^{3/20} — along with a matching lower bound of Ω(H√K).
 
 ## Strengths
 
-1. **First model-free algorithm achieving both near-optimal regret and best-policy identification in online CMDPs.** PRI attains Õ(H√K) regret while outputting a single provably near-optimal policy, whereas the best prior model-free algorithm (Triple-Q) gives only Õ(H⁴√(SA)K^{4/5}) regret with no policy convergence guarantee (abstract, Table 1, Theorem 1). This directly answers the open question posed in the introduction.
+1. **First model-free BPI algorithm for online CMDPs with convergence guarantees.**  
+   Existing model-free algorithms (e.g., Triple-Q) only average over all used policies and do not output a single near-optimal policy. PRI explicitly solves this BPI problem (abstract, contributions list, Table 1).
 
-2. **Matching lower bound showing order-wise optimality.** Theorem 2 claims that for any online algorithm there exists a well-separated CMDP instance where regret or violation is Ω(H√K), establishing that the Õ(H√K) upper bound is tight up to polylog factors—a contribution absent from prior model-free work.
+2. **Significantly improved regret bound: Õ(H√K) vs. prior best Õ(H⁴√SA·K^{4/5}).**  
+   The leading term is independent of S and A, and the paper provides a matching Ω(H√K) lower bound, establishing order-wise optimality (Theorem 1, Theorem 2, Table 1).
 
-3. **Novel algorithmic design using the "limited stochasticity" structure.** The paper leverages Lemma 1 (optimal policies have at most N stochastic decisions) and the Decomposition Lemma to design a pruning-refinement-identification procedure that first identifies where stochastic decisions are needed and then recovers a single policy. This structural insight overcomes the fundamental limitation of primal-dual model-free methods that cannot converge to a single policy (Section 4, Lemmas 1–2).
+3. **Novel algorithm design exploiting the limited-stochasticity structure of CMDPs.**  
+   The insight that an optimal CMDP policy needs at most N stochastic decisions (Lemma 1) is cleverly used to prune actions, decompose the problem into few greedy policies (Lemma 2, M ≤ 2^N), and recover a single policy from a mixed policy. This structural approach differentiates PRI from prior primal-dual methods.
 
-4. **Regret bound whose leading K-term is independent of S and A.** The dominating term does not scale with state or action space sizes, a significant improvement over typical bounds (abstract, conclusion, line 365).
+4. **Empirical validation shows large improvements over Triple-Q.**  
+   In both synthetic and grid-world environments, PRI achieves substantially lower regret (e.g., 6.89×10⁴ vs. 1.57×10⁶ in the synthetic CMDP) and near-zero constraint violation (Figures 1–2).
 
-5. **Empirical validation showing substantial practical improvement over Triple-Q.** Experiments on a synthetic CMDP and a grid-world environment (Section 7, Figures 1–2) demonstrate that PRI reduces regret by over an order of magnitude compared to Triple-Q while achieving near-zero constraint violation, confirming the theoretical advantages in practice.
-
-6. **Model-free memory efficiency with theoretical guarantees.** PRI maintains O(HSA) Q-table memory vs. O(HS²A) for model-based approaches (Related Work), making it more practical for large state spaces while still providing optimal regret and PAC guarantees.
+5. **Regret bound independent of S and A in the leading term.**  
+   Unlike prior model-free bounds, the Õ(H√K) leading term does not explicitly depend on state/action space sizes, with the caveat about sufficiently large K acknowledged in the text (line 365).
 
 ## Weaknesses
 
@@ -28,50 +33,49 @@ None.
 
 ### Minor
 
-1. **The lower bound (Theorem 2) is stated without any justification, construction, or proof sketch in the main text.** Unlike Theorem 1, which refers to a proof in the next section, Theorem 2 simply asserts the result. No construction of the hard instance, no discussion of why the well-separated condition is preserved, and no indication of where the proof resides. While the full proof likely exists in the appendix (stripped by the parser), the main text would benefit from at least a one-paragraph sketch describing the CMDP instance and the intuition for why Ω(H√K) is forced.
+1. **Experiment-theory gap for the optimality bound.**  
+   The paper claims the learned policy has an Õ(1/√K) optimality gap. With K = 8×10⁶, this predicts a gap of roughly 3.5×10⁻⁴ (ignoring log factors). The observed gap between the learned policy's cumulative reward (1.561) and the LP-optimal solution (1.573) is 0.012, which is ~34× larger. The paper describes this as "match" without explaining the discrepancy. While log factors and constants in the Õ notation could account for some of this, the gap warrants discussion, especially since the theoretical bound is a central contribution.
 
-2. **The pruning-phase threshold values (4/K^{0.03}, K^{0.2}, K^{0.25}) and their interactions are presented without any analytical intuition in the main text.** The paper states probability bounds (e.g., 1 − O(K^{−0.02}), 1 − O(K^{−9/8})) but does not explain why these specific exponents work or how the threshold relates to Triple-Q's regret bound. The Compare subroutine is the most novel and most fragile component—it drives all subsequent phases—yet the main text defers all reasoning. While the proofs are presumably in the appendix (stripped by the parser), a few sentences of intuition would greatly improve readability and verifiability.
+2. **Well-separated condition not quantitatively connected to algorithm parameters.**  
+   The definition of σ_min (the minimum gap over reduced action spaces) is stated in terms of the problem instance, yet the algorithm's pruning thresholds (e.g., 4/K^{0.03} in Compare) are fixed functions of K that do not depend on σ_min. The paper invokes "sufficiently large K" but provides no explicit requirement on how large K must be relative to σ_min (e.g., K ≥ f(1/σ_min)) for the guarantees to hold. This is a standard form of asymptotic statement in the literature but is less clean than an explicit condition would be.
 
-3. **The Decomposition-Opt constraint αₘ ≥ ε′ = 1/log K for all m interacts with M = ∏|𝒟̃_{h,x}| without discussion.** If M > 1/ε′ = log K, the optimization problem becomes infeasible because ∑αₘ ≥ M/log K > 1. The paper bounds M ≤ 2^N (line 332), which could exceed log K for moderate N (e.g., N=10 gives M ≤ 1024, while log₁₀(10⁶) ≈ 14). The paper does not address when this occurs or what modifications would be needed. This is a concrete algorithmic gap—either M must be bounded by log K, or the fairness constraint αₘ ≥ ε′ must be relaxed for unused policies. The paper should discuss this.
+3. **Computational complexity of the refinement phase.**  
+   The paper bounds M ≤ 2^N, which is exponential in the number of constraints N. While N is typically small, the paper does not discuss the computational cost of solving Decomposition-Opt (a linear program with M variables) when M is moderate (e.g., N=10 → M=1024). The α_m ≥ 1/log K constraint in the LP could also conflict with large M, since Σ α_m = 1 would force each α_m to be small, potentially making the LP infeasible if M > log K. The paper does not address this.
 
-4. **The initial action-removal step in Policy Pruning (threshold K^{0.2}) is unexplained.** The algorithm removes actions used ≤ K^{0.2} times across multiple Triple-Q runs (Algorithm 2, lines 161–173). The paper does not provide intuition for this threshold, how it relates to Triple-Q's exploration, or why the resulting set is guaranteed to retain an optimal action. While likely justified in the appendix, the main text should at least sketch the reasoning.
-
-5. **The bias introduced by forcing αₘ ≥ ε′ when the optimal mixing weight is zero is not discussed.** The constraint in Decomposition-Opt forces each policy to receive at least ε′√K samples per round even if its optimal weight is zero. The paper handles constraint satisfaction via tightened constraints (̃ρ⁽ⁿ⁾), but does not address how this forced sampling introduces bias into the occupancy estimates or how the bias is controlled in the analysis. A brief discussion would clarify the bias-variance tradeoff.
+4. **Grid-world experiment uses a cost formulation not directly covered by the paper's framework.**  
+   The grid-world experiment uses a cost constraint (cost ≤ 0.5), whereas the paper's formulation uses lower-bound utility constraints (W^{π,n}_1 ≥ ρ^{(n)}). While translating a cost constraint to a utility constraint is straightforward (utility = H − cost, ρ = H − 0.5), the paper does not explain this translation, which could confuse readers.
 
 ### Trivial
-
-- Line 143: "̃ρ⁽ⁿ" has a missing closing parenthesis (̃ρ⁽ⁿ⁾).
-- Line 269 contains a stray closing brace "}" after "meta-algorithm."
-- Line 317: "inccurs" → "incurs."
+- None beyond the minor issues above.
 
 ## Nice-to-Haves
-
-- A brief discussion of what happens when the well-separated assumption fails—does the algorithm degrade gracefully to Triple-Q's O(K^{4/5}) bound, or could it fail entirely? This would clarify the scope.
-- Including model-based algorithms as an additional baseline in the experiments, though not required for a model-free theory paper, would help practitioners calibrate the practical gap between model-free and model-based methods.
+- An explicit lower bound on K in terms of σ_min, S, A, and H under which the theoretical guarantees hold.
+- A discussion of the observed experiment-theory gap (1.561 vs. 1.573) and how constants/log-factors in the Õ bound account for it.
+- Clarification of how cost constraints are mapped to the paper's utility formulation in the grid-world experiments.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+These points are flagged to be removed; treat them with caution.
 
-- **Criticism that the abstract does not qualify the regret bound with "for well-separated CMDPs."** The abstract (line 7) explicitly states "for well separated CMDPs" in the same sentence. The critic's claim of this being "just in a footnote" is factually incorrect.
-- **Criticism that experiments lack model-based baselines.** The paper's scope is model-free algorithms; the comparison with Triple-Q (the only prior model-free algorithm) is the appropriate comparison for its class. Demanding model-based comparisons is scope creep.
-- **Criticism that the pruning-phase analysis is entirely missing.** The paper states concrete probability bounds (1 − O(K^{−0.02}), 1 − O(K^{−9/8})) and the proofs are in the appendix (stripped by the parser). The issue is one of insufficient intuition in the main text, not absence of evidence.
-- **Criticism about "runtime is at least M·K" for the refinement phase.** The critic misread the algorithm: total episodes per round is ∑αₘ√K = √K regardless of M (since ∑αₘ = 1). The total episode count in refinement is K, not M·K.
-- **Criticism about the comparison with "not yet released" or unverifiable systems.** N/A—the paper does not rely on unreleased artifacts.
+**1. Critic's Point 1 (Identification phase "fundamentally flawed"):** The reviewer claims that converting empirical visitation counts from a mixed policy into a Markov policy via π̃_h(a|x) = N_h(x,a)/Σ_ã N_h(ã,x) is unjustified. This is incorrect. The paper explicitly states at line 120: given an occupancy measure q_h(x,a), the corresponding Markov policy is π_h(a|x) = q_h(x,a) / Σ_a q_h(x,a). The identification phase (Algorithm 4) estimates the occupancy measure of the mixed policy through empirical counts and applies this standard conversion. The mixed policy's true occupancy measure satisfies the flow constraints by construction (it is a convex combination of occupancy measures of greedy policies), so the conversion is well-founded. Any gap is due to estimation error, handled by concentration bounds in the (appendix) proof. The reviewer's claim that "the empirical counts from the mixed policy do *not* directly translate into a valid occupancy measure" reflects a misunderstanding of the standard occupancy-measure-to-policy conversion in CMDP theory.
+
+**2. Critic's Point 2 (Algorithm too vague):** The reviewer claims Triple-Q initialization details are missing — Triple-Q is a published, cited algorithm; using it as a subroutine is standard. The reviewer claims the pruning loop's number of Compare calls is unbounded — each (h,x,a) flag is examined at most once (flags only transition from 0→1), giving at most O(HSA·log K) calls, which is polynomial. The reviewer claims "M could be as large as A^N" — the paper states M ≤ 2^N, not A^N.
+
+**3. Critic's Point 3 (Lower bound not proved):** REMOVED per rule — proofs are in the appendix, which the parser strips from all papers.
+
+**4. Critic's Point 5 (Proof of Theorem 1 relies on unsubstantiated Theorem 4):** REMOVED per rule — the identification phase's theoretical justification (Theorem 4/5) is standard occupancy-measure-to-policy conversion (line 120), and detailed proofs reside in the appendix.
 
 ## Novel Insights
 
-The reviews surface one genuinely insightful observation beyond the paper's own contributions: the αₘ ≥ ε′ constraint in Decomposition-Opt creates a tension between M (the number of candidate policies) and log K that is not discussed. This constraint forces each candidate policy to receive at least √K/log K samples per round, which means the algorithm can support at most ~log K candidate policies without violating the simplex constraint. Since M ≤ 2^N, this implicitly limits N ≤ log log K for feasibility unless unused policies are handled differently. This is a real structural constraint on the algorithm's applicability that the paper should acknowledge and the reviews correctly identified.
+The reviews, when stripped of noise, highlight an interesting tension: the paper's core theoretical contribution (regret-optimal BPI via limited stochasticity) is genuinely novel and well-motivated, yet the quantitative validation leaves a gap (0.012 vs. ~3.5×10⁻⁴ theoretical gap) that the paper does not address. This suggests either that the hidden constants in the Õ bound are large enough to matter in practice, or that the well-separated condition requires a larger K to kick in than K=8×10⁶ provides. Either way, it points to a need for more attention to the finite-sample regime in future work. The well-separated condition's lack of explicit quantification also surfaces as a recurring concern — while standard in asymptotic theory, it limits the practical interpretability of the guarantee.
 
 ## Suggestions
-
-1. Add a one-paragraph proof sketch for the lower bound (Theorem 2) in the main text, including the CMDP instance construction and why it forces Ω(H√K).
-2. Provide 3–5 sentences of intuition in Section 5 explaining why the exponents 0.03, 0.2, and 0.25 work in the Compare subroutine—specifically, how the Triple-Q regret bound O(T^{4/5}) translates to an average reward error that falls below the threshold 4/K^{0.03} with high probability.
-3. Add a brief discussion in Section 5 (around line 283) addressing the feasibility of Decomposition-Opt when M is large relative to 1/ε′. Either bound M ≤ log K or relax the αₘ ≥ ε′ constraint for empirically unused policies.
+- Add a paragraph discussing the experiment-theory gap: quantify the hidden constants in the Õ(1/√K) optimality gap and explain whether the observed gap is consistent with them.
+- Provide an explicit lower bound K ≥ g(σ_min, S, A, H) under which the main theorems hold, or at minimum discuss the dependence on σ_min.
+- Clarify the computational cost of solving Decomposition-Opt when M is moderate (e.g., 2^N for N up to 10–15), and discuss whether the α_m ≥ ε' constraint may conflict with large M.
+- Explain the cost-to-utility translation in the grid-world experiments.
 
 ## Score and Decision
 
-This paper makes a significant theoretical contribution: it resolves an open problem by providing the first model-free algorithm for best policy identification in online CMDPs with optimal (up to log factors) regret. The algorithmic design is novel, the theoretical claims are well-structured, and the experiments validate the practical improvement. The weaknesses are all presentation-level (insufficient main-text intuition for key technical choices, unsupported lower bound sketch) rather than structural. These are fully addressable in a revision.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

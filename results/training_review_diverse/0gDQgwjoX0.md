@@ -1,18 +1,18 @@
-Now I have a thorough understanding of the paper. Let me construct the final consolidated review.
+Now I have a comprehensive understanding of the paper. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes Stochastic Gradient Discrete Langevin Dynamics (SGDLD), the first practical algorithm for MCMC sampling from discrete probability distributions defined by expectations over large datasets. The method addresses two fundamental obstacles: (1) bias in naive stochastic gradient estimators for discrete Langevin dynamics (since the ratio of expectations does not equal the expectation of ratios), and (2) extreme variance in jump rate magnitudes across states and mini-batches. SGDLD introduces gradient caching (reusing mini-batch estimates when the state does not change, making the estimator asymptotically unbiased) and a Polyak-style state-dependent step size that normalizes simulation time by the local jump rate. Experiments on synthetic tasks (Gaussian-Bernoulli, Bayesian logistic regression) and three real-world applications (stochastic facility location, approximate computing, prompt tuning) demonstrate the method's effectiveness.
+The paper proposes Stochastic Gradient Discrete Langevin Dynamics (SGDLD), the first practical method for stochastic gradient MCMC sampling in discrete spaces. The core algorithmic innovations are: (1) a gradient caching scheme that accumulates mini-batch evaluations across consecutive rejected steps to obtain an asymptotically unbiased estimate of the probability ratio, and (2) a modified Polyak step-size adaptation that normalizes simulation time by the local jump rate to handle enormous variance in stochastic gradients. Experiments on two synthetic tasks and three real-world applications (Bayesian logistic regression, stochastic facility location, approximate computing, prompt tuning) show that SGDLD matches or outperforms strong baselines with substantially lower computational cost.
 
 ## Strengths
 
-- **Novel and well-motivated algorithmic contributions.** The paper clearly identifies the two core obstacles to stochastic-gradient MCMC in discrete spaces — bias from non-exchangeability of the ratio and expectation (Section 3.2, Eq. 10), and variance in jump rate magnitudes (Figure 1 shows jump rates spanning 30 orders of magnitude) — and proposes clean, intuitive solutions for each. Gradient caching (Section 4.1) and Polyak step-size adaptation (Section 4.2) directly target these challenges.
+1. **Gradient caching corrects the bias in naive stochastic ratio estimation.** The paper clearly identifies that a naive stochastic gradient does not yield an unbiased estimator of the rate matrix in discrete spaces (Eq. 10–11), since expectation and the nonlinear weight function \(g\) do not commute. The cache accumulates mini-batch evaluations across consecutive steps where the state does not change (Eq. 12), effectively expanding the batch size without additional computation. Proposition 4.1 states asymptotic unbiasedness, and Figure 2 confirms empirically that SGDLD's total variation decreases with step size while the no-cache variant's does not — direct evidence that caching resolves the bias.
 
-- **Ablation studies cleanly isolate each contribution.** The variants SGDLD-noC (no caching) and SGDLD-noP (no Polyak step size) are evaluated across multiple tasks. Figure 2 is the most critical evidence: SGDLD's total variation decreases monotonically with step size (consistent with asymptotic unbiasedness), while SGDLD-noC fails to improve and even worsens — directly confirming that caching corrects the bias. SGDLD-noP is shown to underperform or fail entirely in multiple settings.
+2. **Polyak step-size adaptation addresses the multi-order-of-magnitude variance in jump rates.** The paper motivates this with empirical evidence (Figure 1) showing that the stochastic jump rate can vary by \(\sim 10^{30}\) across mini-batches, making a fixed step size infeasible. The Polyak normalization (Eq. 14) adapts \(\epsilon_t\) to the local jump rate \(Z(x)\). The ablation study (Figure 3) shows SGDLD dramatically outperforms SGDLD-noP, and the paper notes SGDLD-noP cannot produce reasonable solutions in the three real applications, underscoring the practical necessity of this component.
 
-- **Diverse real-world applications.** The method is applied to three distinct practical problems — stochastic integer programming (facility location), approximate computing (AxC), and prompt tuning for text-to-image models — demonstrating impact beyond synthetic benchmarks. In the approximate computing task, SGDLD achieves comparable results to learned methods with 10k evaluations versus 100 million for training data alone.
+3. **Broad empirical validation across diverse discrete-space problems.** SGDLD is evaluated on two synthetic tasks (Gaussian-Bernoulli, Bayesian logistic regression) and three real applications (facility location, approximate computing, prompt tuning). In each case it matches or surpasses strong baselines (DLMC, Gibbs, Gurobi, SLS, continuous relaxation), often using orders of magnitude fewer function evaluations (e.g., 10k vs. 100M for training-based methods in approximate computing).
 
-- **Honest about limitations.** The discussion (Section 7) openly acknowledges that SGDLD is an unadjusted sampler requiring exact probability ratios for unbiasedness, and that variance reduction and MH correction steps are natural future work. This candor strengthens rather than weakens the contribution.
+4. **Clear problem formulation.** The paper formally defines "stochastic distribution" (Eq. 6) with illustrative examples (quenched model, Bayesian learning), precisely identifies the two obstacles (bias from non-exchangeability and variance from exponential-scale gradients), and provides a principled convergence analysis for the naive stochastic DLD under an unbiased estimator.
 
 ## Weaknesses
 
@@ -22,65 +22,59 @@ None.
 
 ### Major
 
-- **Theoretical analysis of the caching scheme is incomplete in the main paper.** Proposition 4.1 asserts asymptotic unbiasedness as step size decreases to zero, but the paper provides no analysis of the non-Markovian dynamics introduced by the growing cache (which resets upon a jump) or the coupling between the cache size and the step size schedule. The remark that the process "has an equivalent form of memoryless Markov chain" (line 187) is asserted without any justification or sketch of the equivalence. While the proof may exist in the appendix, the main paper does not convey how the key technical challenges — the state-dependent memory, cache resetting, and interaction with the Polyak step size — are resolved. This gap weakens the paper's central theoretical claim.
-
-- **Missing experimental details that affect reproducibility and evaluation.** Several critical parameters are not reported: (i) the dataset dimensions (number of features *d* and samples *m*) for the Bayesian logistic regression experiment (Section 6.2); (ii) the inverse temperature *β* values used to convert the facility location and approximate computing optimization problems into sampling problems (Sections 6.3–6.4); (iii) the concrete annealing schedule for *h<sub>t</sub>* in the Polyak step size (the paper only says "set a threshold *h\** and gradually decrease *h<sub>t</sub>*" without specifying the rule). The paper also contains a dangling claim: "We conducted extra experiments to show the fast mixing of SGDLD and demonstrate its advantage compared to more baselines, such as pseudo marginal MCMC" (line 279), but no results are shown.
+1. **Gap between advertised convergence claim and delivered theoretical content.** The introduction states: "With proper annealing, we can prove that SGDLD samples from the correct distribution." However, the main text does not state a theorem about the convergence of the **full SGDLD algorithm** (caching + Polyak step size + schedule). The paper provides: (a) a convergence analysis for naive DLD assuming an unbiased rate matrix estimator exists (Section 3.2), and (b) Proposition 4.1 asserting asymptotic unbiasedness of the caching scheme (proof deferred). But there is no theorem that combines these components, specifies conditions on the schedule \(h_t\), and characterizes the limiting distribution of the full algorithm. Even a theorem statement (with proof in appendix) would bridge this gap. As presented, the theoretical framing in the introduction oversells what the main text delivers, which weakens the paper's claimed contribution.
 
 ### Minor
 
-- **Limited baselines in several experiments.** The prompt tuning experiment (Table 3) compares SGDLD only to continuous relaxation and SGDLD-noC. Additional comparisons with random search, evolutionary methods, or other discrete MCMC samplers would strengthen the case. The facility location experiment (Table 1) compares against Gurobi with SAA and stochastic local search, but the claim that SGDLD "significantly outperforms" is not backed by statistical significance testing — the reviewer correctly notes that standard deviations appear to overlap for some settings. Confidence intervals or paired tests would be informative.
+1. **Connection between step-size decay and effective cache size is asserted but not argued.** The paper's intuition is that as \(\epsilon \to 0\), the chain remains at the same state for many steps, allowing the cache to accumulate. Proposition 4.1 claims asymptotic unbiasedness under this dynamic. However, no argument is given for how the step-size decay schedule connects to the effective cache size or the bias decay rate. The claim that the bias vanishes with \(\epsilon\) requires linking the Polyak-controlled step size to the number of cached mini-batches, which is not addressed.
 
-- **The calibration of computational cost in Figure 3 is not fully justified.** The paper calibrates steps as "320 updates for stochastic methods and 2 updates for DLMC" but provides no justification for this specific ratio (which presumably depends on the unreported dataset dimensions). Wall-clock time or total energy evaluations would be a more transparent and verifiable comparison metric.
+2. **Polyak step-size schedule is underspecified.** The paper says: "set a threshold \(h^*\) and gradually decrease \(h_t\) until it reaches \(h^*\)." How \(h_t\) is decreased (linearly, exponentially, or otherwise) is not stated. Since the algorithm's behavior depends on this choice, this omission hurts reproducibility.
 
-- **No analysis of the Polyak step-size approximation error.** The method for computing *Z(x)* uses a gradient approximation (following Grathwohl et al., 2021), but the paper provides no analysis — theoretical or empirical — of how approximation errors in the jump rate affect the step-size schedule or mixing. The statement "we find this is sufficient to stabilize the sampling process" is an empirical observation without supporting sensitivity analysis.
+3. **Prompt tuning experiment lacks details on discrete representation.** The paper samples "text prompts \(x\)" in a discrete space but does not describe how prompts are represented as elements of \(\mathcal{X}\), what the neighborhood structure \(N(x)\) is, or how the gradient approximation \(\exp(\langle \nabla\log\pi(x), y-x\rangle)\) is computed over token sequences. This information is essential for reproducibility.
 
-- **The Gaussian-Bernoulli toy (Section 6.1, 16 states) uses a state space too small to stress-test the caching scheme** (the cache can easily saturate). While this experiment serves its purpose as a verification of asymptotic unbiasedness, a larger synthetic problem would strengthen the validation.
+4. **The \(10^{30}\) claim about jump-rate ratios lacks quantitative backing.** The paper states that "the largest jump rate can be \(10^{30}\) times the smallest jump rate" (Figure 1 caption and line 137) based on 200 mini-batches in the Bayesian logistic regression task. No computation or derivation is provided to support this striking figure, making it unverifiable from the main text.
+
+5. **Gradient approximation for \(Z(x)\) is acknowledged but its effect is unexplored.** The paper notes that calculating \(Z(x)\) exactly is expensive, so a gradient approximation is used (following Grathwohl et al., 2021). The Discussion (Section 7) explicitly states that this approximation breaks the unbiasedness guarantee. This is an honest limitation, but the paper does not investigate empirically how this approximation affects sampling quality or whether it introduces systematic bias in practice.
 
 ### Trivial
 
-- The decomposition *N = N₁N₂* in Equation 9 is stated without explanation of the roles of *N₁* and *N₂* — this is explained in the subsequent text but the equation placement could be clearer.
+None.
 
 ## Nice-to-Haves
 
-- A discussion of the memory overhead of the caching scheme in larger state spaces (neighborhood size grows linearly, and the cache persists across rejected steps).
-- Reporting inverse temperature *β* values for the optimization-to-sampling transformations.
-- A sensitivity analysis showing how the gradient approximation error in *Z(x)* affects mixing rates.
+- The pseudo-marginal MCMC baseline is mentioned as an "extra experiment" but not included in the main text. Including it (or a brief summary) would strengthen the empirical comparison.
+- A small-scale analytical verification of the caching bias reduction (e.g., computing the bias of the naive and cached estimators on a tiny problem where the expectation is tractable) would provide a clean proof of concept complementing the empirical results.
+- More details on the neighborhood structures used in the three real applications would improve reproducibility.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviews are removed with justification:
 
-1. **"First practical method" claim too strong.** The reviewer objected to "first practical method" given Zhang et al. (2022). However, the paper explicitly acknowledges Zhang et al. (2022) and explains why their assumption (unbiased estimator of the rate matrix exists) is generally unattainable. The claim is defensible in context.
-
-2. **Notation confusion in Section 4.1 (Eq. 12).** The reviewer found the cache notation ambiguous, but the paper's description is logically consistent: the cache stores ψ(·, ξₖ) for all neighbors *z ∈ N(x)* for each mini-batch *ξₖ*, and the ratio averages over all cached mini-batches. The notation is dense but unambiguous.
-
-3. **SGDLD-noP tuning may unfairly penalize it.** The reviewer argued that tuning SGDLD-noP to match SGDLD's jump distance could be unfair. Matching the average jump distance is a standard way to control for exploration rate, making this a fair comparison that arguably favors the baseline by giving it the same explorability.
-
-4. **Missing related works (Titsias & Yau, 2017; Lyne et al., 2015).** Rule prohibits mentioning missing related works without external confirmation.
-
-5. **Gibbs comparison "odd" in Section 6.1.** The comparison to a mini-batch-based Gibbs sampler is a reasonable baseline for a verification experiment; the small state space (16 states) is intentional for exact TV computation.
-
-6. **Low variance in prompt tuning suggests saturated metric or non-independent runs.** This is speculation without evidence of flawed methodology.
+- **"No proof or proof sketch for Proposition 4.1 in main body."** — Removed per rules: proofs deferred to appendix are standard and the parser strips appendix content. The proposition statement itself is in the main text.
+- **"Section 3.2 assumes an unbiased estimator of R exists, which does not hold."** — Removed: the paper is explicitly setting up the naive baseline and then identifying why it fails (Eq. 10–11). This is problem setup, not a flaw.
+- **"The caching estimator is not unbiased (only asymptotically)."** — Removed: Proposition 4.1 claims *asymptotic* unbiasedness, which is precisely what caching achieves. The reviewer conflates finite-sample bias with asymptotic bias.
+- **Pure formatting/style nitpicks and wording complaints.** — Removed per Hard Rules.
+- **"The paper should cover additional tasks/domains."** — Removed as scope creep; the paper already covers 5 distinct tasks across diverse domains.
 
 ## Novel Insights
 
-The reviews surface a key tension that the paper itself partially acknowledges but does not fully resolve: the caching scheme introduces non-Markovian dynamics (memory through the cache that resets upon jumps), yet the paper claims asymptotic unbiasedness without a detailed analysis of how this resetting mechanism affects convergence. The remark comparing to Hamiltonian Monte Carlo (which also has state-dependent momentum variables) is an intriguing analogy but is not developed. The strongest evidence for the method's correctness is not the theoretical proposition but the empirical demonstration in Figure 2, where total variation decreases monotonically with step size for SGDLD but not for SGDLD-noC — this is a rare case where an ablation study effectively substitutes for a missing convergence proof. However, the field would benefit from a rigorous non-asymptotic analysis of the cached estimator's bias in terms of step size and cache size.
+The reviews surface an interesting observation beyond the paper's own contributions: the paper's two techniques (caching and Polyak step size) address two fundamentally different failure modes of naive stochastic DLD — bias and variance — and these are somewhat orthogonal. The caching scheme targets the non-exchangeability of expectation and nonlinearity (the bias problem), while the Polyak adaptation targets the exponential-scale variation in jump rates (the variance problem). This decomposition suggests that future improvements could address each axis independently: variance-reduced gradient estimators could further improve the caching scheme, and more sophisticated adaptive step-size rules (beyond the simple Polyak schedule) could further stabilize the variance. The paper's framework cleanly separates these concerns, which is a valuable conceptual contribution in itself.
 
 ## Suggestions
 
-1. **Provide the theoretical sketch in the main paper.** Even if the full proof is in the appendix, the main text should explain how the non-Markovian dynamics (growing cache, resetting on jumps) are handled and what the HMC analogy means formally.
+1. **Add a theorem statement for the full SGDLD algorithm** in the main text (even if the proof is deferred to the appendix). Specify: (a) conditions on the schedule \(h_t\) and the likelihood ratio bound, (b) the claim about the limiting distribution, and (c) any caveats about the gradient approximation for \(Z(x)\). This would align the introduction's promise with the paper's content.
 
-2. **Report all missing experimental parameters** (dataset dimensions, β values, annealing schedule for hₜ) either in the main text or in the appendix that reviewers can access.
+2. **Specify the Polyak schedule** (e.g., linear decay, exponential decay, or cosine schedule) and provide the default parameters used in experiments.
 
-3. **Add wall-clock time or total energy evaluations** for the Bayesian logistic regression experiment to make the computational comparison more transparent.
+3. **Provide reproducibility details for the prompt tuning experiment:** how prompts are tokenized, the neighborhood structure over prompt sequences, and how the gradient approximation is computed.
 
-4. **Include confidence intervals or statistical significance tests** for the facility location results.
+4. **Include a brief computation or reference** supporting the \(10^{30}\) claim, or soften the phrasing.
 
-5. **Conduct a sensitivity analysis** for the gradient approximation used in the Polyak step size, showing how approximation error affects mixing rates.
+5. **Add a small experiment** investigating whether the gradient approximation for \(Z(x)\) introduces measurable bias compared to exact computation, at least on one of the synthetic tasks where exact computation is feasible.
 
 ## Score and Decision
 
-The paper addresses a well-motivated and important problem (scaling gradient-based MCMC to discrete spaces with large-data energy functions) with novel algorithmic contributions (gradient caching + Polyak step-size adaptation) that are clearly explained and supported by ablation studies across multiple domains. The empirical evidence strongly supports the core claims, particularly Figure 2 which directly validates the caching scheme. The weaknesses — incomplete theoretical exposition in the main text, some missing experimental details, and limited baselines in certain experiments — are addressable and do not undermine the paper's central contribution. This is a solid paper with clear practical value.
+The paper addresses an important and genuinely open problem — stochastic gradient MCMC in discrete spaces — with a well-motivated algorithm and strong empirical validation across diverse tasks. The caching scheme and Polyak adaptation are simple, practical, and clearly shown to address the identified challenges. The main weakness is a gap between the introduction's promise of a convergence proof for the full algorithm and the theoretical content actually presented. However, this gap is bridgeable (it requires stating a theorem that likely exists in the appendix), and the empirical evidence convincingly demonstrates the algorithm's practical effectiveness. The contributions are significant enough to warrant acceptance.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

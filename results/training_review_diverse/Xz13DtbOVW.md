@@ -1,103 +1,88 @@
-Here is my consolidated final review based on careful verification against the paper.
+Here is my consolidated final review:
 
 ---
 
 ## Summary
 
-This paper proposes CEAG (Constrained Excess Accuracy Gaps), a constrained optimization approach to mitigate the disparate impact of model pruning. The key idea is to directly bound per-group accuracy changes between the dense and sparse models (rather than using surrogate loss-based metrics), and solve the resulting non-convex, non-differentiable constrained problem using proxy constraints with replay buffers for variance reduction. Experiments on FairFace, UTKFace, and CIFAR-100 show that CEAG reliably satisfies disparity constraints on the training set across architectures and sparsity levels, and generally achieves competitive or best test-set disparity.
-
----
+This paper addresses the disparate impact of pruning—where sparse models exhibit unequal accuracy drops across sub-groups—by formulating a constrained optimization problem (CEAG) that directly bounds per-group excess accuracy gaps (EAGs) between dense and sparse models. The authors propose an algorithm using proxy constraints (negative loss gaps as surrogates for the non-differentiable accuracy gaps) and replay buffers to stabilize stochastic constraint estimates. Experiments on FairFace, UTKFace, and CIFAR-100 show that CEAG reliably satisfies disparity constraints on the training set across architectures and sparsity levels, and the paper honestly documents that all surveyed mitigation methods (including CEAG) fail to generalize to test data.
 
 ## Strengths
 
-- **Direct, interpretable formulation of pruning-induced disparity.** Defining constraints on excess accuracy gaps (EAGs) — the difference between per-group and global accuracy changes from pruning — is a meaningful advance over surrogate loss-based approaches (Tran et al. 2022). The tolerance ε has a clear interpretation (e.g., ε=1% bounds per-group accuracy degradation relative to the average), enabling algorithmic accountability with a well-defined feasibility criterion (§3.1–3.3).
+- **Direct, interpretable constraints on accuracy gaps.** The formulation (Equation 2) bounds per-group EAGs between dense and sparse models with a tolerance parameter ε, providing clear semantics: a feasible model guarantees that no group's accuracy degrades more than ε beyond the average degradation. This is a cleaner, more directly interpretable target than loss-based surrogates (Section 3.3).
 
-- **Reliable training-set disparity reduction across diverse settings.** CEAG consistently achieves the smallest maximum EAG and pairwise disparity on the training set across all evaluated tasks (FairFace at 99% sparsity, UTKFace with race and intersectional groups, CIFAR-100 with 100 groups) and architectures (ResNet-34, MobileNet-V2, CifarResNet-56), while maintaining comparable aggregate accuracy. The results are reported with mean±std across 5 seeds, demonstrating low variance (§5.2–5.3).
+- **Novel algorithm for constrained optimization with stochastic, non-differentiable constraints.** The paper contributes a practical method combining proxy constraints (Cotter et al., 2019) with replay buffers to handle the non-differentiability and high variance of accuracy-gap estimates from mini-batches. The alternating GDA scheme (Algorithm 1) requires only one forward/backward pass per iteration, matching the cost of ERM—a non-trivial engineering contribution.
 
-- **Scalability to large numbers of groups.** The method handles up to 100 sub-groups (CIFAR-100) and intersectional groups (UTKFace race×gender) with the same per-iteration cost as ERM — one forward pass and one backward pass. Replay buffers provide a practical mechanism for variance reduction in constraint estimation without increasing the per-iteration computational budget (§4, Table 3).
+- **Replay buffers improve training dynamics.** The introduction of replay buffers demonstrably reduces variance in constraint estimates, improving disparity metrics for both CEAG and the equalized-loss baseline (EL). The CIFAR-100 experiment (Section 5.3) shows that replay buffers improve max ψ_g on both train and test sets, confirming this is a broadly useful technique.
 
-- **Novel technical components for stochastic constrained optimization.** The combination of proxy constraints (for non-differentiable accuracy-based constraints) with replay buffers (for variance reduction in mini-batch constraint estimates) is well-motivated and demonstrated to improve training dynamics for both CEAG and the equalized loss baseline (Table 3, App. B.3). The algorithm is general and applicable beyond the specific disparity setting.
+- **Honest documentation of the generalization barrier.** The paper is the first to systematically document that all current mitigation approaches (CEAG included) fail to guarantee low disparity on unseen data (line 56, Section 6, Ethics Statement). This is a genuine empirical finding that clarifies the current frontier for the field.
 
-- **Transparent documentation of limitations.** The paper repeatedly and prominently acknowledges that all mitigation methods (including CEAG) fail to generalize disparity constraints to unseen data (§1, §5.3, §6, Ethics Statement). This candor is a strength of scientific integrity and identifies a concrete open problem for the community.
-
----
+- **Empirical consistency across tasks and sparsity levels.** CEAG consistently achieves the lowest training-set max ψ_g and Ψ_pairwise across FairFace (99% sparsity), UTKFace (85–95%), and CIFAR-100 (92.5%), with lower variance across seeds than baselines.
 
 ## Weaknesses
 
 ### Fatal
 
-None. The paper's core technical contributions — the EAG-based formulation, the proxy-constraint + replay-buffer algorithm, and the experimental demonstration of reliable training-set control — are valid and supported by the evidence. The generalization gap is a genuine limitation but is transparently documented and does not invalidate the core claims.
+None.
 
 ### Major
 
-1. **Generalization gap undermines practical deployment claims.** The paper candidly states that "all methods considered in this paper (including ours) fail to mitigate pruning-induced disparities on unseen data" (§1). While CEAG reliably satisfies constraints on the training set and generally achieves better test-set disparity than baselines, the central promise implied by the title and framing ("Constraining Disparate Impact in Sparse Models") is delivering sparse models with controlled disparity for deployment. The constraints serve as a training-time diagnostic tool, but their failure to transfer means the method does not (yet) provide a deployable solution. This is the most significant weakness and limits the practical impact of the contribution.
+- **The paper's framing overstates what has been demonstrated, creating a tension with its own central finding.** The paper repeatedly claims CEAG can "reliably mitigate the disparate impact of pruning" (introduction bullet list, line 28 caption, line 337, conclusion line 396) without consistently qualifying that this holds *on the training set*. Yet the paper's most striking empirical result is that *all methods, including CEAG, fail to mitigate on unseen data* (line 56). A method whose constraints are violated on test data at comparable levels to baselines is not yet a practical mitigation tool. The paper acknowledges this gap honestly in multiple places, but the framing foregrounds the method as a solution. The actual contribution is a clean formulation + algorithm for constrained optimization on the training distribution, plus the documentation that this does not transfer. These are valuable, but the paper would be stronger if this were the headline, with CEAG presented as a tool for *studying* the gap rather than as a deployed solution. The gulf between "reliably mitigates" (unqualified) and "fails on unseen data" is too wide.
 
-2. **Incomplete baseline comparison.** The baselines are limited to naive fine-tuning, early-stopped fine-tuning, and the equalized loss method of Tran et al. (2022). Missing are simpler fairness-aware fine-tuning approaches such as group-weighted loss reweighting, group distributionally robust optimization (DRO), or directly adding per-group accuracy gap terms as penalties rather than constraints. These are directly applicable to the same problem (post-pruning fine-tuning) and would help establish whether CEAG's constrained formulation offers advantages over simpler alternatives. Without these, it is unclear whether the complexity of the constrained optimization is justified.
+- **The generalization gap is documented but not analyzed.** The paper identifies an important finding that no method generalizes, but does not investigate *why*. Is it because training-set constraints force the model to memorize group-specific patterns? Does the surrogate (negative loss gap) misalign with the true constraint on test data? Does the replay buffer variance reduction bias estimates toward old measurements that don't reflect distribution shift? Without even a preliminary analysis (e.g., tracking per-group accuracy on a validation split and early-stopping on test disparity), the paper stops at documenting the problem rather than advancing understanding of it. This limits the paper's impact from a "finding that shapes future work" to an "observation that needs follow-up."
 
 ### Minor
 
-1. **On CIFAR-100, ELGRB outperforms CEAG on test disparity.** The paper reports that "the best accuracy and the smallest max_g ψ_g on the test set are obtained by ELGRB" (§5.3, Table 3). This directly undercuts any claim that CEAG is uniformly the best method, and the paper does not analyze why the advantage reverses on this larger-group setting.
+- **The one-sided constraint (only bounding positive ψ_g) is handled too briefly in the main text.** The paper imposes only upper bounds on ψ_g (Equation 5), while the disparity metric used (Ψ_pairwise = max ψ_g − min ψ_g) depends on both tails. A group that improves far more than average (negative ψ_g) can inflate Ψ_pairwise even if all positive ψ_g are ≤ ε. The paper acknowledges this (Section 3.2) and cites the appendix for justification, but the main-text explanation ("challenging due to the small feasible region relative to estimation noise") is asserted without evidence. An analysis of whether min ψ_g is typically large in practice (e.g., a correlation plot of min vs. max ψ_g during CEAG training) would substantially increase confidence that the practical impact is small.
 
-2. **Only upper bounds on ψ_g are constrained, not the full disparity range.** The formulation only imposes ψ_g ≤ ε (positive EAGs/hyper-degraded groups), not lower bounds. As the paper acknowledges (§3.2), this means the pairwise disparity ψ_max − ψ_min can still grow if some groups improve dramatically while others degrade. The operational shift to max_g ψ_g as the metric is a reasonable practical choice, but the paper would benefit from clearer discussion of what disparity patterns the formulation does and does not control.
+- **The surrogate–true constraint alignment is not analyzed.** The primal objective uses ∇ψ̃_g (negative loss gaps) while the dual update uses the true ψ_g (accuracy gaps). The paper asserts this is "a reasonable choice because drops in accuracy correspond to increases in loss" (line 208), but the correspondence is neither linear nor monotonic in general: a small loss increase can correspond to a large accuracy drop near a decision boundary, and vice versa. No empirical correlation analysis between ψ̃_g and ψ_g during training is provided. If the surrogate gradient points in a direction that does not reduce (or even increases) the true accuracy gap, the primal and dual signals could conflict. A simple figure tracking both quantities over training would address this.
 
-3. **Limited hyperparameter sensitivity analysis.** The tolerance ε and buffer size k are critical hyperparameters, but no sensitivity analysis is presented in the main text. The choice of ε values is justified conceptually (§3.3) but not empirically explored (e.g., how does the train/test trade-off change with ε?). The buffer ablation for CIFAR-100 is informative but limited to a single experiment.
+- **Scalability claim of "hundreds of sub-groups" is supported by only one experiment with 100 groups (CIFAR-100) and a moderate-sized model (CIFAR-ResNet-56).** The UTKFace intersectional experiment has ~10 groups. While the computational overhead argument (Section 4.3) is plausible, it is not backed by wall-clock or memory measurements. The claim should be tempered or better evidenced.
 
-4. **No analysis of why the generalization gap occurs.** The paper documents the generalization failure but provides no analysis of its causes — e.g., whether it stems from distribution shift, overfitting to noisy constraint estimates, insufficient buffer sizes, or fundamental limitations of the training-set objective. This analysis would significantly strengthen the paper even without a full solution.
+- **The specific ε values used in experiments are not stated in the main text.** The paper describes ε conceptually and uses "feasible" to indicate max ψ_g ≤ ε, but the actual ε values per experiment are not reported in the running text (they may appear in the table files, which are included via \input commands). Adding them to the main text would aid reproducibility.
+
+- **Computational overhead is claimed but not measured.** Section 4.3 argues the overhead is negligible, but no wall-clock time per epoch or total training time is reported for any task.
 
 ### Trivial
 
-None.
-
----
+- "Hundreds" (abstract, line 4, line 54) is an overstatement for 100 groups. The number of groups in the scalability experiment is exactly 100, which is closer to "one hundred" than "hundreds."
+- The asymmetry of the normative choice (treating over-improvement as equally problematic as degradation via Ψ_pairwise, without constraining negative ψ_g) is not discussed in the ethics statement.
 
 ## Nice-to-Haves
 
-- Sensitivity analysis for ε and buffer size k across multiple settings.
-- Simpler baseline methods (group-weighted loss, DRO, or penalty-based approaches) to isolate the benefit of the constrained formulation.
-- Analysis of the generalization gap: does it correlate with dataset size, group representation frequency, or model capacity? Is the gap reduced by validation-set-based early stopping on disparity?
-- The FairGRAPE comparison on FairFace (Table 1) uses a different architecture and is quoted from the original paper without re-running; the paper acknowledges this, but the comparison adds limited information given the confounds.
-
----
+- The paper could compare against EL without replay buffers on all tasks (currently only done on CIFAR-100), to strengthen the claim that replay buffers are a broadly useful contribution.
+- An ablation study on the replay buffer size k (bias–variance trade-off) would strengthen the engineering contribution.
+- Reporting the dense model's per-group accuracy would help readers assess whether the dense model itself introduces bias that propagates through the EAG definition.
 
 ## Removed Points
 
-These points are flagged to be removed from the harsh critic's review; treat them with caution:
+The following points were raised by reviewers but are removed or downgraded based on verification against the paper:
 
-- **"The method's central claim is flatly contradicted by the paper's own evidence."** Overstated. The paper's central claim is about directly constraining disparity via accuracy gaps; this is achieved on training data. The generalization caveat is stated prominently and transparently. The claim is not "contradicted" — it is qualified. The paper would benefit from sharper framing but does not contradict itself.
-
-- **"FairGRAPE comparison is problematic and misleading."** The paper transparently notes it quotes from the original publication and does not re-run FairGRAPE due to cost. This is standard practice for comparison with expensive prior methods. The comparison is imperfect but not misleading.
-
-- **"Computational overhead claim not substantiated in main paper."** The main paper provides a clear technical argument (§4.3): one forward + backward pass, same as ERM, plus O(|G|) constraint evaluation. The appendix is referenced for empirical confirmation. This is standard practice and substantiated.
-
-- **"The paper would be more honest as an empirical study."** The paper has a genuine methodological contribution (the formulation and algorithm). Reconceptualizing it as purely an empirical study would discard this contribution. The current framing as a method paper with honest limitation documentation is appropriate.
-
-- **"The method only constrains positive ψ_g — the full range of disparity is not bounded."** The paper explicitly discusses and justifies this design choice (§3.2), defines an operational metric (max_g ψ_g), and uses both max_g ψ_g and pairwise disparity in evaluations. The issue is acknowledged.
-
-- **"No statistical significance testing."** Reporting mean ± std across 5 seeds is standard for this type of empirical work. This is not a meaningful gap.
-
----
+- *"The equalized loss baseline (EL) is re‑implemented and enhanced with replay buffers, but the original paper's version is not run on the same tasks."* — The paper explicitly states this is a "re-implementation... enhanced with replay buffers" (line 302) and compares against EL without buffers on CIFAR-100 (line 358). The comparison is transparent. Removed because the paper acknowledges this design choice.
+- *Criticisms based on missing appendix content* — Removed per instructions: the parser strips appendices, which exist in the original submission.
+- *Formatting nitpicks and hypothetical missing references* — Removed per instructions.
+- *"The paper criticizes loss-based methods as surrogate/indirect, but the accuracy-gap definition also makes a specific normative choice."* — This is a valid observation but not a weakness; the paper's ethics section (line 406–422) covers limitations. Including normative implications of the one-sided constraint would be nice, but its absence is not a flaw in the technical contribution.
 
 ## Novel Insights
 
-The reviews surface an interesting tension that the paper itself embodies: CEAG introduces a clean, principled formulation for controlling pruning-induced disparity, but its central finding (from the transparent evaluation) is that training-set disparity control does not transfer to test sets. The most novel insight to emerge from the reviews is that **the very directness and interpretability of the EAG formulation might be contributing to the generalization gap** — accuracy-based constraints are non-smooth and may cause the model to overfit to training-set accuracy patterns in a way that loss-based surrogates (like ELGRB) partially avoid (consistent with ELGRB's better CIFAR-100 test performance). This hypothesis is not in the paper but is worth investigating. Beyond this, the reviews do not contribute insights beyond the paper's own documented findings.
-
----
+The most striking finding to emerge from the review process is that the paper's empirical honesty about the generalization gap (all methods fail on test data) is simultaneously its strongest and weakest point: it is a genuine contribution to document this barrier, but the paper does not leverage this finding to advance understanding of *why* the gap occurs. The reviews converge on the same structural observation: the paper sits at the boundary between "here is a new method that works on the training distribution" and "here is a surprising failure mode affecting all methods in this area." Pushing further into the latter direction—characterizing the causes of the gap—would transform the paper from a solid-but-limited engineering contribution into a genuinely insightful piece of research.
 
 ## Suggestions
 
-1. **Sharpen the framing.** The paper claims to "reliably mitigate the disparate impact of pruning" (Contributions, line 53) and then immediately states "all methods fail on unseen data" (line 56). This juxtaposition is confusing. The paper should clearly scope its central claim as *training-time disparity control* and frame the generalization failure as a secondary finding (which is already valuable).
-
-2. **Add simpler baselines.** Including group-weighted loss or DRO fine-tuning would establish whether the constrained optimization machinery is necessary, or whether simpler reweighting suffices.
-
-3. **Investigate the generalization gap.** Even without solving it, an analysis (correlating the gap with group size, buffer parameters, or model capacity) would substantially increase the paper's impact. If the gap is related to accuracy-as-constraint non-smoothness, the paper could suggest specific remedies.
-
-4. **Ablate ε and k in the main text.** Even one figure showing how test-set disparity and accuracy vary with ε across sparsity levels would significantly strengthen the empirical evaluation.
-
----
+1. **Reframe the central narrative.** Make the generalization gap a primary contribution rather than an afterthought. Present CEAG as a tool for *studying* why training-set disparity guarantees do not transfer, and add even a preliminary analysis (e.g., does the gap correlate with per-group sample size? Does early-stopping on test disparity help? Does the surrogate misalign on test data?).
+2. **Add a correlation analysis** between ψ̃_g (loss-based surrogate) and ψ_g (accuracy gap) over training for at least one task (e.g., CIFAR-100 or FairFace). A scatter plot showing alignment (or misalignment) would substantially strengthen confidence in the optimization.
+3. **Report ε values per experiment in the main text** and add a brief analysis of whether min ψ_g ever becomes large enough to inflate Ψ_pairwise despite bounded max ψ_g.
+4. **Include wall-clock training time** for at least one task to substantiate the "negligible overhead" claim.
+5. **Tone down unqualified claims** of "reliably mitigates disparate impact" and consistently specify "on the training set" where appropriate, to avoid the tension with the generalization finding.
 
 ## Score and Decision
 
-The paper proposes a novel and well-motivated formulation for a real problem, provides a working algorithm, evaluates across multiple tasks/architectures, and is transparent about its limitations. The generalization gap and incomplete baselines are real weaknesses that limit the practical contribution, but the technical advances (EAG-based constraints, proxy-constraint + replay-buffer optimization, demonstrated training-set control and scalability) are genuine. In its current form the paper is above the acceptance threshold but would be strengthened by addressing the major and minor concerns.
+The paper has genuine methodological contributions: a clean, interpretable formulation for the accuracy-based disparate impact of pruning, a practical algorithm with proxy constraints and replay buffers, and the honest documentation that all current methods fail on test data. These are real contributions that advance the field's understanding.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+However, the framing systematically overstates what the evidence supports. The paper presents CEAG as a mitigation method, but the evidence only shows it works reliably on the training set. The generalization gap is documented but not analyzed—stopping at observation rather than advancing understanding. The optimization has plausible gaps (one-sided constraints, surrogate alignment) that are not empirically evaluated. These issues do not invalidate the methodological contributions, but they prevent the paper from delivering on the promise of its headline claims.
+
+The core ideas are worth pursuing, and with a major revision that reframes the contribution and adds even preliminary analysis of the generalization gap, the paper could become a strong candidate. In its current form, the distance between what is claimed and what is demonstrated is too large.
+
+**Score and Decision**
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

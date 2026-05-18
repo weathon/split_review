@@ -1,20 +1,36 @@
-Now I have all the information I need. Let me produce the consolidated review.
+Now I have verified the paper thoroughly. Let me cross-check each reviewer claim against the actual paper content.
+
+**Verification results:**
+
+1. **Policy-dependence claim**: The paper explicitly acknowledges this in Section 6 (line 119): "our findings can only approximate this through what π can achieve." The paper's language is mostly careful — "For each robotic agent, we characterize..." (abstract), "most task policies in our study" (Section 4). Some broader phrasing exists ("sensory information is rarely task-critical") but is generally qualified.
+
+2. **Tautological claim**: The paper does use "counter-intuitively" in line 12. Section 4.1's theory (lines 54-59) shows optimal policies need no sensing in deterministic settings. The empirical finding that better policies need less sensing follows directly. Valid observation about framing.
+
+3. **OOD claim**: The paper acknowledges this explicitly in lines 88-89 but provides no quantitative diagnostics. Valid concern.
+
+4. **Thin stochastic experiments claim**: Only the four-rooms gridworld. Valid.
+
+5. **Computational cost claim**: Lines 90 explicitly state "These are expensive evaluations: for each state...we must generate 100x5=500 trajectories." The reviewer is factually wrong. **REMOVE.**
+
+6. **Greedy strategy claim**: The contributions list mentions it but no evaluation in main text — likely in the appendix. **REMOVE per rules about missing appendix content.**
+
+Now writing the consolidated review.
 
 ## Summary
 
-This paper proposes VoSI (Value of Sensory Information), an empirical framework for measuring how much task performance degrades when sensing is withheld at specific states along a robot's trajectory. Using look-ahead policies (TD-MPC2 and Diffusion Policy) across 7 robotics tasks (DM-control, Robosuite, Push-T), the authors compute state-wise "VoSI profiles" and categorize them into three prototypical shapes (flat, gradual, stepped). The key empirical findings are that sensory information is rarely task-critical in many standard benchmarks, and that better-trained policies are more robust to sensor loss.
+This paper proposes a framework called Value of Sensory Information (VoSI) that empirically measures how much task performance degrades when sensory feedback is withheld from a frozen policy at different moments during task execution. Applied to seven robotics benchmarks (DM-control, Robosuite, Push-T) with TD-MPC2 and DiffusionPolicy agents, the framework reveals that sensory information is surprisingly rarely task-critical in many standard setups — several tasks incur near-zero regret even under fully open-loop execution. The paper also demonstrates that stochastic dynamics drive sensing needs and that more competent policies are more robust to sensor loss.
 
 ## Strengths
 
-1. **Novel state-wise VoSI profiles enable fine-grained temporal analysis of sensing needs.** Unlike prior value-of-information work (e.g., Majumdar et al. 2023) that provides global bounds or only studies fixed-rate sensing, this paper proposes VoSI profiles (Section 5, Eq. 1) that measure, per state, how task performance degrades when sensing is withheld for varying durations. The classification into flat, gradual, and stepped profile shapes (Figure 7) with concrete visualizations (Figures 8, 10) is genuinely new and provides actionable insight into *when* along a trajectory sensing matters.
+- **Novel empirical methodology (VoSI):** The paper introduces a clean, state-wise regret measure that quantifies the task-relevant value of sensory information at specific moments, going beyond prior work focused on constrained optimization or theoretical bounds. The methodology is clearly defined (Eq. 1) and practically implemented via mixed-loop execution of lookahead policies.
 
-2. **Systematic empirical study across diverse tasks and two SOTA policy architectures.** The paper evaluates 7 tasks spanning dynamic locomotion (DM-control), static tabletop manipulation (Robosuite), and contact-rich pushing (Push-T), using both a model-based RL policy (TD-MPC2) and an imitation learning policy (Diffusion Policy). This breadth (Section 4, Figures 2-3) supports the paper's descriptive findings about sensory requirements varying across task types.
+- **Systematic empirical finding that sensing is rarely critical in common benchmarks:** Figure 3 shows that for 6 of 7 tasks, policies achieve near-zero normalized regret even when sensing only once every 5 steps. For Robosuite tasks, even fully open-loop execution performs as well as closed-loop control. This result is demonstrated across two different policy architectures (TD-MPC2 and DiffusionPolicy) and supported by a theoretical argument (Section 4.1) about optimal policies in deterministic environments.
 
-3. **Counterintuitive finding with practical implications.** Figure 3 shows that on Robosuite tasks, policies achieve near-zero regret (within 95% CI) even under fully open-loop execution. DM-control swingup and Push-T also show strong robustness at reduced sensing rates. The paper correctly connects this to recent observations by Dasari et al. (2022) and Wang et al. (2024), lending credibility to the finding.
+- **Identification of prototypical VoSI profile shapes:** The paper categorizes VoSI profiles into flat, gradual, and stepped shapes (Figures 7-8) and provides intuitive explanations linking each shape to task phases (e.g., flat after goal achievement, gradual from hard-to-model contacts, stepped from phase changes like losing track of a ball). This taxonomy provides a clear visual language for understanding when sensing matters.
 
-4. **Four-rooms toy experiment causally identifies task characteristics driving sensing needs.** The controlled experiment in Section 4.1 (Figure 4) shows that increasing environment stochasticity (varying p) and dynamics model error both produce progressively higher regret from reduced sensing. This provides a principled explanation for the observed variation across tasks.
+- **Critical observation about benchmark sensory complexity:** The paper notes that Robosuite manipulation tasks show no performance loss under open-loop execution, suggesting these benchmarks may underestimate the sensory demands of real-world robotics — a useful observation for the community.
 
-5. **Demonstration that competency correlates with sensor robustness.** Figure 5 shows that policies at later training stages and with higher model capacity degrade less at lower sensing rates. This inverse correlation between performance and sensor dependency is a nontrivial empirical finding with potential implications for efficient deployment.
+- **Demonstration of competency-sensor dependency:** Figure 5 empirically shows that policies at later training stages and with higher model capacity degrade less at lower sensing rates, validating the theoretical expectation that more competent policies are more robust to sensor loss.
 
 ## Weaknesses
 
@@ -22,54 +38,65 @@ This paper proposes VoSI (Value of Sensory Information), an empirical framework 
 None.
 
 ### Major
-
-1. **The VoSI measure conflates information value with policy robustness, and the paper's response to this confound is insufficient.** The paper defines VoSI as the reward gap between closed-loop and mixed-loop execution of a *frozen policy* trained only for closed-loop operation. The paper acknowledges this (Section 5: "standard pre-trained look-ahead policies ... would be operating out-of-distribution when executed in mixed loop mode") but dismisses it with a hand-wavy "appear to hold up well enough to produce coherent and interpretable findings" and a circular appeal to alignment with Section 4.1's theoretical expectations. This is not adequate. The performance drop could reflect the policy's inability to handle out-of-distribution execution patterns rather than the inherent value of the withheld sensory information. The Robosuite results are especially ambiguous: these are deterministic tabletop tasks where open-loop success could reflect either (a) genuinely low sensory requirements or (b) policies that have learned highly stereotyped trajectories requiring no mid-trajectory correction. VoSI as defined cannot separate these. Even acknowledging this limitation explicitly, as the paper does, the core framing of VoSI as measuring the "value" of sensory information rather than "policy fragility under distribution shift" overstates what has been demonstrated. This does not invalidate the framework but means the paper's headline claims must be interpreted as *observations about how specific trained policies behave under reduced sensing*, not about the inherent sensory requirements of the tasks.
-
-2. **The paper's framing overclaims generality relative to the evidence.** The title "The Value of Sensory Information to a Robot" and abstract claims like "sensory information is surprisingly rarely task-critical in many commonly studied task setups" imply conclusions that extend beyond the 7 tasks, 2 architectures, and single-seed training runs studied. The limitations section (Section 6) partially addresses this, but the main contributions (Section 1) and the narrative throughout Sections 4-5 frame the findings as revealing task-level properties rather than policy-level ones. The paper would be substantially stronger and more honest if reframed as "an empirical study of the sensory requirements of current SOTA policies on standard benchmarks" rather than as revealing general truths about sensing and task performance.
+None. The paper's core contribution — the VoSI methodology and the empirical finding that sensing is rarely critical in common benchmarks — is sound and supported by evidence. The issues below are genuine but do not invalidate the central claims.
 
 ### Minor
 
-3. **The connection between the optimal-policy analysis (Section 4.1) and the experiments is suggestive but not evidential.** The paper correctly shows that for an optimal policy with perfect sensing and deterministic dynamics, sensing after the first step has zero value. It then argues that "finite expressivity" drives the need for sensing in the main experiments. However, the experiments only vary training checkpoint and model capacity (Figure 5), showing a correlation consistent with this hypothesis, without directly testing whether the policy is capable of learning the deterministic dynamics or quantifying the role of expressivity limitations. The four-rooms toy experiment provides intuition but is not run on the 7 actual tasks. This does not invalidate the claim, but the link between theory and experiments is looser than the paper's narrative suggests.
+1. **The VoSI framework is inherently policy-dependent, and the paper occasionally uses broader language that blurs this distinction.** The paper acknowledges this in the limitations (Section 6: "our findings can only approximate this through what π can achieve"), and most claims are attributed to the specific policies studied. However, statements like "sensory information is surprisingly rarely task-critical" (abstract) and the task-level "sensory complexity" ordering in Section 4 elide the policy-dependence. What the paper actually measures is how specific policies (TD-MPC2, DiffusionPolicy) handle open-loop execution. A different policy with better internal dynamics prediction could produce different VoSI profiles. The paper would benefit from either computing VoSI across multiple policy families on the same task or consistently qualifying claims as policy-specific.
 
-4. **Statistical precision is thin for the fine-grained VoSI profiles.** The paper uses 5 rollouts per state per h-value (Section 5) to estimate VoSI. While the fixed-rate analysis (Figure 3) reports 95% confidence intervals, the state-wise VoSI profile figures (Figures 7, 10) do not report any variance estimates. Given the contact dynamics and stochastic elements in tasks like Push-T and cup-catch, some profile shapes may be noisy. Given the computational expense noted by the authors (500 trajectories per state), this is understandable, but it weakens confidence in the finer-grained claims about profile shapes.
+2. **The out-of-distribution concern for mixed-loop execution is acknowledged but not quantitatively validated.** The paper (Section 5) correctly notes that policies trained for closed-loop execution are operating out-of-distribution in mixed-loop mode, and asserts that they "hold up well enough to produce coherent and interpretable findings." However, no quantitative diagnostics are provided — e.g., comparing action distributions from closed-loop vs. open-loop rollouts, or verifying that mixed-loop state visitations stay within the training distribution. If mixed-loop rollouts from some states produce erratic trajectories, VoSI profiles could reflect policy failure modes rather than task-relevant sensor value. The coherence of the results partially mitigates this concern, but systematic validation would substantially strengthen the framework.
 
-5. **Contributions 3 and 4 are underdeveloped.** Contribution 3 (VoSI applicability under stochastic dynamics and noise) and Contribution 4 (greedy sensing strategy) are mentioned in the contribution list but receive minimal treatment in the paper. The "greedy strategy" is especially thin — no task it was tested on, no baseline comparison, no quantification of improvement. These should either be fleshed out with experimental results or removed from the contribution list to avoid over-promising.
+3. **The inverse correlation between policy competency and sensor dependency is presented as "counter-intuitively" but is a straightforward consequence of the paper's own theoretical analysis.** Section 4.1 shows that optimal policies in deterministic environments need zero sensing beyond timestep 0. The empirical finding (Figure 5) that more competent policies (better trained, higher capacity) are more robust to sensor loss is a direct validation of this theory, not a surprising new discovery. The paper should reframe this finding as empirical confirmation of the theoretical expectation rather than presenting it as "counter-intuitive."
 
-6. **Interaction between look-ahead chunk length n and VoSI is not discussed.** The paper studies VoSI and fixed-rate sensing as a function of open-loop window h, but the policy's action-chunk length n is a design parameter that directly affects how robust the policy naturally is to missing sensing. A policy with very long chunks might be inherently more stable under open-loop execution. This is a potentially important confound that is not analyzed.
+4. **The stochastic dynamics experiments are too thin to support the claimed generality.** Contribution 3 claims VoSI is applicable "in other settings by showing proof-of-concept applications to environments with stochastic dynamics and model/sensing noise." The only evidence is a single toy four-rooms gridworld (Figure 4). This is far from demonstrating applicability to the complex, high-dimensional tasks studied in the main experiments. The paper would be stronger by either removing this contribution claim or including experiments on stochastic variants of DM-control or Push-T tasks.
+
+5. **The VoSI profile classification (flat/gradual/stepped) is post-hoc and qualitative.** While the taxonomy aids exposition and provides useful intuition, it is not used to make any testable predictions or validated quantitatively. This descriptive categorization is reasonable for an empirical analysis paper but should be presented with appropriate humility about its limitations.
 
 ### Trivial
-None.
+
+- The term "normalized regret" (fraction of closed-loop reward lost) is reasonable but could be confused with regret relative to an optimal policy. Clarification would help.
 
 ## Nice-to-Haves
 
-- **Validation against an oracle.** On tasks with known dynamics (e.g., DM-control), computing the performance of a truly optimal open-loop trajectory (via model-based planning) and comparing it to the mixed-loop policy execution would calibrate how much of VoSI is attributable to information necessity vs. policy suboptimality.
-- **Variance estimates for VoSI profiles.** Adding confidence bands to Figures 7 and 10 would significantly strengthen the credibility of the profile shape classification.
-- **Seed-averaged VoSI.** Computing VoSI profiles across an ensemble of policies trained from different random seeds would distinguish task-driven VoSI from policy-idiosyncratic VoSI.
+- **Multi-policy analysis on the same task:** Computing VoSI for multiple policies (varying capacity, architecture, training budget) on the same task would directly address the policy-dependence concern and potentially strengthen task-level interpretations if profiles are consistent.
+- **Mixed-loop diagnostics:** Providing quantitative evidence (e.g., action distribution comparisons, state-visitation analysis) that mixed-loop rollouts stay within the training distribution.
+- **Cost analysis and approximations:** A brief discussion of how to approximate VoSI (e.g., via importance sampling or learned surrogate models) to reduce the 500-trajectory-per-state cost would enhance practical relevance.
+- **Comparison to a theoretical lower bound:** Deriving a lower bound on VoSI from environment dynamics entropy would help separate policy limitations from irreducible task requirements.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were flagged by reviewers but are removed per the review guidelines:
 
-- **"The framing 'more sensing always improves task performance' is a straw man."** The paper describes a common intuition and immediately cites Mason (1993) and Erdmann & Mason (1988) who argue the opposite. The paper's own claim is precisely about understanding *when* sensing is valuable, so it is not setting up a straw man.
-- **"The optimal-policy analysis is trivial."** The analysis (deterministic dynamics → no value to sensing after step 1) is simple but serves its purpose as a theoretical baseline. The paper uses it to motivate the empirical question, not as a contribution. This is not a weakness.
-- **"The paper should also cover Y / domain Z / additional tasks."** The paper studies 7 tasks across 3 benchmarks with 2 architectures. For a first empirical study proposing a new measurement framework, this is a reasonable scope. Demanding more tasks or domains is scope creep.
-- **Complaints about missing appendix or proofs.** The parser strips supplementary material; these likely exist in the original submission.
+- **"Computational cost not discussed":** The paper explicitly states "These are expensive evaluations: for each state for which we compute VoSI, we must generate 100x5=500 trajectories" (line 90). The reviewer's claim that this is not discussed is factually incorrect.
+- **"Greedy strategy not described/evaluated in main text":** The greedy strategy is listed as Contribution 4 and is likely detailed in the appendix, which was stripped by the parser. Per guidelines, criticisms about missing appendix content are removed.
+- **"Formatting/style nitpicks" and "typos":** Any such criticisms reflect parser artifacts, not author errors.
 
 ## Novel Insights
 
-The reviews surface one genuinely valuable insight the paper itself does not fully articulate: the VoSI framework, as implemented, is best understood not as measuring the inherent "value of sensory information" to a robot in general, but as diagnosing the *open-loop robustness footprint* of a specific trained policy. The fact that VoSI profiles are policy-dependent (the paper shows this in Figure 5) is actually the feature, not the bug — the framework could be used as a diagnostic tool for policy generalization and robustness, analogous to how saliency maps are used in vision. The harmful framing mismatch is that the paper presents this as revealing task properties when the measure is fundamentally about policy properties. Reframed as "a method for characterizing when a learned policy relies on sensory feedback," the contribution would be cleaner and the limitations would become less problematic.
+Beyond the paper's own contributions, the most striking insight synthesizable from the reviews is that the paper's central empirical finding — that sensing is rarely critical — may be partly an artifact of the benchmark ecosystem itself. The paper shows Robosuite tasks are essentially open-loop solvable, DM-control tasks need modest sensing, and only Push-T shows meaningful sensor dependence. This suggests the field's standard benchmarks may be selecting for policies and tasks that systematically underweight the role of sensory feedback, a methodological critique that goes beyond the paper's explicit conclusions. The fact that two very different policy classes (TD-MPC2 and DiffusionPolicy) produce similar VoSI profiles on shared tasks further suggests that this weakness is not an artifact of any single algorithmic family but a property of the benchmark regime.
 
 ## Suggestions
 
-1. Reframe the paper's claims explicitly as being about *trained policies* rather than about tasks or robots in general. This would honestly characterize what VoSI measures and make the limitations less damaging.
-2. Add a validation experiment on at least one task where the ground-truth sensory requirements are known (e.g., by introducing a state-dependent perturbation mid-trajectory and showing VoSI correctly spikes at that moment).
-3. Either flesh out the greedy sensing strategy with concrete experiments or drop it from the contribution list. It currently exists only as a placeholder.
-4. Add confidence intervals or variance bands to the VoSI profile figures (Figures 7, 10), or at minimum a discussion of the noise level.
-5. Discuss how the action-chunk length n of the look-ahead policy interacts with the VoSI measurements.
+1. **Clarify the scope of claims:** Consistently frame findings as "VoSI profiles of these specific policies on these tasks" rather than occasionally implying task-level properties. Add a brief statement early in the paper (not just in the limitations) that VoSI is policy-dependent by construction.
+2. **Add quantitative mixed-loop diagnostics:** Provide a simple analysis (e.g., comparing the distribution of actions or state visitation frequencies between closed-loop and mixed-loop rollouts) to verify that mixed-loop behavior does not degenerate catastrophically.
+3. **Reframe the competency correlation:** No longer present the competency-sensor dependency as "counter-intuitive" — it follows directly from Section 4.1's theory. Present it as empirical validation of the theoretical expectation.
+4. **Either expand the stochastic experiments or tone down Contribution 3:** Add a stochastic variant of at least one DM-control or Push-T task, or replace Contribution 3 with a more modest claim.
 
 ## Score and Decision
 
-The paper proposes a novel and genuinely useful framework for analyzing when sensory information matters to a decision-making policy. The VoSI profile shapes (flat, gradual, stepped) are intuitively meaningful and well-visualized. The core empirical finding — that many standard benchmark tasks can be solved with surprisingly little mid-trajectory sensing — is interesting and connected to concurrent observations in the literature. However, the paper has two significant issues: (1) the VoSI measure has a known confound (policy robustness vs. information value) that is acknowledged but not resolved, and the paper's dismissal of it is too casual; (2) the framing consistently overclaims generality, presenting policy-level observations as task-level truths. These do not invalidate the contribution but mean the paper needs substantial revision in framing and at least one validation experiment to be fully convincing. On balance, the novelty of the framework outweighs the limitations, but just barely in the current form.
+**Originality:** The VoSI methodology and the empirical finding that sensing is rarely critical in standard benchmarks are original contributions. Prior work focused on constrained optimization or theoretical bounds rather than empirical measurement on modern benchmarks.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+**Importance of research question:** Understanding when sensing matters is a fundamental question for robotics and sequential decision-making. The paper's findings have implications for sensor design, policy deployment, and benchmark design.
+
+**Claims support:** The central claims about VoSI profiles and sensing needs on the tested tasks are well-supported by Figures 3 and 7. The competency correlation is supported by Figure 5 but its framing as "counter-intuitive" is overblown. The stochastic dynamics claim (Contribution 3) is under-supported.
+
+**Soundness:** The methodology is sound and clearly described. The main concern is the unresolved OOD issue for mixed-loop execution, which the paper acknowledges but does not quantitatively verify.
+
+**Clarity:** The paper is well-written and clearly organized. Concepts are introduced systematically and visualizations are effective.
+
+**Value to the community:** The VoSI framework provides a useful tool for analyzing sensor requirements, and the finding that common benchmarks may have low sensory complexity is a valuable critique.
+
+The paper has real contributions and is clearly above the acceptance threshold. The weaknesses are addressable and do not undermine the central claims.
+
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

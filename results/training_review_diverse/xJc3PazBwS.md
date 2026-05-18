@@ -1,16 +1,18 @@
-Now I have all the evidence needed. Let me produce the final consolidated review.
+Now I have all the information I need. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes a two-stage Variational Information Bottleneck (VIB) framework for disentangling neural speech model representations into textual and acoustic components. Stage 1 compresses representations to retain only transcription-relevant information; Stage 2, conditioned on the frozen Stage 1 latents, captures complementary acoustic features for a target task (emotion recognition or speaker identification). The authors validate disentanglement via probing experiments showing near-random cross-modal performance, analyze layerwise contributions revealing how fine-tuning shifts acoustic-to-textual encoding, and present a preliminary feature attribution method. The framework is principled, the corroborating evidence is strong where it counts, and the central claim is believable.
+This paper proposes a two-stage Variational Information Bottleneck (VIB) framework to disentangle neural speech model representations into separate textual and acoustic components. Stage 1 compresses representations to decode transcription (textual latents), while Stage 2 learns complementary representations conditioned on the frozen Stage-1 latents to predict a downstream task (emotion recognition or speaker identification). The framework is evaluated on Wav2Vec2 and HuBERT (Base and Large), with probing experiments showing near-perfect separation: textual latents score at random chance on acoustic features while matching original hidden states on transcription, and acoustic latents show the opposite pattern. The paper also includes a layerwise analysis of how textual/acoustic contributions vary across model layers and a preliminary feature attribution analysis using attention weights.
 
 ## Strengths
 
-- **Principled two-stage VIB disentanglement framework.** The information-theoretic design is clean: Stage 1 uses CTC + information loss to isolate textual content; Stage 2 conditions on frozen textual latents with a second information bottleneck to capture complementary acoustic features. The ablation without information loss (footnote in Section 2.2) confirms the information loss term is essential — without it, disentanglement fails. This is a genuine methodological contribution over prior work relying on autoencoders or adversarial training (Section 2.2–2.3).
+1. **Strong probing validation of disentanglement.** The sanity-check probing experiments (Section 5, Figure 3) provide the most compelling evidence: textual latents perform at random baseline on all acoustic features (pitch, intensity, gender, speaker ID), while acoustic latents achieve random-baseline WER on transcription. This bilateral failure pattern is exactly what a successful disentanglement should produce, and it is demonstrated across multiple model architectures and sizes.
 
-- **Strong probing-based validation of disentanglement.** Figure 2 (Section 5) shows a clear pairwise failure pattern: textual latents achieve random-level performance on acoustic features (pitch, intensity, gender, speaker ID) while matching or exceeding hidden-state performance on transcription; acoustic latents perform at random on transcription while substantially outperforming baselines on acoustic features. This is direct, quantitative evidence supporting the core claim.
+2. **Task performance preserved under compression.** Table 1 shows that VIB-trained representations (d=128) are competitive with or exceed probing classifiers trained on full hidden states. For several settings the improvement is substantial (e.g., HuBERT-Large emotion: 66.1% VIB vs. 57.3% probing; speaker ID: 98.4% VIB vs. 92.3% probing). This demonstrates that the information bottleneck retains task-relevant information while discarding irrelevant features.
 
-- **Novel layerwise analysis revealing fine-tuning dynamics.** By applying disentangled representations per layer (Section 6, Figure 4), the paper shows that fine-tuned Wav2Vec2 loses acoustic information in its final layers in favor of textual encoding, whereas HuBERT retains stronger acoustic contributions in middle layers. This finding — obtainable only through the proposed disentanglement — is a genuine empirical insight about how fine-tuning reshapes neural speech model representations.
+3. **Layerwise analysis yields interpretable insights about model behavior.** Section 6 uses the disentangled representations to separately quantify textual and acoustic contributions per layer. The finding that fine-tuned Wav2Vec2 loses acoustic emotion-relevant information in later layers while gaining textual contribution quantitatively confirms a known phenomenon and shows the framework's value as an analysis tool beyond compression.
+
+4. **Framework generality demonstrated across architectures and tasks.** The method is evaluated on two architectures (Wav2Vec2, HuBERT), two sizes (Base, Large), both pre-trained and fine-tuned variants, and two downstream tasks (emotion recognition, speaker identification). The consistent disentanglement results across all settings support the claim that the framework is not tied to a specific model or task.
 
 ## Weaknesses
 
@@ -18,55 +20,63 @@ This paper proposes a two-stage Variational Information Bottleneck (VIB) framewo
 None.
 
 ### Major
-None.
+None. The core claims (disentanglement is achievable via two-stage VIB; the representations are separable by probing; task performance is maintained) are well-supported by the evidence. The issues below are addressable without invalidating the paper's contributions.
 
 ### Minor
 
-- **Missing ablation: performance of the acoustic latent alone on target tasks.** Table 1 and the main results only report the combined performance (Z_textual + Z_acoustic concatenated). Showing Z_acoustic alone on emotion recognition and speaker identification would directly confirm that the acoustic latent carries non-redundant, task-relevant information beyond what the textual latent already provides. The probing in Figure 2 already shows Z_acoustic captures acoustic features (pitch, intensity, etc.), which is evidence of disentanglement, but the utility of Z_acoustic *for the target task* remains inferred rather than measured. This is a completeness gap, not a fatal one — the core claim about disentanglement is separately validated.
+1. **No comparison against alternative disentanglement approaches.** The paper compares VIB-trained classifiers against probing classifiers on original hidden states, which shows that VIB compresses without losing task performance. However, it does not test whether the *disentanglement* achieved by the two-stage VIB is better or worse than what other methods (e.g., adversarial training to minimize text-predictability, β-VAE with factorized latents, or a single-stage VIB with explicit disentanglement loss) could produce. Without at least one such comparison, it is difficult to assess whether the two-stage architecture is essential or whether its main contribution is the principled IB framing. This gap is notable given that the paper positions the framework as the central contribution.
 
-- **No quantitative comparison with prior disentanglement methods.** The related work cites AutoVC, SpeechSplit, NANSY, Prosody2Vec, and others, but the paper provides no empirical comparison against any of them on the same tasks or metrics (e.g., DCI, MIG, or task accuracy). While the VIB-based approach is methodologically distinct (post-hoc on frozen representations), a comparison would substantially strengthen the contribution. The absence does not invalidate the results, but it limits the paper's ability to demonstrate relative advantage.
+2. **Framing of stage-2 representations as "acoustic" overstates what is verified.** The paper consistently labels stage-2 latents as "acoustic" features, but the training objective (learn representations complementary to an ASR-based text representation) could in principle capture any non-textual signal — including disfluencies, discourse structure, timing patterns, or residual ASR errors — not only acoustic properties. The probing suite verifies that pitch, intensity, gender, and speaker identity are present, but these are a subset of what the representation might encode. The paper would be more defensible by explicitly stating this as a bounded claim (e.g., "features complementary to the textual representation, which we verify include standard acoustic correlates") rather than equating "not textual" with "acoustic." The title and abstract's framing should reflect this precision.
 
-- **HuBERT-FT Large WER gap under-discussed.** In Table 1, probing on HuBERT-FT Large gives WER=6.9 while VIB gives WER=25.6 — a large gap. The paper (line 164) states "VIB demonstrates a similar or sometimes even lower word error rate (WER) compared to probing classifiers," which is misleading for this case. The paper should explicitly discuss why compression hurts fine-tuned HuBERT so much more than other models and whether this affects the trustworthiness of textual latents from such models.
+3. **Attribution analysis (Section 7) is preliminary and would benefit from stronger validation.** The paper is transparent that this is a preliminary investigation (line 260: "While a comprehensive evaluation of disentangled attribution is beyond the scope of this work"), but the abstract and introduction still present it as a contribution. The current analysis relies on a single dot-product measure averaged over the test set, without per-utterance qualitative examples, perturbation tests (e.g., zeroing out high-attention frames), or comparisons against meaningful baselines beyond Integrated Gradients. The finding that textual attention also correlates with acoustic features (line 267) is hand-waved rather than rigorously analyzed. Either deepening this section or more strongly disclaiming it in the abstract would be appropriate.
 
-- **No error bars on layerwise probing results (Section 6, Figure 4).** While Table 1 reports averages over 3 seeds, the layerwise probing plots (left and middle panels of Figure 4, plus the right panel showing textual vs. acoustic contributions) do not report variance. Given that per-layer data is more limited, confidence intervals would help assess whether the observed trends are stable.
+4. **Critical ablation — removing the information loss — is mentioned in a footnote without quantified results.** The footnote on line 86 states that training without the information loss yielded "a slight improvement in performance" but "failed to disentangle" the representations, and refers to Section 5 for details. However, Section 5 does not actually present these results quantitatively. Since the information loss is central to the disentanglement claim, showing these ablation numbers (e.g., probing accuracy on target vs. non-target features with and without the loss) would directly support the paper's main methodological point.
+
+5. **β sensitivity is not investigated.** The β coefficient is scheduled linearly from 0.1 to 1.0 (line 110) without any analysis of how performance or disentanglement quality varies with β or the annealing schedule. For a VIB-based method, this is a standard sensitivity check, and its absence makes it difficult to assess robustness.
+
+6. **Bottleneck dimension results reported for only one setting.** The paper states that d ∈ {16, 32, 64, 128, 256} was explored (line 107), but all results are shown only for d=128. Readers cannot assess how compression level affects the trade-off between task performance and disentanglement quality.
+
+7. **Layerwise analysis limited to Base models.** Figure 4 is captioned as showing results for "Base models," but the surrounding text presents the findings without consistently qualifying this restriction. Since Large models showed different patterns in Table 1 (e.g., larger gaps between pre-trained and fine-tuned Wav2Vec2), extending the layerwise analysis to Large models would be informative.
+
+8. **No confidence intervals or variance estimates.** Results are averaged over three runs (Table 1), but no standard deviations or confidence intervals are reported. Given the modest dataset sizes (e.g., ~4,000 IEMOCAP utterances), some comparisons may fall within run-to-run noise (e.g., Wav2Vec2 Base emotion: 61.4 probing vs. 58.9 VIB).
 
 ### Trivial
-
-- **Bottleneck dimension analysis not shown.** The paper mentions experimenting with d={16,32,64,128,256} (line 107) but only reports d=128. Showing how disentanglement quality scales with dimension would strengthen characterization of the method.
-
-- **Claim about "independent of the target task" is overstated.** Line 32 says textual latents "can be easily applied to new downstream tasks." In practice, only the same stage 1 encoder is demonstrated. This is a minor overclaim easily corrected.
-
-- **Probing resolution for acoustic features is coarse.** The discretization into 4 quartiles (Section 5) gives a 25% random baseline; probing scores around 40–60% are above chance but well below ceiling. The paper could note this limitation.
+- The random baseline for WER is reported as 100 (percentage) in Table 1's caption but as 1 (fractional) in the body text for Figure 3 (line 194). This is not a substantive error — both convey the same information — but it can cause momentary confusion.
 
 ## Nice-to-Haves
-
-- A stage 2 ablation without the information loss (mirroring the stage 1 ablation already in a footnote) would strengthen the claim that the conditional VIB setup is necessary for acoustic disentanglement.
-- Using a completely held-out transcription dataset (e.g., LibriSpeech test-clean) for probing textual latents, rather than a held-out split of Common Voice which partially overlaps with the stage 1 training domain.
-- Reporting the effect of bottleneck dimension on both task performance and probing-based disentanglement metrics.
+- Report standard training details (optimizer, learning rate, number of epochs, batch size) currently absent from the paper.
+- Include a limitations section explicitly discussing (a) the dependency of stage 2 quality on ASR performance in stage 1, and (b) the task-specific nature of the acoustic latents (i.e., they are not a general-purpose acoustic disentanglement).
+- Add per-utterance qualitative examples to the attribution analysis to make the results more interpretable.
+- Extend the layerwise analysis to include speaker identification as the target task, not just emotion recognition.
 
 ## Removed Points
 
-- **Criticism about Feature Attribution lacking rigor (Critical Issue 3):** The paper explicitly states (Section 7) "While a comprehensive evaluation of disentangled attribution is beyond the scope of this work, we do conduct a preliminary investigation." The critic's concerns about no statistical tests, no baseline comparisons, and no validation are accurate *if* the section claimed to be a rigorous evaluation — but the paper openly frames it as preliminary/exploratory. This is a limitation the authors already acknowledge. Downgraded from a weakness to a context note: the attribution section is clearly preliminary and should be read as such.
+These points were raised by reviewers but are not included as weaknesses in the main review:
 
-- **Criticism that "probing results for acoustic features using 4 buckets is coarse":** This is a reasonable methodological note but not a weakness — 4-way classification with a 25% random baseline is standard practice, and the probing results still convincingly show above-chance performance for acoustic latents and random-level for textual latents. The coarseness affects both equally.
-
-- **Criticism about Common Voice overlap inflating textual latent probing quality:** The paper uses a held-out test split of Common Voice, and the probing results for transcription are not the paper's main claim (disentanglement is). The textual latents' strong transcription performance is a sanity check, not the central result. Even if inflated, the cross-modal random performance (textual→acoustic, acoustic→text) is unaffected.
+- **WER=1 criticism**: The reviewer claimed that "random baseline (WER=1)" seems implausible, suggesting the figure normalizes WER by 100. This is a misunderstanding: WER of 1.0 (fractional) is equivalent to 100% error rate, which is the correct random baseline. The table uses percentage (WER=100) while the figure text uses fractional (WER=1) — a trivial unit inconsistency, not a substantive error.
+- **Missing related works**: Removed per policy — external confirmation of missing citations is not available.
+- **Formatting/style nitpicks**: Removed per policy — these are parser artifacts, not author errors.
+- **Missing appendix/proof references**: Removed per policy — these sections exist in the original submission and are stripped by the parser.
+- **Reproducibility nitpicks about trivial details**: The request for complete training logs and all hyperparameters goes beyond what is standard for a conference submission; however, the absence of optimizer/learning rate/epochs is noted in Nice-to-Haves.
 
 ## Novel Insights
 
-The reviews collectively highlight an important nuance that goes beyond what the paper explicitly discusses: the VIB framework does not just *separate* features — it also *reveals the information-processing strategy of the underlying speech model*. The layerwise analysis showing that fine-tuned models shift acoustic→textual encoding in later layers is only interpretable as a finding *because* the disentanglement framework exists. This suggests that the paper's method may be as valuable as an *analysis tool* for understanding pretrained speech representations as it is as a disentanglement method per se. The reviews also surface the tension that the strongest evidence (probing-based pairwise failure) and the weakest section (attribution) are evaluating different claims — the paper is strongest as a disentanglement method paper, weakest as an attribution method paper, and the attribution section should be de-emphasized.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Add the Z_acoustic alone experiment.** Train a classifier on acoustic latents (without textual latents) for emotion recognition and speaker identification and report the accuracy. This directly confirms the acoustic latents carry task-relevant non-textual signal and only takes one additional row in Table 1.
-2. **Add a brief discussion of the HuBERT-FT Large WER gap** (25.6 vs. 6.9) explaining why compression is more detrimental for fine-tuned models and whether this affects any downstream conclusions.
-3. **Add error bars (e.g., over 3 seeds) to the layerwise probing plots** to establish stability of the observed trends.
-4. **Either add a quantitative comparison with one prior method on a shared task** (even a single row in a table), or add a clear statement explaining why such comparison is not feasible (different setups, different assumptions) so readers are not left wondering.
-5. **Clarify that the feature attribution results are exploratory** by adding a limitations paragraph in Section 7 that acknowledges the absence of statistical testing, the lack of validated attribution metrics, and the preliminary nature of the comparison with Integrated Gradients.
+1. **Add a comparison baseline** — a simple alternative disentanglement approach (e.g., training a single VIB encoder with an adversarial loss to discourage text-predictability in the acoustic stream) would directly demonstrate the advantage of the two-stage conditional design.
+2. **Quantify the information loss ablation** — report probing accuracy on target and non-target features for encoders trained with and without the information loss term, to directly substantiate the claim made in the footnote.
+3. **Add a β-sensitivity experiment** — show how WER, task accuracy, and probing-based disentanglement metrics vary across at least 3-4 β values or schedules.
+4. **Tighten the framing** — replace the blanket "acoustic" label for stage-2 representations with a more precise description (e.g., "features complementary to the textual representation, verified to include acoustic correlates") to avoid overclaiming.
 
 ## Score and Decision
 
-The paper makes a sound, well-motivated contribution. The core claims — that VIB can disentangle textual and acoustic features, validated by cross-modal probing — are well supported. The identified weaknesses (missing Z_acoustic-alone ablation, no comparison with prior methods, under-discussed WER gap, missing error bars) are real but addressable and do not threaten the central findings. The paper should be accepted after minor revisions.
+The paper presents a well-motivated framework with clean empirical validation. The core contribution — a two-stage VIB approach that demonstrably disentangles textual from complementary features in neural speech representations — is convincingly supported by the probing experiments and layerwise analysis. The weaknesses are addressable: they relate to framing precision, missing ablations/baselines, and the preliminary nature of one section. The paper would be strengthened by addressing these, but none invalidate the central claims.
+
+**Score**: 7.0 / 10
+
+**Decision**: Accept
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

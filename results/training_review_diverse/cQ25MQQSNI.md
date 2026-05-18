@@ -1,102 +1,76 @@
-Now I have all the information needed. Let me compose the final consolidated review.
-
----
+Now I have all the information I need. Let me compile the final review.
 
 ## Summary
 
-This paper presents CertainlyUncertain, a 178K-sample VQA benchmark spanning five fine-grained uncertainty categories (knowledge, complexity, extraneous, temporal, ambiguity), built via two automatic pipelines: (1) prompting GPT-4 with DOCCI captions to generate answerable/unanswerable contrastive pairs, and (2) inpainting images with LaMa/Grounded-SAM to render answerable questions unanswerable. The authors also propose a confidence-weighted accuracy metric and show empirically that current VLMs perform poorly on uncertainty tasks and that fine-tuning on the dataset improves refusal behavior and hallucination rates while maintaining standard VQA accuracy.
-
----
+This paper introduces CertainlyUncertain, a taxonomy-driven benchmark of ~178K contrastive VQA samples spanning five categories of epistemic and aleatoric uncertainty (Knowledge, Complexity, Extraneous, Temporal, Ambiguity). It also proposes a confidence-weighted accuracy metric and shows that fine-tuning on this dataset improves model performance on refusal-oriented benchmarks (UNK-VQA, TDIUC absurd) while maintaining standard VQA performance.
 
 ## Strengths
 
-1. **Large-scale, systematically constructed uncertainty dataset with a novel taxonomy.** The dataset (178K contrastive VQA pairs across 5 uncertainty categories, ~95K images) substantially exceeds prior refusal-oriented datasets in size and coverage (UNK-VQA: ~10K; TDIUC absurd: one category). The image-inpainting pipeline for generating naturalistic counterfactuals (extraneous category) is creative and produces more realistic images than simple masking or copying used in prior work. Table 2 documents the coverage advantage clearly.
+- **Novel taxonomy of multimodal uncertainty.** The paper provides a structured, fine-grained taxonomy (epistemic vs. aleatoric with five subcategories) that goes beyond prior work treating unanswerability as a monolithic concept (§2.1). This provides a principled framework for generating and evaluating diverse uncertain scenarios.
 
-2. **Fine-tuning on CertainlyUncertain consistently improves refusal performance across multiple benchmarks while maintaining standard VQA accuracy.** LLaVA-13B SFT on CertainlyUncertain raises LAVE_idk on UNK-VQA from 53.6 to 73.4 and on TDIUC from 30.4 to 74.7 (Table 5, as described in the paper). Hallucination ratio on MMHal drops from 43.4% to 36.2% for the same model, while VQAv2 accuracy is essentially unchanged (77.7 vs. 77.6). These trends hold across multiple training strategies (SFT, R-tuning, DPO) and model variants, showing the dataset's practical utility for improving model reliability.
+- **Large-scale contrastive dataset (178K samples).** CertainlyUncertain is significantly larger and more diverse than existing refusal benchmarks like UNK-VQA (10K). It covers all five uncertainty categories across ~95.8K images with paired answerable/unanswerable instances, enabling contrastive learning (§2.2, Table 1, Table 2).
 
-3. **Comprehensive evaluation across 7 benchmarks and 3 training strategies.** The paper evaluates on refusal (UNK-VQA, TDIUC), hallucination (MMHal, POPE, AMBER), and standard VQA (VQAv2, VizWiz) datasets, with three training recipes and an inference-time selective prediction baseline. This breadth makes the empirical findings more robust and contextualized than a narrow evaluation would be.
+- **Effective fine-tuning results on refusal benchmarks.** Supervised fine-tuning with CertainlyUncertain substantially improves performance on UNK-VQA (e.g., LLaVA-7B accuracy from 56.09 to 81.51) and TDIUC absurd, while maintaining or improving standard VQA performance (Table 6). These gains directly support the claim that the dataset enhances model uncertainty awareness.
 
-4. **Human quality checking on the extraneous test set and the Generative AI Paradox analysis.** The authors manually verified the 6K extraneous testing samples, filtering ~1.2K invalid ones (20% rejection rate). The paradox analysis (Figure 3) showing GPT-4V fails to answer its own generated uncertain questions is a helpful diagnostic that motivates the benchmark.
+- **Dual-stage LAVE_idk evaluation.** The adaptation of LAVE to handle diverse IDK phrasings through a two-stage normalization and scoring mechanism (§2.3) is a practical contribution for evaluating open-ended refusal responses, more robust than simple string matching.
 
----
+- **Multi-source data construction pipeline.** Combining caption-based generation (DOCCI) with image perturbation (VQAv2, GQA) reduces reliance on a single generation method and increases coverage across uncertainty types (§2.2).
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **The confidence-weighted accuracy metric is under-validated relative to its prominence as a contribution.** The metric is presented as a core contribution (title: "A Benchmark and Metric"; abstract: "introduce a new metric"). However, its empirical support is thin:
-   - **Correlation evidence is preliminary.** Figure 4 shows scatter plots but reports no correlation coefficients or significance tests. The caption states data comes from "different model variants in our experiments" on a single split (extraneous). The paper claims the metric is "more negatively correlated with ECE compared to LAVE_idk accuracy" without providing the actual correlation values.
-   - **No comparison to proper scoring rules.** The paper does not compare against standard metrics like Brier score or negative log-likelihood, which also jointly evaluate confidence and accuracy. The claim that existing metrics "do not address model accuracy" is overstated — ECE and accuracy are complementary, and a single metric combining them risks conflating distinct desiderata.
-   - **The confidence proxy is not validated across model families.** The metric relies on a self-verification prompt (probability of the "yes" token, following Whitehead et al., 2022). Its reliability across LLaVA, Qwen, and GPT-4V is unexamined, and compounding biases from the LAVE_idk scoring scheme (which uses Mistral-7B as a judge) are not discussed.
-   
-   Because the metric is a claimed contribution on par with the dataset, the current validation is insufficient to support its advertised role. The authors could either (a) substantially strengthen the metric validation with correlation coefficients, statistical tests, and comparison to Brier/NLL on multiple splits, or (b) relegate it to a smaller secondary contribution.
+- **Insufficient dataset validation.** Only the extraneous test split (4.8K samples) and the first 5K caption-sourced test samples have human verification. The remaining ~168K samples — including all training instances and caption-sourced samples for knowledge, complexity, temporal, and ambiguity categories — are unvalidated and rely on a heavily model-dependent pipeline (GPT-4, GPT-4V, Grounded-SAM, LaMa). The paper acknowledges possible failures (§2.2, lines 77–78) but does not estimate the noise rate in unvalidated splits or its potential impact on evaluation. If a non-trivial fraction of supposedly unanswerable questions are actually answerable (or vice versa), this undermines both the benchmark's reliability and the conclusions drawn from fine-tuning.
 
-2. **Experimental results are reported without variance or significance measures.** Tables 5 and 6 (referenced in the paper) report single values without standard deviations, confidence intervals, or significance tests. Given the stochasticity of VLM fine-tuning, it is impossible to assess whether the claimed improvements (e.g., LAVE_idk 53.6→73.4) are statistically reliable or within the noise of a single run. This is the most important methodological gap for the training experiments.
+- **Confidence-weighted accuracy metric is insufficiently validated.** The metric is presented as a core contribution but validated only on the extraneous split of CertainlyUncertain via correlation plots (Figure 4). It is not compared systematically against standard alternatives (Brier score, selective prediction curves, accuracy-coverage curves, ECE) on multiple benchmarks. The design — weighting LAVE_idk accuracy by a separately prompted verification probability $P(\text{pred})$ — is also somewhat ad-hoc: $P(\text{pred})$ measures the model's agreement with its own prediction under a verification prompt, not its actual confidence in the original answer. Without a broader validation showing that this metric is more informative than existing approaches, its claimed contribution is not established.
+
+- **Lack of baselines isolating the dataset's contribution.** The fine-tuning experiments compare against the base model and against training on LLaVA instruction data or LRV data. These do not isolate the marginal benefit of CertainlyUncertain's specific design. The most informative baselines would be (a) training on existing refusal datasets (UNK-VQA, TDIUC absurd) at similar scale, and (b) training on only the IDK subset (without answerable contrastive pairs). Without these, it is unclear whether observed gains come from the taxonomy-driven contrastive design or simply from adding more unanswerable training data.
+
+- **Potential inconsistency between POPE claims and results.** The paper states that fine-tuning with CertainlyUncertain shows "improving F1 scores on POPE" (lines 149–150), but the critic reports that Table 6 shows POPE F1 dropping for LLaVA-7B (85.27 baseline → 80.20 SFT+Ours). Since Table 6 is embedded as an image and I cannot verify the exact numbers, this claims-versus-evidence discrepancy requires clarification. If the numbers reported by the critic are correct, then the paper's text overstates the positive results and is misleading.
 
 ### Minor
 
-1. **Dataset quality assurance is unevenly documented across categories.** Human verification is clearly described for the extraneous test set (6K→4.8K after 1.2K filtered). For the DOCCI-sourced splits (knowledge, complexity, temporal, ambiguity), the paper states "We retain the first 5K samples verified by human on DOCCI testing images" but does not specify: what the verification process entailed, how many were rejected, whether verification covered all categories proportionally, or what the inter-annotator agreement was. A systematic audit (e.g., 200-500 samples per category with agreement rates) would strengthen confidence in the benchmark's labels, particularly for the unanswerable class.
+- **R-tuning and DPO results are under-analyzed.** The paper investigates three training strategies (SFT, R-tuning, DPO) but the discussion (§3.2, lines 149–150) focuses almost exclusively on SFT. R-tuning and DPO results appear in Table 6 without analysis of when or why they outperform SFT.
 
-2. **The confidence proxy's reliability across model families is unexamined.** The metric uses a self-verification prompt to extract confidence (probability of "yes" token). The paper does not analyze whether this proxy is equally reliable for LLaVA, Qwen, and GPT-4V, nor how to apply it to models without instruction-following capabilities or when the verification prompt is ineffective.
+- **No statistical significance or confidence intervals.** All comparisons are point estimates without confidence intervals or significance tests. Given the size of the evaluation sets and the stochasticity of LAVE-based evaluation, some reported differences may not be reliable. Adding bootstrapped intervals would strengthen the empirical claims.
 
-3. **Potential shortcuts in the contrastive structure are not analyzed.** The paper partially addresses spurious correlations (testing random inpainting perturbations), but does not analyze whether models fine-tuned on the dataset learn to predict "IDK" from surface-level cues (e.g., inpainting artifacts, question phrasing patterns) rather than genuine uncertainty awareness. Attention-map analysis or probing experiments would strengthen this aspect.
+- **Selective prediction baseline is mentioned but not reported.** The paper states it implements a naive selective prediction baseline (line 130) but does not present its results, leaving an important inference-time comparison absent.
 
-4. **Performance degradation on AMBER is acknowledged but not explored.** The paper notes that Qwen-VL-Chat SFT on CertainlyUncertain leads to inferior results on AMBER, hypothesizing it is due to missing attribute/relation IDK questions. This is honest but the degradation is not analyzed further (e.g., by examining which AMBER sub-categories are affected).
-
-5. **No per-split, per-category statistics breakdown.** Table 1 gives aggregate counts but does not report train/test splits per category (beyond the bold numbers for new images). A full breakdown would help assess distributional balance.
+- **Metric applicability is limited.** The confidence-weighted accuracy requires token-level probability access from a separate verification step. This is unavailable for black-box models (as the authors note for GPT-4V) and models without accessible token probabilities, limiting the metric's practical deployment.
 
 ### Trivial
-None.
 
----
+- The taxonomy boundaries between "complexity" and "ambiguity" categories could be discussed further — complexity can often be reduced by better reasoning (epistemic) and ambiguity resolved with more context (also epistemic) — though this does not detract from the taxonomy's practical utility as an organizational tool.
 
 ## Nice-to-Haves
 
-- Reporting correlation coefficients (Pearson/Spearman) and confidence intervals for Figure 4, ideally on multiple dataset splits.
-- A comparison of the confidence-weighted accuracy metric against Brier score and NLL on a held-out split.
-- Human accuracy baselines on a sample from each uncertainty category to establish an upper bound and validate label quality.
-- An ablation isolating the contribution of the contrastive structure (e.g., fine-tune on non-contrastive subsets).
-
----
+- **Human validation on a statistically representative sample from each category**, rather than just the extraneous test split. Even a 500-sample check per category would help bound the noise rate.
+- **Ablation: training on only the IDK subset vs. the full contrastive data**, to measure whether the contrastive pairs or simply the quantity of refusal data drive the improvements.
+- **Per-category transfer analysis:** does fine-tuning on one uncertainty category transfer better to others? (Figure 5 partially addresses overall category breakdown but does not analyze cross-category transfer during fine-tuning.)
+- **Comparison against training on UNK-VQA and TDIUC absurd data at matched scale**, to isolate the effect of the specific dataset design.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-1. **"The equation has a typo: 'accur $a c y$'"** — Removed per hard rule: this is a PDF parsing artifact (LaTeX math rendering issue), not an author error in the original submission.
-2. **"The confidence-weighted accuracy metric is a core strength that correlates well with both accuracy and calibration"** (from Strength Finder) — Removed because this conflicts with the verified major weakness that the metric is under-validated. Per instructions: when a strength and weakness disagree, the weakness wins. The paper's correlation evidence is too thin to count as a confirmed strength at this stage.
-3. **"No analysis of dataset biases... Are certain uncertainty categories more heavily represented in training versus test?"** — Removed because this is a distributional reporting issue already partially covered by the kept minor weakness about per-split/category statistics. The paper provides aggregate counts in Table 1, and the criticism reduces to an incremental transparency ask rather than a structural problem.
-
----
+- **"Missing analysis per uncertainty category"** — The paper has this in Figure 5 ("Breakdown of model performance on finegrained categories"). Removed because the criticism is factually incorrect; the paper does present per-category performance.
+- **"Comparison with simpler refusal baselines not evaluated"** — The paper explicitly states it "implement[s] a inference-time baseline with naive selective prediction approach" (line 130). The results may appear in an unrenderable table. Downgraded to minor since the results are not evidently reported in text.
+- **Generic strengths from the Strength Finder (e.g., "important problem", "interesting question")** — Removed as they lack specific content tied to the paper's concrete contributions.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a clear tension between the paper's ambitions (a benchmark *and* a new metric) and the uneven validation of the metric component, but this is a standard assessment framing rather than a novel insight.
-
----
+The contrastive pair design — where an answerable and unanswerable question share the same or visually similar images via inpainting — is a genuinely useful synthesis strategy. The paper's demonstration that this design helps models learn to discriminate between answerable and unanswerable scenarios (rather than just learning to always say "I don't know") is an important practical insight. However, the lack of an ablation isolating this contrastive design from simply adding more refusal data means this insight remains suggestive rather than proven.
 
 ## Suggestions
 
-1. **Re-center the paper on the benchmark.** The dataset contribution — a 178K-sample, multi-category, contrastively structured uncertainty benchmark — is solid and timely. The confidence-weighted accuracy metric is a reasonable proposal but needs substantially more validation to carry equal weight. Consider presenting it as a secondary contribution with appropriately hedged claims, or strengthening it with correlation coefficients, statistical tests, and comparison to Brier/NLL.
-
-2. **Add variance information.** Report standard deviations over at least 3 runs for a representative subset of the main experimental conditions. This is the single highest-leverage improvement for the training experiments.
-
-3. **Clarify and expand human validation.** Report what the 5K human verification on DOCCI testing images covered (per-category breakdown, rejection rates, inter-annotator agreement if available). Consider sampling 200-500 examples from each category for a systematic quality audit.
-
----
+1. **Validate a representative sample across all categories**, report noise rates per category, and discuss whether noise could bias evaluation or be mitigated by filtering. This is the single most important improvement.
+2. **Resolve the POPE claim inconsistency** by either correcting the text to accurately reflect Table 6, or explaining which settings show improvement and why others degrade.
+3. **Add two baselines**: (a) training on existing refusal data (UNK-VQA, TDIUC absurd) at matched scale, and (b) training on only the IDK subset of CertainlyUncertain without contrastive pairs. This will isolate whether the taxonomy-driven contrastive design adds value beyond data scale.
+4. **Validate the confidence-weighted accuracy metric** against standard alternatives (Brier score, accuracy-coverage curves, ECE) on at least 2–3 benchmarks, not just the extraneous split of CertainlyUncertain.
+5. **Add bootstrapped confidence intervals** for key evaluation numbers to assess statistical reliability.
+6. **Report the selective prediction baseline results** to enable comparison with inference-time refusal methods.
 
 ## Score and Decision
 
-The paper makes a genuine contribution with the CertainlyUncertain benchmark: the taxonomy is well-motivated, the construction pipeline is creative and scalable, and the fine-tuning experiments consistently show benefits across refusal and hallucination benchmarks. The dataset fills a clear gap in multimodal evaluation.
+This paper tackles an important problem and makes genuine contributions: a taxonomy-driven benchmark that is larger and more diverse than prior refusal datasets, with evidence that fine-tuning on it improves performance on refusal benchmarks. However, the contributions are weakened by limited dataset validation, insufficient baselines, a partially validated metric, and a potential inconsistency between POPE claims and results. The core dataset contribution is valuable, but the paper would benefit from addressing these issues before publication. Given the real contributions and the addressable nature of the weaknesses, the paper is on the borderline.
 
-The major weakness is that the confidence-weighted accuracy metric — presented as a co-equal contribution — is under-validated. The correlation evidence is thin (one split, no coefficients, no comparison to proper scoring rules). Additionally, the experimental results lack variance reporting, making it difficult to assess statistical reliability.
-
-However, the benchmark itself is sound and useful to the community. The metric weakness can be addressed by either substantially strengthening validation or downscoping its claims. The variance concern is addressable in revision. The paper's core value — the dataset and the finding that fine-tuning on it improves uncertainty awareness — is not undermined.
-
-**Weak Accept.** The benchmark contribution is significant enough to warrant publication, but the metric needs to be either substantially strengthened or de-emphasized, and variance reporting is needed for the experimental results.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

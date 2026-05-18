@@ -1,90 +1,72 @@
-Now I have all the evidence I need. Let me write the final consolidated review.
-
----
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes Ranking-Constrained Actor-Critic (RCAC), the first offline reinforcement learning approach for learning branching policies in MILP solvers. RCAC trains a scoring function \(G_\omega\) to weight actions by dual-bound improvement, then constrains the actor-critic policy to only consider the top-\(k\) actions ranked by \(G_\omega\), thereby handling sub-optimal or small training datasets. Experiments on six benchmarks show RCAC consistently outperforms imitation learning (GGCN) and online RL (tMDP) baselines, particularly on easy problems where variance-controlled results are reported.
+This paper proposes Ranking-Constrained Actor-Critic (RCAC), an offline reinforcement learning algorithm for learning branching policies in MILP solvers. RCAC trains a ranking model to identify promising candidate actions using dual-bound improvement rewards, then constrains the actor-critic policy to only consider the top-k candidates, thereby handling the dynamic action space and out-of-distribution actions typical in offline RL for branch-and-bound. The experiments show RCAC consistently outperforms imitation learning (GGCN) on the same limited or suboptimal datasets across four easy and two hard benchmarks, while also comparing favorably against hand-crafted heuristics (FSB, RPB) and online RL (tMDP).
 
 ## Strengths
 
-- **First offline RL formulation for branching in MILP solvers** — The paper explicitly and verifiably states this claim (Section 1: "first attempt to apply the offline RL algorithms to MILP solving"; Section 5.1: "de facto the first work in applying offline RL in learning to branch"). This addresses a real limitation of prior neural branching methods that assume near-optimal demonstrations.
+1. **Novel and well-motivated offline RL formulation for branching**: The paper correctly identifies a real bottleneck in prior neural branching methods—their reliance on large, near-optimal demonstrations—and proposes a principled offline RL solution. The ranking-constrained design specifically addresses the unique challenges of B&B (dynamic action space, OOD action risk) that generic offline RL methods do not handle. This is stated clearly in Section 3.2 and Section 5.1.
 
-- **Consistent empirical gains on easy benchmarks with proper statistics** — On SC, MIS, CA, and CFL, RCAC trained on sub-optimal (VHB) or small near-optimal (FSB) datasets achieves lower solving time and smaller search trees than GGCN across all four datasets, with means and standard deviations reported over 5 seeds (Tables 2 and 3). For example, on CA, RCAC (VHB) solves in 50.1s vs. 88.0s for GGCN; on MIS, RCAC (VHB) uses 2.4k nodes vs. 4.0k for GGCN.
+2. **Consistent empirical advantage over IL on the same limited data**: Across all six benchmarks (SC, MIS, CA, CFL, WA, AP), RCAC outperforms GGCN when both are trained on the same datasets—whether suboptimal (VHB-100k) or small near-optimal (FSB-5k). This is demonstrated in both exact-solving metrics (Tables 2, 3; Figure 1) and time-constrained dual-integral scores (Table 4; Figure 2). The advantage is especially pronounced on MIS and CA, where RCAC reduces solving time by factors of 2–5× over GGCN on the same data.
 
-- **Data collection efficiency convincingly demonstrated** — Table 1 shows that collecting the VHB or small-FSB dataset takes 0.2–1.0 hour for easy problems and 6–8 hours for hard problems, versus 4–10 hours (easy) or 72–144 hours (hard) for the standard FSB dataset. This directly supports the paper's practical motivation.
+3. **Ablation validates that RCAC learns beyond the ranking model**: Table 5 and Figure 3 show that RCAC improves over the pretrained ranking model \(G_{\omega}\) alone, and that varying the top-k constraint affects performance in a manner consistent with learning Q-values (rather than simply distilling \(G_{\omega}\)). This disentangles the RL component from the ranking pretraining.
 
-- **Ablation shows RCAC improves beyond its own ranking model** — Table 5 compares the ranking model \(G_\omega\) alone against full RCAC. RCAC further reduces solving time and tree size in most cases (e.g., CA: 66.8s / 3.7k nodes for \(G_\omega\) vs. 50.1s / 2.5k nodes for RCAC). Figure 3's \(k\)-ablation on CA shows monotonic improvement with larger \(k\), confirming RCAC is learning Q-values for the candidate set rather than simply distilling \(G_\omega\).
-
-- **Well-motivated reward design** — Section 3.1 provides a clear rationale for choosing dual-bound improvement over solving time, LP iterations, or tree size: it is system-invariant, directly reflects branching quality, and remains informative under time limits.
-
-- **Clean positioning relative to prior work** — Section 5.1 draws a clear conceptual line between RCAC and the most similar methods (Huang et al., 2023b; Qu et al., 2022), noting those methods "still assume cheap access to a near-optimal expert heuristic without considering a sub-optimal dataset."
+4. **Practical data-efficiency advantage**: Table 1 quantifies the data collection time, showing that VHB-100k and FSB-5k datasets require hours of collection versus days for the standard FSB-100k dataset. Combined with the performance results, this supports the paper's practical motivation.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **Missing ablation: vanilla offline actor-critic without the ranking constraint** — The paper ablated \(G_\omega\) vs. RCAC and varied \(k\) on CA (Section 4.4), but never compares RCAC against the same actor-critic algorithm trained on the same data *without* the ranking constraint (i.e., using all actions for Bellman backups and policy improvement). This control is essential to attribute improvement to the proposed ranking-constraint mechanism rather than to using offline RL in general. If unconstrained offline actor-critic performs similarly, the claimed mechanism is not the source of improvement; if it collapses due to OOD errors, that would be strong evidence for the constraint. As it stands, we only know RCAC > GGCN (IL) and RCAC > \(G_\omega\), not that the constraint specifically is what makes the difference.
+1. **Missing comparison against GGCN trained on full FSB-100k (standard practice)**. The paper's narrative is that RCAC overcomes the need for expensive, high-quality demonstrations. To fully substantiate this, the paper should compare RCAC (trained on cheap VHB-100k or small FSB-5k) against GGCN trained on the standard 100k FSB dataset—i.e., the prior state of the art that the paper aims to replace. The current experiments compare RCAC and GGCN only when both are trained on the same limited data, which shows RCAC makes better use of limited data but does not answer the practical question: can RCAC on cheap data match or surpass GGCN on expensive data? This gap weakens the strongest practical claim in the abstract and conclusion. Table 1 already reports the collection times, making this a straightforward extension that would either strongly validate or honestly qualify the central claim.
 
-- **No statistical variance reported on hard benchmarks (WA, AP)** — The paper explicitly states on line 178: "We evaluate each model on 20 testing instances from the official split and report the best results for each model." Unlike the easy benchmarks where mean and std over 5 seeds are reported, the hard-problem results provide no measure of variance. Given that hard problems are a core motivation for the paper ("especially for large problems where accurate solvers have a hard time scaling"), the lack of variance information makes it impossible to assess whether RCAC's apparent lead (best score on WA, second-best on AP) is reliable. The inconsistency in reporting standards between easy and hard benchmarks is unexplained and undermines the central claim.
+2. **No comparison against other offline RL algorithms adapted for B&B**. The paper claims to be "the first work in applying offline RL in learning to branch" and introduces a custom ranking constraint. But without comparing against a generic offline RL method adapted to this setting (e.g., a variant of CQL or IQL using the same GNN architecture and Bellman updates, without the ranking constraint), it is unclear whether the reported gains come from the specific ranking-constrained design or simply from using any offline RL with reward signals instead of IL. The paper describes the distributional-shift challenge but never validates that its specific solution is necessary; a simple conservative Q-learning baseline would isolate the contribution of the ranking constraint.
 
 ### Minor
 
-- **\(k\) selection not justified for main experiments** — The method introduces a critical hyperparameter \(k\) (top-\(k\) candidates from \(G_\omega\)), but the paper never states what value of \(k\) is used in the main experiments (Tables 2, 3, 4). Only an ablation on CA is provided (Figure 3), showing larger \(k\) is better on that dataset. Without knowing \(k\) for the other benchmarks, the results cannot be reproduced, and the reader cannot tell whether \(k\) was tuned per problem.
+1. **The ranking model's shortsightedness is acknowledged but not directly tested**. The scoring function \(G_{\omega}\) weights actions by immediate dual-bound improvement (Equation 6 with \(\zeta=0\)). The top-k constraint can filter out actions with low immediate reward but high long-term value. The ablation (Figure 3) is consistent with this concern—increasing \(k\) (relaxing the constraint) improves performance on CA. The paper shows RCAC improves over \(G_{\omega}\), but does not test whether a softer penalty (e.g., a weighted BC term or using \(G_{\omega}\) as a prior rather than a hard cutoff) would be more effective. This does not invalidate the method but leaves an important design question open.
 
-- **Hyperparameters \(\lambda\) and \(\delta\) not specified** — \(\lambda\) (reward-weighting factor in the scoring function, Eq. 3) and \(\delta\) (the negative penalty for OOD actions) are introduced but never assigned values or justified. \(\gamma\) (discount factor) and \(\zeta\) (reward threshold) are at least partially addressed (\(\zeta=0\) by default), but \(\lambda\) and \(\delta\) are left unspecified.
+2. **Hyperparameters not stated in the main text**. Key values for \(k\), \(\delta\), \(\lambda\), learning rates, and network architecture details are absent from the main paper. These affect reproducibility and are needed for practitioners to assess or implement the method.
 
-- **tMDP excluded from hard benchmarks without showing its easy-benchmark performance** — The paper excludes tMDP from WA and AP "due to its long training time and bad performance on easy problems" (line 178), but does not provide any quantitative result to substantiate this "bad performance" claim. Since tMDP is the only other RL-based neural method, its absence from the harder comparison set is a lost reference point.
-
-- **Related work distinction could be more technically concrete** — The claim that Huang et al. (2023b) and Qu et al. (2022) "still assume cheap access to a near-optimal expert heuristic" (line 219) is stated without a concrete technical comparison of what those methods actually do. A few sentences contrasting their algorithmic assumptions with RCAC's would strengthen the novelty claim.
+3. **Wall-clock training time for RCAC not reported**. The paper reports data collection time but not the actual training time of RCAC (including the ranking model pretraining and actor-critic training). This information would help assess practical feasibility, especially since the GNN architecture is used three times (for \(G_{\omega}\), \(\pi_{\phi}\), and \(Q_{\theta}\)).
 
 ### Trivial
+
 None.
 
 ## Nice-to-Haves
 
-- **Brief discussion of why standard offline RL methods (CQL, BRAC, I-DQN) are not directly applicable** — The paper would benefit from a short note acknowledging these well-known methods and explaining why the dynamic action space or reward structure in B&B makes direct application non-trivial. Even a negative result or a reasoned argument would be informative.
-- **Inference cost breakdown** — A short comment on per-node inference overhead (especially given three GNNs for \(G_\omega\), \(\pi_\phi\), and \(Q_\theta\)) would help practitioners understand the computational trade-off.
+- **Translate the dual-integral scores into physically meaningful units** (e.g., relative optimality gap over time) for WA and AP, to help readers judge effect size beyond relative rankings.
+- **Test a softer variant of the ranking constraint** (e.g., using \(G_{\omega}\) scores as importance weights or a penalty coefficient rather than a hard top-k cutoff), to directly address the shortsightedness concern.
+- **Report the percentage of actions filtered out by the top-k constraint in practice**, to help readers understand how restrictive the constraint actually is.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-1. **Criticism that VHB is "not a standard baseline, created by the authors"** — The harsh critic raises this but then says it is "acceptable"; moreover, VHB is a clearly defined heuristic (FSB with prob 0.05, otherwise pseudocost branching) and serves a specific purpose as a sub-optimal behavior policy. This is reasonable design practice for a method paper, not a weakness.
-
-2. **Strength claim about "robust experimental design"** — The Strength Finder lists this as a supporting strength, but it conflicts with the verified major weakness (no variance on hard benchmarks). Since the weakness is verified and the strength overgeneralizes, the strength is dropped.
-
-3. **Criticism about "the paper would benefit from a brief discussion of why [CQL/BRAC] are not directly applicable"** — This is a wishlist suggestion, not a weakness. Moved to Nice-to-Haves.
-
-4. **Criticism about "a short comment on the per-node inference overhead"** — Also a wishlist item. Moved to Nice-to-Haves.
+- **"PRB vs RPB typo"**: Minor inconsistency between "PRB" (Section 4.1) and "RPB" (Section 2.1) in the paper. Removed per hard rule on typo criticisms.
+- **"Single GNN architecture for all three networks is expensive"**: The harsh critic notes this as an observation, not a weakness. The paper acknowledges the shared architecture choice in Section 3.3. Not a substantive weakness.
+- **"The method description could be clearer about δ"**: The critic notes δ is not discussed in the main paper. This is a hyperparameter that belongs in the experimental setup section; papers routinely defer hyperparameter values to appendices. Minor and borderline-pedantic.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews converge on a standard critical pattern: the core idea is novel and the easy-benchmark evidence is solid, but the experimental evaluation needs a key ablation and better statistical reporting on hard problems to fully support the paper's claims.
+The key insight emerging from the reviews is that the paper's evaluation design creates a blind spot: by comparing RCAC and GGCN only on the *same* limited data, it proves that offline RL extracts more value from constrained data than IL does, but it never tests the most practically relevant comparison—whether the *total cost* of RCAC (cheap data + training) pays off relative to the established practice of GGCN trained on expensive data. This is a case of framing the experiments around the algorithmic question ("does offline RL beat IL given the same data?") rather than the practical question ("does the proposed pipeline beat the existing pipeline when you account for all costs?"). Both questions are valid, but the paper claims to answer the latter while providing evidence only for the former.
 
 ## Suggestions
 
-1. **Add the missing control ablation** — Compare RCAC against the same actor-critic architecture trained on the same data *without* the ranking constraint (all actions allowed). Report on at least one easy dataset (CA) and one hard dataset (WA). If the unconstrained version performs worse, the ranking constraint is validated; if similar, the paper must rethink the claimed mechanism.
+1. **Add GGCN trained on full FSB-100k as a baseline.** This single comparison would directly test the paper's practical claim. Even one benchmark (e.g., SC or MIS, where data collection is cheapest) would be informative. If RCAC on VHB-100k or FSB-5k matches or beats this baseline, the paper's central claim is strongly validated. If not, honestly report the gap and discuss trade-offs.
 
-2. **Report mean and standard deviation for hard benchmarks** — Aggregate existing runs (if multiple seeds were used) or re-run with 3–5 seeds. The reader needs variance to assess reliability on WA and AP.
+2. **Add a generic offline RL baseline** (e.g., CQL with the same GNN architecture, with the action space handled by masking invalid actions). This would isolate whether the ranking constraint is the source of improvement or merely the offline RL framework itself.
 
-3. **Specify all hyperparameter values** — State the chosen \(k\) for each benchmark, and report values for \(\lambda\) and \(\delta\) in a table, ideally with a brief sensitivity check.
+3. **Report key hyperparameters** (\(k\), \(\delta\), \(\lambda\), training details) in the main paper or a clear pointer to where they appear.
 
-4. **Provide a quantitative statement about tMDP's performance on easy problems** — If tMDP was run on the easy benchmarks, report its results or a summary so the exclusion from hard problems is grounded.
+4. **Deepen the ablation on the ranking constraint**: test a "soft" variant where \(G_{\omega}\) scores are used as a penalty weight rather than a hard filter, to determine whether the hard cutoff is beneficial or harmful.
 
 ## Score and Decision
 
-**Originality**: High — first offline RL formulation for MILP branching.  
-**Importance of research question**: High — reducing dependence on expensive near-optimal demonstrations is practically significant.  
-**Claims well supported**: Moderate — strong on easy problems with proper statistics; weak on hard problems (no variance) and the ranking-constraint mechanism is not isolated from vanilla offline RL.  
-**Soundness of experiments**: Moderate — good experimental design overall, but the missing ablation and lack of variance on hard benchmarks are notable gaps.  
-**Clarity of writing**: Good — clear motivation, method description, and empirical presentation.  
-**Value to the research community**: Good — useful benchmarks, novel method, and a new problem framing for the learning-to-branch community.
-
-The paper makes a genuine contribution and the easy-benchmark evidence is convincing. The two major weaknesses — missing ablation control for the ranking constraint and no variance reporting on hard problems — are fixable and do not invalidate the core contribution, but they do prevent full acceptance of the paper's strongest claims in its current form.
+The paper proposes a genuinely novel and well-motivated approach to a recognized problem in neural MILP solving. The core algorithmic contribution (ranking-constrained actor-critic) is clean and the experiments convincingly show RCAC > IL on the same limited data across diverse benchmarks. However, the evaluation has meaningful gaps: the most practically relevant baseline (GGCN on full FSB-100k) is absent, and the contribution of the specific ranking constraint (versus any offline RL method) is not isolated. These gaps prevent the paper from fully supporting its strongest claims about overcoming data-collection obstacles. The paper is a solid contribution that would be substantially strengthened by addressing these gaps. I recommend a borderline accept with the expectation that the missing baselines be addressed in the final version.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

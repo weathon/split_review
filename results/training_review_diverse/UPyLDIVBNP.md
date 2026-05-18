@@ -1,88 +1,88 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me write the consolidated review.
 
 ## Summary
 
-The paper proposes IDInit (Fully Identical Initialization), an initialization method for residual networks that preserves identity transitions in both main and sub-stem branches. It introduces: (1) a padded identity-like matrix (IDIτ) to handle non-square weight matrices and break rank constraints, (2) momentum to resolve convergence issues of identity initialization, (3) a patch-maintain reshaping strategy (IDICτ) for convolutional layers to improve feature diversity, and (4) IDIZε with small ε values to address dead neurons. The method is validated across image classification (ImageNet, CIFAR-10), text classification, and BERT pretraining, showing consistent improvements.
+This paper introduces IDInit (Fully Identical Initialization), a method that preserves identity transition in both main- and sub-stem layers of residual networks. The core technical contributions are: (1) a padded identity-like matrix (IDI_τ) that handles non-square weight matrices while avoiding rank constraints that plague zero-padding approaches; (2) an empirical demonstration that the known convergence problem of identity initialization is resolved by standard momentum optimizers; (3) a patch-maintain convolution strategy (IDIC_τ) for higher-order weights; and (4) a small-noise technique (IDIZ_ε) to mitigate dead neurons in identity-control settings. Experiments span CIFAR-10, ImageNet, text classification (SST2, TREC-6), and BERT pre-training, showing consistent improvements over baselines.
 
 ## Strengths
 
-1. **Novel identity-maintaining initialization for both branches**: IDInit is the first approach (to the authors' knowledge) to use identity matrices for the non-zero weight W₁ in identity-control residual networks, whereas prior work (Fixup, ZerO) used random or Hadamard matrices that dilute the inductive bias. Figure 2 supports this advantage by showing IDInit achieves better convergence than random/Hadamard alternatives.
+- **Practical identity-like initialization for non-square matrices**: The IDI_τ scheme (Eq. 3) provides a simple, principled way to extend identity initialization to rectangular weight matrices, which is a genuinely practical problem. Figure 4(b) empirically confirms that this scheme achieves higher rank than zero-padding, supporting the claimed advantage.
 
-2. **Padded identity-like matrix (IDIτ) overcomes rank constraint for non-square weights**: The IDIτ scheme theoretically (Theorem 3.1) and empirically (Figure 4b) achieves higher weight rank than zero-padding during training. Figure 4b shows IDInit's rank reaches ~1500 versus <768 for zero-padding, supporting the claim of breaking the rank constraint.
+- **Consistent empirical improvement across architectures and tasks**: On ImageNet (Table 3), IDInit achieves an average 0.55% top-1 accuracy improvement over default initialization across ResNet-50/152, Se-ResNet-50, and ViT-B/32, with 7.4 epochs faster convergence to 60% accuracy. On BERT-Base pre-training (Figure 9), it yields an 11.3% FLOPs reduction and reaches a lower final loss. These results demonstrate broad applicability.
 
-3. **Consistent improvements on large-scale benchmarks**: On ImageNet (Table 3), IDInit achieves an average 0.55% accuracy gain over baselines and converges 7.4 epochs faster across ResNet-50/152, Se-ResNet-50, and ViT-B/32. On BERT-Base (Figure 9), IDInit claims an 11.3% FLOPs reduction during pretraining.
+- **Clean ablation study isolating the two key techniques**: Table 4 quantifies the individual contributions of IDIC_τ (+3.42%) and IDIZC_ε (+5.89%) on ResNet-20/CIFAR-10, validating that both modifications independently improve over the baseline identity initialization.
 
-4. **Ablation study isolates individual contributions**: Table 4 cleanly decomposes the effects of IDICτ (+3.42%) and IDIZCε (+5.89%) on CIFAR-10, providing evidence that each component independently improves performance.
+- **Strong performance against identity-control baselines on CIFAR-10**: Table 2 compares IDInit against Fixup, SkipInit, ReZero, Zero-γ, ZerO, and Kaiming across ResNet-56/110 with/without BN and both SGD/Adam optimizers. IDInit achieves the best accuracy in most settings and consistently reaches 80% accuracy in the fewest epochs.
 
-5. **Addresses the dead neuron problem concretely**: Figure 5 visually shows that IDIZε makes all weights trainable in a ResNet block, while Fixup/ReZero leave many weights frozen. The mathematical derivation (mean 0, variance → 0 with small ε) provides a principled basis for the approach.
-
-6. **Broad empirical validation**: The method is tested across multiple domains (vision, NLP) and architectures (CNN, ViT, RNN, Transformer), demonstrating generality.
+- **Stable text classification results with lowest variance**: Table 5 shows IDInit achieves highest accuracy across all six TextCNN/TextRNN settings on SST2 and TREC-6, and consistently obtains the smallest standard deviation, supporting claims of training stability.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None.
+
+- **Theorem 3.1 is mathematically imprecise and potentially incorrect as stated**: The theorem claims that initializing all weights with IDI₁ yields rank(θ̂⁽ᵏ⁾) ≥ D₀ for middle square layers (θ̂⁽ᵏ⁾ = θ⁽ᵏ⁾ − I). However, for the middle square weights θ⁽ᵏ⁾ ∈ ℝ^{D_h × D_h}, IDI₁ produces the identity matrix I, making θ̂⁽ᵏ⁾ = I − I = 0, whose rank is 0 — not ≥ D₀ (assuming D₀ > 0). The paper's own post-statement clarification acknowledges that ZerO's rank-constraint claim "is tenable in the initial state" and that "after training for several steps, an IDInit initialized network can break this constraint." This means the theorem as written is either false (if interpreted as an initialization guarantee) or vacuous (if interpreted as a post-training claim about dynamics that are not proven). Since the rank constraint argument is the paper's main motivation for the IDI_τ padding scheme, this inconsistency undermines the theoretical framing. The empirical evidence (Figure 4) still supports the practical claim, but the theorem needs substantial correction or removal.
+
+- **Missing identity-control baselines on ImageNet**: On ImageNet (Table 3, Figure 8), IDInit is compared only against "Default" (Kaiming) initialization. Fixup, ZerO, SkipInit, and ReZero — the directly relevant identity-control methods discussed at length in Section 2 and compared on CIFAR-10 (Table 2) — are absent from the largest-scale experiments. Without these comparisons, the paper cannot substantiate its claim that IDInit is superior to existing approaches in its own class on the most important benchmark. The CIFAR-10 comparisons are a useful sanity check, but ImageNet is the standard for evaluating practical initialization methods, and this omission is a decisive gap.
 
 ### Minor
 
-1. **Convergence experiment is too small to be fully convincing (Section 3.1, Table 1)**: The experiment uses a 3-layer linear network with 10×10 weight matrices and 2000 samples to show that momentum resolves the convergence problem of identity initialization. While the conclusion (momentum helps) is unobjectionable, the setup is far simpler than the deep nonlinear networks that IDInit targets. The paper would benefit from a controlled study on deeper networks or with non-linear activations to strengthen this claim.
+- **The dead neuron analysis is correlational rather than causal**: The paper shows that IDIZ_ε improves accuracy by 5.89% (Table 4) and that weights in a trained ResNet look more "alive" with IDIZ_ε (Figure 5). However, it never verifies that the baseline (Fixup/ZerO) actually suffers from zero-gradient dead neurons under the specific training conditions used, nor does it establish that the accuracy gain is causally linked to resolving dead neurons rather than other side effects of adding small noise. The 5.89% improvement is a real ablation result, but the claimed mechanism is not rigorously demonstrated.
 
-2. **Rank constraint argument contains confusing presentation (Section 3.2.1, Theorem 3.1)**: Theorem 3.1 states rank(θ̂⁽ᵏ⁾) ≥ D₀ with IDI₁ and claims this "breaks the rank constraint." However, since the constraint from ZerO is rank ≤ D₀, achieving ≥ D₀ (which could equal D₀) does not necessarily exceed the constraint at initialization. The paper then says ZerO's claim "is tenable in the initial state" and IDInit breaks it "after training for several steps," which seems to undercut Theorem 3.1's claim about initialization. Figure 4b convincingly shows that IDInit achieves higher rank during training, but the theoretical framing needs clarification. The gap between the theorem's lower bound and the actual claim of "breaking" should be resolved.
+- **The convergence experiment is too limited to fully resolve the theoretical concern**: Section 3.1 tests only a 3-layer network with 10×10 weights on synthetic data with 4000 samples. While this demonstrates that momentum helps SGD converge from identity initialization under the specific condition Bartlett et al. (2019) identified, the paper then broadly asserts that "momentum is crucial in training deep networks" and treats the problem as solved for all settings. The gap between this toy setup and the deep, wide networks used in later experiments is significant. This does not invalidate the method (since all experiments use momentum), but the "solution" to the convergence problem is presented with weaker evidence than it merits.
 
-3. **CIFAR-10 ablation gains vs. ImageNet gains are not discussed (Section 4.4 vs. Section 4.3)**: The ablation on ResNet-20/CIFAR-10 shows large improvements (+5.89% from IDIZCε, +3.42% from IDICτ), while the ImageNet improvement is only 0.55% on average. The paper does not discuss this discrepancy. The CIFAR-10 gains may be specific to smaller architectures or datasets, and the paper should acknowledge this.
-
-4. **Convergence metric choice not justified (Table 3)**: The paper reports "Epochs to 60% Acc" for ImageNet results without explaining why 60% was chosen. For ViT-B/32, 60% is far below final accuracy (~75%+), making this threshold potentially uninformative about convergence speed in the meaningful performance range. Reporting epochs to 70% or final accuracy would be more standard.
-
-5. **FLOPs reduction claim lacks methodology (Section 4.6)**: The paper states "IDInit shows an 11.3% acceleration ratio in terms of FLOPs" for BERT pretraining without specifying how FLOPs were computed or estimated. Since this appears to be derived from comparing loss curves at different time steps, the estimation method should be clearly described.
-
-6. **No variance/confidence intervals for ImageNet results (Table 3)**: The main ImageNet and CIFAR-10 results report only point estimates without standard deviations or significance tests. While single-run evaluations are common practice at this scale, the paper should at minimum acknowledge this limitation.
-
-7. **Limitations section is empty**: Section 5 lists "Limitation." with no content. This is a missed opportunity to discuss the method's constraints (e.g., the discrepancy between CIFAR-10 and ImageNet gains, the limited convergence experiment, or the lack of isometry measurements in the main paper).
+- **Overclaim on novelty relative to ZerO**: The paper states "IDInit is the first successful trial to maintain identity in both main- and sub-stems by breaking the rank constraints." ZerO (Zhao et al., 2021) also breaks rank constraints (using Hadamard matrices) and maintains identity in the main stem via the Dirac function. The genuine novelty of IDInit is using identity-like periodic patterns (IDI_τ) rather than Hadamard matrices for the non-square case, and maintaining identity in sub-stem weights — but the "first to break rank constraints" framing is misleading given prior work.
 
 ### Trivial
-- The paper uses inconsistent formatting for some mathematical expressions (e.g., spacing issues in Theorem 3.1).
-- Figure captions occasionally contain garbled punctuation (e.g., "Figure 2: Analyzing effect of initializing $W_{1}$ while $W_{2}\,=\,{\bf0}$ .4.").
+
+- The modulo condition in Eq. (3) (m ≡ j mod D_i) would benefit from explicit index ranges (m ∈ [0, D_{i+1}-1], j ∈ [0, D_i-1]) and clarification of 0-vs-1 based indexing, though the convention is inferable.
 
 ## Nice-to-Haves
 
-- A controlled experiment on deeper nonlinear networks to verify that momentum resolves the convergence problem of identity initialization in more realistic settings.
-- Analysis of whether the specific subtraction construction in IDIZε is necessary, or whether simply adding small uniform noise to a zero weight would suffice.
-- Inclusion of training loss curves alongside accuracy curves on ImageNet to separate convergence speed from final performance.
-- Dynamical isometry measurements (currently deferred to Appendix C.4, which may be stripped) integrated into the main paper.
+- Adding Fixup/ZerO baselines on ImageNet under the same training recipe would greatly strengthen the paper's central claim.
+- A controlled analysis of the dead neuron mechanism (gradient flow measurements, ablations isolating the effect of ε noise from the identity structure) would turn a heuristic into a well-understood fix.
+- The ablation (Table 4) uses ResNet-20 on CIFAR-10; repeating this on a larger model (e.g., ResNet-50) would increase confidence in the findings.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were identified but removed because they are factually incorrect, misunderstand the paper, or violate the filtering rules:
 
-- **"Incomplete baselines (missing Orthogonal, LSUV, DS Init, ProxInit)"**: The paper focuses on identity-control initialization methods (Fixup, ZerO, SkipInit, ReZero, Zeroγ). Orthogonal, LSUV, etc. are from different initialization families and are not required for a paper targeting identity-control schemes. The baseline set is appropriate for the paper's scope.
-- **"Section 4.1 warm-up comparison is contrived"**: The paper shows results both with and without warm-up. The finding that IDInit works without warm-up is a genuine strength, not a contrived comparison. The critic misread the experiment.
-- **"Patch-maintain convolution underspecified"**: The reshaping operation from [k×k×cin×cout] to [cout × kkcin] is clearly described in the text. The term "patch-maintain" is defined by its operation.
-- **"ISONet dismissal is abrupt"**: The paper gives concrete reasons (requires SReLU, no batch normalization) that are legitimate technical critiques, not dismissals.
-- **"Section 3.2 τ value not justified"**: The paper states τ values for different activations and references Appendix A for trainability analysis. This is standard practice.
-- **"First successful trial is questionable given ISONet"**: The paper uses "To our knowledge" and explains that ISONet uses a Dirac function (zero-padding) rather than identity for non-square matrices, and imposes restrictive architectural constraints. The distinction is valid.
+- **Criticism about "convergence problem is not established for deeper networks" (Harsh Critic, overblown)**: The paper's claim is modest — momentum solves the Bartlett et al. convergence problem under the specific condition that motivated it. All experiments use momentum. The reviewer's demand for testing on "deeper, wider networks" as proof of concept is disproportionate to the paper's intended scope of this subsection. The paper is not claiming a new convergence theory.
+
+- **Criticism about "the paper never verifies that dead neurons actually occur in the compared baselines" (Harsh Critic, partially invalid)**: Figure 5(a) visually demonstrates untrained weights in the baseline. The ablation (Table 4) shows the technique improves accuracy. A rigorous causal chain would be stronger, but the paper provides reasonable (if correlational) evidence.
+
+- **Notation nitpicks about modulo indexing and "padded identity-like matrix" not being formally defined (Harsh Critic, Other Observations)**: The IDI_τ definition in Eq. (3) and Figure 3 formally define the construction. The modulo convention is standard in matrix indexing. These are parser/stylistic nitpicks that do not impede understanding.
+
+- **Strength Finder strengths that conflict with verified weaknesses**: The strength about "Theorem 3.1 proves rank ≥ D₀" is retained in substance (the empirical rank improvement is real) but qualified in the Weaknesses section by the theorem's imprecision.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a genuinely novel perspective that the paper itself does not articulate.
+Beyond the paper's own contributions, a notable observation from the cross-review is that the paper inadvertently highlights a gap in the identity-control literature: prior methods (Fixup, ZerO, SkipInit, ReZero) each handle identity in the sub-stem by setting the last layer to zero, but none address what happens to that zero-initialized weight when downstream normalization layers or downsampling operations produce zero gradients. This failure mode — where zero initialization interacts pathologically with modern architectural components — is genuinely underexplored, and the paper's IDIZ_ε solution, while simple, draws attention to a real vulnerability in the identity-control paradigm. The paper would benefit from leaning into this observation more explicitly as a contribution.
 
 ## Suggestions
 
-1. **Clarify the rank constraint argument**: Distinguish clearly between (a) the rank at initialization (where both IDInit and ZerO may have rank = D₀) and (b) the rank during training (where IDInit demonstrably exceeds D₀). Theorem 3.1 should either be revised to state a result about training dynamics rather than initialization, or its bound should be strengthened to show rank > D₀ at initialization.
+1. **Fix Theorem 3.1**: Either (a) restate it as a claim about the rank achievable *after training* from IDI₁ initialization, with empirical backing from Figure 4, or (b) remove the theorem entirely and rely on the empirical rank measurements as motivation. The current formulation is mathematically incorrect for square middle layers and confuses the paper's theoretical narrative.
 
-2. **Report convergence at multiple thresholds on ImageNet**: Include epochs to 70% or 76% top-1 accuracy alongside the current 60% threshold. This would make the convergence speedup claim more robust.
+2. **Add ImageNet results for at least Fixup and ZerO** under the same training setup used in Table 3. If cost is prohibitive, explicitly acknowledge the gap and frame the ImageNet contribution as a comparison against "standard initialization" rather than against identity-control methods.
 
-3. **Describe FLOPs estimation methodology**: Clarify how the 11.3% reduction is computed—is it based on wall-clock time to reach a target loss, theoretical FLOPs saved by early stopping, or another method?
+3. **Strengthen the dead neuron analysis** by adding gradient norm measurements (or a simple probe) that show the baseline's zero-initialized weights receive near-zero gradients while IDIZ_ε's do not. This would convert a plausible claim into a verifiable one at minimal experimental cost.
 
-4. **Acknowledge the CIFAR-10 / ImageNet discrepancy**: Add a brief discussion of why the ablation gains on CIFAR-10 are much larger than the improvements on ImageNet.
-
-5. **Fill the limitations section**: Even a few sentences acknowledging the scope of validation (e.g., single runs on ImageNet, small-scale convergence experiment) would improve the paper's credibility.
+4. **Tone down the "first" claim** regarding breaking rank constraints and instead emphasize the specific novelty: using identity (rather than Hadamard) matrices for non-square weight initialization, and maintaining identity across *both* stems.
 
 ## Score and Decision
 
-This paper proposes a novel and clearly motivated initialization method backed by consistent empirical improvements across multiple architectures and domains. The core contributions—using identity matrices for both residual branches, padding identity to break rank constraints, and practical fixes for dead neurons—are technically sound and practically useful. The main weaknesses are in presentation clarity (the rank constraint argument is confusingly framed) and missing experimental details (FLOPs estimation, variance reporting, convergence threshold justification). These are all addressable in revision. No fatal or truly major flaws undermine the method's validity.
+**Originality**: 6/10 — The identity-like padding scheme is a practical twist on existing ideas (ZerO, DiracNet), not a paradigm shift. The dead neuron fix and patch-maintain convolution are incremental but useful.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Quality**: 5/10 — Experiments are generally well-designed and cover multiple tasks, but the theoretical flaw and missing ImageNet baselines reduce rigor. The ablation study is a highlight.
+
+**Clarity**: 6/10 — The core ideas are communicated clearly, but the theoretical section (Theorem 3.1) is confusing and the notation has minor imprecisions.
+
+**Significance**: 6/10 — A simple, practical initialization method that works across architectures and tasks has clear value to the community. The improvements are modest but consistent.
+
+**Overall**: The paper proposes a simple and practical initialization method with broad empirical validation across vision and language tasks. However, the central theoretical claim (Theorem 3.1) is mathematically imprecise and potentially incorrect for the setting it describes, and the paper lacks the direct ImageNet comparisons against identity-control baselines needed to substantiate its claimed advantages over prior work in its own class. These are fixable issues, but in their current form they significantly weaken the contribution.
+
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,18 +1,18 @@
-Now I have a thorough understanding of the paper and can verify the reviewer claims against the actual content. Let me compile my final consolidated review.
+Now I have a thorough understanding of the paper and all the reviewer inputs. Let me construct the final consolidated review.
 
 ## Summary
 
-NeRM introduces a two-stage generative framework for human motion synthesis that first learns variational implicit neural representations (INRs) of motion clips at their native framerates, then trains a diffusion model on the resulting latent codes. The key insight is to represent motion as a continuous function over temporal coordinates, decoupling the representation from discrete framerate and duration. This enables training on mixed-framerate datasets (e.g., 20–250 fps in HumanML3D) without downsampling or discarding data, and supports high-framerate motion generation without prohibitive memory cost.
+**Paper:** NeRM introduces a two-stage generative framework combining variational Implicit Neural Representations (INRs) with latent diffusion for high-framerate human motion synthesis. The key insight is representing motions as continuous fields over temporal coordinates, which allows training directly on datasets with varied native framerates (20–250 fps) without discarding or downsampling data. The first stage learns per-sequence variational latent codes via a coordinate-conditioned decoder with a Codebook-Coordinate Attention (CCA) mechanism; the second stage learns a diffusion model over these latents. NeRM achieves state-of-the-art FID on HumanML3D (0.180 vs. next best 0.427) and demonstrates high-framerate generation that avoids interpolation artifacts like foot sliding.
 
 ## Strengths
 
-1. **Training on native-framerate data demonstrably improves generation quality.** The paper directly validates its central claim: NeRM trained on native framerates achieves FID 0.024 on HumanML3D text-to-motion, substantially outperforming its own fixed-framerate variant (FID 0.034) and the best baseline MLD (FID 0.40). The "Fairness discussion" (lines 151) cleanly separates the benefit of raw data usage from the benefit of the architecture itself. This is the paper's strongest piece of evidence.
+- **Novel approach to a real, underexplored problem.** NeRM is, to my knowledge, the first generative motion model that handles varied native framerates directly during training — a practical bottleneck that prior work sidesteps by downsampling and discarding data. The core idea (continuous motion field via INR + latent diffusion) is well-motivated and the two-stage decomposition is architecturally sound.
 
-2. **High-framerate motion synthesis without interpolation artifacts.** Table 2 shows NeRM achieving clip-FID of 0.025 (50 fps), 0.031 (100 fps), and 0.048 (250 fps) on HumanML3D, while interpolation-based baselines degrade sharply (MLD: 0.128, 0.361, 0.594). Figure 4b provides qualitative corroboration: NeRM's high-framerate output avoids the foot-sliding artifacts that appear when baselines upsample via spherical linear interpolation.
+- **Substantial empirical results on standard benchmarks.** NeRM achieves state-of-the-art FID on HumanML3D (0.180, vs. next best MLD at 0.427) and KIT (0.429, vs. next best 0.502) for text-to-motion, competitive results on action-to-motion (best Accuracy and Diversity on UESTC, Table 3), and best FID on unconditional AMASS (Figure 5). These results are presented with confidence intervals and represent a clear advance.
 
-3. **Variational INR formulation creates a smooth latent space for diffusion.** Unlike prior INR-based motion models (NeMF) that overfit deterministic codes, NeRM treats each latent as a normal distribution (Section 3.1). The benefit is empirically validated in unconditional generation (Figure 5): NeRM achieves FID 0.044 and Diversity 9.765 on AMASS versus NeMF's FID 0.7 and Diversity 8.860.
+- **Meaningful high-framerate generation with direct evidence.** Table 2 shows NeRM achieving clip-FID scores far below interpolated baselines at 60, 90, and 120 fps (e.g., 0.216 at 90 fps vs. 2.588 for interpolated MLD). Figure 4b provides visual confirmation that NeRM avoids foot sliding artifacts that appear under SLERP interpolation of baseline outputs.
 
-4. **Codebook-Coordinate Attention (CCA) enriches coordinate embeddings.** The fixed-framerate variant of NeRM (FID 0.034) outperforms all baselines including MLD (FID 0.40), suggesting that CCA and the latent diffusion framework contribute beyond the multi-framerate advantage. The paper motivates CCA by noting Fourier features alone are empirically insufficient (Section 3.1).
+- **Abundant conditioning flexibility.** The same variational INR decoder supports text (via CLIP), action labels (via learned embeddings), and unconditional generation within a unified diffusion framework — demonstrated across three distinct experimental settings.
 
 ## Weaknesses
 
@@ -21,61 +21,68 @@ None.
 
 ### Major
 
-1. **Missing ablations for core design choices.** Three key components are introduced without independent justification:
-   - **Variational vs. deterministic latents**: The paper argues variational formulation enables smooth latent interpolation, but provides no experiment showing this matters for generation quality or diversity.
-   - **Codebook-Coordinate Attention (CCA)**: No ablation compares "decoder with Fourier features only" vs. "decoder with CCA" (or a simpler alternative). The fixed-framerate NeRM outperforms MLD, but this conflates CCA with other differences (latent diffusion, transformer architecture). A direct CCA vs. no-CCA comparison is needed to attribute the improvement.
-   - **Progressive training**: The two-phase training (fixed framerate first, then multi-framerate) is described (lines 102) without any analysis showing it outperforms multi-framerate training from scratch.
-   
-   These are standard expectations for a method paper. Their absence makes it unclear which design choices drive performance.
+- **No ablation studies for individual components.** The paper introduces at least four distinct design choices — variational INR (optimizing latent distributions vs. deterministic latents), Codebook-Coordinate Attention (CCA vs. plain Fourier features), progressive multi-framerate training, and the two-stage diffusion-over-latents pipeline — but never isolates their contributions. The sole ablation is "NeRM (fixed-framerate train)" which controls for raw-data benefit. Without ablations, readers cannot tell whether the codebook, variational formulation, progressive schedule, or diffusion stage actually drive the improvements, or whether simpler alternatives would suffice. This undermines the attribution narrative built around each component, even though the full system's effectiveness is clear from the SOTA results. **Impact:** The paper's claims about which specific designs matter are unsupported.
 
 ### Minor
 
-2. **The "arbitrary framerate" claim is overstated given the evidence.** The paper uses "arbitrary framerate" and "any-framerate" in the abstract and introduction, but evaluation in Table 2 only tests framerates within the training distribution (50, 100, 250 fps, all within the 20–250 fps training range). The paper would be strengthened by testing extrapolation to unseen framerates (e.g., 500 fps or intermediate values like 75 fps). The method's continuous formulation *should* support this, but no evidence is provided.
+- **Codebook pre-training details are unspecified.** The paper states the codebook is "pre-trained" (line 86) but does not specify on what data, using what objective, or whether it is frozen or fine-tuned during INR training. While CoCo-NeRF is cited, the adaptation to motion data is non-trivial and requires specification for reproducibility and to rule out the concern that the codebook memorizes training structure that inflates reconstruction metrics.
 
-3. **clip-FID is underspecified and unvalidated.** As the metric central to the high-framerate evaluation (Table 2), clip-FID is described in only ~4 sentences (lines 145). Key details are missing: (a) what feature extractor is used for FID computation on motion clips; (b) the clip size *m* and number of sampled clips; (c) whether the metric correlates with human perception of detail quality. A simple sanity check—computing clip-FID between real motions at different framerates to establish a reference range—would help calibrate the numbers in Table 2.
+- **Framerate encoding into the decoder is underspecified.** The paper states that framerate \(s\) is fed into the decoder \(f_\theta\) (Figure 2 caption, line 46) but never specifies how — as a scalar, an embedding, or concatenated with normalized coordinates. This detail affects whether the decoder truly conditions on framerate as a continuous variable, which is central to the any-framerate claim.
 
-4. **Efficiency and memory claims are asserted without measurement.** The abstract claims NeRM is "memory-friendly" and "highly efficient even when generating high-framerate motions." No runtime, GPU memory, throughput, or parameter count numbers are reported. The conceptual argument (INRs decouple memory from resolution) is reasonable, but the paper makes specific empirical claims without supporting data.
+- **High-framerate evaluation uses only SLERP as a baseline.** The baselines (MLD, MDM, etc.) cannot natively generate high-framerates, so interpolation is a natural comparison. However, comparing against at least one simple learned upsampling network would provide a stronger test of whether NeRM's INR-based upsampling genuinely outperforms reasonable alternatives, not just linear blending. The lack of this comparison weakens but does not invalidate the claim.
 
-5. **Implementation details are insufficient for reproduction.** The decoder *f_θ* architecture (number of layers, hidden dimension, activation functions) is not described. Latent code dimensionality is not given. Codebook size *N* and dimension *d* are named but not specified, nor is the pretraining procedure for the codebook. These details may exist in a supplementary appendix (which the parser strips), but the main text alone is not self-contained.
+- **Clip-FID metric is introduced but not validated.** The paper proposes clip-FID as a metric sensitive to local details like foot sliding (line 145) but provides no evidence — no correlation with human judgments, no analysis of what it captures beyond standard FID, and no specification of the clip sampling parameters (number of clips, clip size \(m\), sampling strategy). For a new metric used in core evaluation, this is a gap.
+
+- **Continuous framerate claim is demonstrated only at discrete points.** The model is described as learning a continuous field, yet evaluation is limited to 20, 60, 100, and 250 fps — all within the training distribution. No results are shown at framerates not seen during training (e.g., 33, 75, 150 fps) or at non-integer timestamps, which would directly validate the "any-framerate" claim and rule out overfitting to training framerates.
+
+- **No runtime or memory measurements.** The paper claims NeRM is "memory-friendly" and "highly efficient even when generating high-framerate motions" (abstract), but provides no runtime comparisons, memory profiling, or latency measurements against baselines. Given that INRs can be computationally expensive to evaluate at many points, this claim needs quantitative support.
+
+- **Key hyperparameters for the multi-framerate sampling are missing.** The maximum duration \(l_{max}\), clip size \(m\), number of clips per training step, and the progressive training schedule (iteration counts, learning rate changes) are not reported. These are non-trivial choices that likely affect performance and are needed for reproducibility.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
 
-- **Root trajectory handling at high framerates**: The paper does not discuss how root velocity accumulation is handled when generating at high framerates, where drift could be a concern. A discussion or simple evaluation would help.
-- **Long-sequence generation**: The model generates clips of fixed size *m*; how full sequences beyond this size are produced (stitching, sliding window, or direct full-sequence decoding) is not addressed.
-- **Confidence intervals on unconditional results**: Figure 5 (bar chart) would benefit from error bars for the unconditional generation metrics.
+- A simple learned temporal upsampling baseline (e.g., a small MLP or linear layer that upsamples low-framerate poses) would strengthen the high-framerate evaluation without requiring re-architecting the baselines.
+- Quantifying the temporal sub-sampling property (Figure 4c) — e.g., measuring pose consistency when skipping frames — would turn a qualitative demonstration into a quantitative one.
+- Validating clip-FID against human perceptual judgments on a small set of examples would establish the metric's credibility.
 
 ## Removed Points
 
-These points were raised by reviewers but are removed per guidelines:
-
-1. **Criticism about missing newer baselines (MotionGPT, ReMoDiffuse, LODGE).** Per instruction: missing related works should not be mentioned as a weakness since external verification is unavailable.
-
-2. **Complaint that Figure 2 is "not explained in the text."** The paper explicitly references Figure 2 in lines 40 and 46 with a caption explaining the two-stage pipeline. This is standard for a method figure.
-
-3. **The claim that certain test framerates (30, 60, 120, 240 fps) are evaluated.** The actual tested framerates from the paper's discussion are 50, 100, 250 fps. The reviewer's specific numbers are inaccurate, though the broader point (all tested framerates are within training distribution) stands.
-
-4. **Complaint about "long sequences beyond clip size" not being addressed.** The continuous motion field formulation inherently supports querying at arbitrary time points; the clip-based training is a training strategy, not a constraint on inference.
+- **Missing related works (HuMoR, EDGE).** The harsh critic mentions these under "Other Observations" — removed per instructions to not mention missing related works.  
+- **Criticism that the high-framerate comparison uses "extremely weak" baselines.** The critic describes SLERP as an "extremely weak competitor." However, the baselines literally cannot generate high-framerates, so SLERP is a natural and reasonable comparison. The paper's comparison is not unfair. Downgraded to Minor and reframed.
+- **"Weakness" about "unfair comparison" framing** — not applicable; no such framing exists in the review.
+- **Generic phrasing about "should also cover Y in addition to X"** — limited to the one related-works instance above.
 
 ## Novel Insights
 
-The reviews surface one tension not fully explored in the paper: the method's strongest result (native-framerate training beating fixed-framerate training in Table 1) cleanly validates the core thesis, but the mechanism behind this improvement is underspecified. Is the improvement driven by (a) simply having more training data (frames not discarded), (b) the continuous inductive bias of INRs, or (c) the specific architecture choices (CCA, variational latents)? The fixed vs. native comparison supports (a) + (b), but without ablations the paper cannot separate them or attribute to (c). The reviews correctly identify this as the paper's central methodological gap.
+The most interesting observation from the reviews is the tension between the paper's strong SOTA results and its lack of component-level attribution. The paper shows an impressive FID of 0.180 on HumanML3D — nearly 2.4× better than the next best method — while also enabling high-framerate generation. Yet without ablations, it is unclear whether this gain comes from the INR formulation, the codebook, the variational latents, the progressive training, the diffusion stage, or simply the benefit of using more training data (i.e., not discarding low-framerate sequences). Disentangling these would substantially elevate the paper's contribution from "the system works well" to "here is why each piece matters." The review process highlights that in a paper with multiple architectural novelties, evaluating the whole system is necessary but not sufficient — readers need to understand what each component buys.
 
 ## Suggestions
 
-1. **Add three targeted ablations**: (i) variational vs. deterministic latents on the unconditional generation task; (ii) decoder with Fourier features only vs. decoder with CCA; (iii) progressive training vs. multi-framerate training from scratch. Report FID for each.
+1. **Add component-level ablation studies** as the top priority: (a) CCA vs. plain Fourier features, (b) variational INR vs. deterministic per-sequence latents, (c) progressive training vs. one-stage multi-framerate training, (d) latent diffusion vs. direct sampling from the variational prior without diffusion. Even a single table with these ablations on one dataset (e.g., HumanML3D FID and clip-FID) would dramatically strengthen the paper's causal claims.
 
-2. **Report efficiency numbers**: GPU memory (peak training and inference) and inference time (ms per frame) for NeRM vs. at least MLD at 20, 100, and 250 fps.
+2. **Specify codebook pre-training details**: dataset, objective (VQ-VAE? k-means?), frozen or updated during INR training, number of codes \(N\) and dimension \(d\).
 
-3. **Validate clip-FID**: Specify the feature extractor, clip size, and sampling procedure. Compute clip-FID between real motions at different framerates (e.g., real 20 fps vs. real 120 fps) to establish the metric's behavior.
+3. **Clarify how framerate \(s\) is encoded** into the decoder \(f_\theta\).
 
-4. **Test framerate extrapolation**: Generate motions at one unseen framerate above the training range (e.g., 500 fps on HumanML3D) and report clip-FID with qualitative inspection.
+4. **Report hyperparameters** for the multi-framerate clip sampling (\(l_{max}\), \(m\), clips per step) and the progressive training schedule.
 
-5. **Provide architecture details** (decoder layers/hidden dims, latent dimension, codebook N/d, pretraining objective) either in main text or an appendix that will not be stripped.
+5. **Provide runtime and memory measurements** to substantiate the efficiency claims.
+
+6. **Validate clip-FID** by reporting its parameters (clip size, number of clips, sampling strategy) and ideally correlating it with a small human evaluation on foot sliding vs. smooth motion.
+
+7. **Include at least one additional high-framerate baseline** (e.g., a lightweight learned temporal upsampler applied to baseline low-framerate outputs) to strengthen the comparison beyond SLERP.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Originality:** 7/10 — the specific combination of variational INR + latent diffusion for motion with native-framerate training is novel, though each individual technique is established.  
+**Importance of research question:** 8/10 — handling varied-framerate data and generating high-framerates addresses a genuine practical limitation.  
+**Claims supported:** 5/10 — the system-level results support the overall effectiveness, but component-level claims are unablated and underspecified.  
+**Soundness of experiments:** 6/10 — methodology is appropriate, evaluation covers multiple tasks and datasets, but missing ablations and limited high-framerate baseline weaken the validation.  
+**Clarity of writing:** 7/10 — well-structured and readable, though several implementation details are missing.  
+**Value to community:** 6/10 — the approach and SOTA results are valuable, but missing reproducibility details and ablations limit immediate impact.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

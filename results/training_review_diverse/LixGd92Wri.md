@@ -1,66 +1,69 @@
-Now I have a thorough understanding of the paper. Let me write the consolidated review.
+Now I have all the evidence I need. Let me construct the final consolidated review.
 
 ## Summary
 
-The paper introduces GDL-DS, a benchmark for evaluating geometric deep learning (GDL) models under distribution shifts across three scientific domains (particle physics, materials science, biochemistry). It curates/adapts 6 datasets, defines 10 shift scenarios categorized via a causal data model (conditional, covariate, concept shifts), and evaluates 3 GDL backbones with 11 learning algorithms at three levels of OOD information availability (No-Info, O-Feature, Par-Label). The goal is to provide systematic evaluation and practitioner guidance.
+This paper presents GDL-DS, a benchmark for evaluating geometric deep learning models under distribution shifts across three scientific domains (particle physics, materials science, biochemistry). It covers 10 distribution shifts at three levels of OOD data availability (no information, unlabeled features, few labels), evaluates 11 learning algorithms on 3 GDL backbones, and introduces a causal categorization framework to connect shift types to recommended solution strategies. The paper's main contribution is a systematic, multi-domain evaluation infrastructure that yields actionable recommendations for practitioners.
 
 ## Strengths
 
-- **First multi-domain, multi-shift benchmark for GDL under distribution shifts.** The paper covers three distinct scientific fields (HEP, materials science, biochemistry) within a unified framework and categorizes shifts using a causal data model (conditional, covariate, concept) — going beyond prior benchmarks that focus on a single domain or shift type (Table 1, Sec. 3.1). This fills a genuine gap.
-- **Three-tiered OOD information availability studied in a single benchmark.** GDL-DS evaluates settings with no OOD info, unlabeled OOD features, and a few OOD labels within the same experimental framework, applying OOD generalization, domain adaptation, and transfer learning methods respectively (Sec. 4.1). Prior benchmarks typically consider only one or two levels, making this a novel synthesis.
-- **Domain-relevant dataset construction.** The Track dataset uses varying pileup levels and signal particle types that mirror real experimental conditions in HEP (Sec. 3.2.1). The QMOF fidelity shift leverages genuine discrepancies between DFT calculation methods (PBE vs. HSE06), which is a real challenge in materials science (Sec. 3.2.2). These are not artificial perturbations but practically motivated shifts.
-- **The causal framing of distribution shifts is a thoughtful organizational device.** Decomposing shifts into conditional, covariate, and concept categories via the X_c/X_i data model provides a principled way to reason about which methods might work, even if the causal assumptions are not empirically validated (Sec. 3.1).
+- **Comprehensive coverage across shifts, domains, and OOD info levels.** The benchmark spans 10 distribution shifts across 3 scientific domains and 3 levels of OOD data access, yielding 30 experimental configurations — substantially broader than prior benchmarks that typically cover a single domain or shift type (e.g., DrugOOD covers only biochemistry, Hoffmann et al. only fidelity shifts). This breadth enables the paper's central finding: no single method dominates, and method selection should depend on shift type and data availability.
+
+- **Principled causal categorization of distribution shifts.** The paper formalizes shift types (covariate, concept, conditional) through a causal data model with $X_c$ (causal) and $X_i$ (independent) components, and further sub-categorizes conditional shifts into $\mathcal{C}$-conditional and $\mathcal{T}$-conditional variants. This causal grounding goes beyond purely empirical shift descriptions and is used to interpret experimental outcomes (e.g., why DA methods help when shifts affect critical features).
+
+- **Actionable, domain-grounded recommendations.** The paper distills three concrete takeaways and a three-step decision guide (assess shift type → assess OOD data availability → select method category), backed by specific observations from Table 3. These are precisely the kind of output a benchmark should produce for practitioners.
+
+- **Creation of new, physically motivated benchmark datasets.** The Track-Pileup and Track-Signal datasets are newly constructed with shifts that mirror real experimental conditions in high-energy physics (varying pileup noise, varying signal particle momenta), with clear mappings to the paper's causal shift categories.
+
+- **Integration of multiple OOD solution families under one framework.** Evaluating OOD generalization methods (No-Info), domain adaptation methods (O-Feature), and transfer learning (Par-Label) within the same benchmark enables cross-level comparisons that reveal trade-offs (e.g., catastrophic forgetting when few OOD labels are available) that single-level studies would miss.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-- **Method selection for O-Feature and Par-Label levels is too narrow to support the benchmark's broader conclusions.** For the O-Feature (unsupervised DA) level, only DANN and DeepCoral are included — both from 2016. For the Par-Label (transfer learning) level, only vanilla fine-tuning with varying label counts is used. This under-represents the diversity of modern DA and TL strategies (e.g., contrastive adaptation, optimal transport DA, source-free adaptation, parameter-efficient fine-tuning). Consequently, claims such as "DA methods show advantages when distribution shifts happen to features critical for label determination" (Sec. 1) are fragile — they may be artifacts of this limited method set rather than robust benchmark conclusions. A benchmark's conclusions about a method *family* require representative coverage of that family.
+
+- **Missing hyperparameter tuning protocol.** Section 4.1 contains the heading "Hyperparameter Tuning." on line 145 with no text following it. For a benchmark that compares 11 learning algorithms across 3 backbones and 30 settings, the tuning procedure is foundational to the fairness and interpretability of every comparison. Without knowing the search space, selection criterion, or number of trials, readers cannot assess whether observed performance differences reflect genuine algorithmic advantages or arbitrary hyperparameter choices. This must be added for the experimental claims to be credible.
 
 ### Minor
-- **The main empirical table (Table 3) is incomplete relative to the claimed scope.** The paper states it evaluates 3 GDL backbones, but Table 3 explicitly shows results for only 2 (EGNN and DGCNN), with the paper noting "Experimental results on 2 of 3 backbones are shown in Table 3" (line 149). The Assay shift from DrugOOD-3D — described as a concept shift in Sec. 3.2.3 — is also absent from the table. For a benchmark paper, the main evidence base should be as self-contained as possible; relegating results for one backbone and one shift type outside the main paper weakens the reader's ability to assess the claims.
-- **DrugOOD-3D conformer generation is underspecified.** The paper states "We leverage a conformer for each molecule and then assign a 3D coordinate to each atom" (line 116) without specifying which conformer was selected (e.g., lowest-energy conformer, random conformer, ensemble average) or how molecular coordinates were aligned. This compromises reproducibility for a key dataset.
-- **The causal shift categorization is presented as a verified property of the datasets but is not empirically validated.** The paper acknowledges "our data model does not aim to cover all possible causality relationships" (Sec. 3.1), but the actual categorization of each dataset's shift type (conditional/covariate/concept) is asserted based on domain reasoning rather than tested. For instance, the QMOF fidelity shift is classified as a concept shift because P(Y|X) differs across DFT levels — but this could be verified by examining conditional probability changes for held-out materials, which would strengthen confidence in the taxonomy.
-- **The "catastrophic forgetting" explanation for TL_100 underperformance is asserted without direct evidence.** The paper observes that TL_100 underperforms ERM in some cases and attributes this to catastrophic forgetting (Sec. 4.2), but does not measure forgetting (e.g., ID performance degradation after fine-tuning). Alternative explanations (insufficient fine-tuning, poor initialization) are equally plausible.
-- **No statistical significance testing.** Standard deviations from 3 replicates are reported, but the paper does not test whether differences between methods are significant. Given the small number of replicates, many apparent differences may be noise.
-- **No discussion of limitations.** The paper does not acknowledge that the Track dataset is synthetic, that the DA/TL method set is limited, or that the DrugOOD-3D conformer step needs specification. A brief limitations section would improve candor.
+
+- **Incomplete results in the main text.** The paper claims 10 distribution shifts and evaluates 3 backbones (EGNN, DGCNN, Point Transformer), but Table 3 reports results for only 8 shift cases on 2 backbones. The Assay shift (a concept shift, directly relevant to one of the paper's key takeaways about TL methods under concept shifts) and Point Transformer results are not shown. While these likely appear in the appendix, the main paper should at minimum cross-reference where these results live and ideally include a summary or pointer so readers can verify central claims without hunting through supplementary material.
+
+- **Ambiguous O-Feature evaluation protocol.** The paper states that data is split into Train-OOD, Val-OOD, and Test-OOD (line 141), but then says DA methods are trained on "data features of the whole OOD dataset" (line 143). It is unclear whether "the whole OOD dataset" includes Test-OOD features. While using unlabeled target features in unsupervised DA is standard practice and not "leakage" per se, the ambiguity should be resolved: the paper should explicitly state which OOD splits are used for adaptation and confirm that no Test-OOD labels are seen.
+
+- **Dataset split specifications lack full reproducibility detail.** For the Signal shift, the paper mentions 5 source-domain subgroups each corresponding to "a specific type of signal decay" without naming the decay types; for DrugOOD-3D, it references "the same design of domain splits and sub-group splits as DrugOOD" without specifying which of DrugOOD's multiple cores/splits are used. Sample counts per subgroup are not provided. While some of these details are natural for an appendix, the paper should include a pointer to where these specifications can be found.
+
+- **Causal categorization is asserted rather than empirically validated.** The paper assigns each dataset's shift to a causal category based on domain knowledge. While this is reasonable and the paper acknowledges the data model's limitations (line 63: "our data model does not aim to cover all possible causality relationships"), the "insightful conclusions" depend on these categorizations being correct. The paper would benefit from an explicit caveat that the categorizations are domain-informed hypotheses, and from discussing how robust the conclusions are to potential misclassification.
 
 ### Trivial
-- The "Hyperparameter Tuning." header (line 145) appears to be a section stub with no following content in the parsed version. (Likely a parser artifact, but worth verifying in the original.)
-- Section 4.3 (Results Analysis — Insightful Conclusions) appears to terminate abruptly after one introductory sentence. The three takeaways from the introduction are stated but the detailed supporting analysis is not visible in this parsed version.
+
+- **Notation inconsistencies.** The target domain is denoted as both $\mathcal{T}$ and $\tau$ interchangeably (e.g., line 57 uses $\mathbb{P}_{\mathcal{T}}$, line 67 uses $\tau$). The symbols $\dot{\mathbb{P}}$ and $\bar{\mathbb{P}}$ appear on line 80 without prior introduction. Line 57 has a typographical glitch ($\mathbb{P}_{7}$ appears instead of $\mathbb{P}_{\mathcal{T}}$).
 
 ## Nice-to-Haves
-- Include computational cost analysis (training times, GPU hours) — standard for benchmarks and useful for practitioners selecting methods.
-- Add a few more recent DA methods (e.g., one contrastive adaptation method) and a surgical fine-tuning baseline to broaden the method set for the O-Feature and Par-Label levels.
-- Provide a quantitative summary table ranking methods per (shift type, OOD level, backbone) combination for easier digestion.
+
+- **Include a non-GDL baseline** (e.g., an MLP on invariant features or a 2D GNN) to clarify whether the observed behaviors are specific to geometric architectures.
+- **Add a quantitative summary** (e.g., average rank across settings, win-tie-loss matrix) to support the qualitative observations in Section 4.3, rather than relying solely on visual inspection of Table 3.
+- **Report Test-ID performance for TL methods** to assess whether fine-tuning degrades in-distribution accuracy, which would strengthen the catastrophic forgetting discussion.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **"Data leakage in O-Feature setting" framed as an unfair advantage.** The harsh reviewer claimed DA methods have an "information advantage" over other methods. This misunderstands the benchmark design: the different OOD info levels are an *intentional* axis of variation — DA methods are *supposed* to have access to unlabeled target features. That is the definition of the O-Feature level. The remaining kernel of a valid concern (ambiguity about which OOD split is used) is kept as a Minor weakness above.
 
-- **"The counting of 30 experiment settings is internally inconsistent"** (Harsh Critic): The paper says 10 shifts × 3 OOD levels = 30 settings, and evaluates 3 backbones × 11 algorithms *in each setting*. This is perfectly consistent — the critic misread "in each setting" as conflating settings with backbone-algorithm combinations. **Reason: factually wrong.**
-- **"Table 1 is rendered as an image and cannot be evaluated"**: This is a parser artifact from extracting the PDF. The original submission contains a proper table. **Reason: parser artifact.**
-- **"Hyperparameter tuning is mentioned but not described"**: The section header exists; the content was likely stripped by the parser. **Reason: parser artifact.**
-- **"No code or data availability statement"**: These details are typically in the appendix, which is stripped by the parser. **Reason: missing appendix content (parser artifact).**
-- **Strength: "Actionable practitioner takeaways grounded in empirical results"**: This strength conflicts with the verified weakness that the takeaways are not convincingly backed by structured analysis. Per the rule, when a strength and weakness disagree, the weakness wins. **Reason: conflicts with verified weakness.**
-- **Strength: "Extensive empirical evaluation across multiple backbones and algorithms"**: Overstated given that Table 3 shows results for only 2 of 3 backbones and omits one shift type. **Reason: conflicts with verified weakness about incomplete evidence.**
+- **Claims that reproducibility concerns stem from "not yet released" or "unverifiable" datasets/models.** The paper cites existing datasets (DrugOOD, QMOF) and methods — these are publicly available. Removed per hard rule.
+
+- **Demand for conditional independence tests to validate causal categorization.** The paper clearly acknowledges its data model's limitations (line 63). Requiring formal statistical tests for a benchmark paper's design choices is outside the scope of what is standard or expected. The concern is kept in weakened form as a minor caveat.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The most interesting observation emerging from this review is that the paper's main vulnerability is not any single experiment being wrong, but a gap in methodological transparency (empty hyperparameter tuning section) that makes it impossible to assess whether the experiments are trustworthy. This is an unusual failure mode for a benchmark paper — the curation and design are largely sound, but a documentation gap undermines the very comparisons the benchmark exists to enable. The causal taxonomy itself is a genuine strength, but it also creates a fragility: if any shift is miscategorized, the paper's "insightful conclusions" could lead practitioners astray. The interplay between the strength of the taxonomy and the weakness of its empirical grounding is the paper's deepest tension.
 
 ## Suggestions
 
-1. **Expand the DA and TL method coverage.** Adding even 2-3 additional representative methods per level (e.g., a contrastive DA method, a source-free DA method, and surgical fine-tuning) would substantially strengthen the generality of the benchmark's conclusions about these method families.
-2. **Complete the main empirical table.** If space is constrained, consolidate or aggregate results so the main paper covers all claimed backbones and shift types. A reader should be able to assess the full scope without consulting supplementary materials.
-3. **Empirically validate the causal categorization for at least one dataset.** A simple check (e.g., verifying that P(Y|X) changes for QMOF fidelity shift) would significantly strengthen confidence in the taxonomy.
-4. **Replace qualitative observations with structured quantitative analysis.** A table ranking per-shift-type winners with pairwise significance tests would make the three takeaways more convincing and reproducible.
+1. **Fill the Hyperparameter Tuning section completely.** For each method and backbone, report: search space, selection criterion (validation ID vs. OOD), number of trials, and final selected hyperparameters. Without this, the benchmark's comparisons are uninterpretable.
+2. **Cross-reference all 30 settings to results locations.** Add a table or figure caption in the main text mapping each of the 10 shifts × 3 info levels to where results appear (Table 3 or specific appendix section).
+3. **Clarify the O-Feature split usage.** State explicitly which OOD splits (Train-OOD only, or Train+Val+Test-OOD features) are used for unsupervised DA, and confirm that Test-OOD labels are never seen during adaptation.
+4. **Strengthen the caveat on causal categorization.** Add a sentence acknowledging that the shift categorizations are domain-informed hypotheses and that practitioners should verify the categorization in their own applications.
 
 ## Score and Decision
 
-The paper addresses a real and important gap. The dataset curation, shift categorization, and multi-level evaluation framework are valuable contributions. However, the narrow method selection for the DA and TL levels limits the generality of the benchmark's conclusions about those method families, and the main empirical table is incomplete relative to the claimed scope. These are addressable weaknesses — the paper's core structure is sound. With expanded method coverage and a more complete main table, this could be a strong benchmark paper.
+The paper addresses a genuine gap — distribution shift evaluation for geometric deep learning in scientific applications — with a comprehensive design and a useful causal taxonomy. The curation of datasets, the breadth of methods, and the actionable takeaways all represent real contributions. However, the empty hyperparameter tuning section is a significant documentation failure for a benchmark paper: it prevents readers from assessing whether the experimental comparisons are fair, which undermines the credibility of the results. This is fixable (the authors likely have this information), but as submitted, the paper is incomplete. With the tuning protocol documented and the minor issues addressed, this would be a strong resource for the community.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

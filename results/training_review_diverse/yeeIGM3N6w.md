@@ -1,82 +1,72 @@
-Now I have all the information I need. Let me produce the consolidated final review.
+Now I have a thorough understanding of the paper and can verify each claim. Here is my consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes HC-SMoE, a retraining-free, task-agnostic framework that reduces the number of experts in sparse MoE models by (1) computing averaged expert outputs on a calibration set, (2) clustering those output vectors with hierarchical clustering (average linkage), and (3) merging experts within each cluster via frequency-weighted, average, or fixed-dominant merging. The method is evaluated on Qwen (60 experts) and Mixtral (8 experts) across eight zero-shot tasks, consistently outperforming three pruning baselines (O-prune, S-prune, F-prune) and one merging baseline (M-SMoE).
+This paper proposes HC-SMoE, a retraining-free, task-agnostic framework for reducing the number of experts in sparse Mixture-of-Experts (SMoE) language models. The method uses hierarchical clustering (average linkage) on averaged expert outputs as the similarity metric to group functionally similar experts, then merges experts within each cluster. The paper evaluates on two model families (Qwen: 60→30 experts, Mixtral: 8→4 experts) across eight zero-shot language tasks, consistently outperforming pruning baselines (O-prune, S-prune, F-prune) and the M-SMoE merging baseline.
 
 ## Strengths
 
-1. **Expert outputs as a similarity metric are convincingly shown to be more effective than router logits or weights.** Table V (tab:ab-hc) shows that under average-linkage hierarchical clustering, expert-output similarity achieves 0.5459 average accuracy on Qwen45, substantially outperforming router-logits (0.3153) and weights (0.5234). This direct evidence supports the paper's core insight that functional similarity is better captured by output behavior than by routing patterns or parameter distances.
+- **Expert outputs convincingly outperform alternative similarity metrics.** The ablation in Table~4 (tab:ab-hc) shows that clustering with expert-outputs under average linkage achieves 0.5459 average, while router-logits yield 0.3153 and weights yield 0.5234 on Qwen 45x2.7B. This three-way comparison, repeated across models and reduction rates, provides strong evidence that output-based similarity captures functional expertise better than prior metrics.
 
-2. **HC-SMoE (the full framework) consistently and significantly outperforms all baselines across two model families and two reduction levels.** In Tables 2 and 3 (tab:qwen, tab:mixtral), HC-SMoE (avg) achieves the highest average accuracy in all four settings: Qwen45 (+2.14% absolute over best baseline F-prune), Qwen30 (+6.95% over F-prune), Mixtral6 (+0.62% over O-prune), and Mixtral4 (up to +2.49% over O-prune). These margins are meaningful and demonstrate that the overall framework works well on both a large (60-expert) and compact (8-expert) SMoE architecture.
+- **Hierarchical clustering demonstrates clear advantages over K-means and single-shot grouping.** Table~5 (tab:ab-kmeans) shows HC-SMoE achieves 0.5426 average vs. the best K-means variant at 0.5415 on Qwen 45x2.7B, with K-means exhibiting high sensitivity to initialization (12.96% drop from fixed to random initialization with weights). Table~6 (tab:ab-one-shot-mixtral) shows HC-SMoE outperforms single-shot grouping by 1.98% (Mixtral 6x7B) and 1.67% (Mixtral 4x7B). The consistency across model scales substantiates the claim that iterative clustering matters more than the merging method.
 
-3. **Scalable by design, avoiding combinatorial explosion.** The paper explicitly contrasts with O-prune, which requires ~10¹⁸ combinations per layer for Qwen, and shows that HC-SMoE's O(N²) hierarchical clustering is practical. This is a genuine practical advantage for models with many experts.
+- **Strong empirical results across two model families and eight tasks.** On Qwen 30x2.7B (50% reduction), HC-SMoE averages 0.5223, outperforming the best baseline F-prune (0.4528) by 6.95% absolute. On Mixtral 4x7B, HC-SMoE achieves 0.5729, competitive with O-prune (0.5728) while dramatically outperforming S-prune (0.4062). Performance degrades gracefully — within 3% of the original model at 25% reduction and 7.43% at 50% reduction.
 
-4. **Merging strategy is shown to be secondary to clustering quality.** Table IV (tab:ab-merge) demonstrates that with hierarchical clustering, all three merging methods (frequency, average, fixed-dominant) yield nearly identical scores (0.5712–0.5716 for Qwen45, 0.5208–0.5240 for Qwen30), all outperforming every baseline. This cleanly isolates the clustering stage as the driver of performance retention.
+- **Comprehensive ablation study isolating design choices.** Tables 4–7 systematically ablate linkage methods (single/complete/average), similarity metrics (router-logits/weights/expert-outputs), clustering algorithms (hierarchical/K-means/single-shot), and merging strategies (frequency/average/fixed-dominant). The finding that merging strategy has little impact when clustering is good (Table 7: all three strategies score within 0.001 of each other on Qwen 45x2.7B) cleanly isolates clustering quality as the driver of performance.
+
+- **Practical retraining-free pipeline.** Uses only 32 sequences of 2,048 tokens from C4 as calibration data, requiring no fine-tuning or task-specific data.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-1. **The claim that hierarchical clustering (HC) is meaningfully superior to K-means is overstated.** Table VI (tab:ab-kmeans) shows that on Qwen45, HC-SMoE achieves 0.5426 while K-means-fix with expert-output achieves 0.5415 — a difference of ~0.1% with no uncertainty quantification. On Qwen30, the gap is larger (4.75%), but the paper's narrative ("hierarchical clustering is able to outperform K-means," "underscoring the superiority of HC") does not acknowledge how small the gap is in the 45-expert setting. The paper highlights the 4.75% result while the near-tie at Qwen45 receives no caveat. Since Contribution #3 explicitly claims that hierarchical clustering provides "robust and reliable results for expert grouping" relative to alternatives, this evidence is weaker than claimed. The strongest evidence for HC over K-means is its *stability* (deterministic, no initialization sensitivity) — this is valid and should be emphasized instead of marginal accuracy differences. The accuracy-based superiority claim needs tempering.
-
-2. **Absence of statistical rigor for fine-grained comparisons.** No experiment is repeated, and no measure of variance (standard deviation, confidence intervals) is reported. This matters most for the small-margin comparisons (HC vs. K-means-fix on Qwen45, linkage method differences, and some close baseline comparisons on Mixtral4). The large-margin wins (Qwen30, Qwen45 vs. baselines) are robust even without replication, but the paper makes several claims that rest on very small differences.
+None.
 
 ### Minor
 
-1. **The cross-model scalability argument is confounded.** The paper claims: "Qwen 45x2.7B and Mixtral 4x7B achieve comparable scores despite a twofold difference in parameter count. This observation substantiates the scalability of HC-SMoE to SMoE models with a higher number of experts." However, Qwen and Mixtral differ in architecture, training data, total parameters, and baseline performance — the comparison is not a clean test of scalability. The scalability claim is better supported by the computational complexity analysis (O(N²)) and the fact that HC-SMoE works well on both models individually. This specific paragraph weakens rather than strengthens the paper.
+- **The distance metric for expert output vectors is not specified.** The paper discusses linkage methods (single, complete, average) but never states the underlying distance function applied to the averaged expert output vectors before hierarchical clustering. The method repeatedly refers to "pairwise distance" and "cluster distance" (Section 3.2.2) without specifying whether cosine similarity, Euclidean distance, or another measure is used. This is a genuine reproducibility gap — the distance metric is a free parameter of the algorithm, and the paper's own Table 4 shows that different metrics (router-logits vs. weights vs. expert-outputs) produce dramatically different results, so the distance function for expert outputs matters. The paper clearly implemented *something*; it needs to be stated explicitly.
 
-2. **No analysis of cluster quality.** The paper hypothesizes that HC maintains intra-cluster similarity and inter-cluster diversity, and that this is why it works, but never measures this directly (e.g., silhouette scores, Davies–Bouldin index). A cluster validation index on the expert-output vectors would directly test this hypothesis and potentially explain why HC and K-means-fix produce similar downstream accuracy despite different clustering properties.
+- **The scalability claim is imprecisely supported.** The paper claims the method "scales efficiently with the number of experts" (contributions list), but provides no runtime measurements, no complexity analysis, and demonstrates only on models with 8 and 60 experts per layer. Average-linkage hierarchical clustering has O(n²) time and memory complexity in the number of experts. For 60 experts this is negligible, but the claim as stated implies a generality that is not demonstrated. The paper's own "scalability" evidence (Section 4.2, line 216–217) refers to *performance* scaling (comparable scores across parameter counts), not computational efficiency — the two are conflated. The claim should be either substantiated with runtime/complexity data or qualified.
 
-3. **No sensitivity analysis for the calibration set.** The calibration set is fixed to 32 × 2048 tokens from C4. Practitioners would benefit from knowing how robust the method is to calibration set size and composition.
+- **The comparison with M-SMoE is in a regime it was not designed for.** The paper applies M-SMoE in a task-agnostic setting without retraining (Section 4.1), even though the paper correctly notes that M-SMoE was designed *with* retraining (Section 2, Table 1 marks it as requiring retraining). M-SMoE then unsurprisingly performs worst among baselines. This comparison is transparently reported, but it is not informative about M-SMoE's actual capabilities and therefore does not meaningfully strengthen the case for HC-SMoE. A comparison against M-SMoE *with* retraining (or at least a discussion of the trade-off) would have been more useful.
 
-4. **Router behavior after merging is not discussed.** After merging, the router still outputs logits for original expert indices, which are mapped to merged experts. This could cause a mismatch between the router's assignments and the merged experts' actual competence, especially when experts with different routing patterns are merged. The paper silently assumes this is harmless.
-
-5. **Single-shot grouping methods underperform O-prune (which prunes rather than merges) without discussion.** Table VII shows that all one-shot grouping methods (including weight and expert-output based) underperform O-prune on Mixtral. The paper notes this but does not analyze *why* merging can be worse than pruning in this comparison — a natural question for readers.
-
-6. **The paper does not discuss computational cost of clustering/merging.** While scalability is a claimed advantage, no clustering time, merging overhead, or comparison to alternative methods' costs is reported.
+- **Calibration data sensitivity is not examined.** The method uses a fixed calibration set of 32×2048 tokens from C4. The paper does not investigate how sensitive clustering results (and downstream performance) are to different calibration datasets, different sample sizes, or different random draws from C4. For deployment where calibration data may mismatch the test distribution, this is a relevant concern.
 
 ### Trivial
-
-- Minor phrasing issues: the sentence about M-SMoE's inferior generalizability (¶2 of Introduction) feels vague; a brief preview of *why* would help.
-- The comparison of fixed vs. random K-means initialization showing a 12.96% drop is a nice result but is presented for the weight metric, which is not the paper's recommended approach — the paper could clarify this.
+None.
 
 ## Nice-to-Haves
 
-- A cluster validation analysis (silhouette score, Davies–Bouldin) on the learned expert clusters would strengthen the argument that HC produces better groupings.
-- Sensitivity analysis for calibration set size and composition (e.g., varying the 32×2048 default).
-- Reporting runtime/memory cost of the clustering and merging stages would help practitioners assess the practical overhead.
-- A brief discussion of the router-mismatch issue and why it is or is not problematic.
+- A brief analysis of *why* expert outputs provide better similarity than router-logits or weights — beyond the intuitive reasoning already given — would strengthen the paper. For instance, silhouette scores or dendrogram visualizations comparing clusters formed by different metrics.
+- Wall-clock time for the clustering step would aid reproducibility and practical adoption.
+- The paper could note that the number of clusters (merged experts) is currently determined by the experimental design (target reduction rate), and hierarchical clustering's dendrogram could also support automatic selection (e.g., by cutting at a similarity threshold).
+- An experiment showing that when clustering is deliberately degraded (e.g., random grouping), different merging methods diverge dramatically — reinforcing the paper's own claim that clustering quality is the primary driver.
 
 ## Removed Points
 
-- **"Introduction should preview why M-SMoE fails"**: This is a presentational suggestion, not a weakness. The paper could be clearer, but this does not affect the contribution's validity.
-- **"Table I inconsistency about M-SMoE's setup"**: The paper applies M-SMoE in a modified setting (task-agnostic, no retraining) for fair comparison, which is standard practice and is explicitly noted. Not a weakness.
-- **"§3.3: High parameter similarity doesn't mean weight-space distance is a poor metric"**: This is a reasonable methodological observation but a) the paper's main argument is that *outputs* work better empirically (Table V shows this clearly), and b) the theoretical justification is secondary to the experimental evidence. This is an arguable nuance, not a weakness of the paper.
-- **"§3.4: No discussion of computational cost for very large numbers of experts"**: Hierarchical clustering is O(N²) (as the paper notes), which is already demonstrably feasible for current SMoE scales. Speculating about hypothetical future scales is beyond the paper's scope.
-- **"Table VII: O-prune beats one-shot grouping but paper doesn't discuss why"**: This is a minor observation, not a structural weakness. The paper's main finding is that *HC-based* merging (its method) beats O-prune, not that all merging methods do.
+These were raised by reviewers but are not included in the main weaknesses for the reasons stated:
+- **"M-SMoE results primarily serve to inflate HC-SMoE's relative advantage"** — The paper is transparent about evaluating M-SMoE in a task-agnostic, retraining-free setting, and does not over-claim from this comparison. The transparency makes this an acknowledged limitation, not an unfair inflation.
+- **"The 'first retraining-free, task-agnostic SMoE merging strategy' claim is plausible but narrow"** — This is a normative judgment, not a weakness. The paper correctly qualifies this as "to the best of our knowledge."
+- **Strength Finder's claim that "HC-SMoE... outperforms the best baseline F-prune (0.4528) by 6.95% absolute" while also claiming "the competing merging method M-SMoE collapses to 0.3221"** — Both numbers are correct in the paper but the implied contrast is somewhat inflated since M-SMoE is used outside its intended regime, as noted above.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews primarily surface verification of existing claims rather than revealing unexpected patterns.
+None beyond the paper's own contributions. The reviews surface no observation about the method's behavior that the authors themselves have not already identified or claimed.
 
 ## Suggestions
 
-1. **Temper the HC-vs-K-means claim.** Acknowledge that on Qwen45, K-means-fix with expert-output achieves nearly identical accuracy to HC, and reframe the advantage of HC as *stability* (deterministic, no initialization sensitivity) rather than universal accuracy superiority. This would be more accurate and equally persuasive.
-
-2. **Add repeat-run statistics for the fine-grained comparisons.** Even 3–5 runs with different calibration samples would allow reporting means and standard deviations, clarifying whether the small differences (HC vs. K-means-fix, linkage methods) are meaningful.
-
-3. **Remove or rephrase the cross-model scalability argument.** The claim that "Qwen 45 and Mixtral 4 achieve comparable scores despite twofold parameter difference" does not support scalability — it's confounded by architectural differences. The scalability argument is already well-supported by the complexity analysis and by the consistent performance across reduction ratios within each model.
-
-4. **Report a cluster quality metric** (e.g., silhouette score) to directly test the hypothesis that HC produces better cluster structure, which would complement the downstream accuracy results.
+1. **Specify the distance metric** used for expert output vectors (and justify the choice briefly). This is a one-line fix that closes the main reproducibility gap.
+2. **Clarify the scalability claim**: either provide wall-clock measurements or O(·) analysis for the clustering step, or rephrase to distinguish performance scalability from computational scalability.
+3. **Add a calibration-data sensitivity experiment** — even varying the sample size (e.g., 16 vs. 64 sequences) or drawing from a different corpus would help establish robustness.
+4. **Acknowledge the M-SMoE comparison limitation** more directly: state that M-SMoE with retraining would be a different (and likely stronger) baseline, and that the reported results only show the inadequacy of router-logit-based grouping in a retraining-free setting.
 
 ## Score and Decision
 
-This paper presents a practical, well-motivated method for retraining-free SMoE expert merging. The core results — HC-SMoE consistently outperforms all baselines, and expert-output similarity is the key driver — are solidly supported. The main weaknesses are overclaiming on the HC-vs-K-means comparison (where the evidence is mixed) and the absence of statistical rigor for fine-grained distinctions. These are real but not fatal; they can be addressed in revision. The overall contribution — a task-agnostic, scalable merging framework validated on large models — has clear value to the community.
+This is a solid empirical paper with a clear contribution: a well-motivated, retraining-free expert merging method backed by thorough ablations that cleanly isolate clustering quality as the key design factor. The core findings are convincing and reproducible modulo one missing detail (the distance metric). The missed specification and the imprecise scalability claim are genuine but minor gaps that do not threaten the main conclusions. The paper represents a meaningful step forward for practical SMoE compression and merits acceptance.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

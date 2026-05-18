@@ -1,16 +1,15 @@
-Now I have a thorough understanding of the paper and can produce the consolidated review. Let me write it.
+Now I have all the information needed. Let me compose the final consolidated review.
 
 ## Summary
 
-The paper reinterprets Transformer self-attention through a graph signal processing (GSP) lens, treating the attention matrix Ā as a shift operator. It proposes GFSA (Graph Filter-based Self-Attention), which augments the standard attention with a three-term polynomial filter: w₀I + w₁Ā + w_K·Ā^K. To avoid O(n³) cost of computing Ā^K, the paper uses a first-order approximation (Ā + (K-1)(Ā² - Ā)) derived via finite differences. GFSA adds only tens to hundreds of parameters and is evaluated across six domains (NLU, image classification, language modeling, graph regression, ASR, code classification), showing consistent improvements over base Transformers.
+This paper reinterprets the self-attention mechanism in Transformers as a graph filter and proposes GFSA (Graph Filter-based Self-Attention), a learnable three-term polynomial filter consisting of an identity term, a first-order term, and an approximated high-order term. The method is designed to address the oversmoothing problem in deep Transformers by enriching the frequency content of representations. GFSA adds only tens to hundreds of parameters to existing backbones and is evaluated across six domains (NLP, vision, graphs, speech, code), showing consistent improvements in all settings.
 
 ## Strengths
 
-1. **Consistent empirical gains across six diverse domains with minimal parameter overhead.** GFSA improves over base Transformers in NLU (e.g., BERT GLUE avg 82.51→83.58), image classification (DeiT-S 79.8→81.1, +1.63%), graph regression (Graphormer PCQM4M validate MAE 0.1286→0.1193, −7.20%), ASR (Transformer test-clean WER 11.02→10.30), and other tasks, adding only ~72–144 parameters. This breadth of validation across domains is the paper's strongest asset.
-
-2. **GSP-based framing provides a principled foundation for designing enriched self-attention.** The observation that vanilla self-attention = ĀX is exactly the simplest graph filter is well-motivated. Theorem 1 connects coefficient signs to low-pass/high-pass behavior, providing a conceptual handle on frequency response. The empirical analysis in Fig. 2 (filter response, cosine similarity, singular values) offers supporting evidence that GFSA preserves high-frequency information compared to vanilla DeiT-S.
-
-3. **Practical efficiency strategies are investigated.** The selective-layer strategy (applying GFSA to even-numbered layers only) cuts the per-epoch runtime increase by 26.90% relative to full-layer application while retaining most of the accuracy gain. Integration with linear attention variants (e.g., Efficient Attention) yields 11.82× faster runtime than vanilla GFSA + self-attention while improving performance. These address the method's primary practical concern.
+- **Novel GSP reframing of self-attention enables principled filter design.** The paper provides a clear connection between the self-attention operation and graph signal processing (Section 2.2), interpreting $\bar{\bm{A}}\bm{X}$ as a first-order graph filter. This immediately motivates upgrading to a more expressive polynomial filter, which is a well-motivated departure from prior heuristic approaches to oversmoothing.
+- **Consistent empirical improvements across six diverse domains with minimal parameter overhead.** GFSA improves the average GLUE score for BERT_base from 82.51 to 83.58, boosts DeiT-S 12-layer top-1 accuracy from 79.8 to 81.1, improves PCQM4M validation MAE by 7.2%, and shows gains in speech recognition and code classification — all with 72–144 additional parameters. The breadth of the evaluation (NLP, vision, graphs, ASR, code) is significantly wider than typical prior work on oversmoothing in Transformers.
+- **Compatibility with linear-attention variants addresses scalability concerns.** Section 6 shows GFSA integrated with Efficient Attention is 11.82× faster than GFSA with vanilla attention while still improving performance, demonstrating the method can scale to long sequences.
+- **Connections to established GCN methods are explicitly drawn.** Section 4 relates GFSA to ChebNet, GCN, GPR-GNN, and GREAD, showing that several existing graph filters are special cases of the GFSA formulation.
 
 ## Weaknesses
 
@@ -19,67 +18,60 @@ None.
 
 ### Major
 
-1. **The "high-order dependencies" claim is misleading — the filter collapses to a second-order polynomial regardless of K.** The paper frames GFSA as capturing K-hop dependencies via Ā^K (e.g., "computers" → "Book" → "pencils" in Section 4). However, substituting the approximation Ā^K ≈ Ā + (K-1)(Ā² - Ā) into the full filter yields:
-   
-   H̃_GFSA = w₀I + w₁Ā + w_K(Ā + (K-1)(Ā² - Ā))
-          = w₀I + (w₁ + w_K(2-K))Ā + w_K(K-1)Ā²
+1. **The oversmoothing explanation is not empirically verified: learned coefficients are never reported.** The paper's central argument (Section 4, "How to alleviate the oversmoothing problem?") is that GFSA learns coefficients $\{w_0, w_1, w_K\}$ that produce beneficial low-pass, high-pass, or combined frequency responses. Theorem 1 characterizes this theoretically, but the actual learned values are never reported for any experiment. Without knowing whether $w_K$ is positive or negative (or whether $w_0$ dominates), the claim that the method works via learned spectral filtering remains speculative. The cosine similarity plots in Fig. 1(b) could equally arise from simply adding an identity-preserving component or from optimization dynamics of the extra parameters. This is a significant gap between the proposed explanation and the actual evidence.
 
-   This is a **second-degree polynomial** in Ā irrespective of K. The actual computation reaches at most 2-hop neighborhoods, yet the paper repeatedly calls this a "high-order term" and claims it captures multi-hop relational chains. The narrative is inconsistent with the mathematics. The method would still be valuable as a learned second-order polynomial filter — the paper should reframe it honestly.
-
-2. **The hyperparameter K is never reported for any experiment.** The paper defines K ≥ 2 as a hyperparameter (Section 3) but nowhere states what values of K were used across the six domains. Since K controls the coefficient structure of the second-order filter (w_K(K-1) multiplies Ā²), and since the quality of the Taylor approximation to Ā^K degrades with K, this omission is a basic reproducibility gap. Without K, a reader cannot replicate the method.
-
-3. **The learned coefficients (w₀, w₁, w_K) are never analyzed.** Theorem 1 claims the filter can behave as low-pass (positive coefficients) or high-pass (negative/alternating coefficients), and the paper states this enables mitigation of oversmoothing. Yet no experiment reports what values these coefficients actually take after training — across layers, heads, tasks, or architectures. The reader cannot verify whether the filter is learning high-pass characteristics, degenerating to vanilla attention (w₀=w_K=0, w₁=1), or settling into a trivial configuration. This is a significant gap for the paper's central mechanism.
+2. **The approximation of $\bar{\bm{A}}^K$ reduces the effective filter to degree 2, but the narrative implies higher-order modeling.** Expanding Eq.~(7) shows the effective filter is:
+   \[\tilde{\bm{H}}_{\text{GFSA}} = w_0\bm{I} + (w_1 + w_K(2-K))\bar{\bm{A}} + w_K(K-1)\bar{\bm{A}}^2\]
+   This is a degree-2 polynomial in $\bar{\bm{A}}$ — the hyperparameter $K$ merely rescales the coefficient of $\bar{\bm{A}}^2$ relative to $\bar{\bm{A}}$ and does not introduce any term beyond $\bar{\bm{A}}^2$. The paper openly presents this as an approximation (Section 3), but the framing throughout the paper ("high-order term," "capturing high-order dependencies" in Section 4, "$\bar{\bm{A}}^K$ with $K$ as a tunable hyper-parameter") suggests capabilities that the actual computation does not possess. The paper would benefit from being explicit that the effective filter is second-order and that $K$ controls a coefficient ratio rather than a neighborhood radius.
 
 ### Minor
 
-4. **The 6.25% NLU improvement in the abstract is not directly supported by the table.** The abstract and Fig. 1 claim a 6.25% improvement for NLU. However, the GLUE results (Table 1) show per-model absolute improvements of ~1% (BERT: 82.51→83.58, ALBERT: 84.01→85.05, RoBERTa: 85.87→86.79). The 6.25% figure is not defined or derivable from the reported numbers. The paper should clarify what aggregation this refers to.
+3. **Most experiments lack error bars, making it difficult to assess statistical reliability.** Standard deviations or confidence intervals are reported only for the GPS/Graph-ViT experiments (Table 5). The core results in GLUE (Table 1), ImageNet (Table 3), graph regression (Table 4), ASR (Table 6), and code classification (Table 7) are presented as single numbers. Some improvements are small (e.g., GPT-2 perplexity 18.806 → 18.764; Swin-S top-1 82.9 → 83.0; LibriSpeech 960h WER 2.42 → 2.31). While the consistency across dozens of task/model combinations strengthens the case that the gains are real, the absence of variance estimates weakens the paper's empirical rigor. At minimum, multiple runs should be reported for the largest claims (e.g., CoLA 60.34 → 64.11).
 
-5. **Several improvements are small with overlapping standard deviations; no statistical significance is reported.** For example, GPT2 perplexity improvements (19.513→19.450, 20.966→20.923, 15.939→15.919) are tiny fractions of a point. GPS+GFSA on Peptide-struct (0.2500±0.0005 vs. 0.2496±0.0013) has overlapping error bars. While the consistency across domains is encouraging, individual results would be more convincing with significance tests.
+4. **Missing comparisons against cited oversmoothing methods.** The paper cites Dovonon et al. (2024), who propose a direct reparameterization to prevent oversmoothing, and Shi et al. (2022), who use layer fusion (JKNet-style). Both are discussed in the text but neither is included as an experimental baseline. For a paper that claims to address oversmoothing, the experiment set is limited to two comparisons (ContraNorm for GLUE; ContraNorm, AttnScale, FeatScale for ViT). Adding at least one of these cited methods would substantially strengthen the comparative claims.
 
-6. **The error bound in Theorem 2 (E_K ≤ 2√n·K) is very loose.** For n=196 (typical ViT) and K=12, the bound (28·12=336) exceeds the maximum possible Frobenius norm of the error (≤ n = 196). The bound is non-vacuous only for small K (K ≤ √n/2). It provides asymptotic O(K) scaling but no practically meaningful guarantee.
+5. **The approximation error bound (Theorem 2) is too loose to be useful.** The bound $E_K \leq 2\sqrt{n}K$ grows to approximately 136 for $n=512, K=3$, while the Frobenius norm of $\bar{\bm{A}}^K$ itself is at most $\sqrt{n} \approx 22.6$ since $\bar{\bm{A}}$ is row-stochastic. The bound is vacuous and does not provide meaningful theoretical grounding for the approximation's accuracy. A tighter bound, or empirical error measurements, would be more informative.
 
-7. **Comparison baselines (AttnScale, FeatScale, ContraNorm) are reported for DeiT but not extended to CaiT or Swin backbones.** This limits the comparative assessment.
+6. **Computational overhead of computing $\bar{\bm{A}}^2$ is not thoroughly analyzed.** The paper mentions "negligible additional parameters" but computing $\bar{\bm{A}}^2$ from an $n \times n$ attention matrix costs $O(n^3)$ naively, or $O(n^2 d)$ with careful implementation. While the selective-layer strategy and linear-attention integration are discussed, the paper never reports actual FLOPs, memory footprints, or runtime comparisons beyond per-epoch wall-clock time for BERT. For practitioners considering adoption, this information would be valuable.
 
 ### Trivial
 
-8. **The Taylor approximation derivation is mathematically unconventional.** Treating f(K) = Ā^K as a continuous function and applying a Taylor expansion at a=1, with f'(1) approximated by forward finite difference with h=1, conflates discrete exponents with continuous variables. The finite-difference approach is standard for discrete functions but should not be presented as a Taylor expansion. This does not affect the validity of the resulting filter.
-
-9. **The parameterization of learned coefficients could be clearer.** The paper states "tens to hundreds of additional parameters" but does not explicitly state whether coefficients are shared across heads, layers, or both. From the parameter counts (144 for 12×12-head GPT2, 72 for 12-layer 6-head DeiT-S), it appears there is 1 learnable scalar per attention head, but the relationship to the three coefficients (w₀, w₁, w_K) is not explained.
+- The approximation error bound (Theorem 2) could be moved to the appendix since it adds little practical insight in its current form.
+- The dynamic nature of the attention graph (changing per input and per layer) is briefly noted but could receive a more explicit discussion in the GSP framing section.
 
 ## Nice-to-Haves
 
-- An ablation comparing GFSA against a simple learned second-order filter (w₀I + w₁Ā + w₂Ā² with three independent coefficients) would clarify whether the specific parameterization matters beyond the filter order.
-- Reporting layer-wise coefficient values (or summaries) for at least one experiment (e.g., DeiT-S+GFSA on ImageNet) would substantially strengthen the claim that the filter modifies frequency response.
-- Statistical significance tests (e.g., paired bootstrap) on key results would make the evidence more robust.
-- State what K values were used in each set of experiments.
+- **Report learned coefficient values** ($w_0, w_1, w_K$) for at least one representative task per domain. This would directly validate or refute the oversmoothing mechanism.
+- **Ablate the approximation** by comparing full $\bar{\bm{A}}^K$ (for small $K$ and small $n$) against the Taylor approximation to quantify actual approximation error.
+- **Compare against a simpler baseline**: a fixed second-order polynomial $w_0\bm{I} + w_1\bar{\bm{A}} + w_2\bar{\bm{A}}^2$ (without $K$) to show whether the $K$ hyperparameter adds value beyond a fixed degree-2 filter.
+- **Add multiple-run statistics** for the CoLA improvement (60.34 → 64.11) since this is the largest single gain claimed.
+- **Measure and report FLOPs or GPU memory** for GFSA versus the backbone.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-- *"The method is not novel because GPR-GNN uses a similar form."* — The paper explicitly acknowledges this connection and positions GFSA relative to existing graph filters. Novelty is in applying polynomial graph filtering to Transformer self-attention, not in inventing a new filter family. This was a misunderstanding by the reviewer.
-- *"The comparison to GPR-GNN and GREAD reveals GFSA's form is not novel."* — Same as above. The paper's contribution is the application and approximation strategy, not filter invention. Removed as strawman.
-- *"The derivation is mathematically confused."* — The finite-difference approach is a standard technique for discrete settings. The presentation is informal but not confused. Downgraded to Trivial.
-- *"GFSA's integration into Graphormer/GPS is not explained."* — The paper states "we replace its self-attention module with our GFSA." This is a sufficient explanation. Removed.
-- *"The paper does not specify whether coefficients are shared across heads and layers."* — The parameter counts (144 for 12×12-head GPT2) imply per-head scalars, though the exact parameterization of the three coefficients is unclear. Downgraded to Trivial.
+- **Approximation makes the filter "not truly $K$-hop"** — The paper explicitly calls it an approximation throughout and presents the equations transparently. The remaining concern (misalignment between narrative and actual degree) is kept as a Major weakness, but the stronger version claiming the paper is "misleading" rather than merely over-claiming is removed.
+- **The bound is vacuous and the paper "should not have included Theorem 2"** — The bound, while loose, is mathematically correct. The concern is kept (Minor weakness 5) but softened from "the paper should remove this" to "a tighter bound would be more informative."
+- **Selective-layer strategy lacks accuracy results** — The paper references Table~\ref{tab:vit_half} and the figure caption states "Effectiveness...maintain accuracy benefits." These results exist in the appendix, which the parser has stripped. Per the meta-review rules, weaknesses about missing appendix content are removed.
+- **Dynamic graph concern (attention matrix changes per input/layer)** — This is an inherent property of Transformers that the paper acknowledges by citing Maskey et al. (2023) on GSP for directed graphs. The criticism reflects a mismatch in expectations rather than a flaw in the paper.
+- **"The paper would need a full re-write of the theoretical narrative"** — The approximation is transparently presented; the issue is one of degree (narrative overclaiming) rather than incorrectness.
+- **Several strength-finder strengths dropped**: Strength 3 ("theoretical guarantees lend rigor") conflicts with the verified weakness that the bound is loose/vacuous; the strength is removed. Supporting Strength 1 (selective-layer) is kept but note it relies on appendix content.
 
 ## Novel Insights
 
-The reviews surface a genuine tension: the paper's engineering contribution (consistent gains across six domains with minimal parameters) is stronger than its scientific framing would suggest, while its claimed "high-order" theoretical motivation is mathematically weaker than presented. The most interesting open question not resolved by the paper is whether the gains come from (a) the specific high-order approximation narrative, (b) simply having any second-order polynomial that reweights the attention distribution, or (c) the extra flexibility of learned coefficients. An ablation isolating these factors would be valuable.
+The most interesting observation from the review process is the tension between the GSP framing and the actual computation. The paper correctly identifies self-attention as a graph filtering operation, and the resulting filter design (identity + two polynomial terms) is well-motivated and empirically effective. Yet the Taylor approximation, introduced for efficiency, strips the "high-order" term of its claimed multi-hop capability, reducing it to a degree-2 polynomial with a tunable coefficient ratio. This creates a curious situation: the paper's GSP motivation points toward a rich design space of polynomial filters, but practical constraints (and the approximation trick) pull it back to something much simpler. Whether the improvements come from the GSP-inspired structure specifically, or simply from adding two learnable scalars and an extra self-attention computation, is a question the paper does not fully resolve — and the unreported coefficients leave it open. An ablation replacing GFSA with a straightforward $w_0\bm{I} + w_1\bar{\bm{A}} + w_2\bar{\bm{A}}^2$ would cleanly address this.
 
 ## Suggestions
 
-1. **Reframe the method honestly.** Drop the "high-order dependencies" narrative and present GFSA as a learned second-order polynomial graph filter (identity + Ā + Ā²). This is still a clean, well-motivated contribution over vanilla self-attention and aligns with the actual computation.
-2. **Report K values for all experiments**, and ideally justify why they were chosen.
-3. **Analyze the learned coefficients** for at least one setting (e.g., DeiT-S on ImageNet). Show their values across layers to demonstrate that the filter is not degenerating to vanilla attention and that it learns high-pass characteristics where needed.
-4. **Clarify the 6.25% NLU number** — explain the aggregation used in Fig. 1 or correct it to match the table.
-5. **Consider reporting statistical significance** or confidence intervals for key results with small margins.
+1. Add a table or figure showing learned coefficients $\{w_0, w_1, w_K\}$ for at least one model per domain, ideally alongside the resulting frequency response of the effective filter. This would directly validate or qualify the oversmoothing explanation.
+2. Add multiple-run statistics with standard deviations for the GLUE and code classification experiments, which are relatively low-cost to run multiple times. At minimum, report runs for the largest claims.
+3. Rewrite the narrative around the "high-order" term to be transparent about the effective degree-2 filter. Reframe $K$ as a coefficient-balancing hyperparameter rather than a neighborhood radius.
+4. Include comparisons against Dovonon et al. (2024) or Shi et al. (2022) in at least one domain (e.g., GLUE or ImageNet).
+5. Report per-epoch FLOPs or training memory for the backbone versus GFSA on at least one model (e.g., BERT or DeiT-S) to help practitioners assess the computational trade-off.
+6. Add an ablation of the approximation: compare full $\bar{\bm{A}}^K$ (small $K$, small $n$) against the Taylor approximation to quantify the actual approximation error.
 
 ## Score and Decision
 
-The paper makes a genuine empirical contribution — it proposes a simple, low-cost modification to self-attention that yields consistent gains across six domains. The breadth of validation and minimal parameter overhead are notable. However, the paper's narrative overstates the method's theoretical novelty (the "high-order" claim is misleading given the second-order collapse), and the two most important experimental details (what K values were used; what values the learned coefficients actually take) are absent. These issues are addressable with revisions but weaken the paper in its current form.
+The paper has a genuine contribution: a simple, well-motivated modification to self-attention that consistently improves Transformers across many domains with negligible parameter overhead. The GSP framing is novel and provides a principled foundation. However, the paper has three significant weaknesses that prevent it from being strong in its current form: (1) the oversmoothing explanation is asserted without direct evidence of learned coefficients; (2) the "high-order" framing overstates what the approximation actually delivers; and (3) the experiments lack standard deviations for most results, making the (often small) improvements harder to evaluate. None of these is fatal — the empirical consistency is impressive — but they collectively prevent the paper from reaching its full potential. With coefficient analysis, error bars, and a more accurate narrative about the filter order, this could be a solid contribution.
 
-**Score:** 5.0 / 10 — Borderline. The empirical results are solid but the framing and missing analyses prevent a stronger score.
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

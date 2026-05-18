@@ -1,22 +1,18 @@
-Now I have a thorough understanding of the paper. Let me construct the final consolidated review.
+Now I have all the information needed. Let me construct the final review.
 
 ---
 
 ## Summary
 
-MME-Finance introduces the first multimodal benchmark specifically designed for evaluating MLLMs in the financial domain. It contains 1,171 English and 1,103 Chinese open-ended VQA pairs spanning 6 chart types, 4 image styles, and 3 ability levels (perception, reasoning, cognition), with answers validated by finance experts with 10+ years of experience. The paper evaluates 19 MLLMs, finding that the top models (Qwen2VL-72B at 65.69%, GPT-4o at 63.18%) perform far below general-domain benchmarks, with particular weaknesses on candlestick charts, mobile photographs, spatial awareness, and estimated numerical calculation tasks.
+MME-Finance introduces a bilingual (English + Chinese) multimodal benchmark for the financial domain, comprising 1,171 English and 1,103 Chinese open-ended VQA pairs covering six chart types and four image styles, curated by experts with 10+ years of financial industry experience. It evaluates 19 MLLMs and finds that top models achieve only 63–65% accuracy, with particularly poor performance on candlestick charts, mobile photographs, spatial awareness, and estimated numerical calculation. The paper also proposes an LLM-based evaluation method that incorporates visual information into the scoring prompt, validated through a human consistency experiment.
 
 ## Strengths
 
-- **First multimodal finance benchmark with expert-verified annotations**: The paper identifies and fills a clear gap — no prior multimodal benchmark specifically targets the financial domain. The QA pipeline is rigorous: GPT-4o generates initial candidates, then undergoes at least two stages of manual review including a panel of three finance researchers with 10+ years of experience who must reach consensus on the reference answers (Section 3.3, Figure 2). This ensures domain relevance and answer quality far beyond automated-only benchmarks.
-
-- **Comprehensive experimental findings with actionable insights**: The evaluation of 19 MLLMs yields concrete, non-obvious findings: (1) the best model scores only 65.69%, showing general-domain performance does not transfer to finance; (2) spatial awareness is the hardest perception task (best at 30.31%); (3) estimated numerical calculation is extremely challenging (best at 44.76%); (4) candlestick charts and mobile photographs are the most difficult image types (Table 2, Table 3). These results provide clear direction for model development.
-
-- **Real-world ecological validity through image diversity**: The benchmark includes four image styles (computer screenshots, mobile photographs, vertical/horizontal mobile screenshots) and six chart types collected from real financial platforms, simulating actual usage patterns. This is a deliberate design choice (Section 3.2) that makes the benchmark more practically relevant than synthetic-only alternatives.
-
-- **Bilingual coverage**: Includes both English (1,171) and Chinese (1,103) versions, addressing the dearth of Chinese finance multimodal benchmarks and enabling cross-lingual comparison of MLLM performance (Section 3.4).
-
-- **Rigorous evaluator analysis with practical cost alternatives**: The paper systematically compares multiple LLM-based evaluators (GPT-3.5Turbo, GPT-4Turbo, o1-preview, GPT-4o, CogVLM2, MiniCPM2.6, Qwen2VL-72B) both with and without image input, and identifies Qwen2VL-72B as a viable open-source alternative achieving comparable Spearman correlation (0.678 with image) at lower cost (Table evaluator). This provides practical guidance for researchers using the benchmark.
+- **First multimodal benchmark tailored specifically for the financial domain.** While text-only financial benchmarks (FINANCEBENCH, CFBenchmark) exist, no prior work targets MLLMs with diverse financial image types. This fills a clear gap.
+- **Expert-annotated QA with multi-stage validation.** Questions and answers are generated via GPT-4o, then manually reviewed and corrected. Complex subjective questions are evaluated by a panel of three finance researchers with over 10 years of experience, with consensus-based final answers (Section 3.3). This yields higher-quality reference answers than fully automatic pipelines.
+- **Comprehensive coverage of finance-specific image types and real-world styles.** The benchmark includes six chart types (candlestick, technical indicator, statistical, tables, documents, mixed) and four image styles (computer screenshot, mobile photograph, vertical/horizontal mobile screenshot), closely simulating actual usage scenarios (Section 3.2, 3.4).
+- **Extensive evaluation of 19 MLLMs with actionable fine-grained analysis.** The evaluation reveals specific, non-obvious weaknesses: spatial awareness (best 30.31%), estimated numerical calculation (best 40.95%), poor performance on candlestick charts and mobile photographs (Tables 2, 3). These findings concretely guide future research.
+- **Rigorous evaluator comparison with human agreement study.** The paper compares multiple evaluators on 100 samples scored by three experts, reporting Spearman rank correlation and average absolute differences (Section 4.4). GPT-4o with image input achieves the best agreement (Sp=0.738), and Qwen2VL-72B is identified as a cost-effective alternative. The evaluator design is validated rather than asserted.
 
 ## Weaknesses
 
@@ -25,51 +21,54 @@ None.
 
 ### Major
 
-- **Evaluator validation is limited and circularity is unexamined**. The paper's automatic evaluator (GPT-4o with image input) achieves a Spearman correlation of only 0.738 with human judges on 100 samples from a *single* model (MiniCPM2.6). An average absolute difference of 0.84 on a 0–5 scale means the evaluator and humans disagree by nearly one full scoring level on average. Critically, the validation set does not test whether the evaluator is equally fair across different model families, sizes, or output styles. Since GPT-4o is itself one of the evaluated models and also generated the candidate questions (Section 3.3), there is an unexamined risk that the evaluator systematically favors outputs resembling its own. The paper does not discuss or attempt to control for this circularity (e.g., by checking for systematic disagreement patterns across models, or by comparing evaluator scores on outputs from multiple models). Because the paper's conclusions about which models are strongest depend on these scores, this is the most consequential weakness. (Partially mitigated: GPT-4o ranks second at 63.18%, not first, suggesting any potential bias did not inflate it past Qwen2VL-72B at 65.69%.)
+- **Chinese version is advertised as a core contribution but is not evaluated.** The abstract states the Chinese version "helps compare performance of MLLMs under a Chinese context," and the first contribution item lists "1,171 English and 1,103 Chinese questions" as part of the benchmark. Yet Section 4 presents English results only — there is no table, analysis, or discussion of Chinese performance anywhere in the experimental section. The tables are explicitly captioned "Evaluation results on **English** MME-Finance." This is a mismatch between the claimed contribution and what is actually delivered. The authors should either present Chinese results or remove the bilingual framing from the core contributions.
 
 ### Minor
 
-- **Several tasks have very small sample sizes that limit per-task reliability**. Risk Warning (22 samples), Reason Explanation (18), Not Applicable (22), and Estimated Numerical Calculation (42) each have fewer than 55 samples. A single model's score on these tasks could shift by several percentage points if a few samples were different. The paper draws fine-grained conclusions (e.g., "GPT-4o achieves the highest score across cognition tasks") without confidence intervals or any acknowledgment that these per-task scores have low evidentiary weight. The paper acknowledges that sample counts "vary from 18 to 229" (Section 3.4) but does not discuss the implications for reliability.
+- **Per-task sample sizes are too small for several cognitive/reasoning tasks to support the fine-grained comparisons the paper draws.** Reason Explanation (RE) has 18 questions, Risk Warning (RW) has 22, Estimated Numerical Calculation (ENC) has 42, and Investment Advice (IA) has 53. With samples this small, a single correct/incorrect answer shifts reported percentages by 2–5 points. The paper draws per-task conclusions (e.g., "the ENC task is significantly more challenging," "GPT-4o surpasses Qwen2VL-72B in all cognition-related tasks") without providing confidence intervals, error bars, or any statistical grounding. The ENC gap between GPT-4o (44.76%) and Qwen2VL-72B (40.95%) is within ~1.6 answers on 42 samples. These comparisons should be caveated, and per-task scores treated as indicative rather than definitive.
 
-- **Potential data contamination is not discussed**. GPT-4o was used to generate candidate questions and answers (Section 3.3), and GPT-4o is also one of the evaluated models. While all QA pairs underwent expert manual review and refinement, the paper does not acknowledge or discuss the risk that GPT-4o's training data may overlap with the visual concepts in the benchmark. A brief discussion of why this is unlikely (e.g., charts are newly constructed, images are from specific platforms) would strengthen trust.
+- **Using GPT-4o in both QA generation and evaluation raises potential bias concern, and the human consistency validation is limited to one model.** GPT-4o generates candidate questions and preliminary answers (Section 3.3) and also serves as the primary evaluator (Section 3.5). Although experts review and correct the answers, the question content itself originates from GPT-4o. The human consistency experiment (Section 4.3) validates the evaluator only on MiniCPM2.6 outputs; it does not demonstrate that the evaluator is equally fair across all 19 models, especially those whose response styles diverge from GPT-4o's. The paper should acknowledge this limitation and ideally validate on outputs from a more diverse set of models.
 
-- **Inter-annotator agreement is not reported**. The paper states that three finance experts review complex subjective questions and confirm reference answers "when the reviewers reach a consensus" (Section 3.3), but no agreement metric (e.g., Fleiss' κ) is reported. This makes it difficult to assess the reliability of the ground-truth answers, especially for inherently subjective cognition tasks like investment advice and risk warning.
+- **The claim of "first" introducing visual information in evaluation is overstated.** The paper states "visual information is first introduced in the multi-modal evaluation process" (abstract, introduction, contributions). Adding the same image the model saw to the LLM-as-judge prompt is a straightforward extension of existing practice (e.g., MM-Vet's evaluation methodology). The empirical improvement over text-only evaluation is modest (Spearman 0.738 vs 0.720). This should be framed as a practical design choice validated by experiment, not a claimed "first."
 
-- **No statistical significance testing for model comparisons**. The per-task and per-dimension analyses (Sections 4.2–4.4) are entirely descriptive. Differences of a few percentage points between models are discussed as meaningful without any indication of whether they exceed what would be expected from the small per-task sample sizes.
+- **No human baseline is provided.** The paper describes the benchmark as requiring "expert-level understanding" and characterizes 65% accuracy as "unsatisfactory" (abstract, line 40). Without measuring how well domain experts perform on the same questions, the claim that models are inadequate is an assertion rather than a calibrated finding. Human performance might also be 70–80% on the more subjective tasks (investment advice, risk warning). A small-scale human evaluation would directly strengthen the paper's central argument.
 
 ### Trivial
-None.
+
+- **Inter-annotator agreement is not reported for the subjective tasks (RE, RW, IA).** While the paper states that three experts scored subjective questions and reached consensus (Section 3.3), reporting agreement metrics (e.g., Fleiss' kappa) would strengthen confidence in the reference answers.
+- **The hallucination probe (modified prompt allowing "Not Applicable" across all tasks) reports only qualitative findings** ("a rise in false negatives in most MLLMs," line 335) without quantifying the increase. The finding is too vague to be actionable.
 
 ## Nice-to-Haves
 
-- **Human performance baseline**: A small set of human expert scores on the benchmark (even a subset) would calibrate how far current MLLMs are from expert-level financial ability. This is not required but would add useful context.
-- **Chinese version results**: The paper mentions 1,103 Chinese questions but reports only English results. Including Chinese results (even in an appendix) would strengthen the bilingual claim.
-- **Inference variance reporting**: If results come from a single inference run per model, reporting variance across multiple runs for at least a subset of models would increase confidence.
+- Providing confidence intervals or bootstrap estimates for per-task scores (especially ENC, RE, RW, IA) would give readers a sense of how much the reported numbers could vary and prevent overconfident comparisons.
+- A small-scale human baseline (e.g., 100–200 questions annotated by the same financial experts) would directly calibrate the "unsatisfactory" claim and increase the benchmark's usefulness to the field.
+- Reporting Chinese MME-Finance results alongside English in a single table would justify the "bilingual" framing and could reveal interesting cross-lingual patterns (e.g., whether models perform differently on Chinese financial terminology).
+- Validating the GPT-4o evaluator on outputs from a second model (e.g., Qwen2VL-72B or InternVL2-76B) would strengthen the claim that the evaluator is model-agnostic.
 
 ## Removed Points
 
-These are flagged for caution — treat them as removed rather than included in the evaluation above:
+These points were raised by reviewers but are excluded from the main assessment:
 
-- **"GPT-4Turbo without image (0.711) is very close, suggesting the image signal adds limited benefit"**: The paper correctly claims images help for subjective questions (0.471→0.515) and acknowledges the breakdown in Table sub_obj_evaluator. The overall improvement (0.720→0.738) is modest but accurately stated. Not a weakness — the paper does not overclaim.
-- **Criticism about "not testing for statistical significance"**: Already captured in Minor weaknesses above with appropriate weight.
-- **Criticism about missing limitation section**: The paper has no explicit limitation section but this is a presentation preference, not a substantive flaw. The limitations are clear from the paper's own data.
-- **Demand for "verify no multimodal benchmark in finance"**: The paper's novelty claim is supported by its literature review (Section 2). This is not a weakness.
-- **Some strength finder entries about "novel evaluation strategy"**: This is a real contribution and is kept in the Strengths section.
+- **Criticism about sample sizes being "too small to support reliable conclusions" in an absolute sense** — The paper acknowledges the sample size variation in the statistics section (Table tab:stat). The total benchmark size (1,171 English + 1,103 Chinese) is adequate for a specialized domain benchmark. The concern is retained in Minor but downgraded from "structural limitation" to "per-task comparisons should be caveated."
+- **Criticism about the evaluator comparison improvement being "modest" / not novel** — Retained as a Minor framing issue, not removed entirely.
+- **"The annotation pipeline does not report inter-annotator agreement"** — Retained as Trivial. Not a fatal omission but worth noting.
 
 ## Novel Insights
 
-The most interesting insight from the review process is that the evaluator circularity concern is somewhat self-limiting in this specific case: despite GPT-4o being both the evaluator and a top-performing model, Qwen2VL-72B (an open-source model from a different family) actually scores highest overall (65.69% vs 63.18%). This suggests that any evaluator self-preference bias, if present, is not strong enough to overturn the ranking. However, the limited validation scope (100 samples, one model) means we cannot rule out subtler biases affecting fine-grained per-task comparisons.
+Beyond the paper's own contributions, an interesting observation emerges from the discrepancy between the paper's strong claims (bilingual evaluation, "first" visual evaluation, "unsatisfactory" model performance) and what is actually delivered in experiments. The paper would be significantly stronger if it aligned its claims with its evidence — replacing the "first" novelty claim with a more measured framing about a validated practical design, presenting the Chinese results it already has in its dataset, and adding a human calibration experiment. The most valuable takeaway is not the absolute accuracy numbers but the specific failure modes identified (spatial awareness on financial charts, estimated numerical calculation, mobile photograph processing, candlestick/technical indicator charts) — these provide concrete targets for future financial MLLM development.
 
 ## Suggestions
 
-1. **Expand the human evaluator validation** to 200–300 samples covering outputs from at least 3–4 models spanning the performance range (e.g., Qwen2VL-72B, GPT-4o, InternVL2-76B, and a weaker model like Yi-VL-34B). Report agreement separately per model to test for systematic bias.
-2. **Add a brief contamination discussion** explaining why the benchmark design mitigates this risk (expert manual refinement of all QA pairs, newly captured rather than scraped images, charts from specific financial platforms unlikely to appear in training data).
-3. **Report bootstrap 95% confidence intervals** for per-task scores, especially for the small-n tasks (18–53 samples), to prevent over-interpretation of small performance gaps.
-4. **Add inter-annotator agreement** (e.g., Fleiss' κ) for the expert panel's consensus process on subjective questions.
+1. **Add Chinese results to the experimental section.** The data already exists (1,103 Chinese questions); present a summary table comparing English and Chinese performance. This would directly justify the "bilingual" claim and may reveal interesting cross-lingual patterns.
+2. **Provide confidence intervals or bootstrap estimates for per-task scores**, especially for the smallest tasks (RE: 18, RW: 22, ENC: 42, IA: 53), and add a cautionary note about the stability of these estimates.
+3. **Add a small-scale human baseline** (100–200 samples from the same experts) to calibrate the difficulty claim and increase the benchmark's practical value.
+4. **Tone down the "first to introduce visual information" claim** in favor of a more measured description: the paper proposes and validates a practical evaluation design that incorporates visual context.
+5. **Validate the GPT-4o evaluator on outputs from at least one additional model** (e.g., Qwen2VL-72B) to show the human consistency result is not model-specific.
+6. **Report inter-annotator agreement** for the subjective tasks (RE, RW, IA) and quantify the hallucination probe results rather than describing them qualitatively.
 
 ## Score and Decision
 
-The paper's core contribution — the bilingual, expert-validated, ecologically valid finance benchmark — is solid and fills a genuine gap. The main results are informative and directionally correct. The central weakness is the incomplete evaluator validation, which tempers confidence in fine-grained model rankings but does not invalidate the benchmark itself. The issues are addressable with additional validation work.
+MME-Finance addresses a genuine gap and makes a solid contribution through its expert-curated benchmark, diverse financial image types, and the insights from evaluating 19 MLLMs. The specific failure modes identified (spatial awareness, ENC, candlestick charts, mobile photographs) are actionable and useful for the community. However, the paper over-claims in several respects (bilingual evaluation without Chinese results, "first" visual evaluation framing, "unsatisfactory" claim without human calibration) and the per-task comparisons would benefit from statistical grounding. The issues are fixable — adding Chinese results, confidence intervals, and a human baseline would substantially strengthen the paper. With these revisions, this would be a strong benchmark contribution.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

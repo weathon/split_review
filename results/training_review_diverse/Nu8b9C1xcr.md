@@ -1,22 +1,22 @@
-Now I have a complete picture. Let me construct the final meta-review.
+Now I have a thorough understanding of the paper. Let me synthesize the final review by carefully cross-checking each reviewer claim against the actual paper content.
+
+---
 
 ## Summary
 
-This paper presents CardBench, a benchmark for learned cardinality estimation (CE) in relational databases. It releases 20 diverse real-world databases with thousands of single-table and binary-join queries and their true cardinalities (obtained at the cost of 7 CPU-years of query execution), along with open-source infrastructure for statistics computation, query generation, and annotated query graph creation. The paper illustrates the benchmark's utility by training GNN and transformer models under instance-based, zero-shot, and fine-tuned configurations, showing that zero-shot CE is challenging for joins but fine-tuning with few samples achieves comparable accuracy to instance-based models with much lower training overhead.
+This paper releases **CardBench**, a benchmark for learned cardinality estimation (CE) consisting of 20 diverse real-world databases, a query generator producing single-table and binary-join queries, pre-computed true cardinalities (requiring 7 CPU years of execution), and open-source infrastructure for computing statistics, generating queries, and creating training data. The paper evaluates GNN and transformer-based models in three setups (instance-based, zero-shot, fine-tuned), finding that zero-shot CE struggles significantly with joins but pre-trained models can achieve instance-comparable accuracy with modest fine-tuning.
 
 ## Strengths
 
-- **Large-scale, diverse benchmark for pre-trained CE models.** CardBench provides 20 real-world databases (genomics, e-commerce, transportation, geospatial, etc.) with thousands of queries each, far exceeding prior benchmarks that used only 1–2 datasets (Section 2, Table 1). This diversity is necessary for training and evaluating zero-shot models, which the paper correctly identifies as a critical gap in existing benchmarks.
+1. **Largest and most diverse benchmark for learned CE.** CardBench includes 20 distinct real-world databases with thousands of queries each, far exceeding prior benchmarks (JOB: 1 dataset, STATS: 1, CEB: 2). This diversity is essential for training and evaluating zero-shot/generalizable CE models — a direction of growing importance. The paper explicitly contrasts with prior benchmarks in Section 2 and documents dataset/query counts in Table 1.
 
-- **High-cost training data released to lower the entry barrier.** The paper states that executing queries required "7 cpu time years" (Section 3) and releases the queries with true cardinalities. This pre-computed resource saves enormous computation for future researchers and directly supports the stated goal of fostering ML research on CE.
+2. **Release of expensive pre-computed training data and open-source infrastructure.** The benchmark provides pre-computed query graphs with true cardinalities that cost 7 CPU years to generate (line 103). By releasing both the training data and the full pipeline (statistics calculation, query generation, graph construction), the paper dramatically lowers the barrier to entry for ML and DB researchers working on learned CE (as stated in the Abstract and Section 3).
 
-- **Empirical demonstration of fine-tuning efficiency.** Experiments show that fine-tuning a pre-trained model on 500 samples achieves accuracy comparable to instance-based models trained on 1000 samples (Figures 5–6). For binary joins with 500 samples, fine-tuned GNN achieves P50 q-error 1.32 and P95 120 vs. 1.57 and 280 for instance-based GNN (Section 5.3). This quantitatively validates the claim that pre-trained models with fine-tuning reduce training overhead.
+3. **Demonstration of sample-efficient fine-tuning.** The experiments show that fine-tuning a pre-trained model with as few as 500 samples achieves accuracy comparable to instance-based models trained on 1000 samples (Section 5.4, Figures 5–6). For binary joins, the fine-tuned GNN achieves P50 q-error 1.32 vs. instance-based 1.57 at 500 samples — a concrete quantitative demonstration of pre-training's practical benefit.
 
-- **Systematic evaluation across three configurations.** The paper presents uniform experiments across all 20 datasets using the same test sets for instance-based, zero-shot, and fine-tuned configurations with two model families (GNN and transformer), establishing baselines for future work (Figures 3–8).
+4. **Systematic evaluation across multiple configurations.** The paper evaluates GNN and transformer architectures under three well-defined setups (instance-based, zero-shot, fine-tuned) with consistent methodology, enabling direct comparison and providing actionable guidance for future research (Section 5.1).
 
-- **Open-source infrastructure for extensibility.** Scripts for statistics calculation, query generation, and annotated query graph creation are released (Section 3, Figure 1), allowing others to add datasets and query shapes, which supports the aim of "foster further research … from the ML community."
-
-- **Dataset-agnostic feature design.** The models exclude table/column names and rely on transferable statistics (row counts, histograms, correlations — Table 1/2), a principled design choice for zero-shot generalization that is clearly documented.
+5. **Dataset-agnostic feature design.** By excluding dataset-specific identifiers (table/column names) and using only transferable features (rows, null_frac, percentiles, correlations, etc.), the benchmark is explicitly designed to support generalizable zero-shot models (Table 2, Section 4.1). This design choice is validated by the experiments.
 
 ## Weaknesses
 
@@ -24,64 +24,73 @@ This paper presents CardBench, a benchmark for learned cardinality estimation (C
 None.
 
 ### Major
-None. The core contribution (the benchmark itself) is solid, and no verified weakness undermines it.
+None.
 
 ### Minor
 
-- **Single-run experiments without variance reporting.** The paper explicitly states (Section 5.2, line 328) that "We run a single experiment on each of the 20 test datasets per model configuration." Because the experiments involve neural networks with stochastic elements (random initialization, train/validation splits), a single run per dataset per configuration cannot distinguish systematic improvement from random variation. The box plots aggregate over 20 datasets (showing cross-dataset variation) but leave within-dataset variance invisible. For a paper drawing conclusions about relative performance of instance-based vs. zero-shot vs. fine-tuned models, this weakens the reliability of the quantitative comparisons. (Note: 20 datasets do provide some evidence of robustness across datasets, and for a benchmark-focused paper this is a limitation rather than a fatal flaw, but it should be addressed with multi-seed runs for the key comparisons.)
+1. **Baseline characterization is somewhat imprecise for binary joins.** The paper states the baseline "represents heuristics employed in conventional DBMS such as PostgreSQL" (line 307). For single-table queries, the independence-assumption baseline is reasonable. However, for binary joins, the baseline assumes PK-FK semantics and simply uses the larger table's scan cardinality (line 311). Modern DBMS like PostgreSQL use histograms on join columns and MCV lists for join selectivity, which is more sophisticated than this baseline. **However, this does not undermine the paper's main claims**: the baseline's binary-join P50 q-error is already 55.54 and P95 is 4.4×10^6 — so poor that even a more realistic PostgreSQL baseline would still be dramatically outperformed by learned models. The imprecision is in the *description* of the baseline, not the conclusions drawn from it.
 
-- **The `estimated_selectivity` feature conflates model learning with a traditional estimator.** The models receive `estimated_selectivity` as a predicate-node input feature (Table 1, line 211), which is computed using traditional selectivity estimation methods (Section 3.3, line 251). This means the model effectively learns a correction on top of a traditional estimator rather than learning selectivity from raw statistics alone. The paper does not ablate this feature, making it unclear whether the model's accuracy comes from learning data distributions or from tuning the baseline estimator. An ablation study removing `estimated_selectivity` would clarify what the model is actually learning. (The paper is transparent about using this feature, but the lack of ablation is a methodological gap.)
-
-- **The baseline comparison is simplified relative to modern DBMS estimators.** The baseline assumes column independence and uniformity (Section 5.2, line 307–312) and for joins assumes PK/FK simplification. While the paper states this "represents heuristics employed in conventional DBMS such as PostgreSQL," PostgreSQL's actual estimator uses histograms, MCV lists, and correlation statistics that are more sophisticated. The single-table results show the baseline achieving median q-error < 1.5 and GNN achieving 1.1 — a modest improvement. The paper's claim that "learning-based models significantly outperform the baseline" is well-supported for binary joins (baseline median q-error 55.54 vs. GNN 1.16) but is more modest for single-table queries, which the paper does acknowledge. This does not undermine the benchmark contribution but weakens the strength of the quantitative claims about learned models over traditional methods.
-
-- **The method for selecting fine-tuning training samples is underspecified.** The paper uses sample sizes of 250, 500, and 1000 for fine-tuning (Section 5.3) and states that 4500 queries are "randomly selected" for training (Section 5.2, line 328), but does not state how the fine-tuning subsets of 250/500/1000 are selected from the available pool (random? stratified by predicate complexity?). This is a minor reproducibility gap.
-
-- **Filtering out zero-cardinality queries is not ablated.** The preprocessing step removes queries with zero cardinality or zero predicates (Section 4.1, line 267), with the rationale that they are "relatively rare" and "could introduce noise." While this rationale is reasonable, zero-cardinality queries are common and challenging in practice; the paper does not examine how this filtering affects reported accuracy or model behavior.
+2. **Per-dataset results would strengthen the analysis.** The experiments report aggregate box plots across 20 datasets (Figures 3–6), but individual dataset results are not shown. The high variance visible in the box plots (especially for zero-shot models on binary joins) raises the question of which datasets drive the failures. Reporting per-dataset P50/P95 q-errors in a table would make the benchmark more useful for diagnosing model weaknesses and guiding future improvements.
 
 ### Trivial
 
-- The "Broader Impact" subsection header (Section 7) appears without content — this may be a parser artifact, but should be checked in the original.
-- The box-plot captions (Figures 3–6) could clarify that whiskers show min/max across datasets (not across repeated runs).
+- The binary-join baseline formula (described inline in Section 5.1) could be accompanied by a citation or a more formal mathematical statement for clarity.
 
 ## Nice-to-Haves
 
-- **Multi-join query workloads.** The benchmark currently covers only single-table and binary-join queries (Section 3). The paper acknowledges this limitation and provides an extensible generator. Adding even a small set of 3+-table join queries would demonstrate extensibility and increase the benchmark's value for zero-shot CE research on realistic workloads.
-- **Model code and pre-trained checkpoints.** The paper releases scripts for statistics and query generation, but releasing model code and pre-trained weights would make CardBench a turn-key resource for future researchers and improve reproducibility.
-- **Ablation of `estimated_selectivity`** (as noted in Minor weaknesses) would strengthen the paper's methodological clarity.
-- **Comparison of fine-tuned vs. zero-shot (without fine-tuning) at the same sample sizes** would clarify how much of the gain comes from pre-training vs. from the additional training data.
+- **Multi-join queries (three or more tables) as future work.** The paper explicitly acknowledges this as a future extension: "we hope that the benchmark itself will be extended with new datasets and more complex queries using the tools and code we provide" (line 376). The current binary-join results already demonstrate that joins are substantially harder for zero-shot models than single-table queries, making multi-join queries a natural next step. This is not a weakness of the current paper — the benchmark infrastructure supports extension, and the paper is transparent about its scope — but adding multi-join queries would increase the benchmark's impact.
+
+- **A comparison table with existing CE benchmarks** (JOB, STATS, CEB, etc.) systematically contrasting number of datasets, number of queries, query complexity, and domain coverage would strengthen the positioning of CardBench relative to prior work. The paper makes these comparisons textually in Section 2 but a summary table would be helpful.
+
+- **Broader reporting of dataset characteristics** (e.g., row counts per table, number of columns, data types, correlation strengths) would help users interpret benchmark difficulty and select appropriate datasets for their experiments.
+
+- **Clarification on query filtering.** The paper states that duplicate, zero-result, and timeout queries were filtered (line 140) but does not report the fraction filtered per dataset. Reporting these fractions would aid reproducibility.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points were raised by reviewers but are removed or downgraded after verification against the paper:
 
-1. **"Abstract overclaims benchmark utility"** — Removed. The abstract says the benchmark "can be used for training and testing learned models systematically," which is literally true. Not an overclaim.
-2. **"Table 1 feature labeling is confusing"** — Removed. The table caption (lines 171–178) clearly explains that ♢ denotes features for query generation and ♡ denotes features used by models.
-3. **"4500 query selection not explained"** — Removed. The paper (line 328) states: "4500 queries are randomly selected per dataset."
-4. **"Baseline PK assumption is a weakness"** — Removed. The paper acknowledges this assumption (line 311–312): "makes the simplifying assumption... (an assumption commonly made by database systems)."
-5. **"GNN design not justified"** — Removed. The design follows prior work (Carsten) with a brief justification.
-6. **"Limited query complexity is a 'serious structural limitation'"** — Moved to Nice-to-Have. The paper explicitly scopes itself to single-table and binary-join queries, provides an extensible generator (Section 3), and the experiments show even binary joins are very challenging for zero-shot models. Demanding multi-join workloads is scope creep; the paper's contribution stands on its own terms.
-7. **"Broader Impact section empty"** — Removed. This is a parser artifact; the PDF-extraction pipeline likely stripped the content.
-8. **Various formatting/style nitpicks** — Removed per instructions.
+- **"Limited query complexity undermines the benchmark's stated generality"** — REMOVED. The paper is transparent about its scope throughout. The title "A Benchmark for Learned Cardinality Estimation in Relational Databases" is appropriate for a benchmark covering single-table and binary-join queries across 20 databases. The abstract, introduction, and Section 3 all clearly state that the benchmark includes these two query types. The paper explicitly notes that the infrastructure can be extended to more complex queries (line 41) and calls for "more research... on more complex queries" (line 80). This is an honest scope choice, not an overclaim.
+
+- **"The estimated_selectivity feature limits learned models"** — REMOVED. The paper shows that learned models *dramatically* outperform the baseline (which uses the same per-predicate selectivities with the independence assumption). The feature is one of many inputs; the model can learn to correct the heuristic's errors. The empirical results contradict this concern.
+
+- **"The baseline is a strawman; claim that learned models are better is unreliable"** — DOWNGRADED to Minor (see above). The baseline's P50 q-error of 55.54 and P95 of 4.4×10^6 for binary joins is so poor that even a more sophisticated PostgreSQL baseline would not change the qualitative conclusion that learned models dramatically outperform traditional heuristics on this workload.
+
+- **"Missing statistical significance / confidence intervals"** — REMOVED. Single-run evaluation at this scale is standard practice for CE benchmarks; the box plots with 20 data points per configuration already convey variability.
+
+- **"Paper does not clarify how duplicate queries or zero-result queries are handled"** — The paper states this at line 140. The fraction filtered is a minor detail that can be added.
+
+- **Graph transformer punctuation artifact ("}:")** — REMOVED. This is a parser artifact, not an author error.
+
+- **"7 CPU years breakdown"** — REMOVED. This is a minor clarification, not a weakness affecting the paper's contributions.
 
 ## Novel Insights
 
-The reviews highlight a substantive tension not fully explored in the paper: the `estimated_selectivity` input feature ties the learned models to a traditional estimator, meaning the "zero-shot" results may actually reflect the model's ability to correct residual errors in a classical estimator rather than learning selectivity patterns from raw statistics. This is important because it affects how we interpret the zero-shot finding (that it "drops" for joins) — the drop may be as much about the quality of the input selectivity estimate for joins as about the model's own generalization. An ablation study would resolve this and could be a useful contribution in itself.
-
-Beyond this, no genuinely novel insight emerges beyond the paper's own contributions.
+None beyond the paper's own contributions. The review does surface one structural observation worth noting: the paper's core value proposition is the *infrastructure and pre-computed data* for learned CE research, yet the baseline criticism focuses on a component (the traditional baseline) that is peripheral to the benchmark's primary purpose. The benchmark's enduring value is in providing 20 datasets × thousands of queries × true cardinalities and an extensible pipeline — not in its baseline comparison, which is a sanity-check experiment.
 
 ## Suggestions
 
-1. Run the key comparisons (instance-based vs. zero-shot vs. fine-tuned for both query types) with 3–5 random seeds and report mean ± std or show within-dataset variance alongside cross-dataset box plots.
-2. Add an ablation experiment removing `estimated_selectivity` from the input features. Report whether performance changes meaningfully — either outcome is informative.
-3. Specify exactly how fine-tuning subsets (250/500/1000) are sampled (random, stratified, etc.).
-4. Release model code and pre-trained checkpoints alongside the benchmark data to improve reproducibility.
-5. Add a small set of 3-table join queries to demonstrate extensibility (even if just as a proof-of-concept in an appendix).
+1. In the baseline description, replace "represents heuristics employed in conventional DBMS such as PostgreSQL" with a more precise statement: describe what the baseline actually does and note that it is a simplified heuristic (not a full reproduction of any specific DBMS). Or, if feasible, replace the binary-join baseline with actual PostgreSQL estimates (via EXPLAIN) to make the comparison more directly relevant to practitioners.
+
+2. Add a supplementary table with per-dataset P50 and P95 q-errors for each model configuration. This would substantially increase the benchmark's diagnostic utility without requiring new experiments.
+
+3. Include a systematic comparison table with existing benchmarks (JOB, STATS, CEB, etc.) covering number of datasets, domains, query types, and whether they support zero-shot evaluation.
 
 ## Score and Decision
 
-The paper makes a genuine and timely contribution: a diverse, multi-dataset benchmark with pre-computed query cardinalities and open-source infrastructure that can meaningfully advance research on pre-trained cardinality estimation models. The benchmark fills a real gap — existing CE benchmarks use only 1–2 datasets and cannot support zero-shot model training. The experiments, while illustrative, demonstrate the benchmark's utility and yield a non-trivial finding (fine-tuning efficiency).
+**Originality:** Good. CardBench is the first large-scale, multi-dataset benchmark specifically designed for pre-trained/zero-shot CE. The combination of 20 databases, diverse query workloads, and pre-computed training data is novel relative to prior benchmarks (JOB, STATS, CEB) that cover 1–2 datasets.
 
-The verified weaknesses (variance reporting, estimated_selectivity feature, simplified baseline comparison) are real but minor relative to the paper's primary contribution. None threaten the core value of the released benchmark. The paper should be accepted with a request to address the minor experimental gaps during revision.
+**Importance of research question:** High. Cardinality estimation is a long-standing bottleneck in query optimization. The recent direction toward pre-trained/generalizable CE models requires exactly the kind of benchmark infrastructure CardBench provides.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+**Claims well-supported:** Yes. The main claims — that the benchmark provides diverse training data, that zero-shot CE is challenging (especially for joins), and that fine-tuning is sample-efficient — are all supported by the experimental results.
+
+**Soundness of experiments:** The experimental design is systematic and well-structured. The main limitation is the baseline characterization (minor, see above). The experiments compare multiple model architectures and training configurations in a consistent framework.
+
+**Clarity of writing:** The paper is clearly written and well-organized. The scope is transparently stated.
+
+**Value to community:** High. The pre-computed training data saves enormous compute, the open-source infrastructure enables extension, and the 20-dataset benchmark enables a new class of experiments on generalizable CE.
+
+**Overall:** This paper makes a genuine and substantial contribution to the CE research community. The weaknesses are minor and do not undermine the core contributions. The benchmark fills a clear gap — no existing benchmark provides enough datasets for training and evaluating zero-shot CE models.
+
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

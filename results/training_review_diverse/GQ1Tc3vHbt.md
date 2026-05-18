@@ -1,20 +1,18 @@
-Now I have thoroughly examined the paper. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper. Let me produce the consolidated review.
 
 ## Summary
 
-This theoretical optimization paper studies gradient methods for $(L_0, L_1)$-smooth functions — a class that relaxes classical Lipschitz smoothness and arises naturally in deep learning. The authors derive tighter descent inequalities (Lemma 2, Lemma 5), use them to obtain principled step-size formulas (including a new connection to clipping), and prove complexity bounds for nonconvex, convex, normalized, Polyak-stepsize, and accelerated methods. The key results are: (i) best-known $\mathcal{O}(L_0 F_0/\epsilon^2 + L_1 F_0/\epsilon)$ nonconvex complexity matching prior work, (ii) improved $\mathcal{O}(L_0 R^2/\epsilon + L_1^2 R^2)$ convex complexity that removes the $\epsilon$-dependence on $L_1$ and does not assume $L$-smoothness, (iii) adaptive methods (normalized, Polyak) matching the known-parameter rates, and (iv) a two-stage accelerated method achieving $\mathcal{O}(\sqrt{L_0 R^2/\epsilon} + L_1^2 R^2)$ with no exponential or initial-gradient dependencies.
+This paper studies gradient methods for minimizing $(L_0, L_1)$-smooth functions, a generalization of standard Lipschitz smoothness that allows the Hessian norm to grow linearly with the gradient norm. It derives new stepsizes from tighter descent inequalities, establishes the best-known nonconvex complexity (matching prior work), provides a genuinely improved convex complexity of $\mathcal{O}(L_0 R^2/\epsilon + L_1^2 R^2)$, shows that normalized GD and Polyak stepsizes achieve the same bound without parameter knowledge, and proposes an accelerated two-stage procedure that avoids exponential dependence on $L_1$ (though with a caveat on the line-search cost).
 
 ## Strengths
 
-- **Tighter bounds for $(L_0,L_1)$-smooth functions enable improved step-size derivation and complexity.** Lemma 2 provides stronger first-order bounds than prior work (e.g., Zhang et al., 2020; Hubler et al., 2024), and Lemma 5 generalizes the classical convex smoothness lower bound (Nesterov, 2018) to the $(L_0,L_1)$ setting. These directly enable the optimal step-size formulas and the subsequent complexity improvements.
+1. **Genuinely improved convex complexity**: Theorem 3.2 establishes $\mathcal{O}(L_0 R^2/\epsilon + L_1^2 R^2)$ for gradient descent, strictly improving over Koloskova et al.'s $\mathcal{O}(L_0 R^2/\epsilon + \sqrt{L/\epsilon}\,L_1 R^2)$ and Takezawa et al.'s rate, by removing the $\epsilon^{-1/2}$ dependency on the $L_1$ term. This is the paper's cleanest and most definitive contribution.
 
-- **Best-known or improved oracle complexities for convex $(L_0,L_1)$-smooth problems that remove $\epsilon$-dependence from the $L_1$ term and do not require $L$-smoothness.** Theorems 2 and 4 achieve $\mathcal{O}(L_0 R^2/\epsilon + L_1^2 R^2)$ for both the gradient method with the proposed step sizes and the gradient method with Polyak step sizes. This improves on Koloskova et al. (2023)'s $\mathcal{O}(L_0 R^2/\epsilon + \sqrt{L/\epsilon}\,L_1 R^2)$ and does not assume the function is $L$-smooth; it also avoids dependence on $\|\nabla f(x_0)\|$ present in Li et al. (2023).
+2. **Adaptive methods match the optimal bound without parameter knowledge**: The normalized gradient method (Theorem 4.1) and the gradient method with Polyak stepsizes (Theorem 5.1) both achieve $\mathcal{O}(L_0 R^2/\epsilon + L_1^2 R^2)$ without requiring $L_0, L_1$ or the initial distance $R$. The Polyak result also does not assume $L$-smoothness, unlike prior work. These are practically relevant for settings where problem parameters are unknown.
 
-- **Accelerated method achieving $\mathcal{O}(\sqrt{L_0 R^2/\epsilon} + L_1^2 R^2)$ without exponential or initial-gradient dependencies.** Theorem 5 provides an accelerated rate containing no factor $\exp(L_1 R)$ (cf. Gorbunov et al., 2024) and no dependency on $\|\nabla f(x_0)\|$ (cf. Li et al., 2023). The two-stage procedure (Algorithm 1) is a clean and clever design that first uses gradient descent to reach a region where the function behaves $2L_0$-smooth, then applies a monotone accelerated method.
+3. **New structural insights and tighter descent inequalities**: Lemma 2.2 provides a stronger first-order characterization than Zhang et al. (2020), and Lemma 2.5 generalizes Nesterov's convex lower bounds to the $(L_0, L_1)$ class. The derivation linking the "optimal" stepsize (3.1) to the clipping stepsize (3.6) via a direct minimization of the descent upper bound is a clean conceptual contribution that was not previously articulated.
 
-- **New connection between optimal step sizes and clipping.** Section 3 explicitly derives the optimal step size by minimizing a tight upper bound and shows that the widely used clipping step size is a convenient approximation of this optimal formula — an insight the paper correctly notes "has not been previously explored in the literature."
-
-- **Characterization of operations preserving $(L_0,L_1)$-smoothness.** Proposition 5 gives four concrete operations (sum with a Lipschitz-smooth function, block-separable sums, affine composition, and conjugacy) under which the $(L_0,L_1)$ property is preserved, providing useful tools for constructing and analyzing such functions.
+4. **Accelerated procedure avoids exponential and initial-gradient dependence**: The two-stage procedure (Algorithm 1) achieves $\mathcal{O}(\sqrt{L_0 R^2/\epsilon} + L_1^2 R^2)$, which removes both the $\exp(L_1 R)$ factor from Gorbunov et al. (2024) and the $\|\nabla f(x_0)\|$ dependence from Li et al. (2023). The numerical experiments (Figure 3) confirm the advantage for large $R$.
 
 ## Weaknesses
 
@@ -22,60 +20,42 @@ This theoretical optimization paper studies gradient methods for $(L_0, L_1)$-sm
 None.
 
 ### Major
-None. The paper's theoretical contributions are sound and well-supported.
+1. **The accelerated method's oracle complexity is not fully specified.** Theorem 6.3 reports complexity $K \geq m\sqrt{12 L_0 R^2/\epsilon} + 36 L_1^2 R^2$, where $m$ is the number of oracle calls per iteration for the one-dimensional line search in AGMsDR. Since $m$ is *a priori* unbounded, the total oracle complexity could be larger than advertised by an unknown multiplicative factor. The paper honestly acknowledges this as an open question (lines 451, 517), and the accelerated method's improved $\sqrt{1/\epsilon}$ dependence over the $1/\epsilon$ of standard GD is still a meaningful structural improvement. However, the bound as stated is not a complete worst-case oracle guarantee, which makes the accelerated section less definitive than the convex and nonconvex gradient method sections. This does not invalidate the paper's other contributions, but it is a real gap in one of its advertised advances.
 
 ### Minor
+1. **Experiments are limited to one synthetic function family.** The numerical evaluation uses only $f(x)=\frac{1}{p}\|x\|^p$ for $p\in\{4,6,8\}$. While this is a standard testbed for a theory paper and sufficient to illustrate the main theoretical predictions (the paper is fundamentally a theory contribution), adding even one more example — such as the logistic regression variant $f(x)=\ln(1+e^{\langle a,x\rangle})$ shown in Example 2 to be $(L_0,L_1)$-smooth — would have demonstrated broader practical relevance without demanding a full-scale deep learning experiment.
 
-- **Notational inconsistency in Theorem 4 (Polyak stepsizes).** The theorem states "the method requires at most the following number of iterations: $K \leq \max\{4L_0 R^2/\epsilon,\; 36L_1^2 R^2\}$." The proof (Appendix B.4) derives the sufficient condition $K \geq \max\{\dots\}$. The intended meaning is clear — the complexity bound is $\mathcal{O}(\max\{\dots\})$ — but the "$K \leq$" conflicts with the proof's $K \geq$. This is a minor notational slip that should be corrected for clarity. (Not a mathematical error; the bound itself is correct.)
-
-- **The accelerated method's $m$ factor is acknowledged but unquantified.** Theorem 5 already includes the factor $m$ (oracle calls for the 1D subproblem) and the paper transparently states this is left for future work. This is a legitimate scope note, not a flaw — however, it does mean the practical oracle complexity of the accelerated method is not fully characterized. Strengthening the discussion of when $m$ is small (e.g., closed-form for piecewise-quadratic objectives, small constant for polynomial objectives) would improve the paper's completeness.
+2. **Nonconvex bound matches prior work.** The nonconvex rate $\mathcal{O}(L_0 F_0/\epsilon^2 + L_1 F_0/\epsilon)$ coincides with that of Koloskova et al. (2023) up to constants (as the paper correctly notes). This is not a weakness of the paper per se — the derivation from first principles and the connection to optimal stepsizes are novel — but the section should be read as consolidating the best-known rate rather than introducing a new one.
 
 ### Trivial
-
-- **A few small typos and formatting artifacts** (e.g., line 460: "tthe" → "the," line 456: "stetpsizes" → "stepizes" in a figure caption, line 462: "theoretical founding" → "theoretical findings"). These are parser-likely artifacts but worth cleaning up.
+None worth listing.
 
 ## Nice-to-Haves
 
-- The numerical experiments are limited to the synthetic function $f(x)=\frac1p\|x\|^p$. While this is perfectly acceptable for a theoretical paper, adding a small-scale logistic regression or neural network experiment would broaden the paper's appeal. This is not a weakness but a suggestion for follow-up work.
-
-- A brief remark that the $m$ factor in Theorem 5 can be $m=1$ for objectives where the 1D line search has a closed form could give readers intuition about when the accelerated rate is fully practical.
+- A theoretical bound on $m$ (e.g., $m \leq \log(1/\delta)$ for a backtracking procedure) would make the accelerated complexity fully specified. The authors already flag this as future work.
+- A brief remark on extending the accelerated method to strongly convex functions would be helpful but is not required.
 
 ## Removed Points
-*These points are flagged to be removed; treat them with caution.*
 
-- The harsh critic's "Critical Issue 2" (accelerated method's unquantified per-iteration cost) is already addressed in the paper: Theorem 5 explicitly includes $m$ in the complexity expression, and lines 450-451 transparently discuss this limitation. The critic's suggestion to "restate Theorem 5 as oracle complexity $\le m\sqrt{12L_0 R^2/\epsilon} + 36L_1^2 R^2$" is already what the paper does. This is downgraded from "Methodological gap" — it is a known, acknowledged scope limitation, not an oversight.
-
-- The harsh critic's discussion of the normalized method proof (L₁v_K^* < 3 condition being properly handled) is a commentary on already-correct exposition, not a weakness.
-
-- The Strength Finder's "Supporting strengths" about optimal-clipping connection and operations preserving smoothness are retained as they are substantive and specific.
+- **"Limited empirical evaluation — add neural network experiment"** (from Harsh Critic, point 2): This is a theory paper. Demanding large-scale neural network experiments evaluates the paper against the wrong class of expectations. The synthetic experiments are standard and appropriate for a theory contribution. A small-scale extension (e.g., logistic regression) would be nice but is not a weakness.
+- **"Clearer statement needed for convex bound's improvement"** (Harsh Critic, point 4): The paper already explicitly states (lines 274–275) that the $L_1$ term does not depend on $\epsilon$ and that this is the key advantage. The reviewer's request for even more prominence is a presentation nitpick below the threshold for a weakness.
+- **Strength Finder generic phrasing**: Some strengths from the Strength Finder were kept but condensed; none were entirely dropped as generic — the five listed above are all concrete and citation-supported.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews highlight that the paper's cleaner derivation (minimizing the upper bound to obtain step sizes) is pedagogically valuable and provides a unifying perspective that connects several existing algorithmic variants (optimal step sizes, simplified step sizes, and clipping) as approximations of a single principled formula. The two-stage accelerated procedure's insight — that one can use gradient descent to reach a "safe" region and then apply acceleration without exponential blow-up — is a structural observation that could inspire similar designs for other relaxed smoothness classes.
+The reviewers' perspectives converge on the observation that the paper's strongest contribution is the convex complexity bound with no $\epsilon$ dependence on $L_1$, which is a clean theoretical advance over a line of recent work. The accelerated section, while innovative in structure (two-stage: GD to reduce to the $L_0$-smooth regime, then AGMsDR), carries an acknowledged gap that prevents it from being a fully specified oracle complexity. This tension — between a genuinely new theoretical idea and an incompletely resolved technical detail — is the central axis along which the paper should be judged.
 
 ## Suggestions
 
-1. **Fix the notation in Theorem 4.** Replace "$K \leq \max\{\dots\}$" with "$K \geq \max\{\dots\}$" (or rephrase as "the method requires $\mathcal{O}(\max\{\dots\})$ iterations") to match the proof's sufficient condition.
-2. **Strengthen the discussion of $m$ in Theorem 5.** Add a brief sentence noting function classes for which $m$ is small (e.g., convex piecewise-quadratic) to help readers gauge the practical relevance of the accelerated bound.
-3. **Proofread minor typos** (line 460, line 462).
+1. **Clarify the m-factor in the accelerated bound.** Even an informal discussion of how $m$ behaves in practice (e.g., for the $f(x)=\|x\|^p$ test function, how many oracle calls does the line search require per iteration?) would help the reader assess the practical significance of the accelerated result. A bound like $m = O(\log(1/\delta))$ under mild assumptions would be even better.
+
+2. **Add one additional experiment.** The authors already have Example 2 showing $\ln(1+e^{\langle a,x\rangle})$ is $(L_0, L_1)$-smooth. Running the gradient methods on this function (or a simple composition with a linear map, as Proposition 1 allows) would add breadth without changing the paper's theory-first character.
+
+3. **Explicitly state the nonconvex-rate context in the abstract/conclusion.** Since the nonconvex bound matches Koloskova et al., it would be fairer to frame it as "best-known" (which the paper already does) and let the convex and accelerated results carry the novelty claim in the abstract.
 
 ## Score and Decision
 
-**Originality:** Good — tighter bounds, novel step-size derivation, new connection to clipping, and a clean two-stage accelerated procedure.
-
-**Importance of question:** High — $(L_0,L_1)$-smooth optimization is an active area directly relevant to modern ML training.
-
-**Claims well-supported:** Yes — all theorems are proven in the appendix; complexity claims match the derived bounds.
-
-**Soundness of experiments:** Adequate for a theoretical paper — synthetic experiments confirm the theory.
-
-**Clarity of writing:** Generally clear and well-structured. Minor notational inconsistency in Theorem 4.
-
-**Value to community:** Solid theoretical contribution with practical relevance.
-
-No fatal or major weaknesses exist. Both issues flagged by the harsh critic are minor (Theorem 4 notation) or already addressed (the $m$ factor in Theorem 5). The paper makes a genuine theoretical contribution with several nontrivial improvements over prior work.
-
-**Score:** 7.0 — a solid theoretical paper with clear contributions, minor presentation issues that can be resolved in revision.
+This is a solid theory paper with a genuine advance in convex complexity bounds for $(L_0, L_1)$-smooth optimization, adaptive methods that match the optimal bound without parameter knowledge, and a creative accelerated procedure that — despite an acknowledged gap in fully specifying its line-search cost — improves over existing accelerated results by removing exponential and initial-gradient dependencies. The proof techniques are rigorous, the exposition is clear, and the related work is handled honestly. The main weakness (the $m$-factor in the accelerated complexity) is openly discussed and does not threaten the paper's other contributions. I recommend acceptance.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

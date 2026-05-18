@@ -1,18 +1,24 @@
-Now I have a thorough understanding of the paper. Let me synthesize the final review.
+I have read and verified the paper thoroughly. Let me now construct the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces Guided Stochastic Exploration (GSE), an always-sparse dynamic sparse training (DST) algorithm. The key idea is to sample a subset of inactive connections at each grow/prune step, compute gradients only for those sampled connections, and grow the ones with the largest gradient magnitude. This avoids the dense gradient computation required by RigL while maintaining (often exceeding) its accuracy. Experiments on CIFAR-10/100 and ImageNet with ResNet, VGG, and ViT models show GSE outperforms prior always-sparse methods and matches or beats RigL at high sparsities (90-98%).
+The paper proposes Guided Stochastic Exploration (GSE), a dynamic sparse training algorithm that never materializes dense weights or computes dense gradients. GSE samples a random subset of inactive connections (size proportional to the active set), computes gradients only for that subset, and grows the connections with the largest gradient magnitudes. This hybrid of stochastic exploration and greedy selection is shown to match or modestly exceed the accuracy of RigL (which requires periodic dense gradient computation) while reducing computational cost. Experiments on CIFAR-10/100 and ImageNet across ResNet, VGG, and ViT models at sparsities of 90%–98% are presented against a broad set of baselines.
 
 ## Strengths
 
-1. **Novel and effective algorithm design**: GSE's hybrid exploration strategy — randomly sampling a subset of inactive connections followed by gradient-guided selection from that subset — is a clean, well-motivated idea that bridges SET (pure random) and RigL (pure greedy). The empirical validation (Table 1) consistently shows GSE outperforming both at 98% sparsity across architectures (e.g., CIFAR-100 ResNet-56: 69.71% vs. RigL 68.76% and SET 68.41%).
+1. **Genuinely always-sparse training that matches/slightly exceeds RigL's accuracy at high sparsity.**  
+   On CIFAR-100 at 98% sparsity with ResNet-56, GSE (62.1%) outperforms RigL (60.8%) and SET (56.0%); on VGG-16, GSE (69.6%) vs RigL (68.8%). On ImageNet with ResNet-50 at 90% sparsity, GSE achieves 75.82% vs RigL's 75.01% (Table 2). These results are consistently in GSE's favor, especially at extreme sparsity where differences between methods are most meaningful. Unlike RigL, GSE achieves these results without ever materializing dense weights or computing dense gradients.
 
-2. **Always-sparse computation is genuinely maintained**: Unlike RigL, which periodically computes dense gradients (O(n²) time), GSE never materializes the dense weight matrix or computes dense gradients. The method samples O(n) connections, computes gradients only for those, and selects top-k in O(n) time via introselect. The FLOPs comparison in Figure 4 quantifies this advantage: at 99% sparsity GSE uses 11.8% fewer FLOPs than RigL, and at brain-like sparsities the gap widens to 131×.
+2. **Simple, well-motivated method with a clean ablation of the exploration strategy.**  
+   The core idea — sample a random subset of inactive connections, then greedily select the best from that subset — is intuitive and easy to implement. Section 4.2 thoroughly compares three sampling distributions (uniform, GraBo, GraEst) and shows that uniform sampling works as well or better than the biased alternatives. The finding that uniform + greedy selection is both simplest and most effective is a genuine insight that simplifies the method considerably.
 
-3. **Thorough ablation on design choices**: Section 4.2 systematically varies the subset sampling ratio γ (0.25 to 2) and compares three distributions (uniform, GraBo, GraEst). The finding that uniform sampling with γ ≈ 1 matches or exceeds RigL is non-trivial and well-supported. The paper also tests the hypothesis that γ→∞ converges to RigL behavior, confirming the expected trend.
+3. **Comprehensive empirical evaluation.**  
+   The paper covers 3 datasets (CIFAR-10, CIFAR-100, ImageNet), 3 architectures (ResNet-56, VGG-16, ViT), 3 sparsity levels (90%, 95%, 98%), and compares against 9+ baseline methods spanning pruning-before-training (SNIP, GraSP, SynFlow), gradual pruning, and dynamic sparse training (SET, RigL, Top-KAST, DSR, SNFS). The comparison is wider than many papers in this area.
 
-4. **Comprehensive evaluation**: GSE is compared against 9 baselines (Lottery, Gradual, SNIP, GraSP, SynFlow, SET, RigL, Top-KAST, DSR, SNFS) across two datasets, three architectures, and three sparsity levels. The consistent outperformance — especially at extreme sparsity where differences are most meaningful — provides solid evidence for the method's effectiveness.
+4. **Always-sparse property is a meaningful differentiator from RigL.**  
+   As Section 2 correctly notes, RigL "requires periodically computing the dense gradients." GSE removes this requirement entirely. The paper clearly states (Section 3): "at no point is the dense model materialized, all forward passes use sparse weights, and it exclusively calculates sparse gradients."
 
 ## Weaknesses
 
@@ -20,63 +26,62 @@ This paper introduces Guided Stochastic Exploration (GSE), an always-sparse dyna
 None.
 
 ### Major
-
-1. **The method description does not explain how it applies to convolutional layers, yet experiments rely heavily on them.** Section 3.1 describes subset sampling via independent draws over "input units" and "output units" (a_i ∼ f^{[l]}, b_i ∼ g^{[l]}), and states this is discussed "in the case of fully-connected layers" (line 53). For conv layers, filter weights connect channels with spatial structure, activations and gradients are 4D tensors, and the gradient of a weight involves a sum over spatial locations. The paper does not specify: (a) what constitutes a "unit" for conv layers (channels? spatial positions? a combination?), (b) how the vector-valued distributions f and g are derived from tensor-valued activations and gradients, or (c) how the gradient magnitude of a sampled inactive conv filter weight is computed efficiently. While the experiments clearly work — and the adaptation likely follows standard DST practice (treating channels as units, aggregating over spatial dimensions) — the paper does not provide the specification, making the method description incomplete for the architectures actually evaluated. This is a significant presentation gap that must be addressed for the paper to be reproducible.
-
-2. **ImageNet comparison uses literature-reported baseline numbers rather than controlled reproduction.** Table 2 compares GSE against baselines whose results are "obtained from prior publications" (line 144). Training protocols (epochs, learning rate schedule, label smoothing, weight decay) can differ substantially across papers. While this is common practice for large-scale benchmarks, it weakens the evidence that GSE outperforms competing methods on ImageNet — the GSE result was obtained under one set of conditions, while baselines were obtained under potentially different conditions. The paper should at minimum report the variance across GSE runs and acknowledge the limitation more explicitly.
+None.
 
 ### Minor
 
-1. **Statistical reporting uses the 95th percentile rather than standard deviation.** The paper reports the mean and "plot the 95th percentile" (line 102) across 3 runs. Standard deviation or confidence intervals would be more conventional and informative. The choice of 95th percentile (which shows the best-case performance among runs) is not justified.
+1. **The accuracy improvement over RigL is modest and the framing slightly overstates it.**  
+   The abstract claims GSE "improves the accuracy over previous methods." While this is technically true — GSE consistently achieves higher accuracy than RigL in the reported experiments — the margins are small on ImageNet (~0.8 percentage points at 90% sparsity). On CIFAR at lower sparsities (90%), differences are also small. The contribution is strongest at extreme sparsity (98%). The paper would be more accurate and compelling if it framed its main contribution as *"always-sparse training that matches or modestly exceeds RigL's accuracy at lower computational cost"* rather than leading with an accuracy improvement claim. This is a framing issue, not a result invalidation.
 
-2. **The complexity analysis is spread across the paper rather than presented as a unified derivation.** The O(n) claim is stated in the abstract and supported by component-level reasoning (|A| = O(n) from Erdős–Rényi in line 81; O(n) sampling in line 60; O(n) top-k selection in line 89), but these pieces are not assembled into a coherent end-to-end derivation. A single paragraph connecting the pieces would significantly clarify the claim.
+2. **The time complexity analysis (O(n) vs O(n²)) lacks necessary precision.**  
+   The paper states "improves the training time complexity of RigL from O(n²) to O(n)" (Introduction) but never explicitly derives either complexity. Section 3.2 shows that GSE's sampling, gradient computation for the subset, and top-k selection each run in O(n) time, and that the Erdős–Rényi initialization ensures |A| = O(n). This is correct per update step. However, the paper never explains where RigL's O(n²) cost comes from (computing gradients for all O(n²) inactive connections each grow step) or discusses how RigL's periodicity T affects the *amortized* cost per training step. A proper comparison would clarify: (a) the per-grow-step cost of computing O(n²) vs O(n) gradients, and (b) how the amortized cost changes when T is large. Without this, the complexity advantage is directionally correct but imprecisely argued.
 
-3. **The interaction between subset size γ and pruning fraction α is not explored.** The ablation varies γ at fixed α (cosine-annealed from 0.2 to 0.0), but the optimal γ may depend on α. Since the paper commits to a specific cosine annealing schedule without testing alternatives or interaction effects, it is unclear how robust the γ=1 recommendation is to the choice of schedule.
+3. **The choice of γ=2 on ImageNet is used without justification.**  
+   On CIFAR, γ=1 suffices to match/exceed RigL. On ImageNet (Section 4.4), the paper uses γ=2 with no explanation. The FLOPs comparison in Section 4.6 uses γ=1, creating a disconnect between the efficiency analysis and the ImageNet accuracy results. If γ=1 was tried on ImageNet and failed, that should be reported and explained. If it was not tried, the missing ablation raises questions about whether the efficiency advantage holds at scale. This is a straightforward missing experiment.
 
-4. **The FLOPs comparison (Figure 4) only compares against RigL, not SET or Top-KAST.** GSE is always-sparse like SET but the FLOPs comparison does not include it. The comparison against RigL is the most informative for the paper's core claim (vs. dense-gradient methods), but including SET would provide a fuller picture.
+4. **Variability reporting with only 3 runs is insufficient.**  
+   The paper reports the mean and "plot[s] the 95th percentile" from 3 random seeds (Section 4.1). With only 3 samples, the 95th percentile is not a statistically meaningful dispersion measure — it essentially reports the maximum. Standard deviation or individual run values would be more informative, especially given the small accuracy differences between methods (many in the 0.2–1.3 percentage point range).
+
+5. **Source of baseline numbers is not always clearly distinguished.**  
+   Section 4.4 states that Table 2's baseline results "were obtained from prior publications" but it is not stated whether Table 1's baselines were rerun by the authors or drawn from prior work. Section 4.1 says the authors "adopt the implementation of the baselines based on their available code," suggesting Table 1 baselines are rerun. This should be stated explicitly for each table to avoid confusion about comparability.
 
 ### Trivial
-- None.
+
+- **Figure numbering reference error (Section 4.5):** The text refers to Figure 3 for the model scaling experiment but also mentions ViT accuracy "plateaus at 62" with a sentence fragment that appears garbled — likely a parser artifact.
 
 ## Nice-to-Haves
-- An analysis of how the method handles batch normalization and bias parameters in the complexity accounting (the paper states they are kept dense but does not quantify their overhead).
-- Controlled ImageNet experiments re-running the most important baselines (RigL, SET) under the same pipeline, even if at reduced scale (e.g., 90 epochs).
+
+- A brief sensitivity study of γ on ImageNet (γ=1 vs γ=2 at 90% sparsity) would settle whether the efficiency advantage holds at scale.
+- Reporting actual (or simulated) wall-clock time, even with the mask-simulation acknowledged limitation, would ground the FLOPs analysis.
+- The model scaling experiment (Figure 3) is interesting but tangential to the core GSE-vs-baseline comparison; it could be moved to an appendix to sharpen the paper's focus.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+- **"0.01% gap (77.43 vs 77.42) on ImageNet"** — These numbers do not appear in the paper text. The paper reports different values (GSE 75.82% vs RigL 75.01% per the experiment description and table caption). The harsh critic's specific numerical claim cannot be verified from the readable text and appears to be an error. *Removed as factually unverifiable/incorrect.*
 
-1. **"The complexity claim has no derivation or proof in the main paper"** — The paper does provide component-level reasoning (lines 81, 60, 89) that collectively supports the O(n) claim, though it is spread across sections. The critic overstates the absence. The weakness is downgraded to Minor (item 2 above).
+- **"Figure 2 shows accuracy plateaus at the level of RigL"** — The paper states GSE "consistently matched, or even surpassed" RigL at γ=1, not merely plateaued. The critic's phrasing misrepresents the paper's own description of its results. *Removed as a misreading.*
 
-2. **"The paper does not report whether method-specific hyperparameters (α, T) were re-tuned for each baseline"** — The paper states "All experiments use the same optimization settings" and specifies that all DST methods use "the same update schedule" (line 106). Using a common setting is standard practice for fair comparison. Different hyperparameters per baseline would introduce confounding. This is not a weakness.
-
-3. **"Sparsity initialization for conv layers is ambiguous"** — The Erdős–Rényi formula ⌈ε(n^{[l-1]}+n^{[l]})⌉ where n^{[l]} are "the number of units" follows the same convention as RigL and SET. For conv layers, n^{[l]} refers to the number of channels (feature maps), consistent with the DST literature. The paper could be clearer, but the practice is standard.
-
-4. **"No discussion of how the method handles batch normalization"** — The paper explicitly states at line 102: "The bias and normalization parameters are kept dense since they only contribute marginally to the size and cost of a model." This is addressed.
-
-5. **"LTH inclusion does not strengthen the case for GSE"** — The LTH baseline is included for completeness as a common sparsification method. All relevant DST baselines (SET, RigL, Top-KAST) are also included. The critic's point about LTH underperforming at high sparsity is well-known and does not weaken the paper.
-
-6. **"ViT experiment is tangential"** — The ViT experiment is part of the model scaling study (Section 4.5), which supports the paper's claim about scaling to larger models. It is relevant.
+- **"The model scaling experiment does not directly support the main contribution"** — The paper frames it as an exploration of the method's utility for training wider sparse models, which is a reasonable secondary contribution. This is a presentation preference, not a weakness. *Removed as a scope/style nitpick.*
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+Beyond the paper's own contributions, the reviews surface an interesting observation: GSE's success with uniform + greedy selection suggests that in dynamic sparse training, the *exploration* phase (sampling which inactive connections to evaluate) and the *exploitation* phase (selecting the best among those evaluated) can be decoupled productively. The uniform distribution handles exploration cheaply, while gradient-magnitude selection handles exploitation — and neither requires the complexity of biased distributions like GraBo/GraEst. This insight has practical implications: future DST methods can focus engineering effort on novel selection criteria rather than sophisticated sampling distributions. The fact that γ=1 (subset size = active set size) is sufficient also suggests an "uncertainty principle" for DST: it is not necessary to examine all inactive connections to make good growing decisions — examining as many as are already active suffices, a finding that could guide theoretical analysis of sparse training dynamics.
 
 ## Suggestions
 
-1. **Provide a complete specification of how GSE applies to convolutional layers.** Map each component to conv operations: define "units" as channels, explain how tensor-valued activations/gradients are aggregated over spatial dimensions to produce the vector distributions f and g, describe how gradient magnitudes are computed for sampled inactive filter weights (including the spatial sum), and discuss how the complexity analysis accounts for spatial dimensions and kernel sizes. This is the single most impactful revision.
+1. **Reframe the contribution** around "always-sparse training that matches/exceeds RigL's accuracy at reduced cost" rather than leading with accuracy improvement alone. This is both more accurate and still compelling.
 
-2. **Present the complexity analysis as a unified end-to-end derivation** in Section 3 — from Erdős–Rényi initialization (|A| = O(n)), through subset sampling (O(n) draws using alias method), set difference (O(n) via hash tables), gradient computation (O(n) for sampled connections), to top-k selection (O(n) via introselect). Clarify how this extends to conv layers (whether kernel size and spatial dimensions affect the complexity).
+2. **Provide a brief derivation** of both GSE's O(n) and RigL's O(n²) per-grow-step complexity in Section 3.2, and add a sentence contextualizing the amortized cost over training (accounting for RigL's periodicity T).
 
-3. **Replace the 95th percentile with standard deviation or confidence intervals** for the 3-run experiments, or at minimum justify the choice of 95th percentile.
+3. **Include a γ ablation on ImageNet** (at least one sparsity level) and justify the γ=2 choice — or report γ=1 results if they are comparable.
 
-## Score and Decision
+4. **Replace the 95th percentile** with standard deviation or report individual run values for the main CIFAR experiments.
 
-The paper proposes a genuinely useful algorithm backed by solid experiments and a clear ablation study. The core idea — sampling a subset of inactive connections, computing their gradients, and growing the top-k — is simple, well-motivated, and empirically effective. The CIFAR results provide strong evidence that GSE outperforms existing always-sparse methods and matches or exceeds RigL at high sparsities.
+5. **State explicitly** which baselines in each table are from the authors' runs vs. prior publications.
 
-However, the paper has a significant presentation gap: the method description explicitly covers only fully-connected layers, while all key experiments use convolutional networks. The adaptation to conv layers is not specified, leaving the experimental results partially ungrounded in the described method. This is a major weakness that must be addressed in revision, but it does not invalidate the contribution — it is a documentation gap rather than a structural flaw, as the experiments clearly work and the adaptation follows standard DST conventions.
+## Score & Decision
 
-Given the paper's genuine contributions balanced against this presentation gap, I recommend **acceptance** conditioned on the authors providing a clear specification of the conv-layer adaptation.
+The paper proposes a clean, well-motivated always-sparse training algorithm with a simple and effective design. The core contribution — matching RigL's accuracy while being genuinely always-sparse with a cheaper update step — is real and valuable. The weaknesses are manageable (imprecise complexity analysis, missing γ-justification on ImageNet, suboptimal variability reporting) and addressable in revision. The overclaim about accuracy improvement is a framing issue rather than a factual error. Overall, this is a solid contribution to the dynamic sparse training literature.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**MY FINAL SCORE:** <pineapple>7.0</pineapple>
+**MY FINAL DECISION:** <orange>Accept</orange>

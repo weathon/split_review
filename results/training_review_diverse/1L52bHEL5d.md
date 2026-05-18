@@ -1,22 +1,18 @@
-Now I have a thorough understanding of the paper and can verify each claim. Let me construct the final consolidated review.
-
----
+Now I have all the information I need to produce the final consolidated review. Let me organize my assessment.
 
 ## Summary
 
-This paper proposes MiDl, a test-time adaptation method for handling missing modalities in egocentric video recognition without retraining. The method minimizes mutual information between the model's predictions and the available modality to encourage modality-invariant representations, combined with a self-distillation (KL) term to preserve performance on complete-modality inputs. MiDl operates online, adapting only when complete-modality samples arrive, and is architecture-agnostic. Experiments on EPIC-Kitchens, EPIC-Sounds, and Ego4D show consistent gains over non-adapted baselines across missing rates ranging from 25% to 100%.
+The paper introduces MiDl, the first test-time adaptation method specifically designed for missing modalities in egocentric video. It formulates missing modalities as a distribution shift and proposes minimizing mutual information between predictions and modality type (to build invariance) combined with self-distillation via KL divergence (to retain performance on complete-modality samples). Empirically, MiDl yields consistent gains (up to +11% on Epic-Kitchens, +6% on Epic-Sounds) across architectures (MBT, self-attention, Omnivore), missing-modality types, and settings (online, long-term adaptation, out-of-domain warm-up).
 
 ## Strengths
 
-- **Novel formulation of missing modality as a test-time adaptation problem.** The paper is the first to explicitly frame missing modality handling as an online TTA problem (Section 3), enabling model adjustment without retraining. This contrasts with prior work (e.g., Ramazanova et al., 2024; Lee et al., 2023) that requires retraining the full model on the training set.
+- **First formulation of missing modality as a test-time adaptation problem**: The paper redefines the missing-modality challenge as a TTA task (Sec 3.1), which is a principled shift from prior work requiring expensive retraining. The streaming evaluation protocol (Sec 3.2) provides a clean benchmark for this new framing.
 
-- **Consistent and significant performance gains across multiple settings.** MiDl improves the non-adapted baseline by up to 7% on EPIC-Kitchens and 1.7% on EPIC-Sounds under the standard TTA scenario (Table 1), with larger gains under long-term adaptation (up to 11.9% on EPIC-Kitchens at 100% missing rate, Table 2). These gains hold across multiple missing rates and datasets.
+- **Consistent and significant gains across diverse settings**: MiDl improves the non-adapted baseline by up to 7% in the online setting (Table 1) and up to 11.9% in the long-term adaptation setting (Table 2). Gains hold across different missing rates, architectures (MBT in Table 1, self-attention in Table 3, Omnivore in Table 5), and missing-modality types (dominant vs. non-dominant in Tables 1–4). This breadth convincingly supports the claimed architecture- and modality-agnosticism.
 
-- **Agnostic to architecture, missing modality type, and pretraining strategy.** The paper demonstrates MiDl's generality across MBT (Table 1), vanilla self-attention (Table 3, Section 6.1), Omnivore pretraining (Table 5, Section 6.3), different missing modalities (Table 4, Section 6.2), and mixed-modality setups (Table 9). This breadth of validation supports the claim that MiDl is a general-purpose solution rather than a dataset-specific trick.
+- **Ablation validates the design rationale**: Table 6 cleanly shows that neither the MI component nor the KL component alone suffices — their combination is necessary for consistent gains across all missing rates, directly supporting the design in Section 4.
 
-- **Ablation confirms both components are necessary.** Table 6 shows that using only the KL term yields no adaptation, while using only the MI term degrades performance at low missing rates. The full MiDl (MI+KL) provides consistent gains across all missing rates, validating the design rationale that mutual information minimization drives invariance while self-distillation preserves original multimodal performance.
-
-- **Practical adaptability demonstrated via warm-up on out-of-domain data.** Section 5.4 shows that warming up MiDl on unlabeled Ego4D data (out-of-domain) further improves accuracy on EPIC-Kitchens by 8% at 100% missing rate, demonstrating the method's versatility in data-scarce deployment scenarios.
+- **Out-of-domain warm-up demonstrates practical robustness**: Section 5.4 shows that warming up on Ego4D before deployment further boosts performance (e.g., +8% on Epic-Kitchens at 100% missing rate), showing that MiDl does not require in-domain data for the warm-up phase.
 
 ## Weaknesses
 
@@ -24,66 +20,50 @@ This paper proposes MiDl, a test-time adaptation method for handling missing mod
 None.
 
 ### Major
-None.
+
+- **Limited to a single task (action recognition) with two modalities (audio + video)**: While the paper is thorough within this scope — testing across architectures, missing-modality types, and settings — the task diversity is narrow. The paper claims MiDl is "a comprehensive solution for diverse scenarios," but it has only been validated on egocentric action recognition with audio+video. Claims about generality to other tasks (e.g., moment localization, emotion recognition) or other modality combinations (e.g., video+IMU) are aspirational, not demonstrated. A more measured framing would better match the evidence.
 
 ### Minor
 
-- **The Long-Term Adaptation (LTA) setup uses training data, creating a tension with the "no retraining" narrative.** Section 5.3 lets $S_{\mathrm{in}}$ be "a subset of training data" used for adaptation before evaluation on the validation set. While the method itself does not use labels and is distinct from full retraining, accessing training data at test time deviates from a standard TTA scenario. The paper should more clearly disambiguate this setting from the pure TTA scenario (Section 5.2) and acknowledge that LTA assumes access to unlabeled in-domain data that may not always be available at deployment.
+- **The p_AV>0 requirement for online adaptation is presented but could be foregrounded more explicitly**: The paper states the assumption that p_AV ≠ 0 (line 77) and reports p_AV=0 results in the LTA setting. However, the abstract and introduction frame the method as handling missing modalities "exclusively at test time" without mentioning that online adaptation requires at least some complete-modality samples in the test stream. If the test stream has p_AV=0, MiDl simply uses the most recently adapted model from a prior phase. This is a real practical constraint worth highlighting earlier in the paper. The method still delivers value in the LTA/p_AV=0 case via prior warm-up, but the framing could be sharper.
 
-- **Only two TTA baselines (SHOT, ETA) are compared in the main experiments.** The paper mentions "three off-the-shelf TTA methods" (Table 1 caption) but names only two in the text. Standard TTA baselines such as TENT (Wang et al., 2020) and simple BN-statistics adaptation (Li et al., 2016) are absent. While MiDl convincingly outperforms the baselines included, a broader comparison would strengthen the claim that existing TTA methods are ineffective for this domain shift.
+- **Hyperparameter values and sensitivity not reported**: The learning rate γ is introduced but its value is not given in the main text; the number of gradient steps per adaptation sample and batch size are unspecified. While these may appear in the appendix (which the parser strips), their absence from the main paper makes reproducibility harder. A brief sensitivity analysis would strengthen the paper.
 
-- **The claimed 2× latency advantage assumes sufficient GPU memory for parallel forward passes.** Section 6.5 states that "the latency of MiDl is only 2× slower than the non-adapted model since all the additional 4 forward passes can be performed in parallel." This assumes perfect parallelism without memory constraints. In practice, running multiple forward passes simultaneously on a single GPU may be memory-bound, especially for transformer architectures like MBT. Reporting actual wall-clock times and memory usage would make this claim more credible.
-
-- **The paper says "three off-the-shelf TTA methods" (Table 1 caption) but only names SHOT and ETA in the main text.** If a third method exists, it needs to be named. If the third is simply the non-adapted baseline, the phrasing is misleading.
+- **Wall-clock latency not measured**: Section 6.5 estimates a 2× slowdown assuming full parallelization of the four forward passes, but no actual throughput or latency numbers are reported. Real hardware measurements would strengthen the practical claims, especially for online/low-latency deployments.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
 
-- **Reporting results on a broader egocentric dataset** such as Ego4D's own audio-visual action recognition subset (rather than using it only for warm-up) would strengthen claims of generality beyond the EPIC-Kitchens/EPIC-Sounds recording protocol.
-
-- **A plot of performance vs. fraction of complete-modality samples ($p_{AV}$)** would directly address the practical viability of MiDl when complete samples are rarer (e.g., $p_{AV} < 0.25$), as real-world streams may have very few complete-modality instances.
-
-- **An ablation freezing different parts of the network** (front-end encoders vs. fusion layers) would deepen the analysis of what MiDl actually learns to change, supporting the claim that it creates modality invariance rather than just regularized fine-tuning.
+- A brief discussion of temporally correlated modality-missing patterns (e.g., bursts of missing-modality samples) would be a useful addition, since the current evaluation assumes an i.i.d. stream.
+- The suggestion from the harsh critic about measuring the prediction gap across modality conditions (e.g., average divergence between audio-only and video-only predictions) would be a nice direct validation of the MI loss mechanism.
 
 ## Removed Points
 
-These points are flagged to be removed by the meta-review process; treat them with caution.
+- **"The MI loss implicitly assumes missing patterns match zeroing-out"** — This is standard practice in the missing-modality literature (e.g., Ramazanova et al. 2024, Lee et al. 2023). The paper transparently describes its zero-padding strategy and the limitation is not specific to this work. Removed as not a meaningful weakness.
 
-- **"Missing variance/error bars in main tables"** — The paper explicitly states in the Table 1 caption: "Refer to Table 11 to see the standard deviations." Standard deviations exist in the appendix (which is part of the original submission but stripped by the parser). This is not a missing-results issue but a presentation choice.
+- **"Evaluation should include other tasks (moment localization, emotion recognition)"** — This would require an entirely different paper with new datasets, architectures, and baselines. The paper is scoped to egocentric action recognition; demanding breadth beyond that scope is not a valid weakness. Moved here.
 
-- **"Problem formulation inconsistency in P={0.25, 0.0, 0.75} example"** — The example is correct: 25% missing video means 25% audio-only samples ($p_A=0.25$), 0% video-only ($p_V=0.0$), 75% both ($p_{AV}=0.75$). The reviewer misread $p_A$ as the audio-only rate and conflated it with missing video.
+- **"The method requires complete-modality samples for adaptation which is under-discussed"** — The paper explicitly states the p_AV≠0 assumption on line 77 and reports p_AV=0 results. This is discussed, though could be more prominent. The substantive residue (foregrounding) is kept as a minor weakness above.
 
-- **"Under incomplete modality L_ent = L_div claim is misleading"** — The paper uses this equality as the explicit justification for why adaptation is only performed on complete-modality samples. The reasoning is correct and clearly stated.
-
-- **"Undisclosed hyperparameters (learning rate, optimizer, etc.)"** — Typical reproducibility nitpick about implementation details. The learning rate $\gamma$ is defined in the update equation; specific values and optimizer details are standard in-the-appendix content.
-
-- **"Baseline fairness / hyperparameter configuration for SHOT and ETA"** — Referenced to Section B.1 in the appendix (stripped by parser). The original submission contains these details.
-
-- **"Does not discuss what happens when p_AV → 0"** — The paper explicitly addresses this on line 77: "Since this work focuses on the multimodal setting, we assume that $p_{AV} \neq 0$ ... Nevertheless, to demonstrate that MiDl does not degrade the original multimodal model's performance in this extreme case, we also report results with $p_{AV} = 0$."
+- **"The test-time adaptation claim is only true when the test stream includes complete samples"** — This restates the paper's own explicit assumption; it is not a hidden flaw. The paper is transparent about this. Kept only the framing nuance point above.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The reviews confirm the paper's strengths and surface minor concerns about scope breadth and assumption visibility, which are already partially addressed in the paper.
 
 ## Suggestions
 
-- Rename or more clearly separate the LTA experiment from the pure TTA scenario (Section 5.2 vs. Section 5.3), and explicitly note in the LTA section that it assumes access to unlabeled in-domain data from a related source, which may not always be available.
-- Add standard TTA baselines (TENT, BN-adaptation) to the comparison table to strengthen the claim that existing methods are inadequate for this domain shift.
-- Report actual wall-clock times and peak GPU memory usage alongside the theoretical compute analysis in Section 6.5.
-- Add a plot showing MiDl's performance gain as a function of $p_{AV}$ to help readers understand how the method behaves when complete-modality samples are rare.
+1. **Foreground the p_AV>0 requirement** in the abstract and introduction — even a sentence like "Our method adapts on the fraction of test samples that contain both modalities, and continues to improve even when later samples are unimodal" would resolve the framing tension.
+
+2. **Report hyperparameter values** (learning rate, batch size, number of adaptation steps per sample) and include a brief sensitivity analysis in the main paper or appendix.
+
+3. **Add real wall-clock latency/throughput measurements** on relevant hardware (e.g., a single GPU) to validate the claimed 2× slowdown in practice.
+
+4. **Tone down the generality claims** — the paper convincingly shows architecture-agnosticism and modality-agnosticism *within egocentric video action recognition with audio+visual modalities*. Phrasing like "a comprehensive solution for diverse scenarios" overreaches the evidence.
 
 ## Score and Decision
 
-The paper introduces a novel and principled framing of missing modality handling as a test-time adaptation problem, supported by a well-motivated method (MiDl) and comprehensive experiments across multiple datasets, architectures, pretraining strategies, and missing rates. The core contribution is valuable and the evidence is largely convincing. The weaknesses are minor and addressable — none threaten the central claims.
-
-**Originality**: Strong — first to formulate missing modality as a TTA problem.  
-**Importance**: High — missing modalities are a practical bottleneck in real-world multimodal deployment.  
-**Claims supported**: Yes, with minor caveats around the LTA setup and baseline breadth.  
-**Soundness**: Good, though the baselines could be broader.  
-**Clarity**: Clear overall; the method and protocol are well described.  
-**Value**: Good contribution to the multimodal and TTA communities.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

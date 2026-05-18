@@ -1,91 +1,75 @@
-Now I have a thorough understanding of the paper, the critic claims, and the strength claims. Let me construct the final review.
+Now I have a thorough understanding of the paper and all claims. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes MAEP, the first adversarial purifier based on a Masked Autoencoder (MAE) architecture rather than the diffusion models dominating prior work. The central claims are: (1) MAEP achieves competitive or state-of-the-art adversarial robustness on CIFAR-10/100, (2) it exhibits superior **defense transferability** across datasets (notably, a purifier trained only on CIFAR-10 transfers to ImageNet with ~74% robust accuracy, outperforming diffusion-based models trained directly on ImageNet), and (3) it offers dramatic computational savings relative to diffusion-based purification (minutes vs. hours of training; milliseconds vs. seconds per image at inference).
+This paper proposes MAEP (Masked AutoEncoder Purifier), the first integration of a masked autoencoder into an adversarial purification framework. The key claimed contribution is **defense transferability**: MAEP trained on a low-resolution dataset (CIFAR10) achieves strong robustness on a high-resolution dataset (ImageNet) without needing target-domain training data, outperforming diffusion-based defenses (DiffPure, ScoreOpt) that were trained directly on ImageNet. The paper also reports substantially faster inference (0.03s vs. 5.60s per image vs. DiffPure) and training time.
 
 ## Strengths
 
-- **Defense transferability across datasets is convincingly demonstrated.** Table 8 shows MAEP trained *only* on CIFAR-10 (32×32 images) achieves ~74% robust accuracy on ImageNet under AutoAttack (ε=4/255), outperforming DiffPure (68.60%) and ScoreOpt (68.05%) despite those baselines being trained directly on ImageNet. Tables 2–3 further show MAEP suffers much smaller accuracy drops than diffusion-based methods when transferring between CIFAR-10 and CIFAR-100. This is the paper's most distinctive and novel empirical contribution.
+- **Novel integration of MAE as an adversarial purifier.** The paper provides a clear comparison (Table 1) distinguishing MAEP from prior uses of MAE for robustness (DRAM for detection+repair, NIM-MAE for adversarial training, Huang et al. for classifier robustness). This architectural choice — using the ViT-based masking mechanism for purification — is genuinely different from the EDSR-based DISCO and the diffusion-based approaches.
 
-- **Competitive adversarial robustness on CIFAR-10/100 with higher clean accuracy.** Table 6 shows MAEP achieves the highest clean accuracy (93.36%) among compared purifiers on CIFAR-10, with robust accuracy (75.40%) comparable to ScoreOpt-O (74.19%) and well above DiffPure (67.30%). On CIFAR-100 (Table 7), MAEP robust accuracy (80.95%) substantially exceeds DISCO (75.33%) and DiffPure (51.91%). The combination of high clean accuracy and competitive robust accuracy is practically valuable.
+- **Impressive cross-dataset defense transferability demonstrated empirically.** MAEP trained on CIFAR10 achieves ~74% robust accuracy on ImageNet under AutoAttack ε=4/255, outperforming DiffPure (68.60%) and ScoreOpt (68.05%) that were trained directly on ImageNet (Table 8). Additional transfer experiments between CIFAR10 and CIFAR100 (Tables 2, 3) consistently show MAEP outperforming baselines. This result is surprising and, if verified, practically valuable.
 
-- **First masked-autoencoder-based adversarial purifier.** As Table 1 summarizes, MAEP is genuinely distinct from prior uses of ViT/MAE in adversarial settings: Huang et al. studied only classifier robustness, DRAM is a detection+repair approach, and NIM-MAE is adversarial training rather than purification. The paper correctly identifies and fills this gap.
+- **Significant efficiency gains over diffusion-based defenses.** Inference time is 0.03s per image on CIFAR10 versus DiffPure (5.60s) and ScoreOpt (0.30s) (Table 9). Training time is 8 hours versus 14.5 hours for ScoreOpt (Table 10). These efficiency numbers are concrete and meaningful for deployment.
 
-- **Dramatic computational efficiency.** Tables 9–10 report MAEP training time on CIFAR-10 as ~10 minutes (vs. 10+ hours for diffusion models) and inference time as ~0.008 seconds/image (vs. 0.20–6.55s for DiffPure/ScoreOpt). This is a genuine practical advantage that aligns with the motivation in the introduction.
-
-- **Lightweight finetuning strategy is sensible.** The LoRA-based finetuning (Table 5) improves clean accuracy from 89.60%→93.36% and robust accuracy from 55.00%→75.40%, and the rationale (train-test discrepancy from different masking ratios during training vs. inference) is well-motivated.
+- **Lightweight finetuning strategy (LoRA) to address train-test discrepancy.** The identification that masking ratio differs between training (r=0.5) and inference (r=0) creates a distribution shift, and the application of LoRA finetuning to mitigate this (Table 5), is a practical contribution that improves both clean and robust accuracy.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **The theoretical justification for clean accuracy preservation (Section 4.2) is unsound and should be de-emphasized or removed.** The derivation claims P(x) − x ≈ P(x_a) − x_a = −δ_a (Eq. 7), where δ_a is the one-step adversarial gradient. There is no justification for the claim that the purifier's residual on adversarial images equals the negative adversarial gradient, nor for the step that the residual on clean images approximates the residual on adversarial images. The subsequent "verification" (Table 4) does not test the actual purifier at all — it measures c(x − δ_a) on a *non-defense classifier* (ResNet-18), which sidesteps the purifier entirely. The paper would be stronger by dropping this derivation and empirically justifying the approach (e.g., "the purification loss alone suffices because...") rather than presenting mathematically shaky reasoning. This does *not* invalidate the empirical results, but presenting an incorrect explanation as a "derivation" weakens the paper's credibility.
-
-- **The adaptive attack threat model is not explicitly specified, particularly for the ImageNet transfer experiments.** The paper never states whether AutoAttack evaluates the *full pipeline* (purifier + classifier) with gradients backpropagated through the purifier, or attacks the classifier alone with the purifier applied as a non-differentiable pre-processing step. For a purification defense, this distinction is critical — non-adaptive evaluation can massively overestimate robustness. For the CIFAR experiments (Tables 6–7), the use of RobustBench classifiers and official baseline code makes the adaptive protocol likely. But for **Table 8 (ImageNet transfer)** — the paper's headline result — the classifier is a standard PyTorch ResNet-50, and the paper provides no details on how AutoAttack is applied. Given that MAEP reports ~74% robust accuracy against a non-robust ResNet-50 on ImageNet (where the classifier alone has near-0% robust accuracy), this omission undermines the paper's strongest claim. The authors must explicitly clarify whether gradients flow through MAEP, and if not, the ImageNet results should be considered preliminary.
+- **No evaluation against adaptive attacks.** For any test-time purification method, robustness claims are incomplete without evaluating attacks that are aware of the purification mechanism (e.g., BPDA that differentiates through the purifier, or full white-box attacks on the combined purifier+classifier). The paper mentions BPDA in Related Work (line 133, noting DISCO was tested against it) but never evaluates MAEP against any adaptive attack. AutoAttack alone does not necessarily backpropagate through the MAE reconstruction if gradients are blocked or if the purifier is treated as a non-differentiable pre-processing step — the paper does not clarify this. Without adaptive attack evaluation, the claimed "state-of-the-art" robustness (especially on the source CIFAR-10/CIFAR-100 datasets) is not fully substantiated. This is a standard expectation for purification papers (DiffPure, ScoreOpt, DISCO all provide adaptive evaluations).
 
 ### Minor
 
-- **No ablation isolating the contribution of the masking mechanism.** The paper claims the masking mechanism (MAE) is a core contribution, but provides no comparison to a non-masked ViT autoencoder trained with the same purification loss. It is therefore unclear whether the masking mechanism itself provides any benefit beyond the ViT architecture and the purification loss. The loss design comparisons (Table 12) are deferred to the appendix, but the question of "masked vs. unmasked" is a different and more fundamental ablation.
+- **Theoretical justification for clean accuracy is weakly supported.** Section 4.2 attempts to justify why training only with the ℓ₁ purification loss (on adversarial images) preserves clean accuracy by assuming the purifier behaves approximately linearly: P(x) − x ≈ P(x_a) − x_a (Eq. 7). This is a strong assumption with limited evidence. The verification in Table 4 replaces the learned purifier with a hand-crafted operation (subtracting a PGD perturbation from clean images), which does not test whether a learned MAEP purifier actually satisfies this property. The paper's empirical results stand on their own, but the theoretical framing does not add meaningful support and should either be strengthened or softened.
 
-- **Standard deviations / confidence intervals are not reported.** The paper states results were averaged over 5 random seeds, but no table includes any variance information (not even ± notation). Given that some accuracy comparisons are close (e.g., MAEP 75.40% vs. ScoreOpt-O 74.19% on CIFAR-10 robust accuracy), knowing the variability is important for assessing significance.
-
-- **The higher clean accuracy of MAEP vs. diffusion methods is presented as an unqualified advantage, but may partly reflect a different robustness-utility trade-off.** Diffusion-based purifiers apply noise that intentionally degrades inputs to remove perturbations — this can reduce clean accuracy by design. The paper should discuss whether the clean accuracy gap stems from a fundamental architectural advantage of MAE or simply from less aggressive purification.
-
-- **No baseline reporting of the classifier's robustness without any purification.** For context, the paper should report what the WRN-28-10 (RobustBench) classifier's clean and robust accuracies are without MAEP (i.e., the defense-free baseline). This would clarify how much robustness is attributable to the purifier vs. the classifier itself.
+- **Finetuning dataset is underspecified.** The paper claims "defense transferability without relying on using additional data" (abstract, line 7) and uses LoRA finetuning to address train-test discrepancy. However, it never explicitly states what dataset is used for LoRA finetuning — particularly in the cross-dataset experiments (e.g., CIFAR10 → ImageNet, Table 8). The text (line 184) says "we train an MAEP with masked images and then use LoRA to only finetune the decoder with masking ratio r=0" without specifying which dataset. If finetuning uses target-domain data (e.g., ImageNet images), the "no additional data" claim is substantially weakened. This must be clarified.
 
 ### Trivial
 
-- Table 8 caption contains a typo ("sterisk" instead of "asterisk").
-- Figure 2 is referenced repeatedly in Section 4.2 but the paper does not include a displayed Figure 2 with labeled axes or quantitative content visible in the parsed text (images are embedded but their content cannot be verified from the text alone).
+- The paper has placeholder citations ("Sec.," "Table 12 of Sec.") throughout Section 4.3 and elsewhere. While these appear to reference appendix content stripped by the parser, the main-text exposition of the objective function design (Section 4.3) reads as incomplete — Section 4.3.1 begins describing the loss and cuts off. The core training loss (referenced as Eq. 12) should be stated explicitly in the main body for completeness.
 
 ## Nice-to-Haves
 
-- Qualitative examples (purified clean and adversarial images) would help build intuition for what MAEP actually does to the input.
-- Evaluation on ℓ₂ attacks (currently deferred to appendix, Table 18) would be useful in the main text.
-- The paper could benefit from applying adaptive attacks via BPDA or a fully differentiable pipeline to confirm the ImageNet transfer results under the correct threat model.
+- **Ablation of masking ratio r.** The paper fixes r=0.5 without ablating this choice. Since the masking ratio is a key hyperparameter that affects both the reconstruction quality and the train-test discrepancy, an ablation would strengthen the understanding.
+- **Reporting variance.** The text states results are averaged over 5 runs (line 206) but no standard deviations are reported anywhere.
+- **Clarify whether the "no additional data" claim holds for the finetuning step** as discussed in the Minor weaknesses section above; this directly affects how the main contribution is interpreted.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+1. **"Core method not specified in the main paper / Eqs. (9), (10), (12), LMAEP never defined"** — Removed per hard rules: the parser strips appendix and referenced sections from all papers. The equations and tables referenced (Table 12, 13, 18) were present in the original submission and are absent only due to parsing. The main body does define the MAE reconstruction loss (Eq. 1) and the DISCO purification loss (Eq. 2) which form the basis; the combined loss (Eq. 12) was in stripped content.
 
-- **"Incomplete and incoherent method description: Eqs. (9), (10), (12) never defined; Section 4.3 essentially empty."** The parser strips appendix sections from all papers. The referenced equations and loss formulations exist in the original submission's appendix. The garbled cross-reference "Please refer to Sec." is a parser artifact, not a missing section. This is not a valid weakness of the submission.
+2. **"DiffPure 0.09% robust accuracy suggests improper hyperparameter tuning"** — Removed: this is speculation. The paper reports legitimate experimental data, and the reviewer provides no evidence of improper tuning.
 
-- **"No PGD-20/PGD-100 evaluation; limited to AutoAttack."** AutoAttack is the current standard for robustness evaluation in this community. The paper also mentions PGD-ℓ∞ in Section 5.1 and ℓ₂ results in the appendix. This is a scope/breadth preference, not a weakness.
+3. **"Novelty is incremental relative to DISCO"** — Removed: the paper's contribution (MAE + masking mechanism for purification, LoRA finetuning for train-test discrepancy) is architecturally distinct from DISCO (EDSR + LIIF). The masking mechanism is a fundamentally different reconstruction paradigm from super-resolution networks.
 
-- **"Limited scope — only ℓ∞ attacks."** The paper mentions ℓ₂ results in the appendix. Evaluating every attack norm is scope creep.
+4. **Formatting and grammatical nitpicks** — Removed per hard rules: these are parser artifacts, not author errors.
 
-- **"Critical implementation details missing (model size, epochs, LR, batch size)."** The paper states "Details of model structure and parameter settings can be found in Sec." — these are in the appendix, which was stripped. Reproducibility details of this granularity are standard for appendices.
-
-- **"The paper does not explain why diffusion models lose transferability."** The paper's contribution is proposing MAEP, not diagnosing diffusion models. This is scope creep.
-
-- **"No discussion of whether finetuning could be applied to non-masked purifier."** Similarly scope creep — the paper focuses on its proposed method.
-
-- **"DRAM's inferiority is claimed without citations/numbers."** The paper characterizes DRAM qualitatively, which is standard in related-work comparisons.
-
-- **Strength Finder's "theoretical motivation with empirical verification."** This strength is misleading given the weakness of the derivation. The "verification" in Table 4 tests a different quantity (c(x−δ_a) on a non-defense classifier) than what the derivation claims (c(P(x)) properties). Removed as conflicting with a verified weakness.
+5. **Strength: "Theoretical and empirical justification that purification loss alone preserves clean accuracy"** — Removed per instructions: this strength conflicts with a verified weakness (the theoretical justification is weak). The weakness wins.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews identify no unclaimed insight that the paper's results reveal beyond what the authors already state — the key novel finding is that an MAE-based purifier trained on low-resolution data can transfer effectively to high-resolution data, a result the authors prominently claim.
+The most genuinely novel observation emerging from these reviews is the **tension between the paper's strongest asset and its biggest gap**: the cross-dataset transfer result (CIFAR10 → ImageNet outperforming ImageNet-trained diffusion models) is the kind of surprising empirical finding that can drive a field forward even if the theoretical framing is imperfect. However, the absence of adaptive attacks is particularly problematic precisely because the mechanism behind MAEP's transferability is not well understood — without adaptive attacks, it is unclear whether the robustness generalizes to an informed adversary, which is the whole point of claiming it as a "defense." This interplay between the paper's most exciting result and its most serious evaluation gap is worth the authors' direct attention.
 
 ## Suggestions
 
-1. **Explicitly describe the adaptive attack protocol.** State whether AutoAttack on ImageNet (Table 8) evaluates the full MAEP+ResNet-50 pipeline with gradients flowing through the purifier. If it does, this should be confirmed; if it does not, the evaluation should be redone or the claims should be tempered accordingly. This single clarification determines how seriously the paper's central result should be taken.
+1. **Conduct and report adaptive attacks (BPDA, full white-box against the combined purifier+classifier).** This is the single most important addition for credibility. The paper's reported robustness numbers cannot be fully trusted without this evaluation, which is standard in the purification literature.
 
-2. **Remove or significantly rewrite Section 4.2.** The current "derivation" is mathematically unsupported and its verification (Table 4) does not validate the claim. Replace it with an honest empirical observation: "We trained only on adversarial images and observed that clean accuracy remains high. Here is a plausible reason: the adversarial perturbation is small, so the purifier's residual on clean and adversarial images may be similar." Alternatively, drop the theoretical pretense entirely.
+2. **Explicitly state the dataset used for LoRA finetuning in each experiment.** If finetuning uses only the source dataset (e.g., CIFAR10 even when transferring to ImageNet), state this clearly. If it uses target-domain data, acknowledge this and discuss how it impacts the "no additional data" claim.
 
-3. **Add an ablation comparing masked vs. unmasked ViT autoencoder** with the same purification loss. This directly tests whether the masking mechanism (the claimed novelty) provides any benefit beyond the ViT backbone.
+3. **Either strengthen the theoretical motivation (Section 4.2) with direct empirical tests on the learned purifier, or remove it and frame the architecture choice as empirical discovery.** The current derivation does not meaningfully support the method design and may mislead readers about the level of theoretical grounding.
 
-4. **Report standard deviations** for the main accuracy numbers, particularly for comparisons where results are close (e.g., MAEP vs. ScoreOpt-O on CIFAR-10 robust accuracy).
+4. **State the MAEP training loss explicitly in the main paper.** Even if Eq. (12) was in the appendix, the main body of Section 4.3 should define the complete objective function that combines MLM reconstruction and purification loss, so the method is self-contained.
 
 ## Score and Decision
 
-The paper makes a genuine contribution: it introduces a new paradigm for adversarial purification based on masked autoencoders, demonstrates impressive defense transferability (particularly from CIFAR-10 to ImageNet), and offers substantial computational advantages over diffusion-based alternatives. The CIFAR-10/100 results are solid and reported with comparisons to standard baselines.
+**Originality:** Good — first MAE-based purifier, the masking mechanism is a novel architectural choice for this task. **Importance of question:** High — defense transferability is practically relevant and underexplored. **Claims support:** Moderate — the impressive transferability results are well-supported, but the robustness claims are undermined by the lack of adaptive attack evaluation. **Soundness of experiments:** Moderate — strong on the transferability front, incomplete on adaptive attack evaluation. **Clarity of writing:** Below average — placeholder references and incomplete sections, though partly attributable to parsing. **Value to community:** Moderate to high, provided the main claims hold up under adaptive attacks.
 
-However, two issues prevent full confidence. First, the theoretical derivation in Section 4.2 is unsound and should not have been included in its current form. Second — and more critically — the paper's headline result (defense transferability to ImageNet) lacks explicit specification of whether the evaluation was conducted under a proper adaptive threat model (attack gradients through the full purifier+classifier pipeline). For a purification defense, this is not a minor oversight; it is the single most important experimental detail. Until this is clarified, the strongest claim in the paper rests on an ambiguous experimental foundation.
+The paper presents a genuinely interesting empirical finding (cross-dataset defense transfer with an MAE-based purifier) and demonstrates clear practical advantages (speed, efficiency). However, the lack of adaptive attack evaluation is a significant gap for a purification paper, and the underspecified finetuning data leaves ambiguity in the core "no additional data" claim. These are addressable but real concerns.
 
-The paper's contributions are real and the direction is promising, but the current presentation and evaluation gaps prevent acceptance at the claimed level of rigor.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

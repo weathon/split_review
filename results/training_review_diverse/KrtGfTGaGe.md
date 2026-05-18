@@ -1,20 +1,18 @@
-Now I have all the information I need. Let me write the final consolidated review.
-
----
+Now I have a thorough understanding of the paper and all the reviewer claims. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes the Wasserstein Belief Updater (WBU), a model-based RL algorithm for POMDPs that learns a latent model of the environment (via a WAE-MDP) and an explicit belief update mechanism (via a feed-forward belief encoder trained without BPTT). The main claimed contributions are (1) theoretical value-difference bounds (Theorems 1 and 2) linking the quality of the learned latent model and belief representation to the expected return in the original POMDP, and (2) an algorithm that learns a belief update rule with representational guarantees that existing RNN-based methods lack. Experiments on three partially observable environments (RepeatPrevious, StatelessCartPole, SpaceInvaders) show that WBU can succeed at a long-term memorization task where R-A2C and DVRL fail.
+This paper proposes the Wasserstein Belief Updater (WBU), a model-based RL algorithm for POMDPs that learns a latent space model (via WAE-MDP) and a feed-forward belief encoder that approximates the belief update rule. The core contribution is a theoretical framework providing provable bounds: (1) the latent model's value function is close to the original POMDP's, and (2) histories mapped to close latent beliefs yield close expected returns. Unlike RNN-based methods (R-A2C, DVRL), WBU avoids backpropagation through time and uses normalizing flows for flexible belief distributions. Experiments on three POMDP environments show competitive or superior performance, particularly on long-term memorization and noisy observation tasks.
 
 ## Strengths
 
-- **Novel theoretical analysis with formal guarantees.** Theorems 1 and 2 provide value-difference bounds expressed in terms of local, on-policy, belief, and observation losses. These are the first guarantees of their kind for a learned belief update mechanism in POMDPs that does not rely on RNN hidden states. The bounds connect the quality of the latent model and the belief representation to the expected return — a structural contribution that existing methods like DVRL and R-A2C lack.
+- **Provable value-difference bounds for the latent model (Theorem 1).** Theorem 1 provides an explicit upper bound on the expected absolute value difference between the original POMDP and the learned latent model in terms of local (reward, transition), belief, and observation losses. This is a formal guarantee that SOTA methods like DVRL and R-A2C lack. The bound decomposes cleanly into measurable quantities, making it practically meaningful when losses are driven low.
 
-- **Demonstrated long-term memorization without RNNs.** In the RepeatPrevious environment (POPGym), WBU is the only method that successfully learns to recall the card suit seen 8 steps earlier, while both R-A2C and DVRL fail (Fig. 3). This provides direct evidence that the learned belief update can function as a sufficient statistic for long-range history, which is the paper's central empirical claim.
+- **Provable representation quality for the belief encoder (Theorem 2).** Theorem 2 establishes that histories mapped to close latent beliefs (via the learned encoder) yield close expected returns under the optimal latent policy, with the bound expressed in terms of the Wasserstein belief distance plus loss terms. This provides a formal foundation for using the belief representation as policy input. The t-SNE visualization (Fig. 3) provides qualitative supporting evidence that belief clusters correspond to similar value regions.
 
-- **Clean separation of belief learning from policy learning.** The architecture decouples the belief encoder (trained via KL minimization against the latent POMDP's exact belief update) from the policy (trained via A2C on the resulting sub-beliefs). This means policy gradients do not corrupt the representation, which is solely learned by the belief encoder. This design choice is principled and well-motivated.
+- **Clean architectural separation of belief learning from policy optimization.** The belief encoder is optimized solely via the belief loss (Eq. 7), and gradients from the RL objective do not influence the representation. This is a principled design choice that allows independent verification of belief quality. The decreasing belief loss during training (Fig. 2) confirms that the representation improves independently of policy optimization.
 
-- **Use of normalizing flows for non-Gaussian beliefs.** The MAF-based parameterization of the belief distribution lifts the Gaussian restriction common in prior work (e.g., DVRL), extending the method to a broader class of POMDPs without distributional assumptions.
+- **Avoidance of BPTT with feed-forward belief updates.** The paper demonstrates that belief updates can be learned without backpropagation through time, using a simple feed-forward sub-belief encoder and normalizing flows. The RepeatPrevious experiment provides compelling evidence that this approach achieves strong memorization where RNN-based baselines fail. This is a genuine architectural innovation over prior RNN-dependent methods.
 
 ## Weaknesses
 
@@ -23,65 +21,68 @@ None.
 
 ### Major
 
-1. **Theory-practice gap in the loss functions.** The theoretical bounds (Thms. 1 and 2) are expressed in terms of Wasserstein distances and the observation loss L_obs (Eq. 3, defined using total variation distance involving the true observation function O). However, in practice the algorithm minimizes KL divergence as a proxy for Wasserstein (Sec. 4, "On-policy KL divergence"), and the observation loss L_obs requires computing TV(O(·|s',a), ···) which itself depends on the unknown true observation function O. The paper acknowledges these proxies (KL bounds Wasserstein in the zero-temperature limit via Pinsker; the WAE-MDP's reconstruction loss is used alongside L_obs) but does not explain how L_obs is actually optimized in the implemented system, nor does it report its empirical value. The result is that the theorems establish *conditional* guarantees relying on quantities that are not directly or verifiably minimized. While some gap between theory and practice is normal, the paper would benefit from a clearer operational mapping between the theoretical loss families and what the optimizer actually computes.
+- **The KL–Wasserstein proxy is not rigorously justified.** The paper states (line 377) that "in the WAE-MDP zero-temperature limit, KL bounds Wasserstein by Pinsker's inequality." This is technically imprecise. Pinsker's inequality bounds KL against total variation (TV), not Wasserstein directly. To connect TV to Wasserstein, an additional inequality — e.g., \(W_1 \le \mathrm{diam}(\mathcal{Z}) \cdot \mathrm{TV}\) — is required, which needs the latent space to be bounded (or the metric to be discrete). The paper provides neither a diameter assumption on \(\mathcal{Z}\) nor a derivation of the full chain \(W_1 \le \mathrm{diam}(\mathcal{Z})\sqrt{\mathrm{KL}/2}\). Since the theoretical guarantees (Theorems 1 and 2) are expressed in terms of the Wasserstein belief loss \(\mathcal{L}_{\mathrm{bel}}\), but the practical optimization replaces it with \(\mathrm{KL}\), this gap means the guarantees do not automatically apply to the actually trained system. **This is fixable** (e.g., by adding a compactness assumption on \(\mathcal{Z}\) and stating the full inequality chain), but it is a genuine gap in the current presentation that breaks the tight link between theory and practice.
 
-2. **Narrow experimental evaluation.** The paper tests on only three environments (RepeatPrevious, StatelessCartPole, SpaceInvaders) with only two baselines (R-A2C and DVRL, the latter from 2018). Neither DreamerV2/V3-style methods nor FORBES (which the paper cites) are compared empirically — FORBES is discussed only as related work. The StatelessCartPole results show WBU matches but does not exceed R-A2C final performance; the main positive result is on RepeatPrevious alone. With only 5 seeds per condition and no statistical significance testing, the empirical evidence for the method's generality is thin. The paper's title and framing suggest a general-purpose solution for POMDPs, but the experiments do not yet support that breadth.
-
-3. **No ablation study.** The algorithm involves multiple interacting loss terms: local reward loss, local transition loss, on-policy reward loss, on-policy transition loss, belief loss, and an observation loss. Without ablations, it is unclear which components drive the results. This is especially important because the WAE-MDP training, the belief encoder training, and the policy training are interleaved, and the contribution of each to downstream performance is unknown.
-
-4. **Limited reproducibility details in the paper itself.** Hyperparameters (learning rates, network sizes, optimizer, batch size, number of environment steps) are not reported. The reproducibility statement points to code in supplementary material, but the main text should include key experimental settings.
+- **Theorem 2's bound contains an inverse-probability term that severely limits its practical strength.** The bound (line 323) includes the term \(\frac{1}{\mathbb{P}_{\pi^*}(h_1)} + \frac{1}{\mathbb{P}_{\pi^*}(h_2)}\) multiplying all the loss terms. For any history with low probability under the optimal policy — and the optimal policy is unknown during learning — this term can be arbitrarily large. This means the representation guarantee is only meaningful for histories that are *already likely* under the optimal policy, creating a circularity: the guarantee applies strongest where it is least needed. The bound also depends on the distribution \(\mathbb{P}_{\pi^*}\), which changes as the policy improves during training. The paper should clarify whether the bound can be restricted to hold with high probability under the policy, or provide an alternative formulation that avoids this fragility.
 
 ### Minor
 
-1. **No dedicated limitations section.** The paper acknowledges the state-access assumption (Assumption 1) but does not discuss failure cases — e.g., when the learned latent model is poor, when observations are highly stochastic and the KL proxy becomes inaccurate, or when the state space is very high-dimensional and training the embedding requires many state observations.
+- **The BPTT justification remains heuristic.** The paper argues that BPTT is unnecessary for belief learning because "early time-steps are easier to infer" (line 349). This is an empirical claim with no theoretical backing or ablation study. Since the belief update is recursive (belief at time \(t+1\) depends on belief at time \(t\)), errors can compound even if each individual step is easy. An ablation comparing feed-forward vs. BPTT updates on the belief loss itself (not just the final return) would substantiate this design choice.
 
-2. **Qualitative-only t-SNE analysis.** Figure 4 shows a t-SNE visualization of beliefs with the claim that "latent beliefs clustered together have indeed close values." No quantitative metric (e.g., correlation between Wasserstein distance of beliefs and value difference, clustering purity) is provided. The belief loss plot (Fig. 3) shows a decreasing trend but is not compared against the internal representation quality of baselines.
+- **Experimental evaluation is narrow.** Results are limited to three environments (RepeatPrevious, StatelessCartPole, SpaceInvaders) and two baselines (R-A2C, DVRL, both from 2018). Given the paper's strong theoretical claims, a broader evaluation would be desirable — particularly on environments that stress the guarantees (longer horizons, higher-dimensional observations). Comparisons against more recent methods (e.g., FORBES, referenced but not compared against) would strengthen the empirical case.
 
-3. **The claim that early time-steps are "easier to infer" for belief learning (motivating the no-BPTT architecture) is stated without empirical support.** While the intuition is reasonable, the paper does not provide evidence (e.g., per-timestep belief loss curves, comparison of BPTT vs. no-BPTT variants) that this architectural choice does not harm performance when the latent model is imperfect.
+- **Unclear when loss terms can be driven to zero.** The bounds involve multiple loss terms, but the paper does not discuss under what conditions each can be minimized in practice. For example, the observation loss \(\mathcal{L}_{\mathrm{obs}}\) (Eq. 4) involves a TV between the true observation function and a latent approximation — in continuous observation spaces this may never reach zero. The paper would benefit from a discussion of achievable regimes (e.g., discrete finite spaces, or with universal function approximators in the limit of infinite data).
 
-4. **No wall-clock time comparison.** One claimed advantage of avoiding BPTT is faster training, but no runtime comparison with R-A2C is provided.
+- **The observation loss computation (Eq. 4) requires clarification.** The term involves an expectation over the true observation function \(O(\cdot \mid s', a)\), which is unknown in the POMDP setting. While the augmented POMDP construction (Section 3.1) makes the observation function deterministic, the paper should explain how this loss is approximated in practice (e.g., via sample-based estimation or by leveraging the deterministic nature of the augmented observation function).
+
+- **Assumption 1 (state access during training) is handled transparently, but test-time implications deserve discussion.** The paper is admirably explicit about this assumption (lines 179–187). However, since the guarantees (Theorems 1 and 2) are stated under the training distribution, the paper should discuss how they degrade under test-time distribution shift from the training state distribution. A brief sensitivity analysis or discussion would strengthen practical relevance.
 
 ### Trivial
-None.
+- The paper should fix the typo "armful" → "harmful" (line 349).
 
 ## Nice-to-Haves
-- An experiment on a more challenging long-term memory benchmark (e.g., T-Maze, Memory) where RNN-based baselines clearly fail would substantially strengthen the claim.
-- A direct comparison of the belief loss (in Wasserstein or KL terms) between WBU and baseline methods' internal representations would quantify the representation quality gap.
-- Reporting how L_obs (the observation loss) evolves during training would help bridge the theory-practice gap.
+- A scatter plot of \(|\hat{V}(h_1) - \hat{V}(h_2)|\) vs. \(W_1(b(h_1), b(h_2))\) would directly support Theorem 2 beyond the qualitative t-SNE visualization.
+- Discussion of how the latent space dimension is chosen and its impact on the ability to minimize the losses.
+- Complexity analysis of the normalizing flow (MAF) at each step, since sampling from a flow at every timestep could become a computational bottleneck.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were flagged for removal; treat them with caution if referenced:
 
-1. "The claim in Section 3.1 that the latent POMDP is 'equivalent' to the original is overstated." — The paper cites a formal equivalence result (Chatterjee et al., 2016) for the refined POMDP construction, not for the learned model. The critic conflated a mathematical equivalence with a learning guarantee. The paper's wording is standard and accurate.
-
-2. "The notation in Section 3.2 is confusing because state, observation, action ~ H is a shorthand." — The paper explicitly defines this shorthand on line 270. The notation is clear in context.
-
-3. "Missing appendix / proofs in appendix." — The parser strips appendix sections; they exist in the original submission.
-
-4. "Formatting/style nitpicks and grammar issues." — These are parser artifacts, not author errors.
-
-5. Criticisms questioning the existence or release status of cited works. — Per hard rules, all cited entities are assumed to exist.
+- **Criticism about missing appendix/proofs in appendix** — Removed because the parser strips appendix sections; they exist in the original submission.
+- **Criticism about "no discussion of latent space dimension"** — This is a wishlist item, not a weakness. Moved to Nice-to-Haves.
+- **Criticism about "no analysis of computational cost"** — Moved to Nice-to-Haves.
+- **Complaint about missing comparison to DreamerV2 as a "more recent model-based POMDP method"** — DreamerV2 uses RSSMs for visual environments and would require fundamentally different infrastructure; this is scope creep beyond the paper's stated focus.
+- **Generic formulations from the strength finder (e.g., "this paper addressed an important problem")** — Removed because they are content-free.
+- **Critique about the t-SNE visualization not being quantitative** — This is a suggestion for additional analysis, not a weakness. Moved to Nice-to-Haves.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The reviews surface a genuine tension: the paper's selling point is "provable guarantees," but both the KL-Wasserstein proxy gap and the inverse-probability term in Theorem 2 are structural limitations that, while not unusual in theoretical RL, reduce the practical scope of the guarantees below what the abstract and introduction advertise. The reviews correctly identify that fixing the former is straightforward (add a compactness assumption), but the latter is more fundamental and may require reframing what Theorem 2 actually establishes.
 
 ## Suggestions
 
-1. Clarify which of the theoretical losses (local reward, local transition, on-policy reward, on-policy transition, observation loss, belief loss) are directly optimized in the implementation and which are proxies — and how each proxy connects to its theoretical counterpart. A table mapping theory → practice would help.
+1. **Fix the KL–Wasserstein connection.** State explicitly that the latent space \(\mathcal{Z}\) is assumed compact (bounded), derive the full chain \(W_1 \le \mathrm{diam}(\mathcal{Z})\sqrt{\mathrm{KL}/2}\), and note that the WAE-MDP's zero-temperature limit enforces the required conditions. Alternatively, switch to a tractable bound on the Wasserstein loss (e.g., via the dual formulation or sliced Wasserstein).
 
-2. Add an ablation study that isolates at minimum: (a) belief loss only, (b) belief loss + local losses, (c) all losses. This would clarify which terms drive the RepeatPrevious memorization result.
+2. **Clarify the scope of Theorem 2.** Either (a) restrict the guarantee to histories with probability above a threshold \(\delta\) and state it as a high-probability bound under the policy, or (b) show that the loss minimization ensures \(\mathbb{P}_{\pi^*}(h)\) is bounded away from zero for reachable histories under the optimal policy (e.g., via an exploration assumption). This would make the representation guarantee practically meaningful rather than formally correct but fragile.
 
-3. Expand the experimental evaluation to include at least one additional long-term memory task (e.g., from the POPGym suite) and compare against a more recent baseline (e.g., FORBES or a Dreamer variant adapted for discrete observations).
+3. **Add a BPTT ablation.** Compare the belief loss (not just the return) of feed-forward vs. BPTT-trained belief encoders to directly test the paper's claim that BPTT is unnecessary.
 
-4. Report key hyperparameters in the main text and include statistical significance tests (e.g., Mann-Whitney U across seeds) for the main results.
+4. **Clarify observation loss computation in practice.** Explain how the TV term in Eq. 4 is estimated from samples given only the augmented POMDP's deterministic observation function.
 
-5. Add a limitations paragraph discussing cases where the state-access assumption is violated, the latent model is poor, or the observation function is highly stochastic.
+5. **Expand the discussion of when losses can be driven to zero.** Characterize the regimes (discrete spaces, universal approximators, etc.) under which each loss term can be minimized to acceptable levels.
 
 ## Score and Decision
 
-The paper makes a genuine theoretical contribution — the value-difference bounds for a learned belief update are novel and well-derived. The core algorithmic idea (separating belief learning from policy learning via a feed-forward encoder trained against the latent model's exact update) is principled. However, the experimental validation is too narrow for the claimed generality, the theory-practice gap in the loss functions is not adequately bridged, and the absence of ablation studies makes it difficult to attribute results to specific components. The paper would benefit from major revisions before being competitive for acceptance.
+This paper makes a genuine theoretical contribution by connecting WAE-MDPs to provable belief learning in POMDPs, with a clean architectural design and promising initial results. The main weaknesses are (a) the technically imprecise KL–Wasserstein justification, which is fixable, and (b) the inverse-probability term in Theorem 2, which limits but does not eliminate the value of the representation guarantee. Neither issue is fatal, but both need to be addressed before the paper's central claims are fully supported. I recommend **borderline accept** contingent on major revisions addressing the theoretical gaps.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+**Originality:** Good — the combination of WAE-MDPs with a learned feed-forward belief encoder with provable bounds is novel.
+
+**Quality:** Moderate — the theoretical framing is ambitious but has technical gaps; the experiments are limited but supportive.
+
+**Clarity:** Good — the paper is well-structured and clearly written, though the theoretical exposition could benefit from more explicit assumptions.
+
+**Significance:** Potentially high — if the theoretical gaps are resolved, this framework could provide a principled alternative to RNN-based POMDP methods.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

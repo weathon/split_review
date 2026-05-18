@@ -1,76 +1,72 @@
-Now I have all the information I need. Let me produce the final consolidated review.
+Now I have all the information I need. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes LCOMs, a data-driven approach for crystal structure prediction that combines a crystal diffusion variational auto-encoder (CD-VAE) to map crystal structures into a continuous latent space with a conservative objective model (COMs) regularizer to prevent the optimizer from exploiting surrogate model errors. The method enables simple gradient-based optimization in the latent space, achieving competitive or superior success rates on MatBench while reducing per-structure optimization time to 2 seconds. The central technical contribution is the combination of these two components, and the ablation study cleanly shows that the conservative regularizer is essential for the optimizer to make progress rather than regress.
+This paper proposes LCOMs (Latent Conservative Objective Models), a method for offline data-driven crystal structure prediction that combines a crystal diffusion variational auto-encoder (CD-VAE) to map crystal structures into a continuous latent space with a conservative surrogate model (extending COMs) trained on latent vectors to predict formation energies. Optimization is performed via gradient descent in the latent space and the result is decoded back to a crystal structure. The key ideas are: (1) the latent space provides a simpler Euclidean search space than the original non-Euclidean crystal manifold, and (2) conservative training prevents the optimizer from exploiting errors in the learned surrogate model. The paper reports competitive accuracy with prior methods while reducing optimization wall-clock time by 40× over the fastest prior learning-based method (GNN-BO) and orders of magnitude over DFT-based approaches.
 
 ## Strengths
 
-- **Conservative training is shown to be essential through a clean ablation.** The supervised learning baseline (SL — same latent space, same optimizer, no conservatism) achieves only 5/26 on OQMD versus LCOMs' 16/26, and Figure 2 shows it produces *negative* energy improvement across nearly all 83 MatBench compounds. Figure 3 further demonstrates that without conservatism, energy *increases* over optimization steps due to exploitation of surrogate model errors, while LCOMs steadily decreases toward the global optimum. This provides causal evidence that the proposed mechanism is necessary for success.
+1. **Novel and sensible integration of CD-VAE with conservative MBO for CSP.** The paper is the first to combine a latent generative model of crystal structures (CD-VAE) with conservative objective models, enabling gradient-based optimization in a continuous Euclidean space while addressing the exploitation problem. This is a well-motivated methodological contribution (§4).
 
-- **On MatBench (where all methods use the same evaluation protocol), LCOMs outperforms prior methods by a clear margin.** Under the same 20% energy threshold, LCOMs achieves 19/26 accuracy versus PSO's 13/26 and BO's 10/26 (Table 1). This provides a fair, apples-to-apples comparison that directly supports the paper's central claim.
+2. **Clear demonstration that conservatism in latent space prevents exploitation.** Figure 2 (opt_curve_together) shows that the non-conservative supervised model's energy increases with gradient steps (classic exploitation of model errors), while LCOMs' energy decreases and stays near the global minimum. The bar chart (Figure 3) confirms across compounds that LCOMs yields positive relative improvement whereas supervised learning yields negative improvement. These diagnostics cleanly isolate the value of conservatism (§5).
 
-- **Novel combination of latent-space generative modeling with conservative optimization for CSP.** The paper is the first to combine CD-VAE (for transforming the non-Euclidean crystal manifold into a continuous vector space) with COMs (for robustifying the surrogate against optimizer exploitation). This combination addresses two key bottlenecks in data-driven CSP simultaneously, and the ablation validates that both components are needed.
+3. **Dramatic and well-documented speed advantage.** LCOMs requires ~2 seconds per structure vs. 80s for GNN-BO (40× speedup) and 70,000s for DFT-PSO. The source of the speedup is clearly explained: the complex graph encoder/decoder is used only once (at the start and end of optimization), while optimization itself only requires fast MLP forward passes (§5, Table 2).
 
-- **Comprehensive evaluation against five baselines across two datasets.** The paper compares against RAS, PSO, BO (prior state-of-the-art), plus CD-VAE alone and SL baselines, on both OQMD and MatBench. This provides a thorough benchmark that isolates the contribution of each component.
+4. **Ablation studies confirm necessity of each component.** The supervised learning baseline (5/26) and CD-VAE-only baseline (6/26) both fail badly compared to LCOMs (16/26 on OQMD, 19/26 on MatBench), confirming that both the latent representation and conservative training are needed (§5, Table 1).
+
+5. **Consistent evaluation across two datasets.** Results on both OQMD and MatBench show similar trends, and on MatBench (where the comparison is fair — PSO and BO are evaluated with the same energy threshold as LCOMs), LCOMs outperforms all prior methods (19/26 vs RAS* 18/26, PSO 13/26, BO 10/26) (§5, Table 1).
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **The OQMD comparison uses incompatible evaluation protocols, with the asymmetry favoring LCOMs.** On the OQMD dataset, prior methods (RAS, PSO, BO) are evaluated using manual structural matching (checking whether the predicted structure matches the known ground truth), while LCOMs is evaluated with a looser 20% energy threshold. This asymmetry means the "comparable" claim on OQMD rests on shaky ground — a structure within 20% of the global minimum energy could be geometrically different and would not count as a match under the stricter protocol. The paper acknowledges this difference in a footnote and caption, but still presents the OQMD checkmarks and the "competitive" claim without sufficient caveats in the main text. Crucially, this issue is partly mitigated by the MatBench results (where all methods use the same threshold and LCOMs outperforms), but the OQMD comparison as presented is not reliable.
+1. **The OQMD comparison with prior methods is not apples-to-apples, weakening the central claim of "comparable performance."** The paper's headline claim — that LCOMs "performs comparably to the best current approaches" — relies in part on the OQMD results in Table 1, where LCOMs achieves 16/26 vs. RAS* 17/26, PSO* 6/26, and BO* 16/26. However, the paper explicitly acknowledges (in a footnote and the caption) that RAS*, PSO*, and BO* were evaluated using a *manual inspection* protocol from Cheng et al. (2022), while LCOMs uses an energy-based threshold (20% of the ground-truth minimum). Because a different evaluation criterion can systematically shift the counts, the LCOMs-vs-RAS/PSO/BO comparison on OQMD is not quantitatively calibrated. The paper acknowledges this ("these comparisons...should be made with an understanding of this fundamental difference") but does not resolve it, and the central claim of parity is asserted nonetheless. 
 
-- **The wall-clock time claim is misleading because the 2-second figure excludes the initial DFT relaxation step.** The paper reports LCOMs at 2 seconds per optimization cycle, a 40× reduction over GNN-BO (80s). However, Section 3 explains that the initial stable crystal structure is obtained "by running simulations in the GPAW simulator" (a DFT relaxation that can take hours per compound). The 2 seconds covers only the latent-space optimization and decoding, not the total time from scratch. The comparison to DFT-PSO (70,000s) is also misleading if DFT-PSO's time includes everything while LCOMs' 2s excludes a major up-front cost. The paper should report total end-to-end time or at least clearly disclose the omitted initial cost in Table 2.
-
-- **"GNN-BO" / "GN-BO" is not defined or cited.** Table 2 lists "GN-BO" and the text refers to "GNN-BO" with no citation or description of what this baseline is, who proposed it, or how it was implemented. This makes the 40× speedup claim unverifiable.
+   *Mitigating factors:* The paper is transparent about the issue; on MatBench, PSO and BO are evaluated with the same energy threshold and LCOMs outperforms them; and even with the caveat, LCOMs's 16/26 on OQMD is suggestive. Nevertheless, the claim of "comparable performance" requires recalibrated results or more circumspect language.
 
 ### Minor
 
-- **The 20% energy success threshold is generous and could overstate recovery of the *correct* structure.** While this threshold is internally consistent for the MatBench comparison, a structure at 80% of the global minimum energy could have a substantially different geometry. Additional geometric metrics (lattice parameter error, coordination number similarity, or RMSD) would strengthen confidence that LCOMs is recovering physically meaningful structures, not just energetically close ones.
+2. **Small test set with no uncertainty quantification.** The evaluation uses only 26 chemical compounds (following Cheng et al. 2022). With binary success/failure outcomes and only 26 trials, the reported accuracies (e.g., 16/26 ≈ 61.5%) have wide confidence intervals (roughly ±15-19 percentage points at 95% confidence). The paper reports averaging over three seeds but only shows binary success flags, not the variance of the final energies. A per-compound analysis of failure cases or a bootstrap confidence interval would help gauge reliability.
 
-- **The test set is limited to 26 binary compounds (alkali halides, oxides, sulfides).** While this follows prior work, it provides no evidence that the method generalizes to ternary, quaternary, or more complex systems where the latent space may be less faithful. A small number of additional compounds from the same databases would substantially strengthen the paper.
+3. **No sensitivity analysis for the 20% success threshold.** The success criterion uses a threshold of 20% of the ground-truth minimum energy, justified only as "to account for imprecision in the simulator." No evidence is provided that 20% is appropriate for GPAW, and no analysis shows how the relative ordering of methods changes under different thresholds (e.g., 10%, 15%, 25%). This gap is especially relevant because the OQMD comparison with prior methods (which used manual inspection) could be partially reconciled with a threshold analysis.
 
-- **The decoder's ability to map only to stable structures is asserted but not validated.** The paper states "the decoder should map latent vectors to the manifold of stable crystal structures only" (Section 4.1), but provides no physical validity checks (e.g., shortest interatomic distances, DFT relaxation energies after decoding, or visual inspection of decoded structures). If the decoder can produce invalid or high-energy artifacts for some latent vectors, the optimizer could exploit these imperfections.
+4. **Latent space quality is not evaluated despite strong claims.** The paper states that "the decoder of a well-trained CD-VAE should map latent vectors to the manifold of stable crystal structures only" (§4.1), but provides no empirical verification of reconstruction accuracy, the fraction of decoded structures that are physically valid, or the smoothness of the latent space with respect to formation energy. While the downstream optimization results indirectly suggest the latent space is useful, direct evidence would strengthen the paper's motivation and help readers assess failure modes.
 
-- **No error bars or confidence intervals on binary success rates.** With only 26 compounds, a few outcomes could change relative rankings. Reporting bootstrap confidence intervals or per-seed success rates would improve interpretability.
+5. **Wall-clock time comparison lacks implementation details.** The reported times (2s for LCOMs, 80s for GNN-BO, 70,000s for DFT-PSO) are compelling, but the paper does not specify the hardware used, whether the 80s figure for GNN-BO includes encoding/decoding steps, or how the GNN-BO baseline was implemented. These details would strengthen the reproducibility of the speed claim.
 
 ### Trivial
 
-- The table header uses "GN-BO" while the text uses "GNN-BO" — minor naming inconsistency.
-- The Discussion section mentions future directions but does not discuss limitations, which is a missed opportunity.
+6. **Failure modes not discussed.** Compounds such as LiCl, CdO, and Si never succeed under any method on OQMD. A brief discussion of why some compounds are intrinsically harder (e.g., multiple competing polymorphs, flat energy landscapes) would give insight into the method's limitations.
 
 ## Nice-to-Haves
 
-- Report total end-to-end wall-clock time including the initial DFT relaxation step, or at minimum disclose the typical time for that step so readers can properly contextualize the speed claims.
-- Provide geometric similarity metrics (e.g., lattice parameter error, coordination numbers) alongside energy-based success to better connect the evaluation to the paper's stated goal of "predicting the lowest energy stable crystal structure."
-- Validate decoded structures from random latent vectors to confirm the CD-VAE latent space encodes only plausible crystals.
-- State the latent space dimensionality and briefly discuss how it was chosen, as this affects both optimization ease and surrogate model capacity.
+- A sensitivity analysis varying the conservative coefficient α in Eq. (4) would increase confidence in the robustness of the training procedure.
+- Quantifying how far the training structures are from the global optimum (e.g., distribution of energy gaps) would help characterize the difficulty of the task.
+- Showing the energy-vs-step curve for LCOMs beyond 50 gradient steps (e.g., 200 steps) would verify that optimization has converged and that conservatism continues to prevent degradation.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- *"Loss function in Equation 4 is hard to parse due to formatting."* — This is a PDF parsing artifact, not a paper error.
-- *"Missing code/data release statement."* — A reproducibility nitpick of the kind the instructions classify as removable; code release is standard but its absence is not a weakness of the paper's intellectual contribution.
-- *"The paper does not state the dimensionality of the CD-VAE latent space."* — While this would be nice to know, the paper defers to the CD-VAE implementation from Xie et al. (2021), which is standard practice.
+- **"Supervised-learning baseline is weak"** (Harsh Critic: "The supervised-learning baseline is weak but serves its purpose"): This is not a weakness — the authors present SL precisely as a controlled ablation to isolate the effect of conservatism. It serves its intended purpose, and the critic acknowledges it.
+- **"Training data details are sparse"** suggestion about quantifying distance from global optimum: Partially addressed by the paper's statement that "all [training structures] are not at their global optimum." A more detailed quantification would be a Nice-to-Have, not a weakness.
+- **"Hyperparameters for the conservative model — no ablation of α"**: Valid as a Nice-to-Have but overstated as a weakness. The paper follows the established COMs framework.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the review process surfaces a useful observation: the strength of the ablation (SL baseline producing *negative* improvement) is the paper's most convincing piece of evidence. It transforms what could be a generic "our method works" claim into a falsifiable demonstration: without the conservative regularizer, the same latent space and optimizer actively make structures worse. This suggests that for CSP with learned surrogate models, the latent space alone does not prevent exploitation — the regularizer is not just an improvement but a necessity. Conversely, this raises the question of whether the 20% energy threshold on OQMD might be inflating LCOMs' reported accuracy enough that the gap over the non-conservative baseline is narrower than it appears, which the paper does not explore.
+None beyond the paper's own contributions. The reviews largely converge on the paper's stated contributions. The one observation that goes slightly beyond the paper's own framing is that the evaluation metric mismatch (energy threshold vs. manual inspection) is more consequential for the paper's claims than the text's understated "not as exact" language conveys — but the paper itself discloses this issue.
 
 ## Suggestions
 
-1. **Re-evaluate prior methods on OQMD using the same 20% energy threshold as LCOMs** (or re-evaluate LCOMs using manual structural matching). This single change would either validate or invalidate the paper's central comparative claim and is the most impactful fix.
-2. **Disclose the typical DFT relaxation time for the initial structure** and report total end-to-end time, not just latent optimization time. Alternatively, clarify that the 2-second figure is the marginal cost per optimization after the one-time DFT cost.
-3. **Define and cite the "GNN-BO" baseline** — a reader cannot assess the 40× speedup claim without knowing what it refers to.
-4. **Add a limitations paragraph** to the Discussion section acknowledging the small test set composition, the protocol mismatch on OQMD, and the unvalidated decoder assumption.
+1. **Recalibrate or reframe.** The single highest-priority action is to either re-evaluate RAS, PSO, and BO under the same energy-threshold criterion on OQMD, or (if the raw structures are unavailable) reframe the central claim to focus on the speed advantage and the demonstration that latent-space conservatism works, while treating the OQMD performance comparison as preliminary/suggestive rather than as evidence of parity.
+
+2. **Add threshold sensitivity analysis.** Show how the accuracy counts for LCOMs and the closest competitors change as the success threshold varies from 5% to 30% of the ground-truth minimum energy. This would justify the 20% choice and quantify robustness.
+
+3. **Report variance across seeds.** Instead of binary success/failure, report the mean and standard deviation of the final energy (or the energy improvement) across the three seeds for each method and each compound.
 
 ## Score and Decision
-
-This paper makes a genuine contribution: it combines two existing techniques (CD-VAE and COMs) in a novel and motivated way, provides a clean ablation showing conservatism is necessary, and achieves strong results on MatBench under a fair comparison. The weaknesses are real but addressable — the most serious (incompatible OQMD protocol, missing initial DFT time) are presentation/verification issues rather than flaws in the method itself, and the MatBench results independently support the core claims. The paper would benefit from addressing these issues but is not structurally unsound.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,72 +1,79 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper studies the interaction between Lipschitz continuity and adversarial example transferability in ensembles. The authors identify an important trade-off: clipping layer-wise spectral norms (which improves individual model robustness) simultaneously increases the transferability rate between ensemble members, diluting ensemble-level gains. To address this, they propose LOTOS (Layer-wise Orthogonalization for Training rObust enSembles), which promotes orthogonality between the top-k singular subspaces of corresponding affine layers across ensemble members. The method is supported by a theoretical result (Theorem 4.1) showing that for convolutional layers, even k=1 provides effective orthogonalization, keeping overhead negligible. Experiments on CIFAR-10/100 with ResNet-18 and DLA models show that LOTOS improves black-box robust accuracy over clipped baselines and combines favorably with prior state-of-the-art (TRS).
+This paper identifies a previously overlooked trade-off: while Lipschitz continuity (via spectral norm clipping) improves the robustness of individual models, it *increases* the transferability rate of adversarial examples across ensemble members, undermining ensemble robustness. To address this, the authors propose LOTOS (Layer-wise Orthogonalization for Training rObust enSembles), a method that orthogonalizes the top-\(k\) subspaces of corresponding affine layers across ensemble members during training. LOTOS reduces transferability while preserving the benefits of Lipschitzness, achieving a 6 p.p. improvement in robust accuracy on CIFAR-10 for ResNet-18 ensembles and a 10.7 p.p. improvement when combined with the prior state-of-the-art TRS method.
 
 ## Strengths
 
-1. **Identifies a genuine and non-obvious trade-off.** The paper shows empirically (Figure 1) that decreasing the spectral-norm clipping value increases individual model robustness but simultaneously raises transferability rates between ensemble members. This contradicts the naive expectation that Lipschitz continuity uniformly benefits ensemble robustness and provides clear motivation for a dedicated ensemble-training method. This finding alone is a useful contribution to the community's understanding.
+1. **Identifies and empirically validates a previously unrecognized trade-off.** The paper is the first to show that decreasing the Lipschitz constant (via spectral norm clipping) *increases* the transferability rate among ensemble members, creating a tension between individual model robustness and ensemble robustness. This is convincingly demonstrated in Figure 1, which plots accuracy, robust accuracy, and transferability across varying clipping values, and supported by Proposition 3.3 as motivating intuition.
 
-2. **LOTOS is a well-motivated, novel method grounded in an architectural insight.** The orthogonalization loss targets the top singular subspaces of corresponding affine layers, which govern the most sensitive input directions. Theorem 4.1 provides a theoretically grounded efficiency result for convolutional layers: even k=1 effectively bounds the response to the other model's remaining singular vectors. The empirical verification (Figure 3, Left) confirms negligible improvement from k>1, making the method computationally practical.
+2. **Proposes LOTOS, a novel, lightweight, and well-motivated method.** LOTOS orthogonalizes the top-\(k\) subspaces of corresponding affine layers across models. The method is grounded in a clear intuition: since top singular vectors dominate a layer's transformation, orthogonalizing them forces models to respond differently to input perturbations. Theorem 4.1 shows that \(k=1\) suffices for convolutional layers under reasonable assumptions, and Figure 3 (left) empirically validates this — transferability changes by less than 1 p.p. as \(k\) varies from 1 to 15.
 
-3. **Consistent empirical gains across multiple dimensions.** In Table 1, LOTOS improves black-box robust accuracy over C=1 clipping alone (e.g., 29.3% vs. 23.6% for ResNet-18 on CIFAR-10). Table 2 shows LOTOS scales well with ensemble size (29.3% → 49.5% from 3→9 models, versus marginal gains for baselines). Table 3 shows LOTOS combines with TRS to further boost robust accuracy (up to 33.2% from 22.5% for ResNet-18 on CIFAR-10). The method also works on heterogeneous architectures (Figure 4), where prior methods may not apply.
+3. **Strong empirical results across multiple settings.** LOTOS improves robust accuracy by 6 p.p. over the Lipschitz-clipped baseline on CIFAR-10 (Table 1), scales well with ensemble size (Table 2: 9-model LOTOS ensembles substantially outperform 3-model), works on heterogeneous architectures where most prior methods are not applicable (Figure 4), and combines synergistically with TRS for an additional 10.7 p.p. gain (Table 3).
+
+4. **Thorough ablation studies validate design choices.** The paper systematically ablates \(k\) (dimension of orthogonalized subspace), ensemble size, which layers to orthogonalize (Figure 3 right shows first-layer-only is nearly as effective as all layers), and the effect of batch normalization. These ablations give confidence that the design choices are well-founded.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **White-box attack parameters are not specified.** The paper repeatedly refers to "white-box attack" when computing transferability rates (Figure 2, Section 5.2 discussions) but never names the attack algorithm, number of steps, step size, perturbation budget ε, or whether it is targeted or untargeted (Definition 3.2 defines both, but experiments report only one aggregate). Without this information, the core transferability results are not reproducible. *Evidence*: The "Attacks" paragraph in Section 5 (line 138) describes the evaluation protocol in words but omits all attack hyperparameters. This is the single most important missing piece for reproducibility.
-
-- **Ensemble robust accuracy is not defined in the main text.** Under black-box attacks, the paper reports "robust accuracy" for ensembles (Tables 1–3) but never states whether this is the fraction of examples where *all* models are correct, a majority vote, or some other aggregation rule. Without this, the reported numbers are ambiguous and the results cannot be reproduced or compared against future work. *Evidence*: The "Attacks" paragraph (line 138) and the table captions describe the surrogate model setup but not the ensemble decision rule.
+None. The paper's core claims are well-supported by evidence, and no identified weakness invalidates the central contribution.
 
 ### Minor
 
-- **The "mal" margin parameter (Equation 3) is used experimentally but never formally defined.** The notation `\mathfrak{m a}\mathtt{1}` appears in the definition of S_k as a subtraction term inside ReLU, and the paper states "increasing the value of mal (from 0 to 0.8)" (line 154), but no text explains what this parameter controls. One can infer it is a slack/margin threshold below which the output norm is treated as negligible, but the paper never states this explicitly. *Evidence*: Equation (3), line 98, and line 154.
+1. **Ensemble aggregation rule is not specified.** The paper reports "robust accuracy" for ensembles in Tables 1, 2, and 3 but never states how the ensemble combines individual model predictions into a single decision (e.g., averaging logits, averaging softmax probabilities, majority vote). While averaging softmax/logits is standard practice in the ensemble robustness literature, the omission makes the reported numbers less precisely interpretable, especially given that the paper's theoretical framework (Definition 3.2, Proposition 3.3) centers on the probability that *all* models are fooled simultaneously — the relationship between this condition and the ensemble's final prediction depends on the aggregation rule. The authors should specify the aggregation rule and, ideally, discuss how the transferability rate connects to ensemble robustness under that rule.
 
-- **The connection between Proposition 3.3 and transferability rate is acknowledged as a proxy but remains loose.** Proposition 3.3 bounds the difference in *population loss* between two models on adversarial examples, whereas transferability rate (Definition 3.2) measures the probability that a *classification decision* transfers. The paper calls this a "proxy" (line 82) and uses hedged language ("might be," "might imply"), which is appropriate, but the theoretical motivation section would benefit from acknowledging this gap more explicitly rather than presenting the proposition as direct grounding.
+2. **Proposition 3.3 provides intuition, not a formal proof of monotonicity.** The proposition states an upper bound on the difference between two models' losses on adversarial examples. The paper correctly frames this as a "conjecture" (Section 3.2) and uses hedging language ("might be an indicator"), but the narrative around the bound could still be read as implying a monotonic relationship between Lipschitz constant and transferability. The bound only says that a smaller \(L\) *permits* greater similarity — it does not guarantee it. This is a common and acceptable use of a motivating inequality, but the paper would benefit from a sentence explicitly noting that the bound is permissive, not causal: i.e., a small \(L\) is consistent with high transferability but does not force it. The real evidence for the trade-off is the empirical data in Figure 1, which is convincing on its own.
 
-- **LOTOS models are less individually robust than C=1 models, and the ensemble gain is not decomposed.** The paper acknowledges (line 154) that LOTOS models have lower individual robust accuracy than C=1 models. As the "mal" parameter increases, LOTOS models approach C=1 behavior. This means the ensemble gain could partly come from increased individual robustness (as mal grows) and partly from diversity. The paper does not disentangle these two factors, which would clarify the mechanism.
+3. **Theorem 4.1 is stated under restrictive assumptions without formal justification for the general case.** The theorem assumes a single input/output channel and circular padding. The paper claims (line 127) that it "extends" to multi-channel layers and other padding modes, but provides no formal argument for this extension. The empirical results (Figure 3 left, showing \(k=1\) suffices in practice) corroborate the practical conclusion, so this does not undermine the paper's claims. However, the theoretical section would be strengthened by either proving the multi-channel case or stating the empirical justification more prominently alongside the theorem.
 
-- **Training degradation at k≥20 is reported without supporting evidence.** The paper notes "for k≥20, we noticed a degradation in the training of the models" (line 187) and attributes it to over-constraining, but provides no training loss curves, accuracy trends, or other diagnostic evidence to substantiate this claim.
+4. **The paper's main results for black-box attacks rely on appendix-deferred attack specifications.** The attack algorithm, number of steps, perturbation budget \(\epsilon\), and other parameters are referenced to appendix sections (lines 138–139). While putting implementation details in the appendix is standard, the paper should at minimum state the perturbation budget \(\epsilon\) and the attack algorithm used (e.g., PGD with \(x\) steps) directly in the main text, since these are essential for interpreting the magnitude of the reported robust accuracy numbers.
 
 ### Trivial
-None.
+
+1. **The weights \(w_i\) in Equation (3) are introduced but never discussed.** Since \(k=1\) is used throughout with \(w_1=1\) implicitly, this is a harmless inconsistency, but it should be clarified.
+
+2. **The margin parameter "mal" in Equation (3) appears to be an important hyperparameter but its role is explained only in an appendix reference.** A brief definition in the main text would improve readability.
 
 ## Nice-to-Haves
 
-- A direct plot of ensemble robust accuracy (not just individual robust accuracy and transferability) vs. clipping value, analogous to Figure 1 but for the ensemble, would make the central trade-off immediately visible.
-- The runtime/efficiency claim ("negligible" overhead, Section 4.1) would benefit from a concrete per-epoch wall-clock time comparison in the main text for one representative setting (Orig vs. C=1 vs. LOTOS).
-- A brief note clarifying which experiments use batch normalization and which do not, placed early in Section 5, would help readability.
-- Explicit standard deviation reporting for all entries in Tables 1–3 (some entries appear to lack error bars in the extracted text) would improve statistical rigor.
+- **Direct comparison with standalone TRS and DVERGE in the same main-text table.** Currently, Table 3 shows TRS+LOTOS and TRS alone, but a table with standalone LOTOS, standalone DVERGE, and standalone TRS under the same Lipschitz-clipped budget would make the incremental contribution clearer without requiring the reader to cross-reference the appendix.
+
+- **Discussion of whether the trade-off is specific to spectral-norm clipping.** The paper uses FastClip for Lipschitz control, which is the SOTA and a reasonable choice. However, a brief discussion of whether the transferability-increasing effect generalizes to other Lipschitz regularization methods (gradient penalties, orthogonal layers) would strengthen the narrative.
+
+- **Moving the heterogeneous ensemble results (currently Section S.4) or the adversarial training combination (Section S.8) more prominently into the main text.** These results answer important questions that the paper itself raises in Section 5.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"Abstract claims imply generality"** — The abstract states "increases the robust accuracy of ensembles of ResNet-18 models by 6 p.p." This is qualified to a specific architecture and dataset; it does not imply general claims beyond what is reported.
-- **"Proposition 3.3 assumes both models share the same Lipschitz constant L"** — In the experiments, all models are clipped to the same C value, making this assumption reasonable. Not a weakness.
-- **"FastClip singular vector availability"** — Whether FastClip returns all or top-k singular vectors is an implementation detail of a cited method; the paper uses k=1, which any power-iteration method can compute cheaply.
-- **"Figure 1 does not show ensemble robust accuracy"** — The figure's purpose is to show the trade-off between individual robust accuracy and transferability, which it does. Ensemble robust accuracy is evaluated separately in Table 1.
-- **"Heterogeneous ensemble gain is modest"** — The paper reports the results as they are. The critic's suggestion that more commentary is needed is a matter of taste, not a factual weakness.
+- **"The k ablation nuance discussion is missing"**: The paper *does* discuss this on lines 187–188, noting that \(k \ge 20\) leads to training degradation. This is not a missing analysis.
+- **"Proposition 3.3 over-claims theoretical support"**: The paper explicitly calls this a "conjecture" and uses hedging language throughout ("might be an indicator," "might imply"). The criticism is technically valid but the paper is already appropriately cautious; retained as Minor #2 above with softened framing.
+- **"The paper should compare to more methods"**: Scope is not a weakness when the comparison set is defensible and includes the SOTA (TRS, DVERGE in appendix).
+- **Any formatting/style nitpicks**: These are PDF parser artifacts, not author errors.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The key insight — that Lipschitz continuity trades off individual robustness against ensemble transferability — is the paper's own discovery, and the reviews do not surface any additional novel perspective beyond what the authors already articulate.
 
 ## Suggestions
 
-1. Add a dedicated experimental setup paragraph that specifies: (a) the white-box attack algorithm, steps, step size, and ε used for transferability measurement; (b) the black-box attack parameters; and (c) the exact aggregation rule for ensemble robust accuracy (e.g., majority vote or all-correct). This is essential for reproducibility.
-2. Define the "mal" parameter explicitly in Section 4 when introducing Equation (3): state that it is a slack/margin threshold — the orthogonalization loss only penalizes the output norm when it exceeds this value.
-3. Add a simple training loss curve or accuracy trend to support the claim that "over-constraining" causes the observed degradation at k≥20.
-4. Consider adding a brief decomposition or discussion of how much of LOTOS's ensemble gain comes from improved individual robustness vs. increased diversity.
+1. **Specify the ensemble aggregation rule** (e.g., "we average logits across models and take the argmax") directly in Section 5, before the first robustness results table. Also clarify how the transferability rate definition (Definition 3.2) relates to ensemble robustness under this rule.
+
+2. **Add a note to Proposition 3.3** clarifying that the bound is permissive, not causal: a small Lipschitz constant is consistent with high transferability but does not force it. This would preempt any over-interpretation of the theoretical motivation.
+
+3. **State the attack parameters** (\(\epsilon\), attack algorithm, number of steps) for the black-box attacks directly in the main text rather than only in the appendix.
+
+4. **Recommend \(k=1\) and \(M=1\) explicitly** in the Method section, with a forward reference to the ablation results that justify this choice.
+
+5. **Clarify the role of the margin parameter "mal"** in Equation (3) with a brief sentence in the main text.
 
 ## Score and Decision
 
-This paper makes a legitimate contribution: it identifies a real and underappreciated tension between Lipschitz continuity and ensemble transferability, proposes a novel and well-motivated method (LOTOS) to address it, provides theoretical grounding for its efficiency on convolutional layers, and demonstrates consistent empirical gains across architectures, datasets, and ensemble sizes. The weaknesses are presentation-level (missing attack specifications, undefined parameters) rather than structural or evidential. These are fixable with revisions.
+This is a strong paper with a clear contribution: it identifies a real and previously overlooked trade-off, proposes a novel method (LOTOS) that is both principled and practical, and supports its claims with thorough empirical evaluation. The theoretical components (Proposition 3.3 and Theorem 4.1) provide useful framing and motivation but are not the paper's main strength — the empirical results are. The method is validated across architectures, datasets, ensemble sizes, and in combination with prior SOTA methods. The weaknesses are primarily about omitted specifications and framing precision that can be addressed in a revision.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

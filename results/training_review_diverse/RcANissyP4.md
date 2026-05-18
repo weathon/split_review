@@ -1,89 +1,83 @@
-I now have a thorough understanding of the paper and all the reviewer claims. Let me write the final consolidated review.
+Now I have all the evidence I need. Let me write the final consolidated review.
 
 ## Summary
 
-The paper proposes SelfEval, an automated metric for evaluating text-to-image diffusion models that uses the generative model itself to estimate the likelihood of real images given text prompts, instead of relying on external discriminative models like CLIP or LLMs. By computing these likelihoods on standard image-text recognition datasets (COCO, CLEVR, ARO, TIFA) across six reasoning tasks (attribute binding, color, count, shape, spatial, text corruption), SelfEval yields classification accuracies used to rank models. The paper demonstrates that SelfEval's rankings correlate with pairwise human preference judgments across four diffusion model variants, and that it is the only metric among those tested (CLIPScore, MID, VPEval, LLMScore) with positive Spearman correlation for both pixel and latent diffusion models.
+This paper proposes SelfEval, a method that repurposes text-to-image diffusion models for evaluating their own text faithfulness. The core idea is to estimate the likelihood \(p(\mathbf{x}_0 \mid \mathbf{c})\) of a real image given a text caption using the generative model itself, eliminating reliance on external discriminative models like CLIP or LLMs for evaluation. SelfEval is applied as an image-text matching task across six diagnostic dimensions (attribute binding, color, count, shape, spatial, text corruption). The paper reports correlation between SelfEval's rankings and human pairwise preference judgments across pixel and latent diffusion models with CLIP and T5 text encoders.
 
 ## Strengths
 
-1. **Timely and conceptually appealing idea**: Using the generative model itself as its own evaluator is a principled way to break dependence on external discriminative models (CLIP, LLMs), which the paper convincingly shows have issues including sensitivity to backbone choice (Figure 2, Table 7), CLIP's poor performance on compositional reasoning tasks (Table 4), and LLM hallucination (Figure 6). This motivation is well-articulated and important.
+- **Eliminates reliance on external discriminative models, avoiding their biases.** The paper documents that CLIPScore rankings flip when the CLIP backbone changes (Figure 2), that CLIP performs near-random on several reasoning tasks (Table 6), and that LLM-based metrics like VPEval/LLMScore suffer from hallucination (Figure 7). SelfEval uses only the generative model itself, cleanly sidestepping these issues.
 
-2. **Strong empirical validation via correlation with human evaluations across multiple model types**: The paper provides evidence that SelfEval's rankings align with gold-standard pairwise human preferences across four diffusion models spanning pixel vs. latent architectures and CLIP vs. T5 text encoders (Figure 3). In the Spearman correlation analysis (Figure 5), SelfEval is the only metric with positive correlation for both PDM and LDM, while all other metrics (CLIPScore, MID, VPEval, LLMScore) show negative correlation for latent diffusion models. This is the paper's strongest evidence.
+- **Provides interpretable, fine-grained diagnostic evaluation.** The six tasks (attribute binding, color, count, shape, spatial, text corruption) are constructed from TIFA, ARO, and CLEVR, enabling per-dimension accuracy analysis. This reveals specific failure modes — e.g., CLIP-encoder models score below chance on counting (Table 2) — which is more informative than a single aggregate score.
 
-3. **Non-zero Winoground image score, overcoming a limitation of prior diffusion-based methods**: Concurrent work (li2023diffusion) reports zero image score on Winoground using ELBO proxy, but SelfEval achieves non-zero scores (7.25–14.00, Table 3), competitive with discriminative CLIP models (8.00–12.75). This demonstrates a concrete empirical advantage of the proposed likelihood estimation approach over the ELBO-based alternative.
+- **Non-zero Winoground image scores.** SelfEval obtains non-zero image scores on Winoground (Table 1, LDM-CLIP: 7.25), whereas prior ELBO-based approaches yield 0. This demonstrates that the method can handle cross-image comparisons, which the ELBO-based approach cannot.
 
-4. **Comprehensive evaluation across diverse tasks and comparison with multiple existing metrics**: The benchmark spans 6 reasoning tasks sourced from 3 established datasets (TIFA, ARO, CLEVR), and comparisons include 4 existing metrics (CLIPScore, MID, VPEval, LLMScore) across both pixel and latent diffusion families. The green/red cell analysis (Tables 2, 3) provides a clear visual summary of agreement/disagreement with human judgments.
-
-5. **Identifies real limitations in current evaluation practices**: The analysis of CLIP sensitivity (Figure 2), CLIP's own poor performance on compositional tasks (Table 4), MID's backbone dependence (Table 7), and LLM hallucination (Figure 6) are well-documented and constitute a useful contribution independent of SelfEval itself.
+- **Agreement with human rankings across multiple per-task comparisons.** In Tables 3 and 4, SelfEval's green/red cells show it agrees with human preferences on most task splits, with comparable or better agreement than CLIPScore.
 
 ## Weaknesses
 
 ### Fatal
-None.
+
+- **The likelihood estimation procedure as described is mathematically unsound.** The paper's derivation (Section 3.2) attempts to estimate \(p(\mathbf{x}_0 \mid \mathbf{c})\) via a Monte Carlo procedure that samples trajectories from the forward process \(q(\mathbf{x}_t \mid \mathbf{x}_{t-1})\) and evaluates the reverse-process densities \(p_\theta(\mathbf{x}_{t-1} \mid \mathbf{x}_t, \mathbf{c})\) on those samples without any importance-weight correction (Eq. final_og). The integral in Eq. (rep) is over the reverse process joint distribution; sampling from the forward process and plugging into the reverse-process densities does **not** yield a correct Monte Carlo estimate of the marginal likelihood. The application of Jensen's inequality is also problematic: \(\log(\sum_{n=1}^N a_n) \ge \sum_{n=1}^N \log(a_n)\) does **not** follow from standard Jensen (which requires a convex combination, i.e., an average). Moreover, the estimate sums (rather than averages) over \(N\) samples, so the quantity grows with \(N\) with no normalization. This is not the standard ELBO (Ho et al. 2020, Song et al. 2021), which includes \(-\log q(\mathbf{x}_t \mid \mathbf{x}_{t-1})\) correction terms. As described, the method does not correctly estimate \(p(\mathbf{x}_0 \mid \mathbf{c})\), and the paper provides no synthetic validation (e.g., against a tractable ground-truth likelihood) to demonstrate that the computed quantity approximates the intended likelihood. This undermines the paper's core theoretical claim and means the evaluation framework lacks a validated foundation. Without knowing what quantity SelfEval actually computes, its empirical correlation with human judgments is uninterpretable — it could reflect a confound rather than genuine likelihood estimation.
 
 ### Major
 
-1. **The mathematical derivation of the likelihood lower bound is incorrect as stated.** Equations 7–8 (lines 165–182) contain a flawed application of Jensen's inequality. The paper writes:
+- **The Spearman correlation analysis is underpowered and overclaimed.** Figure 7 reports Spearman's \(\rho\) computed across 5 tasks (Tables 3, 4) per metric per model type. With \(n=5\) data points, the critical value for significance at \(\alpha=0.05\) is \(\rho \approx 0.9\) (one-tailed); most observed correlations are far below this threshold. Furthermore, each data point is a binary comparison (CLIP vs T5 encoder), which makes the ranking degenerate. The paper's central claim that SelfEval is the only metric with positive correlation on both PDM and LDM axes is not statistically supported by this analysis. The green/red cell agreement (Tables 3, 4) is the primary evidence, and it shows that CLIPScore also largely agrees with human judgments — contradicting the claim that existing metrics are unreliable.
 
-   `log sum_{n=1}^N a_n ≥ sum_{n=1}^N log a_n`
-
-   The correct Jensen bound (for concave log, with uniform weights 1/N) yields:
-   
-   `(1/N) · sum log a_n ≤ log((1/N) · sum a_n)`, i.e., `log(sum a_n) ≥ (1/N) · sum log a_n + log N`
-
-   The paper's inequality omits the `1/N` factor and the `log N` term, making it not generally valid. Counterexample: let a₁ = a₂ = 10 (natural log). Then `log(20) ≈ 2.996` but `log(10) + log(10) ≈ 4.606`, and `2.996 ≥ 4.606` is false. While the bound might preserve rankings in practice (the same noise trajectories are used across captions, and the log-probability values are large negative numbers), the paper provides no argument, condition, or empirical check showing that the ranking is preserved. **This is a real mathematical error in the derivation of the core method.** The empirical results may still be valid, but the theoretical justification needs correction. The missing `1/N` constant cancels across captions and is less concerning, but the inequality direction and missing `log N` term are genuine issues.
+- **SelfEval uses real images while human evaluations use generated images, introducing a confound.** The paper acknowledges this mismatch (lines 54–55, 264) but does not address it. The assumption that discriminative performance on real images proxies generative faithfulness is plausible but unvalidated. A model could have strong discriminative performance on real data (e.g., due to language priors learned during training) while generating poorly aligned images, or vice versa. Without a targeted experiment comparing SelfEval scores on generated images to human judgments on those same generations, the alignment claimed between SelfEval and human evaluation could be coincidental or driven by a third factor.
 
 ### Minor
 
-2. **Gap between the evaluation target (generated images) and the measurement object (real images)**. The paper acknowledges this difference explicitly (line 54, line 264): SelfEval computes classification accuracy on *real* image-text pairs, while human evaluations (and other automated metrics) measure faithfulness of *generated* images. The paper's claim is that discriminative performance on real data correlates with generative faithfulness — a plausible but unsubstantiated causal link. The observed correlation could be driven by confounding factors (e.g., both correlate with text encoder strength). While the empirical evidence is suggestive, a direct test on generated images would substantially strengthen the claim.
+- **Human evaluation methodology lacks statistical rigor.** The human vote counts in Tables 3 and 4 vary widely across cells (e.g., Attribute binding: 24 vs 117; Color: 29 vs 42) but no confidence intervals, inter-rater reliability, or significance tests are reported. The paper states that 250 prompts were sampled per task, but the actual vote counts suggest substantial variation in how many comparisons yielded clear preferences. Without error bars, it is unclear whether the human "gold standard" ranking is statistically robust.
 
-3. **Confounded model comparisons for pixel vs. latent analysis**. The paper compares PDM-T5 (7.5B params, 64×64 + super-resolution) with LDM-T5 (5.8B params, 256×256). While three of four models are trained on the same data for the same number of steps (line 284), they differ in resolution, parameter count, and architecture simultaneously. The "offloading high-frequency details to the autoencoder" explanation (line 309) is appropriately hedged as a hypothesis, but the experimental design does not isolate image representation from these other variables.
-
-4. **Statistical significance not reported**. The Spearman correlation (Figure 5) is based on 5 tasks × 2 model types = 10 data points per metric; p-values or confidence bounds are not reported. The main accuracy results are reported as means over 3 repeats but without variance or confidence intervals. The number of human votes per comparison and inter-annotator agreement are not reported.
-
-5. **Ablations for key hyperparameters N and T deferred to supplement**. Given that N=10 and T=100 directly affect both reliability and computational cost, the main paper should at minimum state that rankings are stable across reasonable ranges of these hyperparameters.
+- **The "first automated metric" claim is overstated relative to the evidence.** The paper claims to be "the first automated metric to show a high degree of agreement with gold-standard human evaluations across multiple generative models" (abstract, line 105). The presented evidence — 5 tasks, 2 models per task, no statistical significance testing — is too thin to support a "first" claim of this strength.
 
 ### Trivial
-None.
+
+- None that survive filtering.
 
 ## Nice-to-Haves
 
-- Test SelfEval on generated images (not just real ones) to directly establish the link between likelihood on real data and generation faithfulness.
-- Report computational cost of SelfEval relative to existing metrics (CLIPScore, etc.) — this is relevant for practical adoption.
-- Report statistical significance (p-values or bootstrap confidence intervals) for the main accuracy results and Spearman correlations.
-- A corrected derivation of the likelihood bound, ideally with an empirical check that the ranking under the approximation matches the ranking under a Monte Carlo estimate of the true log-likelihood.
+- A synthetic validation experiment (e.g., on data with tractable likelihoods) would confirm whether the proposed estimator actually recovers true likelihoods, independent of its empirical correlation with human ratings.
+- Validating SelfEval on generated images (using the model to score its own generations and comparing to human judgments of those generations) would directly test the proxy assumption.
+- Ablation studies for \(N\) (trials) and \(T\) (diffusion steps) are referenced as deferred to the supplement; including a summary in the main paper would improve confidence in the method's practical stability.
+- Reporting confidence intervals or Bayesian credible intervals for the Spearman correlations would clarify the strength of the evidence.
 
 ## Removed Points
 
-The following points from the harsh critic are removed or downgraded:
-
-- **"The central claim of alignment with human evaluations rests on comparing fundamentally different quantities... the observed agreement could be coincidental."** — The paper explicitly acknowledges this difference (lines 54, 264) and provides empirical correlation as evidence. The correlation is the link; calling it "coincidental" without evidence of confounds is speculation rather than a documented flaw.
-
-- **"SelfEval image scores (7.25–14.00) are near chance (50%)—actually far below chance on a dataset with 2 images... which is terrible."** — This misreads the paper's contribution. The comparison is to concurrent work that gets 0% image score (li2023diffusion); CLIP itself scores 8–12.75%. SelfEval is *competitive with discriminative models* on this task, which is the paper's stated claim. The criticism evaluates against the wrong baseline.
-
-- **"The claim 'first automated metric to show a high degree of agreement...' is overstated given that CLIPScore in Tables 2–3 shows comparable agreement."** — The green/red cell count is comparable, but the Spearman correlation (Figure 5) shows CLIPScore has negative correlation for latent diffusion models while SelfEval is the only metric with positive correlation for both. The paper's claim is about agreement *across multiple generative models*, which the Spearman evidence supports.
-
-- **"The paper does not justify why using real images is methodologically superior for evaluating generative faithfulness."** — The paper gives a justification: generated images are OOD for external models like CLIP (line 110–111). Whether one agrees with this justification, the paper does provide it.
-
-- **Comparison of concurrent work (Clark et al., Li et al.)** — The paper appropriately discusses these works and positions SelfEval's advantages.
+- **Models not publicly released.** Per meta-review guidelines, questions about release status of cited models/datasets are not valid criticisms.
+- **Missing comparison to HPS v2, ImageReward, PickScore.** The meta-reviewer cannot verify the existence of specific works not cited in the paper and should not penalize for missing related work.
+- **Winoground "feature not bug" criticism.** The paper's point that ELBO-based methods yield zero image scores is factually correct; the non-zero scores from SelfEval are a genuine capability difference. Whether those scores are meaningful requires further validation but is not a weakness per se.
+- **Minor formatting/style nitpicks.** These are likely artifacts of the PDF extraction process, not author errors.
+- **Reference to missing appendix contents.** The appendix exists in the original submission; parser artifacts remove it.
 
 ## Novel Insights
 
-The most interesting finding to emerge from the reviews is not in the paper's own contributions but in the discrepancy between how different evaluation metrics behave across pixel vs. latent diffusion models. Existing metrics (CLIPScore, MID, VPEval, LLMScore) show positive correlation with humans for pixel diffusion but flip to negative correlation for latent diffusion. SelfEval is the only metric that maintains positive correlation across both families. This suggests a systematic blind spot in current evaluation methods that depend on external vision-language models — they may implicitly favor models whose output distribution is closer to natural images (pixel-based) over those whose output distribution is in a compressed latent space. SelfEval's robustness to this shift, by using the generative model's own likelihood, offers a principled way to compare models across fundamentally different architectures. This finding deserves deeper investigation: what exactly causes existing metrics to fail on latent diffusion outputs?
+The most striking observation emerging from the reviews is the tension between a creative, high-impact idea (using the generative model itself as its own evaluator) and a technically flawed derivation. The problem — that external evaluators bias and constrain generative model assessment — is real and important. SelfEval's diagnostic breakdown into six interpretable tasks is genuinely useful and reveals model-specific failure modes (e.g., CLIP-encoder models' below-chance counting). However, the likelihood estimation procedure as presented is not a valid Monte Carlo estimate of \(p(\mathbf{x}_0 \mid \mathbf{c})\), and the paper provides no synthetic validation to check what quantity is actually being computed. The empirical correlation with human judgments could reflect a real signal or a spurious confound. A corrected approach using the standard ELBO or probability-flow ODE, combined with the paper's task decomposition, could produce a much stronger contribution.
 
 ## Suggestions
 
-1. **Fix the derivation.** Correct the Jensen inequality in Eq. 8. The simplest fix: note that the Monte Carlo estimate with 1/N factor yields `log p(x₀|c) ≈ log(1/N) + log Σ aₙ`, and the log(1/N) constant cancels when comparing captions. For the log-bound, either adopt an alternative estimator (e.g., the ELBO used in concurrent work) or provide empirical validation that the approximation preserves ranking on a tractable case (e.g., a simple diffusion on low-dimensional data).
-
-2. **Add a control experiment on generated images.** Even a limited experiment showing that SelfEval scores on generated images also correlate with human judgments would substantially strengthen the bridge between real-image evaluation and generative faithfulness.
-
-3. **Report confidence intervals and p-values** for the main accuracy results and Spearman correlations to establish statistical significance.
-
-4. **Move the N/T ablation into the main paper** or at minimum state the stability of rankings with respect to these hyperparameters.
+- **Fix the likelihood estimation.** Adopt the standard ELBO (Ho et al. 2020) or the probability-flow ODE (Song et al. 2021) with the correct importance-weighting terms. The current Eqs. (final_og) and (final_sim) are not mathematically valid as written.
+- **Validate against ground-truth likelihoods.** Run a controlled experiment (e.g., on a small dataset where the true likelihood is tractable or can be estimated via AIS) to confirm that the corrected estimator approximates the true \(p(\mathbf{x}_0 \mid \mathbf{c})\).
+- **Validate on generated images.** Compute SelfEval on the model's own generations and compare to human judgments of those same generations, to directly test the proxy assumption.
+- **Expand the statistical evidence.** Provide confidence intervals for Spearman correlations and significance tests for the human preference data. Alternatively, aggregate per-example scores rather than per-task rankings.
+- **Tone down the "first" claim** unless substantially more evidence is provided. The current data supports "shows promising alignment" but not "first to show high agreement."
 
 ## Score and Decision
 
-This paper introduces a genuinely useful idea with a thorough empirical evaluation. The main weakness — a mathematically incorrect derivation in the core method — is real but fixable, and the empirical results would likely be unaffected by a corrected derivation. The conceptual leap between evaluating on real images and claiming insight into generation faithfulness is acknowledged but could be stronger. Overall, the paper's contributions (the method itself, the empirical evidence of alignment with human judgments across diverse models and tasks, and the diagnosis of existing metrics' failures) outweigh its theoretical sloppiness, but the derivation error is sufficiently central that it must be addressed before the paper can be accepted.
+**Originality:** Good. The idea of using the generative model's own discriminative ability for evaluation is genuinely novel and well-motivated.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+**Importance:** High. Reliable automated evaluation for text-to-image models is an important open problem.
+
+**Claims support:** Poor. The central claim of valid likelihood estimation is not supported by the derivation. The empirical claims of strong human alignment are based on underpowered statistics.
+
+**Soundness:** Low. The methodological derivation contains a fundamental error that undermines the core contribution.
+
+**Clarity:** Adequate. The paper is generally well-written but the technical derivation is confusing and incomplete.
+
+**Value:** Potentially high with major corrections, but the current version does not provide a reliable evaluation framework.
+
+The fatal technical flaw in the likelihood estimation derivation means that the core methodological claim is unsupported. Combined with the underpowered statistical evidence for human alignment, the paper in its present form does not meet the bar for acceptance. The idea has merit and the task decomposition is useful, but the method requires a corrected derivation and substantially stronger validation.
+
+MY FINAL SCORE: <pineapple>4.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

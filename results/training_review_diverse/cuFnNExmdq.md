@@ -1,85 +1,78 @@
-Now I have all the information I need. Let me verify the PEMS04 claim and other key points carefully.
-
-Looking at Table 2:
-- **PEMS04, Length 48**: SCINet MSE = **0.099** (bold), UniTST = 0.104 (second) — SCINet wins
-- **PEMS04, Length 96**: SCINet MSE = **0.114** (bold), UniTST = 0.137 (second) — SCINet wins
-- **PEMS04, Avg**: SCINet MSE = **0.092** (bold), UniTST = 0.098 (second) — SCINet wins
-
-The paper claims (line 254): "our model outperforms other baselines on all prediction lengths and all PEMS datasets" — verified false for PEMS04 at horizons 48 and 96.
-
-Now I will produce the final consolidated review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ## Summary
-UniTST flattens all patches across all variates into a single 1D token sequence and applies self-attention (with an inducing-point bottleneck called "dispatchers") to simultaneously capture both intra-variate and inter-variate dependencies at the patch level. The dispatcher reduces complexity from O(N²p²) to O(kNp). Experiments on 13 datasets show strong forecasting performance.
+
+The paper proposes UniTST, a transformer for multivariate time series forecasting that flattens all patch tokens from all variates into a single sequence and applies unified self-attention, enabling direct modeling of cross-time cross-variate dependencies. To manage the quadratic complexity of full attention over all patches, the paper introduces a dispatcher mechanism (cross-attention through a small set of learnable tokens) that reduces complexity to O(kNp). Empirical results on 9 long-term and 4 short-term forecasting benchmarks show strong performance, achieving best MSE on 7/9 datasets and best MAE on 8/9 for long-term forecasting, and winning 14/16 metrics on PEMS short-term benchmarks.
 
 ## Strengths
 
-1. **Simple, clean architectural idea.** Flattening all variate-patch tokens and applying unified self-attention is a natural and well-motivated departure from the modular (sequential/parallel) attention designs of prior work (iTransformer, Crossformer, CARD, LEDDAM). The paper's Figure 1 clearly illustrates why prior designs cannot directly attend to cross-variate cross-time token pairs in a single step.
+1. **Empirically motivated architectural insight.** The paper defines a cross-time cross-variate correlation coefficient (Eq. 1) and visualizes it on real data (Figure 2), showing that inter-variate correlations are patch-dependent and not uniform. This provides concrete evidence for why prior approaches that collapse either the temporal or variate dimension are insufficient. The correlation analysis is a genuine contribution.
 
-2. **Strong empirical results.** On long-term forecasting (Table 1), UniTST achieves best MSE on 7/9 datasets and best MAE on 8/9, with notable gains on ECL (0.166 vs. 0.178 for iTransformer), ETTm1 (0.379 vs. 0.387 for PatchTST), and Weather (0.242 vs. 0.258 for iTransformer). On short-term PEMS forecasting (Table 2), UniTST achieves best on 14/16 metric-dataset combinations, often by substantial margins (e.g., PEMS03 Avg 0.097 vs. 0.113 for second-best).
+2. **Simple and effective architectural design.** Unified attention on flattened patches (Eq. 2) is conceptually clean and directly addresses the identified limitation. Unlike prior models that apply separate attention stages (Crossformer, CARD, Leddam), UniTST allows any patch from any variate to attend to any other patch in a single operation. The dispatcher mechanism (Eq. 3–4) is a practical solution to the quadratic complexity, with clear memory-vs-performance tradeoffs shown in ablation (Table 3 on dispatchers, Table on varying dispatcher counts, lines 401–420).
 
-3. **Dispatcher ablation confirms necessity.** The ablation (Table 4) shows that the full self-attention version runs OOM on ECL and Traffic (>40GB), while the dispatcher version uses 13.32GB and 22.87GB respectively, validating that the bottleneck is practically necessary for large-N datasets.
+3. **Strong and consistent empirical results on multiple benchmarks.** On long-term forecasting (Table 1), UniTST achieves best MSE on 7/9 datasets (ECL, ETTm1, ETTm2, ETTh2, Exchange, Weather, Solar-Energy) and second-best on the remaining 2 (ETTh1, Traffic). On short-term PEMS (Table 2), it wins 14/16 metric-dataset-horizon combinations. Improvements over the previous SOTA (iTransformer) are often clear — e.g., ECL MSE from 0.178 to 0.166, ETTm1 from 0.407 to 0.379.
 
-4. **Attention weight analysis supports the core thesis.** Figures 7-8 show that top-attention token pairs are disproportionately from *different* variates and *different* times, confirming that the model learns exactly the cross-variate cross-time dependencies the paper argues are important.
+4. **Attention visualization validates the central motivation.** By multiplying the two dispatcher attention matrices, the paper obtains effective pairwise attention weights (line 423). Figure 8 shows that the top 0.5% highest-attention token pairs are more likely to come from different variates and different times (89.91% vs. 87.50% baseline), directly supporting the claim that cross-time cross-variate interactions are important for prediction.
 
-5. **Varying-dispatchers analysis (Table 5) and patch-size analysis (Figure 5) provide useful design guidance.** The analysis shows the tradeoff between dispatcher count, memory, and accuracy, and demonstrates why iTransformer's single-token-per-variate design can be harmful.
+5. **Useful ablation and hyperparameter analysis.** The paper systematically ablates lookback length (Figure 5), patch size (Figure 6), and number of dispatchers (Table in lines 410–420), providing practical guidance on design choices.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Missing statistical variance / error bars on all main results.** Tables 1 and 2 report only point estimates of MSE/MAE. No standard deviations, confidence intervals, or multiple-seed runs are reported. Given that several claimed improvements are very small (e.g., ETTm2: UniTST 0.280 vs. PatchTST 0.281; ETTh1: UniTST is actually second behind FEDformer), the reader cannot assess whether these differences are meaningful or within noise. The community standard in time series forecasting (e.g., iTransformer, PatchTST, DLinear papers) includes variance over at least 3 runs. This weakens the core claim of state-of-the-art performance.
-
-2. **Factual error in the PEMS claims (line 254).** The paper states: "our model outperforms other baselines on all prediction lengths and all PEMS datasets." This is false for PEMS04: SCINet achieves better MSE at prediction lengths 48 (0.099 vs. 0.104) and 96 (0.114 vs. 0.137), and SCINet has better average MSE (0.092 vs. 0.098). While UniTST is still strong on PEMS04 (first on lengths 12 and 24, second overall), the factual inaccuracy in the text must be corrected.
+None.
 
 ### Minor
 
-3. **Overstated motivation framing.** The paper claims prior models "cannot directly and explicitly learn" cross-time cross-variate dependencies. While literally true (sequential/parallel attention cannot directly attend across both dimensions in a single step), the paper does not provide evidence that *indirect* capture via two-stage attention actually fails — the empirical comparisons against Crossformer, CARD, and LEDDAM confound architecture-level differences (encoder-decoder vs. encoder-only, patching strategy, etc.) with the attention structure itself. The motivation would be stronger if framed as "prior methods are *indirect* and our method is *direct,* which empirically works better" rather than implying prior methods fundamentally cannot exploit these dependencies. A controlled experiment holding everything but the attention structure constant would substantially strengthen the claim.
+1. **Overstated framing of prior work limitations.** The paper repeatedly claims prior sequential/parallel attention models "cannot directly and explicitly learn" cross-time cross-variate dependencies (lines 5–6, 33, 92, 153). While it is true that these models do not compute direct pairwise attention between patch(i,t1) and patch(j,t2) in a single operation — which is UniTST's contribution — the harsh claim of impossibility is overstated. In sequential architectures (Crossformer, CARD), the first stage produces representations that encode temporal context, and the second stage mixes across variates; a dependency between variate 1 at period 1 and variate 2 at period 2 can be approximated through the two-stage flow. The paper's own argument about "error propagation between stages" (line 31) is a more defensible motivation than the "cannot" framing. This does not diminish the contribution — unified attention is genuinely more direct and avoids error accumulation — but the current framing invites unnecessary pushback.
 
-4. **Dispatcher mechanism's novelty is overstated.** The dispatcher is a standard inducing-point / bottleneck cross-attention (queries → dispatchers → tokens), identical in structure to set transformers, Perceiver IO, and memory-compressed attention. The paper presents it as a contribution ("we further propose a dispatcher mechanism") without situating it in this known lineage. The novelty lies in applying it to flattened patch tokens, not in the mechanism itself. Acknowledging this would not weaken the paper — the simple application to the forecasting setting is novel enough.
+2. **Missing per-horizon breakdown for long-term forecasting.** Table 1 only reports averages across four prediction horizons (96, 192, 336, 720). Unlike the PEMS results (Table 2), which provide full per-horizon detail, the long-term results aggregate potentially varying patterns. This makes it impossible to assess whether UniTST's advantage is consistent across horizons or driven by specific settings. Per-horizon numbers are standard in the literature (e.g., iTransformer, PatchTST) and should be reported for completeness.
 
-5. **No baseline reproducibility disclosure.** The paper says it "follows iTransformer" for settings but does not state whether baselines were re-run in-house or taken from published tables. Differences in preprocessing, hardware, and random seeds can inflate apparent improvements. This should be clarified.
+3. **Baseline tuning transparency.** The paper states it "follows iTransformer" for the lookback=96 setting (line 242) but does not specify whether all 11 baselines were re-tuned for this lookback or whether default hyperparameters from original papers were used. Several baselines (e.g., PatchTST, FEDformer) were originally evaluated with longer lookbacks (e.g., 336). Without this information, there is uncertainty about whether the comparison is fair. The lookback ablation (Figure 5) partially mitigates this concern by showing UniTST also wins at lookback=48 and lookback=192, but the main table's setup needs clarification.
 
-6. **Dispatcher ablation shows accuracy improvement that goes unremarked.** On ETTm1 (0.385→0.379) and Weather (0.247→0.242), the dispatcher version achieves *lower* MSE than the full-attention version, not just lower memory. The paper discusses only memory reduction, missing the interesting point that the bottleneck provides implicit regularization. This should be discussed.
+4. **The "explicit" claim about the dispatcher slightly overreaches.** The paper states that "the dependencies between any two patches can be explicitly modeled through attention" with the dispatcher (line 143). The dispatcher uses two cross-attention steps, producing an effective attention weight that is the product of two softmax matrices — a low-rank approximation of the full attention matrix. The paper's own analysis (line 423) correctly shows that multiplying the two matrices yields meaningful pairwise weights, so the mechanism does produce explicit weights. However, calling it "explicit" without acknowledging the low-rank nature and the information bottleneck through k dispatchers is slightly misleading. A more precise framing would acknowledge the rank constraint.
 
 ### Trivial
 
-7. **Position embedding ambiguity (Section 4.1).** W_pos ∈ ℝ^(N×p×d) is described as "learnable position embeddings" but it is unclear whether this is factorized (separate variate position + time position) or a flat indexing scheme. Clarifying matters for understanding how the model distinguishes same-variate-different-time vs. different-variate tokens.
+1. **BatchNorm used without justification.** Most time series transformers use LayerNorm; the paper uses BatchNorm (line 145) without explanation. While not incorrect, a brief justification or ablation would be helpful.
 
-8. **Correlation analysis details (Section 3).** The paper specifies patch length = 16 for the visualization but does not state the stride used, or whether the correlation analysis was done on more than one pair of variates from more than one dataset.
+2. **Default patch size not explicitly stated.** The paper ablate patch sizes in Figure 6 but does not state the default patch size and stride used in the main experiments.
 
 ## Nice-to-Haves
 
-- **Controlled experiment:** Compare unified vs. sequential attention while holding all other architectural choices (patching, encoder depth, embeddings) fixed, to isolate the benefit of unified attention.
-- **Training time / FLOPs comparison** in addition to GPU memory, for practical feasibility assessment.
-- **Past-future correlation analysis:** Show that high past-patch-to-future-patch correlation (not just past-past) predicts forecasting improvement, to strengthen the motivation.
+- Providing per-horizon results for long-term forecasting (as done for PEMS).
+- Clarifying whether baselines were re-tuned for the lookback=96 setting.
+- Reporting parameter counts and training time for all models for practical adoption.
+- A controlled ablation: comparing UniTST against a version of Crossformer or another sequential-attention model that keeps tokenization identical and only varies the attention structure (unified vs. two-stage). This would isolate the effect of attention design from confounding factors.
+- Statistical significance tests or error bars, especially on datasets where margins are small (e.g., ETTh1, Traffic).
 
 ## Removed Points
 
-- **"Central motivation is a straw man"** — Removed as too strong. The paper consistently says prior methods "cannot directly and explicitly" capture these dependencies, which is factually true (they attend sequentially/separately). The reviewer conflates "direct" with "at all." The issue is downgraded to a minor framing concern above.
-- **Missing related works (Set Transformer, Perceiver IO, Linformer)** — Removed per rule: do not mention missing related works without external sources.
-- **Criticism about the correlation measure being past-past rather than past-future** — Removed as scope creep; the paper's motivation is that cross-variate cross-time correlations exist generally, which the analysis shows.
-- **Generic "this paper addressed an important problem" strength from Strength Finder** — Removed as superficial.
+- **Harsh critic's claim that cited references are miscategorized (e.g., carlini2023aligned):** The instructions require treating all cited references as real. The reviewer flagged this but noted it might be a parser error. Removed per policy.
+- **Harsh critic's claim about "cannot be independently verified":** Not present in this review's text, but the general principle is that cited models/tools/datasets exist as stated.
+- **Harsh critic's claim about the ablation showing w/o dispatchers achieves worse MSE being "surprising":** This is actually consistent with the paper's claims — the dispatcher improves both memory and performance. The paper frames this positively, and it does not contradict any stated claim. The observation is interesting but is not a weakness of the paper; it's a result the paper already reports and discusses.
+- **Harsh critic's claim about the attention analysis difference (89.91% vs. 87.50%) being "small":** A 2.41 percentage point difference in the top 0.5% tail is not negligible and is consistent with the paper's framing. This is a supported result, not a weakness.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a useful design observation (dispatchers improve accuracy beyond memory savings, likely through regularization) that the paper itself overlooks.
+None beyond the paper's own contributions. The reviewer observations (e.g., that the dispatcher's low-rank nature could be more explicitly discussed, and that a controlled comparison against a sequential-attention variant with identical tokenization would strengthen the causal claim) are useful suggestions but not novel insights about the field.
 
 ## Suggestions
 
-1. **Correct the PEMS04 claim** to read something like: "Our model achieves the best or second-best on all prediction lengths and all PEMS datasets, and is first on 14 of 16 metric-dataset combinations."
-2. **Add error bars** — report mean ± std over at least 3 random seeds for all main results.
-3. **Disclose baseline source** — clearly state whether each baseline was re-run under a controlled environment or taken from published tables.
-4. **Add a controlled comparison** (unified vs. sequential attention with all else equal) as an ablation or in the appendix. This would definitively support the paper's central motivation.
-5. **Situate the dispatcher** within the inducing-point literature (e.g., mention Perceiver IO), and discuss the accuracy improvement observed in the ablation.
-6. **Clarify the position embedding** structure in Section 4.1.
+1. Tone down the "cannot" framing of prior work to "cannot directly / cannot explicitly in a single attention operation" or "can only approximate indirectly through sequential stages, which introduces error propagation." This preserves the contribution while avoiding overclaiming.
+2. Add per-horizon results for long-term forecasting (as an appendix or supplementary table).
+3. Explicitly state whether each baseline's hyperparameters were re-tuned for the lookback=96 setting, or add a supplementary experiment with lookback=336.
+4. Acknowledge the low-rank nature of the dispatcher factorization explicitly.
+5. State the default patch size and stride used in main experiments.
+6. Add a brief justification for using BatchNorm over LayerNorm.
 
 ## Score and Decision
 
-The paper presents a clean, well-motivated architecture with strong empirical results across 13 datasets. The core idea — unified attention on flattened patch tokens — is simple and effective. However, the lack of statistical variance reporting weakens the SOTA claim, and one factual claim about PEMS04 is incorrect. These issues are addressable with revision and do not undermine the paper's genuine contributions.
+The paper makes a genuine contribution: identifying a limitation in existing models (inability to directly compute cross-time cross-variate attention), providing an elegant architectural fix (unified attention on flattened patches), and contributing a practical complexity-reduction technique (dispatchers). The empirical evaluation is broad (13 datasets, 11 baselines) and the results are strong and largely consistent. The weaknesses are about framing precision and experimental transparency, not about correctness or fundamental flaws. With minor revisions (per-horizon results, baseline tuning clarification, toned-down framing), the paper would be ready for publication.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

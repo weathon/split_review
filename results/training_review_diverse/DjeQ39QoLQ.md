@@ -1,80 +1,70 @@
-Now I have all the information needed. Let me construct the final consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes a "perturb-then-diagonalize" (PTD) methodology for approximately diagonalizing non-normal matrices used in SSM initializations, yielding the S4-PTD and S5-PTD models. The paper provides theoretical analysis showing that the S4D/S5 diagonal initialization converges to the HiPPO DPLR system pointwise for smooth inputs but not uniformly (Theorem 2), explaining its sensitivity to certain Fourier-mode perturbations. The PTD method adds a small perturbation to regularize the ill-conditioned diagonalization problem, and the paper bounds the resulting transfer function error as (2 ln n + 4)ε + O(√(log n) ε²). Empirically, S4-PTD improves over S4D on LRA (86.58% vs 84.89%) and shows robustness to engineered Fourier-mode noise on sCIFAR.
+This paper identifies and addresses a fundamental weakness in the diagonal initialization used by S4D/S5 state-space models: the non-uniform convergence of their transfer functions creates sensitivity to specific Fourier-mode input perturbations. The authors provide a rigorous theoretical analysis proving that the S4D/S5 initialization converges only weakly (pointwise for fixed smooth inputs) and fails uniformly, with persistent spikes in the transfer function. They propose a "perturb-then-diagonalize" (PTD) methodology that approximately diagonalizes the ill-conditioned HiPPO matrix by solving for a small perturbation E that keeps the eigenvector condition number manageable, yielding uniform (L∞) approximation guarantees (Theorem 3). The resulting S4-PTD and S5-PTD models demonstrate improved robustness to Fourier-mode noise and achieve strong LRA performance (S5-PTD: 87.61% average, highest among compared models).
 
 ## Strengths
 
-- **Fine-grained theoretical analysis of S4D convergence limitations.** The paper proves that while S4D/S5 diagonal initialization *converges* pointwise for fixed smooth inputs (Theorem 1, linear rate), it *does not* converge uniformly in operator norm (Theorem 2, Section 3.3). This non-uniform divergence is rigorously linked to high-frequency spikes in the transfer function (Figure 1, Lemma 1), providing an explanation for the sensitivity of diagonal SSMs that prior S4D work lacked.
+- **Rigorous theoretical analysis of S4D vs. S4 convergence gap.** The paper derives an explicit closed-form formula for the transfer function difference (Lemma 1), proves weak* convergence with linear rate for fixed smooth inputs (Theorem 1), and, crucially, proves non-convergence in operator norm with persistent Θ(1)-magnitude spikes at frequencies Θ(n²) (Theorem 2, Figure 1). This goes well beyond prior empirical observations and provides a principled explanation for the diagonal models' fragility.
 
-- **PTD methodology with theoretical error guarantees.** The paper introduces a backward-stable approximate diagonalization scheme and bounds the transfer-function error as |G_Pert − G_DPLR| = (2 ln n + 4)ε + O(√(log n) ε²) (Theorem 4). This shows the error depends only logarithmically on state dimension n and linearly on perturbation size ε — a novel theoretical contribution that directly addresses the ill-posedness of diagonalizing HiPPO matrices.
+- **Identification and empirical demonstration of a novel failure mode.** Figure 2 shows that S4D catastrophically fails on a synthetic frequency-extrapolation task (predicted amplitude decreasing to −4 near s≈80), while S4 and S4-PTD do not. This failure is traced to the spike in |G_Diag|, and the real-world impact is confirmed on sCIFAR (Figure 3a,b): S4D accuracy drops significantly under Fourier-mode noise near spikes, whereas S4-PTD remains robust.
 
-- **Demonstration of a concrete failure mode and robustness improvement.** The synthetic extrapolation experiment (Section 3.4, Figure 2) and the CIFAR robustness test (Section 5.2, Figure 3) show that S4-PTD is resilient to Fourier-mode noise that catastrophically degrades S4D. The paper acknowledges this is a worst-case test (line 444) but the experiment directly validates the theoretical prediction.
+- **Clean theoretical guarantee for the PTD methodology.** Theorem 3 proves that the transfer function error between the perturbed system and the DPLR system scales as (2ln n + 4)ε + O(√(log n)ε²), showing linear dependence on perturbation size and only logarithmic dependence on state dimension. This provides a quantitative trade-off justifying approximate diagonalization, contrasting with the ad-hoc discarding of the low-rank term in S4D.
 
-- **Ablation study validating the perturbation-size trade-off.** The paper systematically varies ‖E‖/‖A_H‖ and reports both test accuracy and eigenvector condition number (Section 5.3, Figure 3c). The results confirm the theory: accuracy peaks when the ratio is between 10⁻² and 1, and the condition number scales as ~1/ε, corroborating the bound in Theorem 5.
+- **Empirical state-of-the-art on LRA.** S5-PTD achieves the highest average accuracy (87.61%) among all compared models on the Long-Range Arena benchmark (Table 1), and S4-PTD (86.58%) outperforms S4D (84.89%) and nearly matches S4 (86.09%). The robustness experiment on sCIFAR directly validates that the theoretical robustness translates to practical gains.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **The optimization problem for E is critically underspecified.** The core PTD method requires solving: minimize κ(Ṽ_H) + γ‖E‖ subject to A_H + E = Ṽ_H Λ̃ Ṽ_H⁻¹ (Eq. 7). The paper states only "We implement a solver to this optimization problem using gradient descent" (line 383) with no details on: how E is initialized, over what variables the optimization is performed, how the eigen-decomposition constraint is enforced during gradient descent, the choice of optimizer/learning rate/stopping criterion, computational cost, or how γ is selected in practice. Since the PTD method is a core contribution, this gap is a concrete barrier to reproducibility. If the appendix contained these details, they should be moved to the main paper.
+- **The optimization procedure for Equation (4) is critically underspecified.** The paper states (line 383): "We implement a solver to this optimization problem using gradient descent." This single sentence is the only description of how the perturbation matrix E — the central object of the PTD methodology — is computed. The problem involves a non-trivial constrained optimization where the objective (κ(Ṽ_H)) and the constraint (eigendecomposition A_H+E = Ṽ_H Λ̃ Ṽ_H^{-1}) are coupled. The paper provides no details on: (i) what the actual optimization variables are (E alone, or jointly E, Ṽ_H, Λ̃), (ii) how gradients of κ(Ṽ_H) through the eigendecomposition are computed, (iii) initialization and convergence criteria, (iv) computational cost for the state sizes used (e.g., n=64, 128), or (v) whether the solver reliably converges across different γ values. The ablation study (Figure 3c) empirically validates the trade-off, showing the optimization was solved successfully for a range of γ, but without algorithmic details the method is not reproducible and cannot be adopted by other researchers for new initialization schemes. This is the paper's core methodological component — the models are named after it — and the current description is insufficient for a methods contribution.
 
 ### Minor
 
-- **LRA results lack statistical support.** No standard deviations, confidence intervals, or multiple-seed results are reported. While single-run evaluation is common in LRA benchmarks, the S5-PTD improvement over S5 is only +0.15% (87.61 vs 87.46), and S5-PTD actually performs slightly *worse* than S5 on Image (87.92 vs 88.00) and Path-X (98.52 vs 98.58). Without variance estimates, the reader cannot assess whether the claimed improvements are meaningful or within noise. This is a genuine concern, though the paper's own framing for S5-PTD is appropriately modest ("comparable with the S5 model," contribution #5).
+- **Ambiguity in the robustness experiment description.** The paper states (line 439) that the test set is "contaminated by 10% of sinusoidal noises whose frequencies are located near the spikes of |G_Diag|." It is unclear whether "10%" refers to the fraction of test samples corrupted, the amplitude of the noise relative to the signal, or some other quantity. The state dimension n used in this experiment is also not specified in the main text. (Some experimental details may be in the appendix section referenced at line 403, which was stripped by the parser.)
 
-- **The robustness experiment, while clean, tests only a single worst-case perturbation.** The paper acknowledges the noises are "intentionally made to fail the S4D model" (line 444), which is fair, but the broader claim of "resilience to Fourier-mode noise-perturbed inputs" in the abstract would be strengthened by an additional experiment with a non-adversarial perturbation (e.g., random Gaussian noise, or a natural corruption benchmark) to show the robustness property extends beyond the hand-crafted noise.
-
-- **The mapping from γ to ‖E‖/‖A_H‖ is not provided.** The ablation study (Figure 3c) uses ‖E‖/‖A_H‖ as the x-axis but does not state how different values of γ produce different ratios. This makes it harder for practitioners to select γ.
+- **The synthetic experiment (Section 3.4) would benefit from more detail.** The paper states (line 226) that the goal is "to learn s and A from the sequential input," but does not specify the model architecture used for this task, the training procedure, or the number of training samples. (These details may reside in the stripped appendix.)
 
 ### Trivial
-
-- The paper does not report the wall-clock time or memory cost of computing E for typical state sizes (n = 64–256), which affects practical adoption.
-- The relationship between the theory (which analyzes initialization only) and trained model behavior is discussed but not formally connected — the bound in Theorem 4 guarantees closeness of initializations but does not directly bound behavior after training.
+None.
 
 ## Nice-to-Haves
 
-- An additional robustness experiment using non-adversarial perturbations (e.g., random Gaussian noise, CIFAR-10-C corruptions) would broaden the evidence for the claimed robustness.
-- A comparison to initializing A as a random diagonal matrix (no HiPPO structure at all) would help isolate the benefit of approximately preserving the HiPPO structure versus simply having a well-conditioned diagonal initialization.
+- **Comparison with random perturbation.** Theorem 4 (on Ginibre matrix perturbation) provides an expected bound on the condition number, and the paper could strengthen its case by comparing PTD's optimized perturbation against simply adding a random Gaussian matrix of the same norm without optimization. This would help isolate whether the optimization is genuinely necessary or whether any small perturbation regularizes the diagonalization adequately for SSM purposes.
+
+- **Clarify the "strong convergence" framing.** The paper's use of "strong convergence" in the abstract and introduction correctly contrasts uniform (L∞) approximation of the transfer function (Theorem 3) with the pointwise/weak* convergence of S4D (Theorem 1) — a meaningful mathematical distinction. However, the practical magnitude of the bound for ε ≈ 0.1 is moderate (~O(1)), and a brief clarification that the term refers to the topology of convergence (uniform vs. pointwise) rather than implying small absolute error would prevent potential misinterpretation.
 
 ## Removed Points
 
-These points are flagged to be removed — treat them with caution:
+These points are flagged to be removed; treat them with caution:
 
-- **Criticism that theory assumptions may not hold after training begins** (harsh critic, Section-by-Section, "Theory"): The paper's theoretical analysis is about initialization, not training dynamics. Evaluating it against post-training behavior evaluates it against the wrong class of expectations. **Removed.**
+- **"The theoretical guarantee is too weak to support 'strong convergence'"** (from Harsh Critic #2). The paper's claim about "strong convergence" refers to uniform (L∞) convergence of the transfer function, contrasting with the weak*/pointwise convergence of S4D. This is a mathematically precise and well-supported distinction (Theorem 3 vs. Theorem 1). The critic conflates the type of convergence (topological property) with the magnitude of the bound. The bound's practical size for ε~0.1 is a separate issue and does not invalidate the uniform-convergence claim.
 
-- **Criticism that "S4-PTD underperforms S4"** (harsh critic, Section-by-Section, "LRA results"): The critic themselves acknowledges S4-PTD (86.58) > S4 (86.09). The statement is factually incorrect. **Removed.**
+- **"Missing experimental details"** (synthetic experiment, robustness experiment details). The paper references \Cref{sec:experimentdetail} (line 403) for hyperparameter details and \Cref{sec:proofdifftransfer}, \Cref{sec:proofnoconverge} for deferred proofs. These sections were stripped by the parser and exist in the original submission. Per the meta-review guidelines, weaknesses about missing appendix content are removed.
 
-- **Criticism that robustness claim implies "general robustness" when paper scopes to Fourier-mode noise**: The paper explicitly describes the test as "worst-case noises ... intentionally made to fail the S4D model" (line 444) and limits claims to "Fourier-mode noise-perturbed inputs." The critic overstates the paper's claimed scope. **Downgraded to minor, re-articulated as a scope limitation rather than an overclaim.**
+- **"Comparison with random perturbation is missing"** as a weakness. This is a reasonable suggestion for future work but not a flaw in the current paper. The paper already provides a theoretical bound for random perturbation (Theorem 4) and shows that PTD's optimized perturbation works well empirically.
 
-- **Missing related works** — per instructions, I cannot confirm these exist. **Removed.**
+- **"Missing related works."** Per guidelines, I cannot confirm the existence or absence of missing citations.
 
-- **Formatting/style nitpicks and requests for appendix content** — these are artifacts of parser stripping. **Removed.**
-
-- **Strength Finder's description of "state-of-the-art LRA accuracy"** — S5-PTD achieves 87.61%, highest in table but by marginal 0.15% over S5. The paper does not claim SOTA. Rephrased accurately.
+- **Formatting/style nitpicks and claims about typos.** These are parser artifacts, not author errors.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The most interesting observation that emerges from the integration of the reviews is that the paper's theoretical contribution works at two different levels that are easy to conflate. First, the analysis of S4D's non-uniform convergence (Theorems 1-2, Lemma 1) is self-contained and does not depend on the PTD methodology at all — it stands as an independent contribution explaining why diagonal SSMs can be fragile. Second, the PTD methodology provides a principled solution whose theoretical guarantee (Theorem 3) cleanly quantifies the trade-off between perturbation size and approximation quality. These two halves — diagnosing the problem and providing a tunable solution — are somewhat decoupled, meaning the analytical contribution has value even independent of the PTD solver, and the PTD concept remains valid even if one implements the solver differently.
 
 ## Suggestions
 
-1. **Provide implementation details for the E optimization** — describe the variable parameterization, initialization scheme, how the eigen-decomposition constraint is handled in gradient descent, optimizer settings, stopping criterion, and computational cost. Without these the PTD method cannot be replicated.
+1. **Fully specify the optimization algorithm for Equation (4).** This is the single most important revision. At minimum, the paper should state: the optimization variables (e.g., optimize over E while computing Ṽ_H, Λ̃ via an off-the-shelf eigendecomposition); how gradients of κ(Ṽ_H) are obtained (e.g., via automatic differentiation through the eigendecomposition, or a surrogate); the initialization scheme for E (e.g., a small random matrix or zeros); the stopping criterion; and the computational cost (e.g., wall-clock time to solve for n=64, 128). Pseudocode or a reference to a standard library routine would be ideal.
 
-2. **Report standard deviations over 3–5 seeds for LRA results**, particularly for the S5-PTD vs S5 comparison where the improvement is only 0.15%.
+2. **Clarify the "10% of sinusoidal noises" description.** Specify whether this refers to the fraction of samples, the noise amplitude, or another quantity. Report the state dimension n used in the robustness experiment. These are small changes that greatly improve reproducibility.
 
-3. **Add a non-adversarial robustness experiment** (e.g., random Gaussian noise, or a standard corruption benchmark) to broaden the evidence beyond the worst-case Fourier-mode noise.
-
-4. **Provide the mapping from γ to ‖E‖/‖A_H‖** in the ablation to help practitioners select the hyperparameter.
+3. **Consider adding a random-perturbation baseline** in the ablation study (or at least discussing it in the text) to help readers understand whether the optimization is necessary or whether simple random perturbation already achieves similar robustness.
 
 ## Score and Decision
 
-The paper makes genuine contributions: a fine-grained theoretical analysis revealing why S4D is non-robust, a principled PTD methodology with theoretical guarantees, and empirical validation showing S4-PTD meaningfully outperforms S4D on LRA (86.58% vs 84.89%) and withstands Fourier-mode noise that breaks S4D. The S5-PTD results are marginal but honestly framed. The main weakness is the underspecified E optimization procedure, which is addressable in revision but currently harms reproducibility. No fundamental flaw undermines the core claims.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

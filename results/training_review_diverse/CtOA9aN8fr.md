@@ -1,28 +1,20 @@
-Now I have a thorough understanding of the paper and all claims. Let me produce the consolidated review.
-
-## Final Consolidated Review
-
----
+Now I have a thorough understanding of the paper and all the review claims. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper introduces Density-Based Pruning (DBP), a method for pruning large-scale multimodal datasets for CLIP training. DBP extends SSP-Pruning by replacing fixed cluster balancing with a complexity-guided allocation: it defines a per-cluster complexity measure Cⱼ = d_inter,ⱼ × d_intra,ⱼ (product of inter- and intra-cluster distances) and uses this to determine how many samples to keep from each cluster, keeping fewer from dense/similar clusters and more from sparse/diverse ones. The pipeline also includes SemDeDup deduplication and CLIP-score filtering. On LAION-CAT-440M, DBP reaches 65.44% ImageNet zero-shot accuracy with the 112M subset, outperforming the full dataset baseline while using ~27% of the training compute. On DataComp Medium, it achieves competitive state-of-the-art results across 38 tasks.
-
----
+This paper proposes Density-Based Pruning (DBP), a method for pruning web-scale multimodal datasets for CLIP training. DBP extends SSP-Pruning by replacing its fixed cluster-balancing score with a per-cluster complexity measure (product of inter- and intra-cluster distances), so that simpler/denser concepts are pruned more aggressively while complex/sparse concepts retain more samples. The method is validated on LAION (starting from LAION-CAT-440M, deduplicating to 277M, then pruning to 84M–222M subsets) and on DataComp Medium. On LAION, a 112M DBP subset achieves 65.44% ImageNet zero-shot accuracy, outperforming the OpenCLIP-ViT-B/32 baseline while using ≈27% of the training compute. On DataComp Medium, DBP achieves a new best ImageNet zero-shot accuracy and is competitive across 38 evaluation tasks.
 
 ## Strengths
 
-1. **Novel complexity-guided allocation yields real compute savings without performance loss.** The key idea — using d_inter × d_intra as a per-cluster complexity measure to guide non-uniform sampling — is intuitive, simple, and empirically effective. On LAION, DBP with 112M examples outperforms the full LAION-CAT-440M baseline (64.1% vs 63.0%) while using only 27.7% of the training compute (Fig. 1, Section 5.1). The improvement over the full-baseline is a clean, controlled comparison that directly demonstrates the value of complexity-aware pruning.
+- **Concept-adaptive pruning via cluster complexity.** The core idea—replacing the fixed cluster-balancing of SSP-Pruning with a per-cluster complexity measure Cⱼ = d_inter,ⱼ · d_intra,ⱼ—is well motivated and directly supported by the experiments. Figure 6 (right) shows DBP outperforms SSP-Pruning across all cluster-balancing ratios on LAION-50M, and Table 5 (referenced) shows the same on LAION-CAT-440M. This cleanly demonstrates that adapting pruning rates by concept complexity adds value beyond uniform cluster balancing.
 
-2. **Strong results on the DataComp Medium benchmark.** DBP achieves 68.0% ImageNet zero-shot accuracy on DataComp Medium, surpassing T-MARS (66.5%) on three of four task families (ImageNet, VTAB, retrieval) while using a smaller dataset (Table 1). This validates the method's transferability beyond the LAION setting.
+- **Strong empirical results on two large-scale benchmarks.** On LAION, training on a 112M subset (27% of the compute) yields ImageNet zero-shot accuracy of 65.44%, exceeding the OpenCLIP-ViT-B/32 baseline (62.92%). On DataComp Medium, DBP achieves a new best ImageNet zero-shot accuracy and outperforms T-MARS on three of four task families (ImageNet, VTAB, Retrieval), while being transparent about T-MARS's advantage on distribution shifts.
 
-3. **Systematic hyperparameter ablation on LAION-50M.** The paper tunes the number of nearest neighbors for d_inter, cluster balancing ratio, temperature τ, and number of k-means clusters, showing stable performance across a range of values (Fig. 7). This provides practical guidance for users.
+- **Thorough hyperparameter ablation.** The paper systematically ablates the number of nearest neighbors for d_inter, temperature τ, number of clusters k, and cluster-balancing ratio on LAION-50M (Fig. 7). This provides practical guidance for deploying the method and strengthens reproducibility.
 
-4. **Empirical analysis of embedding modality and model size.** The paper compares DINOv2-L/14, CLIP, SentenceBERT, and BLIP embeddings (Fig. 6 — distilled DINOv2-L/14 works best), and validates that DBP outperforms CLIP-score filtering across S/32, B/32, and L/14 model sizes (Table 2). These ablations strengthen the empirical grounding.
+- **Transferability demonstrated across datasets, model sizes, and training regimes.** DBP is validated on two distinct web-scale datasets (LAION-CAT-440M and DataComp Medium) with different pre-processing, across model sizes S/32, B/32, L/14 (Table 6 referenced), and shows consistent improvement when training is extended from 5 to 45 epochs (Fig. 6 left).
 
-5. **Clear demonstration that longer training closes the gap to the full dataset.** DBP on 30M examples from LAION-50M, trained for 45 epochs, closes the performance gap to the full 50M dataset (Fig. 5 left), showing the pruned subset retains representative information.
-
----
+- **Insightful analysis of task-specific training dynamics.** The paper identifies that ImageNet distribution-shift and retrieval tasks benefit more from longer training (gains of 0.9 and 0.8 p.p. with extended iterations) compared to ImageNet and VTAB. This provides practical guidance for deploying pruned datasets.
 
 ## Weaknesses
 
@@ -30,67 +22,61 @@ This paper introduces Density-Based Pruning (DBP), a method for pruning large-sc
 None.
 
 ### Major
-None.
+None. The paper's core contributions are sound and supported by evidence.
 
 ### Minor
 
-1. **The abstract and conclusion contain an inaccurate baseline comparison.** The abstract states: "we are able to outperform the LAION-trained OpenCLIP-ViT-B/32 model on ImageNet zero-shot accuracy by 1.1p.p." However, Section 5.1 reports the 112M DBP subset achieves 65.44% vs OpenCLIP-B/32's 62.92% — a difference of 2.52 p.p., not 1.1 p.p. The 1.1 p.p. value matches the Figure 1 caption comparison (64.1% vs 63.0% over the *LAION-400M* full dataset baseline, not OpenCLIP-B/32). The conclusion (line 363) repeats the "1.1 percentage points" claim about OpenCLIP. This is an internal inconsistency: the numbers in the body do not support the claim in the abstract and conclusion. The authors should correct this to accurately reflect which baseline is being compared, and the proper gap. This does not affect the validity of the experiments themselves, but it is misleading as written.
+- **Numerical inconsistency between abstract/figure caption and main text.** The abstract claims a +1.1 p.p. improvement over OpenCLIP (matching the figure caption's "64.1% vs 63.0%"), but the main text (line 219) reports 65.44% vs 62.92% = +2.52 p.p. for the 112M subset. These numbers are inconsistent. While both support the same qualitative conclusion (DBP outperforms the baseline with less compute), the discrepancy in the claimed margin is confusing and should be resolved. The authors should clarify which subset size each number corresponds to and ensure consistency across the abstract, figure captions, and main text.
 
-2. **The SemDeDup cosine similarity threshold is not reported.** The paper states it uses SemDeDup to reduce LAION-CAT-440M to LAION-DeDup-277M and DataComp Medium to 96M (80% retention), but never reports the critical hyperparameter — the cosine similarity threshold that determines which pairs are considered duplicates. Without this, the deduplication step is not reproducible. The threshold should be reported.
+- **Incomplete stage-wise ablation.** The pipeline has three stages (deduplication → CLIP-score filtering → DBP). While the paper does reference a "SemDeDup" line in the figures (providing some baseline), it does not fully isolate the contribution of each stage. A clean decomposition—(a) raw dataset, (b) after deduplication only, (c) after deduplication + CLIP-score filtering, (d) after adding DBP—would make the marginal benefit of DBP clearer. The comparison against SSP-Pruning partially addresses this (isolating the complexity measure), but the role of the deduplication and CLIP-score pre-processing steps could be more transparent.
 
-3. **No SSP-Pruning baseline on DataComp.** The paper convincingly shows DBP > SSP-Pruning on LAION (Fig. 3, Table 3), but on DataComp the comparison to SSP-Pruning is absent. Since the DataComp experiments use a different scale and preprocessing pipeline, including this comparison would directly confirm that the complexity-aware allocation, not some other design choice, drives the improvement in this second large-scale setting. The claim that DBP improves over SSP-Pruning is already supported on LAION, so this is not fatal, but it leaves a small gap in the evidence chain.
+- **Computational cost of the pruning pipeline itself is not discussed.** The paper reports that training is reduced to 27% of the original cost, but does not report the cost of computing DINOv2 embeddings for 280M images, running k-means, or solving the quadratic program. If this pre-processing cost is small relative to training, it strengthens the efficiency claim; if large, it should be accounted for. A brief discussion would help readers assess the overall cost-benefit trade-off.
 
-4. **No ablation on the form of the complexity metric.** The paper uses Cⱼ = d_inter × d_intra without comparing to alternatives (e.g., d_inter + d_intra, or using only one component). While the hyperparameter study (Fig. 7) covers other aspects of the method, the choice of product over sum or single-component metrics is not empirically justified. An ablation here would strengthen the paper's foundation.
+- **No justification for the multiplicative form of the complexity measure.** The paper uses Cⱼ = d_inter,ⱼ · d_intra,ⱼ. This is a plausible heuristic, but alternatives (sum, squared terms, learned weighting) are not discussed or ablated. The empirical success partially justifies the choice, but an ablation over alternative formulations would strengthen the argument.
 
-5. **Computational overhead of the filtering pipeline is not reported.** The paper focuses on training compute savings (27.7% of baseline) but does not report the one-time cost of the DBP pipeline: feature extraction with DINOv2-L/14 for ~280M images, k-means clustering on that scale, and QP solving. For a paper about efficiency, this overhead matters for understanding net savings. Even a rough estimate would help.
+- **Hyperparameters tuned on 5-epoch training not validated at longer (32+ epoch) training.** The optimal cluster count (k=500) and temperature (τ=0.1) are selected on LAION-50M with only 5-epoch training. Whether these choices remain optimal under the longer training schedules used for the main LAION results (32 epochs) is not verified.
 
 ### Trivial
-- The paper does not discuss failure modes or limitations (e.g., sensitivity to the pretrained encoder's embedding space, Euclidean k-means vs. cosine-distance clustering in the complexity computation).
-- The figures in the appendix referenced by "\input{Tables_ICLR/...}" are not present in the extracted text (parser artifact, not a paper error).
 
----
+- **No variance estimates.** Large-scale CLIP training on single seeds is standard practice, so this is not a significant concern, but even 2-3 seeds would improve confidence.
+
+- **Minor formatting/wording issues.** (None that affect scientific content, per the parsing note.)
 
 ## Nice-to-Haves
-- The SSP-Pruning comparison on DataComp (see Minor #3) would be straightforward to add and would fully close the evidence gap.
-- An ablation on the complexity metric form (product vs. sum vs. single-component) would strengthen the paper's empirical foundation.
-- A brief limitation section discussing cases where the method might underperform (e.g., if the pretrained encoder's embedding space is misaligned with downstream tasks) would improve completeness.
 
----
+- A tabular decomposition of the pipeline stages (raw data → deduplication → CLIP-score → DBP) with performance after each step would cleanly settle the ablation question.
+- A brief comparison of alternative formulations of the complexity measure (e.g., sum of distances, squared terms).
+- A brief paragraph on the computational overhead of the pruning pipeline itself (embedding extraction, k-means, QP).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+The following points from the original reviews were removed per the filtering rules:
 
-- **"The wrapfigure placement in the introduction is awkward"** — Pure formatting/style nitpick. Removed per hard rules.
-- **"The commented-out block in the source (lines 118–136) appears to be a draft paragraph"** — Parser artifact; this is not present in the published paper. Removed per hard rules about missing appendix content.
-- **"The training duration mismatch between LAION-CAT full baseline and DBP subsets"** — The paper acknowledges this and explains the full baseline follows OpenAI's procedure. The comparison is asymmetric favoring the baseline (trained longer). Per hard rules: asymmetry favoring baselines is allowed. Downgraded from the reviewer's framing; the point is not a real weakness.
-- **Strength Finder's generic strengths about "addressing an important problem" or similar** — These are generic and lack specific citation or concrete content. Removed to Removed Points.
-- **"No error bars or variance across training runs are reported"** — Single-seed training is standard for large-scale experiments of this type. This is not a real weakness at this scale. Moved to Removed Points.
-- **"The paper does not clarify if T-MARS was the previous SOTA on the leaderboard at the time of submission"** — The paper states "current state of the art on the DataComp leaderboard (T-MARS)" which is a citation-anchored claim. The leaderboard status at submission is not verifiable but also not material to the technical contribution. Removed as a point that does not affect the core claim.
+1. **"State-of-the-art claim is overstated" (Harsh Critic, Critical Issue #3):** The paper specifically claims SOTA on *ImageNet zero-shot accuracy* on DataComp Medium and explicitly acknowledges that T-MARS performs better on distribution shifts. The claim is appropriately qualified. Removed as factually incorrect criticism.
 
----
+2. **"Missing ablation isolating DBP from deduplication" framed as fatal (Harsh Critic, Critical Issue #2):** The paper does reference a "SemDeDup" baseline in the figures (line 229: "SemDeDup in the Fig."). The reviewer's framing as an unknown contribution is too harsh. Downgraded to Minor and reframed.
+
+3. **"Unclear and inconsistent baseline" framed as fatal ambiguity (Harsh Critic, Critical Issue #1):** The paper clearly identifies two baselines: (a) OpenCLIP-ViT-B/32 trained on LAION-400M, and (b) a LAION-CAT-440M baseline trained by the authors. The real issue is a numerical inconsistency in the reported margins, not a conceptual confusion about what is being compared. Reframed as Minor.
+
+4. **Generic strengths from Strength Finder:** All listed strengths were substantive and cited specific evidence; none were dropped.
 
 ## Novel Insights
 
-The most novel observation across the reviews is the identification of an internal inconsistency in the paper's own numbers: the abstract and conclusion claim 1.1 p.p. improvement over OpenCLIP-B/32, but the body data (Section 5.1) shows 65.44% vs 62.92% = 2.52 p.p. The 1.1 p.p. number in the paper actually corresponds to a different comparison (Fig. 1: 64.1% vs 63.0% over the LAION-400M full dataset). This numerical mismatch is a genuine writing error that escaped the authors' attention. Beyond this, the reviews do not reveal any deeper insight that the paper itself does not already present.
-
----
+None beyond the paper's own contributions. The reviews did not surface any novel perspective that the paper itself does not already articulate.
 
 ## Suggestions
 
-1. **Correct the baseline comparison in the abstract and conclusion.** The abstract's claim of "1.1p.p. over OpenCLIP-ViT-B/32" is inconsistent with the 2.52 p.p. gap shown in Section 5.1. Either update the number to match the body (2.52 p.p.) or clarify that the 1.1 p.p. refers to the LAION-400M full-dataset baseline comparison (Fig. 1 caption), and separately report the OpenCLIP-B/32 comparison with its correct margin.
-2. **Report the SemDeDup cosine similarity threshold** used for deduplication on both LAION and DataComp.
-3. **Add the SSP-Pruning baseline on DataComp** to close the evidence gap, or explain why the LAION comparison is sufficient.
-4. **Add a brief ablation on the form of the complexity metric** (e.g., product vs. sum vs. single-component) even if on LAION-50M only.
-5. **Include a rough estimate of the one-time computational overhead** of the filtering pipeline (feature extraction, clustering, QP) so readers can assess net efficiency.
+1. **Fix the numerical inconsistency** between the abstract (+1.1 p.p.), the wrapfigure caption (64.1% vs 63.0%), and the main text (65.44% vs 62.92%). Ensure a single consistent margin is reported for the best configuration, or clearly disambiguate which subset size each number refers to.
 
----
+2. **Add a stage-wise ablation table** (or clarify in the existing figures) showing: raw dataset → after SemDeDup → after CLIP-score filtering → after DBP, with performance and dataset size at each step.
+
+3. **Briefly discuss the computational cost of the pruning pipeline** (embedding extraction, clustering, QP) relative to the training cost savings.
+
+4. **Add variance information** (e.g., a second seed or bootstrap uncertainty) for at least the main LAION result.
 
 ## Score and Decision
 
-**Overall assessment:** The paper makes a solid empirical contribution. DBP is a simple, intuitive improvement over SSP-Pruning that demonstrably works at web scale. The core experiment — beating the full LAION-CAT-440M baseline with 27% of the compute — is compelling. The weaknesses are real but moderate: the baseline attribution error in the abstract/conclusion needs correction, the dedup threshold should be reported, and a couple of ablations are missing. None of these threaten the core claims. The paper's originality is moderate (it improves an existing pruning framework rather than inventing a new paradigm), but the contribution is practically valuable and well-validated at scale.
-
-The paper should be **accepted** pending correction of the inconsistent baseline numbers in the abstract/conclusion and reporting of the dedup threshold.
+The paper makes a clear, well-motivated contribution with strong empirical validation on two large-scale benchmarks. The weaknesses are minor and addressable—none threaten the core claims. The numerical inconsistency should be fixed, but this is a presentation issue, not a methodological flaw. The method is sound, the experiments are largely well-designed, and the paper offers practical value to the community.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

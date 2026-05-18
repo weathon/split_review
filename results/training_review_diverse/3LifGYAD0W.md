@@ -1,24 +1,24 @@
-Now I have all the information needed to produce the final consolidated review. Let me synthesize everything carefully.
+Now I have thoroughly verified all claims against the paper. Let me synthesize the final review.
 
 ---
 
 ## Summary
 
-This paper proposes QueRE, a method that extracts low-dimensional black-box representations from LLMs by feeding the model its own greedy output along with elicitation questions and recording the probability of "yes" responses. These features are used to train linear classifiers for three applications: predicting instance-level model correctness, detecting adversarially influenced system prompts, and distinguishing between model architectures/sizes. The method requires only top-k logprobs (or sample-based approximations), making it applicable to closed-source APIs.
+This paper proposes QueRE, a method that extracts black-box "representations" from LLMs by querying them with ~50 elicitation questions (e.g., "Do you think your answer is correct?") and using the resulting token probabilities as features for linear predictors. The authors demonstrate these representations can be used to predict instance-level model performance, detect adversarially influenced models, and distinguish between different model architectures/sizes — all without white-box access to model internals. A key finding is that QueRE often matches or outperforms white-box linear probes (RepE, Full Logits) across multiple tasks and models.
 
 ## Strengths
 
-- **Black-box features match or outperform white-box methods for predicting LLM performance.** Across six QA datasets (NQ, SQuAD, HaluEval, BoolQ, DHate, CSQA) and multiple model families (LLaMA2, Mistral, GPT-3.5, GPT-4o-mini), QueRE's AUROC often equals or exceeds RepE (hidden-state probe) and Full Logits (vocabulary distribution), both of which require white-box access (Figures 2–3). This is the paper's central empirical contribution.
+- **Black-box method that matches or outperforms white-box probes on performance prediction.** Across open-ended QA (Natural Questions, SQuAD) and MCQ tasks (HaluEval, BoolQ, DHate), linear predictors trained on QueRE features achieve AUROC comparable to or exceeding white-box baselines like RepE (hidden state probes) and Full Logits (vocabulary distribution), despite using only top-\(k\) token probabilities (Figs. 2, 3). This directly supports the paper's central claim.
 
-- **Near-perfect detection of adversarially influenced system prompts in a black-box setting.** QueRE achieves >0.98 AUROC distinguishing clean GPT-3.5 from versions given harmful system prompts (Figure 5), detects subtle bug-introducing prompts in code generation (Table 2, AUROC=0.996), and generalizes to multi-class discrimination among several harmful vs. helpful prompts (Table 1, 99% accuracy). This extends white-box detection (MacDiarmid et al., 2024) to the black-box regime.
+- **Near-perfect detection of adversarially influenced LLMs in a completely black-box setting.** QueRE-based classifiers achieve AUROC close to 1.0 in distinguishing clean GPT-3.5 from GPT-3.5 affected by adversarial system prompts (e.g., "answer questions incorrectly") on BoolQ and DHate (Fig. 5), and on a subtle code-bug insertion task (Table 2). This extends prior white-box detection (MacDiarmid et al., 2024) to black-box access.
 
-- **Accurate discrimination between model architectures and sizes using only black-box outputs.** A linear classifier on QueRE features achieves >0.98 accuracy distinguishing among LLaMA2-7B, 13B, 70B, and Mixtral-8x7B on BoolQ, while all baselines perform near chance (Figure 4). This directly addresses the practical problem of API model verification.
+- **Reliably distinguishes between different model architectures and sizes.** Using QueRE features, a linear classifier achieves near-perfect accuracy in discriminating LLaMA2-7B/13B/70B and Mistral-7B/Mixtral-8x7B on BoolQ, far outperforming baselines (Fig. 4). This has practical value for detecting misrepresented models in APIs.
 
-- **Theoretical and empirical validation of sampling-based approximation.** Proposition 1 provides a convergence rate for logistic regression when true probabilities are estimated from samples. Figure 7 confirms that approximating GPT-3.5's top-5 probabilities with 20–200 samples causes less than a 2-point AUROC drop, making the method applicable to APIs that do not expose logprobs.
+- **Works with sampling approximations when top-\(k\) probabilities are unavailable.** When approximating true probabilities via \(k\) samples, QueRE shows less than a 2-point AUROC drop on HaluEval and DHate (Fig. 7), demonstrating practical applicability to APIs that do not expose log-probs.
 
-- **Better calibration than standard confidence scores.** Figure 6 shows QueRE predictors have substantially lower ECE than models using only answer probabilities on HaluEval and SQuAD, which is important for high-stakes deployment.
+- **Predictors trained on QueRE are better calibrated than competing approaches.** QueRE achieves lower Expected Calibration Error compared to using answer probabilities on HaluEval and SQuAD (Fig. 6), an important property for high-stakes applications.
 
-- **Non-vacuous generalization bounds.** Table 3 reports lower bounds on accuracy (e.g., 91.5% for LLaMA2-7B on BoolQ) using PAC-Bayes theory, enabled by the low feature dimension.
+- **The finding that random sequences of natural language yield competitive results (Table 4) is genuinely interesting.** This suggests the diversity of prompts — rather than their semantic content — drives much of the predictive power, with practical implications for ease of deployment.
 
 ## Weaknesses
 
@@ -27,60 +27,43 @@ None.
 
 ### Major
 
-- **Main experimental results lack uncertainty estimates.** The headline results (Figures 2–5, Tables 1–2) report point estimates of AUROC and accuracy without error bars, confidence intervals, or replication across random seeds. Given the paper's central claim that QueRE "matches or outperforms" white-box methods, it is impossible to assess whether the observed differences are reliable or within noise. The authors demonstrate they have the machinery for uncertainty estimates (Figure 7 uses 5 random seeds; Figure 8 reports standard error), making its absence from the main experiments a significant omission. This weakness undermines the strongest claims but does not invalidate the overall contribution — the trends are consistent across many tasks and models.
+- **Missing error bars / variance estimates on all main comparative results (Figs. 2, 3, 4, 5; Tables 1, 2).** Figures 2–5 and Tables 1–2 report AUROC and accuracy as single point estimates without any indication of variance, confidence intervals, or significance tests. The paper's central claim — that QueRE "often matches or outperforms" white-box baselines — cannot be rigorously evaluated without knowing whether observed differences are reliable or within noise. For example, in Figure 2 the gap between QueRE and Full Logits on SQuAD with Llama2-70B appears very small (~0.01–0.02 AUROC). Since the authors *do* report error bars in the ablations (Fig. 7, Fig. 8), this omission in the main results is a clear gap. This is the most significant weakness and directly affects confidence in the paper's headline contribution. *However, this is addressable: the authors could provide bootstrapped confidence intervals or multi-seed results.*
 
 ### Minor
 
-- **The generalization bounds rely on a strong independence assumption that is not empirically verified.** The paper acknowledges (line 150) that the bounds require representations to be independent of downstream task data, noting this is "verifiable via works in data contamination" or "valid on datasets released after LLM training." While this justification is reasonable, the paper provides no empirical check of whether the assumption actually holds for the settings in which the bounds are reported. Since the bounds are presented as "another added benefit" (line 145) rather than a core contribution, this is a minor issue.
+- **Proposition 1 (theoretical convergence rate) is presented without sufficient support.** The convergence rate \(O(1/\sqrt{n} + \sqrt{n}/k)\) is stated as a formal proposition but neither derived nor traced to a specific theorem. The text says it "follows from relatively standard results" without elaboration. The citation to Stefanski & Carroll (1985) provides context for covariate measurement error but does not directly yield the claimed rate. Since the empirical demonstration (Fig. 7) already shows the sampling approximation works well, this theoretical section adds little; as presented, it is more of a sketch than a rigorous proposition.
 
-- **Adversarial detection experiments use only one model (GPT-3.5).** While the paper tests several adversarial styles (harmful prompts, bug-introducing code prompts) and shows robustness to system prompt variation (Table 1), all adversarial detection uses GPT-3.5. Testing on additional model families would strengthen the generality claim.
+- **Generalization bounds rely on an unverified independence assumption.** Table 3 presents generalization bounds computed under the assumption that QueRE features are "independent of the downstream task data." The paper acknowledges this limitation and notes it is "verifiable via works in data contamination" but does not actually verify it for the datasets used (BoolQ, SQuAD, HaluEval, etc.). Given that standard LLM pretraining data likely overlaps with some of these benchmarks, the assumption is not trivially satisfied. The bounds are not essential to the empirical contribution, but presenting them without verification weakens their force.
 
-- **The random-sequences finding could benefit from deeper analysis.** The paper reports (Table 4) that random GPT-4-generated text sequences can sometimes match or exceed meaningful elicitation questions. The finding is discussed and linked to interpretability pitfalls (line 187), which is appropriate. However, the paper does not analyze what properties of the random sequences drive performance (e.g., length, perplexity, diversity), leaving an interesting question unexplored. This is not a flaw in the method but a missed opportunity to deepen understanding.
+- **Limited diversity in adversarial detection prompts.** The main adversarial detection experiments (Fig. 5, Table 2) each use a single adversarial system prompt per task. While Table 1 tests six helpful/harmful prompts, the core detection results rely on one prompt each (e.g., "answer questions incorrectly" for QA, "secretly insert bugs" for code). The paper's claim of "robustness to variations in the system prompt" is based on Table 1 only. The results are strong, but generalizing to a broader distribution of adversarial prompts or more subtle manipulations is not fully demonstrated.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
 
-- A brief discussion of computational cost (number of API calls per instance, practical guidance on choosing the number of elicitation questions) would help practitioners adopt the method.
-- A comparison with simple black-box alternatives such as asking the model to rate its confidence on a Likert scale, or with an ensemble of few-shot prompts, would further situate QueRE relative to other black-box approaches.
+- **Add a discussion of computational cost.** Using ~50 elicitation questions per instance requires ~50× the forward passes compared to a single confidence score. A brief note on latency/throughput tradeoffs for deployment would strengthen the practical contributions.
+- **Explore why random sequences of natural language work.** The finding in Table 4 is interesting but under-discussed. A brief exploration of whether this reflects a property of autoregressive models (any linguistic context probes the same latent uncertainty) would deepen the paper's contribution.
+- **Expand adversarial detection to include a small held-out set of unseen adversarial prompts** (different phrasings, different types of misbehavior) to strengthen the generality claim.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **"Remarkably can often outperform" is too strong (Abstract).** The abstract uses "often outperform" which is appropriately qualified. The paper's own summary (line 95) says "often matches or outperforms." The results in Figures 2–3 support this qualified claim. REMOVED: the criticism overstates the issue.
-
-- **Method section does not make multi-part design explicit.** The paper explicitly states at line 51: "In addition to these probabilities... we also append: (1) pre- and post-confidence scores... and (2) the distribution over possible answers." This is clearly described. REMOVED: the criticism misreads the paper.
-
-- **RepE comparison asymmetry.** The paper states (line 80) that RepE and Full Logits "cannot be applied to black-box language models and should be seen as strong comparisons that assume more information than our approach." The asymmetry favors the baselines (they have more information), making QueRE's competitive performance more impressive, not less. REMOVED: not a valid weakness.
+- **Strength 5 (Theoretical analysis as a core strength):** Removed because the verified weakness about insufficient support undermines treating this as a standalone strength. The empirical demonstration (Fig. 7) stands on its own.
+- **"Clarify the RepE baseline" suggestion:** The paper already states "RepE (Zou et al., 2023a), which extracts the hidden state of the LLM at the last token position in its representation reading" — this is explicit enough; training a linear probe on extracted features is standard and does not need restatement.
+- **"Full Logits presentation is misleading" observation:** The paper's Figure 2 caption already notes "full logits for the GPT models is an approximation of a sparse vector with nonzero values for the top-5 logits from the API," which adequately informs the reader. QueRE appending these same top-5 probabilities is transparent, and outperforming Full Logits is a valid ablation showing elicitation questions add signal.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews converge on the paper's central finding — that simple black-box queries can extract representations competitive with white-box probes — without adding a fundamentally new perspective. The main value of the review process is in identifying the evidential gap (lack of error bars) and confirming that the random-sequences finding is interesting but underexplored.
+The most interesting finding that emerges across the reviews is that the method's power appears to come more from *diversity of prompts* than from their semantic content. The result that random sequences of natural language sometimes outperform meaningful elicitation questions (Table 4) suggests QueRE is probing the model's latent distributional space in a way orthogonal to interpretable self-reflection. This raises deeper questions about what these "representations" actually capture — they may be encoding model uncertainty in a distributed manner across diverse linguistic contexts rather than through any specific introspective capability.
 
 ## Suggestions
 
-- **Add error bars or confidence intervals to all main experimental figures (Figures 2–5).** Replicate the main experiments over at least 3–5 random train/test splits or seeds. This single change would substantially strengthen the paper's central claim.
-- **Either remove the generalization bounds section or empirically verify the independence assumption** for the specific settings reported.
-- **Expand adversarial detection to at least one additional model family** (e.g., LLaMA or Mistral) to support the generality claim.
-- **Provide a brief analysis of the random-sequences finding** — at minimum characterize what kinds of random text work well (token diversity, perplexity, length) to clarify whether the benefit is driven by diversity or some other property.
+1. **Add variance estimates** (bootstrapped confidence intervals or multi-seed runs) to all main comparative figures and tables. This is the single most impactful improvement.
+2. **Either strengthen Proposition 1** with a proper derivation or a precise reference, or remove the formal proposition framing and present the convergence reasoning as a sketch.
+3. **Acknowledge the independence assumption more transparently** in the generalization bounds section, and either verify it for the specific datasets or frame the bounds as conditional.
+4. **Add a brief discussion** of why random sequences of language yield competitive representations — this could become a strength of the paper with deeper analysis.
 
 ## Score and Decision
 
-This is a solid paper with a clever, practical method, broad experimental scope, and generally positive results across three distinct applications. The main weakness — absence of uncertainty estimates in headline results — is real but addressable and does not invalidate the contribution. The evidence is strongly suggestive and consistent across many settings. I recommend acceptance.
-
-**Originality**: Good — the idea of using response probabilities to elicitation questions as black-box features is novel and well-motivated.
-
-**Importance**: High — black-box interpretability is a timely and practically significant problem.
-
-**Claims support**: Moderate — strong qualitative support but weakened by missing error bars on key comparisons.
-
-**Soundness**: Good overall; the ablations and sampling analysis are well-executed.
-
-**Clarity**: Good, though some organizational improvements would help.
-
-**Value to community**: High — the method is simple, model-agnostic, and immediately usable by practitioners.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

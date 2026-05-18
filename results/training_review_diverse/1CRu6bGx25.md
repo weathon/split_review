@@ -1,20 +1,20 @@
-Now I have all the information needed. Let me synthesize the final review.
+Now I have a thorough understanding of the paper and can verify the reviewer claims against the actual content. Let me compose my final consolidated review.
 
 ## Summary
 
-This paper proposes FI (First-order local Influence), a theoretically grounded influence measure for LLMs/VLMs based on information geometry. The key theoretical contribution is reparameterization invariance (Theorem 2.3), which addresses a known limitation of other measures like Jacobian norm that change under scaling transformations. Empirically, the paper shows that sparsifying only 2–3% of highest-FI parameters causes catastrophic performance loss (up to 75% on MMLU), and applies FI-guided protection to quantization and model merging.
+This paper proposes FI (First-order local Influence), an information-geometric stability measure for LLMs/VLMs that quantifies local sensitivity to perturbations in inputs or parameters. The key theoretical contribution is reparameterization invariance (Theorem 2.3), which avoids scaling artifacts that plague Euclidean-gradient measures like the Jacobian norm. Experiments demonstrate that FI can identify vulnerable input pixels in VLMs, locate fragile parameters via sparsification, and guide channel-selection strategies for quantization and model merging. However, the empirical validation is substantially weaker than the paper's claims warrant.
 
 ## Strengths
 
-- **Reparameterization invariance (Theorem 2.3):** The paper proves that FI is invariant under diffeomorphic reparameterizations, directly addressing a limitation of Jacobian norm, Cook's influence, and sharpness measures. The concrete illustration with ReLU homogeneity (scaling symmetry in MLP layers) grounds this theoretical advantage — showing that unlike FI, Jacobian norm varies under scaling transformations that leave model behavior unchanged. This is a genuine theoretical contribution.
+1. **Invariance under reparameterization (Theorem 2.3)** — A genuine theoretical advantage. The paper correctly identifies that neural networks with ReLU activations have weight symmetries (scaling invariance), and proves that FI remains constant under diffeomorphic reparameterizations while standard measures like the Jacobian norm do not. This addresses a known limitation of Euclidean-gradient-based importance measures and is well-motivated via the Fisher-Rao metric on the perturbation manifold.
 
-- **FI identifies genuinely fragile parameters:** Sparsifying only 2–3% of highest-FI parameters in Qwen2-7B drops MMLU accuracy from ~70% to below 20%, while random sparsification at the same rate leaves performance nearly intact (Figure 3). This stark contrast validates that FI captures meaningful component-level fragility, not random noise.
+2. **Clear mathematical framework** — The construction of the perturbation manifold, the metric tensor \(G_\omega\), and the closed-form solution (Theorem 2.4) are presented rigorously. The handling of low-rank \(G_\omega\) via compact SVD and reparameterization to \(\nu = \Lambda_0 V_0^\top \omega\) (Section 2) provides a tractable computational path for the otherwise problematic low-dimensionality issue in LLMs.
 
-- **Cross-modal vulnerability detection:** FI heatmaps on VLM image inputs (Figure 1) highlight specific pixels — not whole objects — whose masking induces hallucination. The cross-modal prompt analysis (Figure 2) further shows that even "safe" prompts leave residual vulnerable regions. This demonstrates FI's granularity beyond whole-object or whole-region approaches.
+3. **FI identifies fragile parameters more effectively than random selection** — Section 3.2 (Figure 3) shows that sparsifying 2–3% of high-FI parameters can reduce MMLU accuracy by up to 75%, while random sparsification of the same proportion causes negligible loss. This establishes that FI captures genuine parameter sensitivity, and the effect size is dramatic.
 
-- **Broad evaluation across model families and scales:** Experiments span Qwen2-7B, LLaMA2, LLaMA3, and models from 1.5B to 13B parameters, on both knowledge retention (MMLU) and instruction-following (Alpaca-eval). Table 1 shows consistent trends across these models.
+4. **FI-guided channel protection improves quantization outcomes** — Section 3.3 shows that protecting only 5% of high-FI channels in FP16 while aggressively quantizing the rest recovers over 90% of the performance loss with only 0.1 GB extra memory, and consistently outperforms random/low-FI channel selection across subjects.
 
-- **Demonstrated utility in downstream applications:** Protecting high-FI channels during 1-bit quantization improves accuracy by up to 50% on MMLU-Business (Figure 5), and excluding high-FI parameters during model merging yields 15–20% improvement on mathematical benchmarks (Table 2). These results suggest practical value.
+5. **FI-guided exclusion reduces forgetting in model merging** — Table 2 shows that excluding the top-10% high-FI parameters from arithmetic merging yields 15–20% improvements on math benchmarks compared to random exclusion, demonstrating that FI identifies domain-critical parameters.
 
 ## Weaknesses
 
@@ -23,55 +23,55 @@ None.
 
 ### Major
 
-- **No comparison to alternative influence measures in experiments.** The paper's experiments compare FI-guided selection only against random selection (sparsification, quantization, merging). The paper itself notes that alternative measures exist — Jacobian norm, Cook's influence, Hessian-based methods — and claims FI is theoretically superior due to invariance. Yet no experiment compares FI against any of these alternatives on the same tasks. For sparsification: does FI identify different parameters than gradient magnitude or Hessian trace? For quantization: does FI-based channel selection outperform weight-magnitude or activation-range-based selection? For merging: does FI-Protect outperform TIES-Merging or DARE? Without these comparisons, the paper cannot support the claim that FI provides unique practical value beyond what simpler alternatives already offer. The evidence establishes that FI identifies *some* important parameters (better than random), not that FI is *distinctively useful*.
+1. **No comparison to existing importance/salience measures for sparsification.** The parameter sensitivity experiments (Section 3.2) compare FI-guided sparsification only against *random* sparsification. This is a minimal sanity check — every sensible importance measure should outperform random. Without comparisons to gradient magnitude, diagonal Fisher information, Hessian-based criteria, or Jacobian norm, the paper cannot support its implied claim that FI provides a *practical advantage* over simpler alternatives. A reader cannot tell whether the dramatic effects in Figure 3 are unique to FI or would be equally achieved by any reasonable importance measure.
 
-- **Weak baselines in quantization and merging applications.** The quantization experiment compares high-FI channel protection to low-FI channel protection only. The merging experiment compares FI-Protect to random-protect only. Neither baseline is a competitive standard from the literature (e.g., weight-magnitude channel selection for quantization, TIES or DARE for merging). Claiming practical value requires showing FI-guided approaches are at least competitive with existing methods, not merely better than a random policy.
+2. **External perturbation analysis is a single anecdotal example.** Section 3.1 studies one image from ScienceQA with one model (Qwen-VL). No statistics, no success rate, no evaluation across multiple images, tasks, or models. The paper notes that masking random pixels does not cause the same error, but does not quantify what fraction of random 10-pixel masks cause errors, nor compare to alternative salience maps (gradient-based, occlusion, integrated gradients). This does not establish that FI reliably detects vulnerable pixels — it only shows that a particular example is consistent with FI being useful.
+
+3. **Computational feasibility is unaddressed.** The paper provides no runtime, memory, or scaling analysis for computing FI. For parameter-level analysis on models with billions of parameters, the cost of computing and inverting (via SVD) the Fisher information metric per perturbation component is non-trivial. The paper uses \(L=5, N=10\) for sequence generation but provides no analysis of variance, convergence, or whether these values are sufficient. Without any discussion of computational cost, the claim of a "practical" or "universal" stability measure is unsupported. (The paper does acknowledge computational limitations in the conclusion — "develop methods that can accelerate the computation" — but this does not substitute for analysis.)
 
 ### Minor
 
-- **Unexplained notation \(R_0\) in the SVD computation.** In the FI computation derivation (end of Section 2), the matrix \(R_0\) appears in the final expression: \(\nabla f(\omega_0)^\top (V_0 R_0)^\top \Lambda_0^{-2} (V_0 R_0) \nabla f(\omega_0)\) without any definition. Earlier, the SVD is \(B_0 = V_0 \Lambda_0 U_0\) and the transformation is \(\nu = \Lambda_0 V_0^\top \omega\). This makes the derivation impossible to follow from the text alone — an implementer cannot reproduce the computation. Even if \(R_0\) is a rotation matrix arising from non-uniqueness of the SVD, it must be defined.
+1. **No discussion of sensitivity to the choice of objective function \(f\).** All experiments use \(-\log P(y_{\text{pred}}|x,\theta,\omega)\) as the objective. The paper does not discuss whether results would change under alternative choices (e.g., entropy, margin-based objectives), making it unclear how robust FI rankings are to this design decision.
 
-- **External perturbation analysis is purely anecdotal.** The VLM pixel vulnerability experiment (Section 3.1) is conducted on a single image from ScienceQA. The claim that "masking top-10 FI patches induces hallucination" is supported by qualitative confidence scores but not quantified across multiple images (e.g., attack success rate). The cross-modal prompt analysis shares the same limitation — interesting but not statistically validated.
+2. **Title overclaims relative to demonstrated scope.** The title calls FI a "Universal Stability Measurement," but the experimental validation is limited to three model families (Qwen, LLaMA2, LLaMA3) up to 13B parameters, one VLM (Qwen-VL), and one image for external perturbation. "Universal" is not supported.
 
-- **No variance or significance reporting.** All tables and figures report point estimates without error bars, confidence intervals, or significance tests. Given that FI computation for sequence generation involves sampling (N=10), and sparsification/quantization results are likely sensitive to initialization and data split, the reliability of the reported numbers is unclear.
-
-- **The term "stability" is used broadly but FI technically measures local (first-order) sensitivity under infinitesimal perturbations.** The connection between high FI and vulnerability to finite perturbations (e.g., actual quantization or merging) is empirical rather than formally argued, which is fine, but the framing could be more precise.
-
-- **Hyperparameter \(L=5\) (context horizon for sequence generation FI) is not justified**, and no sensitivity analysis is provided. Similarly, the sampling size \(N=10\) for estimating per-token FI is used without checking whether this is sufficient for stable estimates.
+3. **The sequence generation extension (Equations 5–8) has limited empirical impact.** Table 1 reports results using only one aggregation method (\(L=5\) fixed horizon) and one model family comparison. The discounted variant (\(\mathbf{FI}_{\text{seq}}^{\infty,\gamma}\)) is never evaluated, and the per-token FI analysis is not visualized or analyzed qualitatively.
 
 ### Trivial
-- The paper references "Equation 4" in the pixel experiment, but equations are not numbered in the visible text — this is likely a formatting issue.
+
+- In the paragraph before Table 1, the paper refers to "average Fisher Information (FI)" rather than the defined term "First-order local Influence (FI)." This is a minor terminological inconsistency that does not affect technical content.
 
 ## Nice-to-Haves
-- An empirical validation of the invariance property (e.g., scaling parameter groups and showing FI rankings stay consistent while Jacobian norm changes) would ground the theoretical claim in practice and is a natural companion to Theorem 2.3.
-- Clarify how channel-level FI is aggregated from individual parameter FI values — this is relevant for reproducibility of the quantization experiments.
+
+- A dedicated empirical demonstration of the invariance property itself: e.g., apply the scaling transformation \(T_k\) to ReLU layers and show that FI remains constant while the Jacobian norm changes. This would directly validate the paper's core theoretical selling point.
+- A comparison of FI to at least one existing importance measure (e.g., gradient magnitude) for the sparsification experiments.
+- A runtime and memory breakdown for FI computation on a 7B model.
+- For the quantization experiment, the paper could show whether GPTQ's or AWQ's internal importance metrics produce similar or different channel rankings to FI.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
 
-1. **Formatting issue about Equation 1:** The harsh critic notes a possible formatting artifact in the distance formula (split "l o g"). Per rule 5, formatting artifacts from PDF parsing are removed — they are not author errors.
-2. **"The connection between high FI and vulnerability to adversarial perturbations is not formally argued"** — This conflates a missing theoretical guarantee with what the paper actually provides (empirical correlation). The paper's goal is empirical demonstration, not formal proof of causality.
-3. **Strengths from Strength Finder:** All identified strengths were retained as they are specific, citation-grounded, and do not conflict with verified weaknesses.
+These points are flagged to be removed; treat them with caution:
+
+- **"The paper never defines what 'stability' means beyond local sensitivity."** — Removed because the paper *does* define stability operationally: FI quantifies the change in the objective function relative to perturbation distance on the manifold. This is a standard local-sensitivity definition and is clearly stated (Definition 2.2, surrounding text).
+- **"Comparing to GPTQ/AWQ for quantization."** — Removed because the paper proposes a *channel-selection strategy* (which channels to keep at high precision), not a complete quantization algorithm. Comparing FI-guided selection to GPTQ/AWQ is comparing different things; the paper's within-method comparison (FI vs. random) is appropriate for its stated goal. The suggestion is scope creep.
+- **"The paper's own example does not rule out that simple object detection would do as well."** — Removed because this is speculative and unsupported. The paper's claim is that FI identifies particularly *vulnerable* pixels (whose perturbation flips the answer), not that FI uniquely identifies relevant objects. A salience map and an object detector measure different things.
+- **"The reviewer questioned whether the computation can scale to 70B."** — Removed because the paper states "models of varying sizes, from 1.5B to 13B parameters," and the reviewer's 70B example is scope creep. The paper's scope is clearly stated.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews mostly converge on the same assessment: the theoretical contribution (invariance) is genuine and interesting, but the experimental validation is underpowered because it never compares FI against alternative importance measures. The reviewers do not uncover fundamentally new observations about the method itself — they correctly identify a gap between the paper's theoretical framing and its experimental support.
+
+The reviews reveal that the paper's strongest structural vulnerability is the gap between its *theoretical* contribution and its *comparative* validation. The invariance property (Theorem 2.3) is theoretically principled and genuinely solves the scaling-ambiguity problem for gradient-based importance measures in ReLU networks. However, the paper never directly demonstrates this empirically — it proves the invariance but does not show a case where it *matters* by comparing FI rankings to Jacobian-norm rankings under parameter rescalings. The weakest link is not that FI fails to capture sensitivity (it clearly does, outperforming random), but that the experiments do not establish whether FI captures sensitivity *better* or *differently* than simpler existing methods. This makes the paper feel incomplete: a theoretical advance paired with a proof-of-concept that stops short of demonstrating practical superiority.
 
 ## Suggestions
 
-1. **Add at least one experiment comparing FI to an alternative influence measure** — gradient magnitude and Hessian trace-based importance are natural starting points. Show on the parameter sparsification task that FI rankings differ from these alternatives, and that the difference matters for accuracy under sparsification.
-2. **Replace the "low-FI" / "random" baselines in quantization and merging with competitive alternatives** — at minimum weight-magnitude-based channel selection for quantization and TIES-Merging for model merging.
-3. **Define \(R_0\)** and correct the SVD-based computation derivation so an implementer can follow it without external references.
-4. **Add error bars** (e.g., across random seeds or data subsets) to Figures 3, 5 and Tables 1, 2.
-5. **Run the VLM pixel vulnerability experiment across multiple images** and report attack success rate (fraction of images where masking top-FI pixels changes the answer).
-6. **Provide a sensitivity analysis or justification for \(L=5\) and \(N=10\).**
+1. Add at least one existing importance measure as a baseline for the sparsification experiments (e.g., gradient magnitude, diagonal Fisher information, or Jacobian norm). Without this, the paper cannot support claims of practical advantage.
+2. Expand the external perturbation study to more images and quantify success rates. Even 10–20 examples with statistics would dramatically strengthen this section.
+3. Include a direct empirical demonstration of invariance: rescale ReLU layer parameters by \(k\) and show FI unchanged while Jacobian norm changes. This would validate the paper's core theoretical selling point.
+4. Provide a brief computational cost analysis (runtime, memory) for FI computation on a 7B model, even if approximate.
+5. Soften the title's "Universal" claim or scope it to reflect the experimental coverage.
 
 ## Score and Decision
 
-This paper has a genuine theoretical contribution — reparameterization invariance is a real and potentially important property for influence measures in neural networks with scaling symmetries. The empirical evidence that FI identifies *some* important parameters (vs. random) is clear. However, the experimental validation has a major gap: without comparing FI against any existing influence measure (gradient magnitude, Hessian trace, weight magnitude), the paper cannot substantiate that FI provides unique or superior value. The baselines in the application experiments are uniformly weaker than what the literature standard expects. The paper is a solid starting point but does not yet provide sufficient evidence for its claimed contributions.
-
-**Score: 5.0**
-
-**Decision: Reject** (with encouragement to resubmit after adding comparisons to alternative influence measures and strengthening baselines — the core theoretical idea has merit).
+The paper has a solid theoretical core — the information-geometric influence measure with reparameterization invariance is a genuine contribution that addresses a known limitation of gradient-based importance measures. The empirical results consistently show FI outperforming random baselines across multiple tasks, which is necessary but not sufficient evidence. The critical gap is the absence of comparisons to existing importance/salience measures, which prevents the paper from demonstrating whether FI offers practical advantages over simpler alternatives. The external perturbation study is a single anecdotal example, and computational feasibility is not analyzed. These weaknesses collectively mean the paper's evidence does not yet match the breadth of its claims.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

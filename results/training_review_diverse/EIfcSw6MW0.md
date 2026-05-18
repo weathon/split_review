@@ -1,95 +1,97 @@
-Now I have a thorough understanding of the paper and all the verified claims. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper. Let me write the consolidated review.
+
+---
 
 ## Summary
 
-The paper proposes Duet, a training method that aims to preserve clean accuracy during certified robustness training. The key idea is to use SVD to decompose weight matrices into rotation matrices (claimed to affect clean accuracy) and singular values (claimed to affect certified robustness), then align the rotation matrices between a pre-trained vanilla model and the certification model via a similarity loss. The method also uses low-rank approximation for efficiency.
+This paper proposes "Duet," a method for certified robustness training that aims to preserve clean accuracy by transferring rotation-matrix information from a pre-trained vanilla (non-robust) model to the certification model. The approach uses SVD to decompose weight matrices into rotation matrices (U, V^T) and singular values (Σ), then adds a similarity loss that aligns the certification model's rotation matrices with those of the vanilla model. A low-rank approximation is used to reduce computational cost. Experiments on CIFAR-10 report a +3.76% clean accuracy improvement with a −0.93% certified accuracy drop relative to a global-Lipschitz-regularized baseline.
 
 ## Strengths
 
-- **Novel identification of the source of the clean-accuracy degradation.** The paper argues, through an SVD decomposition lens, that certified robustness training over-regularizes singular values (via spectral norm scaling) while neglecting rotation matrices, which harms clean accuracy. This provides a more specific diagnosis than prior general observations about over-regularization. (Section 4.2, lines 109-111)
+- **Direct and quantified claim of clean accuracy preservation**: The paper reports +3.76% clean accuracy improvement and −0.93% certified accuracy degradation (contributions list, Section 1). This directly addresses a recognized problem in certified robustness — the clean-accuracy penalty — and provides concrete numbers, even though the baseline is specified only vaguely.
 
-- **The proposed fix — rotation matrix alignment — targets the diagnosed cause directly.** Rather than using generic distillation or multi-objective training, Duet explicitly preserves the unit-vector structure (U, V^T) of the weight matrices, which the paper argues is responsible for clean accuracy. This is a more principled intervention than ad-hoc regularization. (Section 4.4, Eq. 150)
+- **Rotation matrix similarity is empirically measured and improves**: The paper reports that rotation-matrix similarity between the vanilla and certification models increases from 77.8% (standard certified training) to 95.6% (with Duet) (Section 5). This provides direct evidence that the knowledge-transfer mechanism is working as intended.
 
-- **Low-rank approximation for practicality.** Section 4.3 describes using a truncated set of orthogonal unit vectors to approximate the rotation matrices, which selects important directions and reduces storage/computation. This addresses a real scalability concern. (Lines 126-134)
+- **Low-rank approximation for efficiency**: The method proposes using only a few orthogonal unit vectors (top-r) from the vanilla model's rotation matrices to reduce storage and computation (Section 4.3). This is a practical consideration that addresses a real deployment concern.
 
-- **High rotation matrix similarity is reported (95.6% vs 77.8% for standard certified training).** This provides a direct measurement that the mechanism is operating as intended, even if the metric itself is not fully defined. (Section 5, line 180)
-
-- **The method is designed as a plug-in to existing certified training frameworks.** The similarity loss is added to the existing training objective, making it compatible with BCP-style training without requiring a fundamentally new training paradigm. (Section 4.1, Algorithm 1 reference)
+- **Novel angle of attack on the clean-accuracy problem**: Identifying the role of rotation matrices (as distinct from singular values/spectral norms) in clean accuracy degradation is a genuinely different perspective from prior work, which has focused on regularization strength, warm-up schemes, or local Lipschitz computation.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The central quantitative claims are not backed by a visible results table.** The introduction states a +3.76% clean accuracy improvement and −0.93% certified accuracy decrease over a global-Lipschitz baseline, but the experiment section contains no numerical table showing these values. Results are presented only via figure references (Figures 2 and 3, which are image placeholders in the text). The baseline numbers for BCP (Lee et al., 2020) and Local Lipschitz (Huang et al., 2021) are never given in the text. Without a table reporting clean accuracy, certified accuracy, and standard deviations for all methods, the reader cannot verify the claimed improvement. This is the single most critical weakness — the paper's headline quantitative contribution is not evidenced in a verifiable form.
+1. **Central motivation is asserted without empirical support.**  
+   Section 4.2 claims that certified robustness training makes singular values "similar" and that "the maximum singular value σ₁ is the same as the other singular values," which allegedly "disables" rotation matrices and causes clean accuracy to drop. **No evidence is provided for this claim** — no plots of singular value distributions, no comparison of σ₁/σ₂ ratios between vanilla and certified models, no analysis of whether certified models actually have flatter singular value spectra. This claim is also mechanically questionable: Lipschitz regularization controls the *product* of spectral norms across layers, not the equality of singular values within a single weight matrix. The paper provides no argument or evidence connecting the two. Without this diagnosis, the motivation for the proposed loss is much weaker, and the paper reads as a solution in search of a problem.
 
-- **The method is underspecified to the point of irreproducibility.** (a) The total training objective is never stated — how Loss_sim (Eq. 150) is combined with the certified robustness loss (e.g., the BCP worst-logit loss) is not specified, and the weighting hyperparameter λ is absent. (b) All training hyperparameters (learning rate, batch size, number of epochs, optimizer, weight decay, warm-up schedule) are omitted. (c) The paper says it uses "either ReLU or MaxMin as the activation function" (line 167) without specifying which was used for which experiment. (d) The low-rank approximation is described conceptually but it is unclear whether the certification model's rotation matrices are also approximated during training or only the vanilla model's are. These gaps mean the method cannot be reproduced from the paper as written.
+2. **Experimental reporting is critically incomplete.**  
+   The paper reports only *differences* in accuracy (+3.76% clean, −0.93% certified) relative to a baseline described as "previously trained certified robustness model that only utilized global Lipschitz regularization" (contributions, Section 1). The absolute clean and certified accuracies of the baseline (and of Duet) are never given. The vanilla model's accuracy is reported (90.06%), which is useful as an upper bound, but without baseline numbers the reader cannot assess whether a 3.76% gain is from a low or already-competitive starting point. Similarly, no standard deviations or multi-run statistics are reported. The paper mentions comparing against both global Lipschitz (Lee et al., 2020) and local Lipschitz (Huang et al., 2021) methods, but no absolute results for either are presented. This makes it impossible to verify the claimed improvement or situate it within the literature.
 
-- **No standard deviations, error bars, or multiple trials.** Every reported number appears to come from a single run. In a setting with well-known training variance (certified robustness training is notoriously sensitive to initialization and hyperparameters), single-run results are not credible evidence.
+3. **Evaluation is limited to a single setting.**  
+   Experiments are conducted only on CIFAR-10 with one architecture (6 conv + 2 FC), one perturbation type (ℓ₂), and one perturbation radius (36/255). No results on CIFAR-100, Tiny ImageNet, ℓ∞ perturbations, or other standard architectures (e.g., ResNet) are provided. This is acceptable for a preliminary methodological paper, but the claims of general applicability ("practical training method," "wide range of scenarios") are not supported by the evidence.
 
 ### Minor
 
-- **Factual inaccuracy in the explanation.** Line 119 states: "the maximum singular value σ1 is the same as the other singular values, which results in equal variations in the weight matrix across all directions." This is not generally true — singular values of certification model weight matrices are not identical. The intended intuition (that spectral norm regularization makes singular values *more similar* to each other than in a vanilla model) may be correct, but the statement as written is false and could mislead readers.
+4. **The similarity loss formulation is provided without justification or ablation.**  
+   The loss \( L_{sim} = \sum_l \| \frac{\|\sigma_{cer}^l\|}{\|\sigma_{van}^l\|} Rota_{van} - \frac{\|\sigma_{van}^l\|}{\|\sigma_{cer}^l\|} Rota_{cer} \|_2 \) (Section 4.4) uses a specific reciprocal scaling with spectral-norm ratios. The paper does not explain why this particular form is correct, derive it from any principle, or ablate it against simpler alternatives (e.g., direct cosine similarity between U and V matrices, Frobenius norm of UU^T differences, or standard logit-level KD). Without this, the reader cannot tell whether the specific form matters or whether any rotation-alignment loss would work.
 
-- **The rotation matrix similarity metric is never defined.** The paper reports "average similarity" of 77.8% vs. 95.6% but never specifies whether this is cosine similarity, angular distance, Frobenius-norm based, or something else. Without a definition, these numbers are uninterpretable.
+5. **No ablation of the low-rank approximation.**  
+   Section 4.3 motivates low-rank approximation to "select important rotation matrix information and reduce computational cost," but no experiments vary the rank r or measure the trade-off between r, clean accuracy, and certified accuracy. It is unclear how many singular vectors are needed and whether the approximation actually preserves clean accuracy.
 
-- **No computational cost comparison.** The paper criticizes local Lipschitz methods (Huang et al., 2021) for being expensive but does not report training time, per-iteration cost, or peak GPU memory for Duet. Since the method adds SVD computation plus an extra forward pass through the vanilla model, its own cost should be quantified.
+6. **Computational overhead is not reported.**  
+   The method adds a forward pass through the vanilla model, SVD computation (even with low-rank approximation), and an additional similarity loss term. The paper claims SVD is "offline" and "cheap" but provides no wall-clock training time or memory comparison against the baseline. This makes it difficult to assess practical deployability.
 
-- **No discussion of limitations.** The paper tests only one dataset (CIFAR-10), one architecture (6 conv + 2 FC), and one perturbation radius (36/255 l2). The conclusion does not acknowledge these scope restrictions or discuss when the method might fail.
-
-- **Section 4.2 is repetitive and lacks a clear logical bridge to the loss function.** The intuitive argument about rotation matrices vs. singular values is stated several times in similar language, but the derivation from this intuition to the specific form of Loss_sim (Eq. 150) — particularly the scaling factors ‖σ_cer‖/‖σ_van‖ and ‖σ_van‖/‖σ_cer‖ — is not explained. The reader is left wondering why those specific scaling terms appear.
+7. **Writing quality impedes understanding.**  
+   The paper contains numerous passages that are grammatically broken or unclear (e.g., repeated sentences in Section 4.4, garbled descriptions in the experiment section). The related work section reads as a list of citations without a clear narrative distinguishing the proposed approach. The paper would benefit from thorough editing.
 
 ### Trivial
 
-- The paper contains several minor typos and grammatical errors ("offilne" → offline, "matirx" → matrix, "confilct" → conflict, repeated phrases). These do not affect the technical content.
+- The paper does not specify training hyperparameters (learning rate, batch size, number of epochs, loss weighting coefficient between certified loss and L_sim). While hyperparameter details are often left to the code release, the combination of losses is a design decision that should be stated in text.
+- No discussion of limitations, failure cases, or settings where the method might not work (e.g., when the vanilla model's architecture differs from the certification model, or when the vanilla model has low accuracy).
 
 ## Nice-to-Haves
 
-- An ablation isolating the rotation-matrix similarity loss from the certified robustness loss would directly show that the improvement is due to the proposed knowledge transfer rather than other incidental factors.
-- Testing on an additional dataset (e.g., SVHN, Tiny ImageNet) and at least one more perturbation radius would strengthen the generality claims.
-- A discussion of how the method relates to knowledge distillation (since it uses a teacher model) would help position the contribution.
+- Validation of the singular-value-collapse hypothesis with plots of σ distributions for vanilla, standard-certified, and Duet-trained models.
+- Ablation studies comparing the proposed L_sim against simpler rotation-alignment losses and standard knowledge distillation.
+- Absolute accuracy tables with standard deviations for all methods (vanilla, global Lipschitz baseline, local Lipschitz, Duet) on a consistent evaluation protocol.
+- Sensitivity analysis on the low-rank approximation rank r.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+These points are flagged per the consolidation rules; they should be treated with caution:
 
-1. **Criticism about garbled matrix equations / broken formatting.** These are parser artifacts, not author errors, per hard rules.
-2. **"Algorithm 1 is referenced but its content is not visible."** The algorithm exists as an image in the original submission; the parser stripped it. Not an author error.
-3. **"The definitions themselves are correct but do not connect to the method."** This is a generic scope complaint about a preliminaries section — preliminaries are supposed to be background, not connected to the method in detail.
-4. **"The paper does not clearly state how its method differs from existing knowledge-distillation approaches."** The paper frames its contribution around SVD-based rotation matrix alignment, which is a different mechanism from standard logit-level or feature-level distillation. The difference is implicit in the formulation.
-5. **Strength Finder's claim that the paper "demonstrates" a +3.76% improvement.** This conflicts with the verified weakness that the experimental evidence is insufficiently presented. The paper *claims* this improvement, but the evidence does not meet the bar for "demonstrated."
+- **Algorithm 1 being an "unreadable image placeholder" / Figures and Tables unreadable** — These are parser artifacts. The original PDF would have legible figures, tables, and algorithm pseudocode. These observations are artifacts of text extraction, not paper flaws.
+- **"No textual description of the training loop, weight scheduling, hyperparameters"** (partially) — Hyperparameter omission is considered a nitpick per consolidation guidelines. The core training procedure is described in Algorithm 1 in the original submission.
+- **"The only comparison appears to be against a single global-Lipschitz method"** — Factually inaccurate. The paper explicitly mentions comparing against both global Lipschitz (Lee et al., 2020) and local Lipschitz (Huang et al., 2021) methods, even though absolute results are not tabulated.
+- **Strength (Strength Finder's output) about "Insightful diagnosis"** — Dropped because it conflicts with Verified Weakness #1 (central motivation is unsubstantiated).
+- **Strength about "Concrete training procedure via Algorithm 1"** — Algorithm 1 is an image in the original; its content cannot be evaluated from the text extraction.
+- **Strength about "Clear comparison to baselines"** — Overstates what is actually presented, as absolute numbers are missing.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface any interpretation of the method's implications that the authors themselves did not identify.
+None beyond the paper's own contributions. The reviews surface the standard concerns (missing absolute numbers, limited evaluation, unvalidated motivation) but do not offer a new synthesis or unexpected connection to other bodies of work.
 
 ## Suggestions
 
-1. **Add a complete results table** showing clean accuracy and certified accuracy (with standard deviations over ≥3 seeds) for: (a) the vanilla model (upper bound), (b) global-Lipschitz certified training (BCP), (c) local-Lipschitz certified training, and (d) Duet. This is the single most important improvement.
-2. **State the full training objective explicitly:** L_total = L_cert + λ · L_sim, specify λ, and describe how L_cert is computed (presumably via BCP's worst-logit formulation).
-3. **Report all training hyperparameters** (optimizer, learning rate and schedule, batch size, epochs, warm-up schedule, weight decay) and specify whether ReLU or MaxMin was used.
-4. **Define the rotation matrix similarity metric** — what mathematical operation produces the 77.8% and 95.6% numbers?
-5. **Correct the factual imprecision** about "all singular values being equal" on line 119; replace with a softer statement about singular values becoming more similar.
-6. **Add a computational cost table** comparing training time and GPU memory for all methods.
-7. **Include a limitations paragraph** acknowledging the single-dataset, single-architecture, single-radius scope.
+1. **Validate the core hypothesis**: Add an empirical analysis showing that certified robustness training does (or does not) collapse singular value spectra. Plot σ₁/σ_k ratios or singular value entropy across layers for vanilla, standard-certified, and Duet-trained models. This is essential to justify the paper's narrative.
+
+2. **Report absolute numbers in a proper table**: Include clean accuracy, certified accuracy, and their standard deviations (over multiple runs) for: (a) the vanilla model, (b) the global-Lipschitz baseline (Lee et al., 2020 / BCP), (c) a local-Lipschitz baseline (Huang et al., 2021), and (d) Duet. Report the baseline numbers you are improving from.
+
+3. **Ablate the similarity loss**: Compare the proposed L_sim against at least (i) a direct Frobenius-norm alignment of U matrices, (ii) an unweighted version without the spectral-norm scaling ratios, and (iii) standard feature-level or logit-level knowledge distillation.
+
+4. **Expand the evaluation**: Add results on CIFAR-100 and/or Tiny ImageNet, and at least one ℓ∞ perturbation setting, to demonstrate generality beyond the single ℓ₂ CIFAR-10 configuration.
+
+5. **State the full training objective explicitly in text**: Provide the total loss as \( \mathcal{L}_{total} = \mathcal{L}_{cert} + \lambda \mathcal{L}_{sim} \) (or whatever the form is), report λ and any scheduling, along with basic hyperparameters (learning rate, batch size, epochs, optimizer).
 
 ## Score and Decision
 
-**Originality:** Moderate — the SVD-based decomposition of the problem and the rotation-matrix alignment loss are genuinely novel angles within certified robustness.
+The paper identifies a real problem (clean accuracy degradation in certified robustness) and proposes a novel angle (rotation-matrix alignment via SVD) that has intuitive appeal. However, the core diagnostic claim motivating the method is presented without evidence, the experimental reporting is critically incomplete (no absolute accuracy numbers, single setting), and the loss formulation is not justified or ablated. These gaps are structural, not cosmetic, and prevent assessment of the claimed contribution.
 
-**Importance of research question:** High — the clean accuracy vs. certified robustness trade-off is a well-known bottleneck for deploying certified models.
+**Originality**: Moderate. The rotation-matrix perspective is relatively novel.
+**Importance**: Moderate. Clean accuracy preservation is a recognized challenge.
+**Claims support**: Weak. The central motivation is unvalidated, and the experiments lack essential detail.
+**Soundness**: Weak. Without absolute numbers or ablations, the main result cannot be verified.
+**Clarity**: Below average. The writing is often unclear, and key procedural details are missing from the text.
+**Value**: Moderate potential, but the current manuscript does not realize it.
 
-**Support for claims:** Low — the central quantitative claim is stated but not backed by a proper results table; the method is not reproducible.
-
-**Soundness of experiments:** Low — single dataset, single architecture, single seed, no standard deviations, no numerical table.
-
-**Clarity of writing:** Low to moderate — the method is conveyed but with significant gaps and repetitive prose.
-
-**Value to the research community:** Potentially moderate if the method is real and properly validated, but negligible in the current form because the evidence cannot be assessed.
-
-The paper identifies a real problem and sketches an interesting SVD-based approach. However, the experimental evaluation is thin to the point where the central quantitative claim is unverifiable from the text, and the method description is too incomplete to reproduce. These are not minor presentation issues — they are structural gaps that prevent the paper from making a believable contribution. A major revision that adds rigorous experiments, a proper results table, and a complete method specification could make this a viable paper.
-
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

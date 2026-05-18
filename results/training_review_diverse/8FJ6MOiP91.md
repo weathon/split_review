@@ -1,18 +1,18 @@
-Now I have a thorough understanding of the paper. Let me construct the consolidated review, carefully verifying each claim against the actual text.
+Now I have all the information I need. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes SwitchLoss, a method for imbalanced regression that randomly switches among three loss functions (MSE, Jensen-Shannon Divergence, and standard-deviation loss) during neural network training using a nested two-stage optimization (exploration over loss schedules + traditional training). A restricted variant SwitchLossR fixes MSE at every other switch to reduce search space. The method is evaluated on 15 standard datasets, 5 synthetic high-dimensional datasets, and 2 image-based age estimation datasets (AgeDB, IMDB-WIKI) against MSE and SMOGN baselines.
+This paper proposes SwitchLoss, a nested optimization scheme that dynamically switches between multiple loss functions (MSE, Jensen-Shannon divergence, and standard deviation discrepancy) during neural network training to handle imbalanced regression. A restricted-search variant, SwitchLossR, reduces computational cost by fixing MSE for alternating blocks. The method is evaluated on 15 standard regression datasets, 5 synthetic high-dimensional datasets, and 2 image-based age estimation datasets across multiple architectures.
 
 ## Strengths
 
-- **Novel optimization-centric perspective for imbalanced regression**: Unlike prior work based on resampling (SMOGN) or cost-sensitive weighting (DenseLoss), SwitchLoss manipulates the optimization trajectory by dynamically switching loss functions. This reframing is a genuinely different approach to the problem.
+1. **Novel and well-motivated framework.** The idea of switching loss functions during training to escape local minima in imbalanced regression is genuinely interesting and distinct from existing resampling and cost-sensitive approaches. The nested two-stage optimization (exploration over loss schemes + traditional training) is a clean formalization (Procedure 1).
 
-- **Concrete validation error reduction demonstrated**: On the Accel dataset with a (32,16,8) architecture, SwitchLoss achieves a ~50% reduction in validation error compared to standard MSE training (Figures 1–2), with the same number of epochs. This provides direct evidence that switching helps escape poor local minima caused by imbalance.
+2. **Demonstrated rare-region improvements on image datasets without degrading common regions.** Table 2 reports RMSE separately for few-shot, medium-shot, and many-shot regions on IMDB-WIKI and AgeDB. SwitchLossR improves performance across all regions (e.g., few-shot RMSE drops from 10.23 to 8.47 on AgeDB) while SMOGN actually worsens the many-shot region despite overall improvement. This directly supports the paper's core motivation.
 
-- **Broad evaluation across data types and architectures**: The paper tests on 22 datasets (15 standard, 5 synthetic high-dimensional, 2 image) using 4 different neural network architectures plus a deep ResNet, and includes per-region (many/medium/few-shot) analysis on the image datasets.
+3. **Addresses the under-explored problem of high-dimensional imbalanced regression.** The paper includes 5 synthetic high-dimensional datasets, a setting where SMOGN is known (and observed here) to underperform. SwitchLoss achieves higher win rates (75%) in this under-studied regime.
 
-- **Computationally efficient restricted variant**: SwitchLossR reduces the search space from 3^#switches to 2^(#switches/2) while remaining competitive, and outperforms SMOGN on the deep-learning image tasks. The paper also honestly notes cases where MSE outperforms SwitchLoss (less skewed distributions), which is a sign of intellectual honesty.
+4. **Careful experimental design with balanced validation/test splits and multiple architectures.** The paper explicitly splits data to ensure validation and test sets have uniform coverage across the target range (line 156), avoiding evaluation bias toward abundant regions. Testing four different architectures for standard datasets and ResNet for images shows the method is not architecture-specific.
 
 ## Weaknesses
 
@@ -21,65 +21,48 @@ None.
 
 ### Major
 
-- **Missing the most directly relevant baseline (DenseLoss)**. The paper cites DenseLoss (Steininger et al., 2021) as "a promising approach" (Section 2) but never evaluates it. DenseLoss is a cost-sensitive method designed for exactly the same task (imbalanced regression) and is the closest competitor to SwitchLoss's approach (operating on the loss/optimization rather than resampling data). Without this comparison, the claim in the abstract that SwitchLoss "surpasses prevailing state-of-the-art techniques dedicated to imbalanced regression" is unsupported. The paper shows SwitchLoss beats SMOGN (a resampling method) and plain MSE, but that is a weaker claim.
+1. **Unfair comparison: SwitchLoss uses 100–132 full training runs while baselines use a single run.** The generalized SwitchLoss runs 100 exploration cycles (each a complete training run) and selects the best model; the combined variant runs 132 cycles. The baseline "original data set with MSE loss" and SMOGN are each run once. The reported advantage could therefore reflect the well-known benefit of selecting the best model from many random initializations rather than anything specific to switching loss functions. The paper acknowledges this asymmetry only implicitly (line 173: "we adopt a single default parameter setting") but does not match the compute budget. To isolate the effect of switching, the baselines should be held to the same budget (e.g., train 100 MSE models with different seeds and pick the best, or average over multiple runs). This is the most serious weakness, as it undermines the central empirical claim.
 
-- **Insufficient result reporting prevents assessment of effect magnitude**. Table 1 reports only counts of "best-performing datasets per technique" — no actual RMSE values, no standard deviations, no per-dataset breakdown. The reader cannot tell whether a "win" is by 1% or 50%. Table 2 shows numeric RMSE for image datasets but provides no error bars, confidence intervals, or measures of variance. With no indication of run-to-run variability, the reliability of the results is unknown. Standard practice for empirical ML papers is to report means and standard deviations across multiple seeds.
-
-- **The "Combined" approach conflates more exploration with better methodology**. The Combined column takes the best result from SwitchLoss (100 exploration cycles) and SwitchLossR (32 cycles) — 132 total cycles. The paper presents this as a strength of the method, but it is simply the result of running more search. There is no control showing that 132 cycles of SwitchLoss alone, or 132 cycles of random hyperparameter search, would not achieve the same or better results. This makes the Combined comparison non-informative.
-
-- **No training hyperparameters reported**. The paper does not specify the learning rate, optimizer (Adam/SGD/etc.), batch size, weight initialization, regularization, or total number of epochs used in any experiment. The pseudocode lists "epochs" as a parameter and "#switches = 10" is mentioned, but no concrete values or ranges are given. This makes the experiments irreproducible.
+2. **Jensen-Shannon divergence and STD_loss are not specified enough to be reproducible.** The paper presents the standard JSD formula (Equation 2) and states it "assesses the dissimilarity between probability distributions" (line 108), but never explains how continuous-valued outputs \(y\) and predictions \(\hat{y}\) are converted into probability distributions. Are they binned? Estimated with a kernel? Computed over a mini-batch? Similarly, \(STD\_loss = \|\sigma(y) - \sigma(\hat{y})\|\) (Equation 3) does not specify whether \(\sigma\) is computed over a batch, the full dataset, or some fixed sample. Without these details the method cannot be reproduced, and the claim that JSD is used as a regression loss function is vacuous as written. The gradient computation for backpropagation also depends on how these quantities are constructed, but the paper is silent on this.
 
 ### Minor
 
-- **Method under-specification: batch-level statistics of JSD and STD_loss are never stated**. JSD measures divergence between two *probability distributions*, and STD_loss = ||σ(y) − σ(ŷ)|| requires a set of predictions to compute a standard deviation — both operate on batch-level statistics, not per-sample. The paper never states this explicitly, never discusses how batch-level gradients from these losses interact with the per-sample MSE gradient, and never addresses how optimizer state (momentum, adaptive LR) is handled when the loss function changes at switch epochs. While an experienced practitioner could infer the implementation, this ambiguity is an obstacle to reproducibility.
+3. **Missing a natural competitor (DenseLoss) despite citing it.** The paper describes DenseLoss (Steininger et al., 2021) in the related work as a "promising approach" (line 25) but does not include it in the experimental comparison. The abstract's claim of "surpassing prevailing state-of-the-art techniques" is incompletely supported without comparing against this directly relevant cost-sensitive method. While including every possible baseline is impractical, DenseLoss is the paper's own cited competitor and its omission narrows the scope of the claimed superiority.
 
-- **No ablation or sensitivity analysis**. There are no experiments isolating the contribution of each loss function (MSE↔JSD alone, MSE↔STD alone), no comparison to a fixed-combination loss (MSE+JSD+STD with fixed coefficients), and no sensitivity analysis for key hyperparameters (#switches, explores). Without these, the paper cannot distinguish whether the benefit comes from switching per se, from the specific loss functions chosen, or simply from having more search.
+4. **Performance reported only as "wins per dataset," hiding variance and effect size.** Table 1 counts how many times each method achieves the lowest RMSE per dataset/architecture combination, discarding the magnitude of differences and providing no estimate of variability. Standard deviations or confidence intervals across trials are absent. This makes it impossible to assess whether observed differences are statistically significant.
 
-- **SwitchLoss (generalized) not evaluated on image datasets**. The paper states this is due to "computational resource limitations" (Section 4.1.1). This is an honest limitation but it means the more interesting deep-learning results are only for the restricted variant, and the claim that SwitchLoss works on deep architectures is partially supported.
+5. **Region-specific (few-shot) metrics reported only for the two image datasets, not for the 20 standard/synthetic datasets.** The paper's central motivation is improving rare-region performance, and it defines a sensible many/medium/few-shot breakdown (Section 4.1.3). Yet this breakdown is only applied to the image datasets (Table 2), not the standard or synthetic datasets where it would provide essential evidence for the core claim. The overall RMSE can mask failures on rare regions.
 
-- **Two validation sets reduce SwitchLoss's training data without control**. The paper acknowledges (Section 4.1) that using two validation sets means SwitchLoss has less training data than the baselines. This is a conservative bias (hurting SwitchLoss) but the paper does not quantify or control for it.
+6. **Pseudocode refers to "test data set" for scheme selection (Procedure 1, line 69), conflicting with the text's description of a second validation set.** The paper explains that two validation sets are used (line 158) — one for early stopping, one for scheme selection — and that the final evaluation is on unseen data. This is a sound procedure, but the pseudocode's use of "test data set" is inconsistent and could mislead readers into thinking data leakage occurred. The nomenclature should be corrected.
 
-- **Generalized SwitchLoss not evaluated on image datasets**. (Duplicate of above — consolidating.) The restricted variant alone on deep architectures limits the generality of the claim.
+7. **No ablation study for key hyperparameters.** The default of #switches=10 is stated without any ablation or sensitivity analysis. The restricted pattern (MSE fixed for every other block) is said to have been "observed" to yield comparable results (line 139) but no supporting evidence is shown. The choice between random epoch-level switching, adaptive switching, or the proposed fixed-interval approach is not justified. These gaps make it hard to assess the robustness of the design.
 
 ### Trivial
-
-None.
+- The pseudocode nomenclature issue noted above (test vs. validation) should be fixed.
+- The time complexity is stated as \(O(e)\) where \(e\) is the number of exploration cycles, but this conflates the linear scaling of exploration cycles with the cost of each individual training run, which itself depends on dataset size and architecture.
 
 ## Nice-to-Haves
-
-- Compare against a fixed-weight combined loss (MSE + α·JSD + β·STD) to test whether *switching* is the critical ingredient or simply the inclusion of extra loss terms.
-- Sensitivity analysis for the number of switches and exploration cycles.
-- Per-dataset RMSE table (possibly in supplementary) so readers can assess effect sizes rather than just win counts.
-- Analysis of selection bias / overfitting due to picking the best out of many exploration cycles.
+- A wall-clock time comparison or budget-matched baseline (e.g., best-of-100 MSE runs) would directly address the main comparison concern.
+- Region-specific RMSE breakdowns for the standard and synthetic datasets would strengthen the central claim about rare-region improvement.
+- An ablation varying the number of switches and the loss function set (e.g., MSE + weighted MSE only, or MSE + MAE) would help isolate whether the benefit comes from switching per se or from the specific choice of JSD and STD_loss.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution.
-
-- **"Related work omits many classes of methods (weighted losses, curriculum learning)"** — Removed per instructions: missing-related-work criticisms cannot be verified without external sources.
-- **"Missing references to curriculum learning and loss scheduling"** — Same as above.
-- **"No theoretical justification for loss function choices"** — Weakened/removed: the paper provides a heuristic justification (Section 3.3) and this is an empirical methods paper; theoretical derivation is not the appropriate expectation.
-- **"Section 1 overclaims"** — Partially removed: the overclaim concern is better addressed by the missing-baseline point. The specific overclaim language is a consequence of the DenseLoss omission, not a standalone weakness.
-- **"Section 5 time complexity O(e) is trivial"** — Removed: while the observation is correct, complexity analysis is standard practice and not a weakness per se.
-- **"Pure formatting/style nitpicks"** — Removed per instructions.
-- Generic strengths from Strength Finder that lack specific evidence — filtered into this section.
+None. All of the harsh critic's substantive points are grounded in the paper and survive verification. Some are downgraded in severity (e.g., the test/validation nomenclature issue is kept as Minor rather than framed as data leakage, because the paper's text does describe the correct two-validation-set procedure). The reviewer's criticisms about formatting, missing appendix content, or existence of cited works were not present; no removals are needed.
 
 ## Novel Insights
-
-Beyond the paper's own contributions, the most striking pattern emerging from the reviews is that the paper's central tension — a genuinely novel optimization-centric idea held back by incomplete evaluation — mirrors a common failure mode in empirical ML papers: the contribution is interesting enough to warrant attention, but the presentation makes it impossible to assess *how* interesting. The 50% validation error reduction on Accel (Figures 1–2) is the single most compelling piece of evidence and suggests the idea has real merit, but it is buried in the discussion section and undercut by the missing DenseLoss baseline and the lack of variance estimates elsewhere. The reviews collectively suggest the paper would be substantially stronger with a narrower, better-controlled comparison set (MSE, SMOGN, DenseLoss, with full RMSE tables and error bars) rather than the current broad-but-shallow evaluation.
+None beyond the paper's own contributions.
 
 ## Suggestions
-
-1. **Add DenseLoss as a baseline** — this is the single highest-impact change. Without it, the SOTA claim is indefensible.
-2. **Replace Table 1 with a proper results table** showing per-dataset RMSE (averaged over architectures where appropriate) with standard deviations across multiple random seeds.
-3. **Ablate the switching mechanism**: compare random switching vs. fixed schedule vs. fixed combined loss to isolate what actually helps.
-4. **Control for the Combined comparison**: compare 132 cycles of SwitchLoss alone vs. 132 cycles of Combined to show the restricted search adds value beyond more search.
-5. **Specify all training hyperparameters** (optimizer, learning rate, batch size, total epochs) and clarify the batch-level semantics of JSD and STD_loss.
-6. **Tone down the SOTA claim** unless DenseLoss is included and outperformed. "SwitchLoss outperforms SMOGN and MSE on a majority of imbalanced regression benchmarks" is well-supported; "surpasses prevailing state-of-the-art" is not.
+1. **Run budget-matched baselines:** Train 100 MSE models with random seeds and report the best and average performance alongside SwitchLoss's 100-cycle result. This is the single most important experiment to validate the core claim.
+2. **Specify the JSD and STD_loss implementations precisely:** Describe how JSD's probability distributions are constructed from continuous values (binning scheme, kernel density estimate, or batch-level histogram), and state what window STD_loss's \(\sigma\) is computed over. Include gradient computation details or a reference.
+3. **Add DenseLoss as a baseline** for at least a subset of datasets, or explicitly explain why it cannot be directly compared.
+4. **Report per-region (few/medium/many-shot) RMSE** for all datasets, not just the image datasets.
+5. **Report means and standard deviations** for all methods over multiple runs, and consider a statistical significance test (e.g., paired Wilcoxon) for the win counts.
+6. **Include an ablation** varying #switches (e.g., 5, 10, 20) and the loss function set to confirm the source of improvement.
 
 ## Score and Decision
 
-The paper proposes a genuinely novel idea for imbalanced regression — dynamic loss-function switching — and provides some compelling evidence (50% validation error reduction on one dataset) and broad coverage (22 datasets, multiple architectures). However, the evaluation has three major gaps: (1) the most directly relevant baseline (DenseLoss) is cited but never compared against, making the SOTA claim unsupported; (2) results are reported as win counts without actual RMSE values or variance, preventing assessment of effect magnitude and reliability; and (3) the "Combined" improvement is confounded with additional search effort. Additionally, the method is under-specified (batch-level semantics of JSD/STD_loss not stated, no training hyperparameters reported), making it non-reproducible. These weaknesses are addressable but collectively undermine the paper's conclusions in its current form.
+This paper tackles an important and under-explored problem (imbalanced regression) with a genuinely novel idea (dynamic loss switching). The framework is clean, the motivation is clear, and the image dataset results showing per-region improvements are encouraging. However, the empirical evaluation has two severe flaws that prevent acceptance: (1) the comparison is fundamentally asymmetric (100+ training runs for SwitchLoss vs. single runs for baselines), so the claimed advantage cannot be attributed to the switching mechanism rather than to multiple-restart selection, and (2) two of the three loss functions (JSD and STD_loss) are not defined with sufficient precision to allow reproduction, making the method effectively unspecified. Additional issues — missing a cited competitor, no variance reporting, no per-region metrics for most datasets, and absent ablation studies — further weaken the submission. The core idea has genuine potential, but the paper in its current form does not provide credible evidence for its central claims.
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

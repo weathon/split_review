@@ -1,20 +1,16 @@
-Now I have all the information I need. Let me produce the final consolidated review.
+Now I have all the information needed. Let me carefully construct the final consolidated review.
 
 ## Summary
 
-DITTO (Demonstration ITerated Task Optimization) is a method for aligning LLMs to individual user preferences using fewer than 10 demonstrations. The core insight is that a handful of demonstrations can be cheaply expanded into a large online preference dataset by treating demonstrations as preferred over both the current and past policy outputs, then applying DPO. The paper evaluates DITTO on static author-style benchmarks (CMCC, CCAT50) using GPT-4 as evaluator, and in a user study (N=16) on email writing. Across both settings, DITTO outperforms SFT, SPIN, and few-shot/zero-shot prompting (including GPT-4 baselines) by substantial margins.
+This paper introduces DITTO (Demonstration ITerated Task Optimization), a method for aligning LLMs to individual users using fewer than 10 demonstrations. The key idea is to treat user-provided demonstrations as preferred over model-generated outputs (including from earlier training iterations), thereby constructing online comparison data for preference optimization via DPO. The paper evaluates DITTO on author-attribution static benchmarks (CMCC, CCAT50) using GPT-4 as an automatic judge, and through a user study (N=16) on email-writing tasks.
 
 ## Strengths
 
-- **Novel and well-motivated method for few-shot personalization.** DITTO addresses a genuine gap: existing RLHF requires thousands of pairwise comparisons from aggregated annotators, while prompting is brittle and tedious. Using demonstrations as feedback is a practical alternative grounded in the HCI tradition of programming by demonstration, and the paper makes this concrete with a clean algorithmic formulation (Section 3).
-
-- **Consistent empirical advantage across two evaluation paradigms.** DITTO outperforms all baselines on static benchmarks (Table 1: average 77.09% win-rate across CMCC and CCAT50) and in a user study with human raters (Table 2: 68.8% win-rate, significantly above all methods at p<0.05). The user study corroborates the static-benchmark findings on a different task with real participants, which is a genuine strength — two different evaluation modalities point in the same direction.
-
-- **Theoretical grounding connects DITTO to online imitation learning.** Section 3.3 derives DITTO from an adversarial reward–policy game, and Lemma 3.1 provides conditions under which DITTO can extrapolate beyond demonstrator performance. This gives a principled explanation for why the method works better than simple SFT imitation.
-
-- **Ablation studies validate key design choices.** Section 5.1 demonstrates that updating the reference policy degrades performance (70.1% → 45.8%), and that removing replay or inter-policy comparisons each reduces win rates (by 6.5 and 2 points respectively). These ablations justify DITTO's specific construction and make the contribution more credible.
-
-- **Sample-efficiency analysis (Figure 2) shows rapid improvement with few demonstrations.** Win rates roughly double for each additional demonstration from N=1 to N=3, supporting the central claim that very few demonstrations suffice.
+- **Strong empirical performance across complementary evaluations.** DITTO achieves 77.09% average win-rate on author-attribution tasks (Table 1) and 68.8% win-rate in the user study (Table 2), outperforming SFT, few-shot prompting, self-prompting, and self-play baselines. Improvements are statistically significant (ANOVA + Tukey, p<0.05), and consistent across both automatic and human evaluation — a pattern suggesting the effect is real rather than an artifact of any single evaluation modality.
+- **Order-of-magnitude improvement in sample efficiency.** Figure 3 shows that DITTO with 4 demonstrations matches or exceeds DPO trained on 500+ pairwise preference comparisons. This is a compelling demonstration of the paper's central thesis that demonstrations can serve as a highly efficient form of preference feedback, and it has practical implications for real-world deployment where user annotation effort is costly.
+- **Carefully designed ablation studies.** Section 5.1 isolates the contributions of replay comparisons (removal drops win-rate by 6.5 points), intermodel comparisons (2-point drop), and the fixed reference policy (updating π_ref degrades performance from 70.1% to 45.8%). These ablations confirm that the iterative, multi-source comparison design of DITTO is not gratuitous complexity but serves identifiable purposes.
+- **Realistic user study with blind evaluation.** The user study (N=16, 320 pairwise preferences) uses real email-writing tasks defined by participants, with pairwise comparisons done blinded to condition. The finding that even participants' self-authored prompts underperform DITTO (46.9% vs. 68.8%) underscores the difficulty of verbalizing preferences and the value of demonstration-based feedback as an interaction modality.
+- **Novel framing of demonstrations as a feedback modality for alignment.** The conceptual contribution — reframing alignment from demonstrations as an efficient, low-effort interaction for end-users, contrasting with costly pairwise annotation or principle-writing — is well-motivated and supported by the empirical results.
 
 ## Weaknesses
 
@@ -24,61 +20,58 @@ None.
 
 ### Major
 
-- **The primary static-benchmark evidence (Table 1) relies on GPT-4 as evaluator without human validation on those specific tasks.** The paper acknowledges the self-enhancement bias (Section 4.2) and conducts a separate user study, which provides partial corroboration. However, the user study covers only email writing (a different domain than the financial editorials, opinion pieces, and blog posts in CMCC/CCAT50), and does not directly validate that GPT-4's style-matching judgments on the static benchmarks align with human judgments. The paper cites prior work showing model-based authorship classification can be reliable, but does not provide a correlational study or calibration experiment for this specific evaluation setup. This means the large win-rate margins in Table 1 — the most broadly advertised quantitative result — rest on an automatic evaluator whose behavior on these exact benchmarks is unvalidated. A relatively small human evaluation (e.g., 50 pairwise judgments across several authors) would substantially increase confidence.
-
-- **Section 5.3 ("How do pairwise preferences compare against demonstrations?") is framed in a way that over-claims what the experiment actually tests.** The experiment compares DITTO (4 demonstrations, online iterative alignment) against DPO trained on up to 500 *synthetic* pairwise preferences sampled from a model (either the base policy or a demo-finetuned policy). These are not human-provided pairwise preferences. The title and conclusion ("demonstrations are an order of magnitude more sample-efficient than pairwise preferences") conflate "pairwise preferences as a feedback modality" with "model-generated synthetic preferences." The experiment is better described as comparing online iterative alignment (DITTO) against offline DPO on synthetic preference data — a useful ablation, but not a direct comparison of demonstrations vs. pairwise preferences as feedback modalities. To make the claimed comparison, one would need to contrast the same amount of human effort spent providing demonstrations vs. providing pairwise preference labels. As it stands, this section's framing is misleading and weakens the paper's central narrative about demonstrations vs. preferences.
+- **The static benchmark evaluation depends on GPT-4 as a judgment oracle without direct validation for this specific setup.** The paper's primary quantitative results (Table 1) are obtained by asking GPT-4 to judge which of two generated texts is more similar to a human reference in terms of author style. While the paper cites prior work claiming model-based classification can be reliable for authorship detection, and acknowledges a self-enhancement bias, the GPT-4 judgments are not validated against human judgments for this particular task and domain. The user study provides a partial cross-check, but it differs in task (email writing vs. author attribution), base model (GPT-4 vs. Mistral), and judge type (human vs. GPT-4), so it does not directly validate the automatic evaluation. The conclusion that DITTO achieves a 77% win-rate on style alignment rests on an unverified measurement instrument. The paper would be substantially strengthened by a human evaluation on a subset of the static benchmark data, even a modest one (e.g., 3 authors, 20 comparisons each).
 
 ### Minor
 
-- **Several hyperparameters are absent from the main text.** The paper mentions "at most K times" (Algorithm 1) and sampling M completions per demonstration, but K, M, learning rates, number of gradient steps per iteration, and exact batch sizes are not given in the main text (presumably deferred to an appendix that the parser strips). While standard for conference papers, this makes the main text less self-contained.
-
-- **Forgetting degradation on HumanEval is mentioned but not quantified.** The conclusion states "we evaluated forgetting on coding tasks with HumanEval, observing some degradation" but reports no numbers. Given that the paper claims degradation can be "mitigated entirely" by adapter routing, actual figures would be reassuring and strengthen the claims about practical usability.
-
-- **The GPT-4 evaluator prompt used for style matching is not provided in the main text.** The exact prompt is critical for understanding what GPT-4 is being asked to judge and for reproducibility. It presumably appears in the appendix, but a summary in the main text would help.
-
-- **The mixing ratios (70% online, 20% replay, 10% inter-policy) are empirically determined without theoretical justification or sensitivity analysis.** While this is acceptable for a new method, the ablation does not explore whether the method is robust to different ratios or tightly coupled to the specific numbers chosen.
+- **User study is limited to a single task type (email) with participants who are mostly prompting-experienced PhD students.** The study covers only email writing, not other domains (e.g., article writing, social media posts, code comments). Participants being familiar with prompting means the self-prompt baseline may be stronger than for typical end-users, which is disclosed but constrains generalization. Win-rate point estimates (68.8% for DITTO) are reported without confidence intervals, though statistical significance is established via ANOVA + Tukey. These factors do not undermine the positive results but limit the breadth of conclusions that can be drawn about generalization to non-expert users or other tasks.
+- **No systematic examination of robustness to imperfect or noisy demonstrations.** The method treats all demonstrations as categorically preferred over all model outputs, with no mechanism to downweight low-quality demonstrations. While the user study used demonstrations generated by editing GPT-4 outputs (likely reasonable but imperfect), there is no experiment testing how performance degrades with intentionally degraded demonstrations (e.g., typos, unnatural phrasing, off-target content). The paper mentions this as future work but does not examine it, which is relevant for practical deployment where users may provide hasty or suboptimal examples.
+- **The theoretical grounding (Lemma 3.1) provides a formal condition for extrapolation but does not connect to the algorithm's actual behavior.** The lemma states a condition under which the estimated policy can outperform the demonstrator, expressed in terms of the optimal policy's KL-regularized reward, the expert's expected reward, and KL-divergence terms. This is a general statement about any policy minimizing the DITTO objective — it does not establish that DITTO *satisfies* this condition, nor does it provide insight into when DITTO will succeed or fail in practice. The theory is presented as justification but is ultimately decorative rather than predictive. The paper's value comes from the algorithmic recipe and empirical results, not from the theory.
+- **SPIN is included as a baseline despite being designed for a different data regime.** The paper explicitly acknowledges that SPIN targets SFT-scale datasets (thousands of examples) and that applying it with 7 demonstrations leads to overfitting. Including SPIN is informative as a documentation of failure modes, but it inflates the apparent improvement of DITTO over self-play methods. This transparency mitigates the issue but does not eliminate it.
+- **The number of DITTO iterations (K) used in experiments is not specified.** The algorithm description mentions "at most K times" but the actual value used across experiments is not reported, making it difficult to assess the practical cost of the approach.
 
 ### Trivial
 
-None.
+- Forgetting analysis (HumanEval degradation) is mentioned in the limitations with a proposed mitigation (selectively dropping the LoRA adapter) but the degradation is not quantified.
 
 ## Nice-to-Haves
 
-- A small-scale human evaluation on a subset of the static benchmarks (e.g., 2–3 authors from CMCC, 50 pairwise judgments) correlating GPT-4's choices with human raters would significantly strengthen the paper's quantitative foundation.
-- Reporting quantified HumanEval scores (before/after DITTO, with/without adapter routing) would address the forgetting concern cleanly.
-- A brief mention of how K (the number of sampling rounds) is set in practice.
+- A human evaluation on a subset of the static benchmarks (e.g., 3 authors, 20 comparisons each) would directly validate the GPT-4 evaluation instrument and substantially strengthen confidence in the main results.
+- An experiment with deliberately corrupted demonstrations (varying degrees of typos, unnatural phrasing) would directly address the practical question of how careful users need to be when providing demonstrations.
+- Adding a second task type to the user study (e.g., article summarization or social media posts) with the same participants would show the method is not email-specific.
+- A comparison with human-annotated pairwise preferences (even a small set) in Figure 3 would help disentangle whether the iterative online process or the demonstration form itself drives the efficiency gain.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+These points are flagged to be removed; treat them with caution:
 
-- **"The self-prompt baseline offers a strong baseline"** — The *paper itself* states this as a feature (PhD students familiar with prompting making the baseline stronger), not a bug. The reviewer presents it as a concern about representativeness, but the paper correctly notes this favors the baseline and DITTO still wins.
-- **Various formatting/style nitpicks** (typos, punctuation, garbled text) — These are parser artifacts, not author errors.
-- **"Missing related works"** — Not verifiable without full literature knowledge.
-- **"Missing appendix content"** — The parser strips appendix content from all papers; it exists in the original submission.
-- **"The paper does not provide examples of prompts used during evaluation"** — This is partially about the GPT-4 evaluator prompt (kept in Minor above) and partially about evaluation prompts that would be in the appendix.
-- **"Methodological gap that misleads the reader about the primary contribution"** — This is the Section 5.3 framing issue, which I have kept in Major but with more precise language. The reviewer's phrasing ("misleads the reader about the primary contribution") overstates the impact — the paper's primary contribution is DITTO itself, not the comparison in Section 5.3.
-- **Criticism that K is "never given"** — K is described in the algorithm but the specific value is in the appendix. This is a presentation choice, not an omission that invalidates anything.
+- **"Proof is in a stripped appendix and cannot be checked"** — Removed per rule: the appendix is stripped by the parser, not absent from the original submission.
+- **"Interface and detailed instructions are in a stripped appendix, so this cannot be assessed"** — Removed per rule about missing appendix.
+- **"Analysis of demonstration selection (Fig. F.2) is in the appendix"** — Removed per rule about missing appendix.
+- **"The self-enhancement bias argument relies on Mistral being the base model, but the evaluation measures style similarity to human text"** — The paper does explicitly acknowledge this and argues that prior work shows model-based classification can be reliable for authorship detection. This is a known limitation the paper addresses, not an unacknowledged flaw.
 
 ## Novel Insights
 
-The reviews surface one genuinely novel observation beyond the paper's own contributions: the paper's comparison of DITTO against synthetic pairwise preferences (Section 5.3) raises an interesting question that the paper does not fully address — namely, whether the advantage of demonstrations over preferences is due to the modality itself or due to DITTO's online/iterative structure. The paper frames this as "demonstrations vs. preferences" but the experiment actually tests "online iterative alignment using demos vs. offline DPO on synthetic preferences." An experiment that controlled for the online/offline dimension (e.g., DITTO on synthetic preferences vs. DITTO on demonstrations, or online DPO on human preferences vs. DITTO) would cleanly separate the effect of feedback modality from the effect of the training procedure. This distinction could guide future work on personalized alignment.
+None beyond the paper's own contributions. The reviews do not surface any perspective on the work that the paper itself does not already articulate.
 
 ## Suggestions
 
-1. **Reframe Section 5.3** as a comparison between online iterative alignment (DITTO) and offline DPO on synthetic preference data derived from model samples. Remove the over-claim that this directly compares demonstrations vs. pairwise preferences as feedback modalities. The experiment is still informative as an ablation.
-
-2. **Add a small human validation study** for the GPT-4 evaluator on at least one static benchmark task. Even 50–100 pairwise human judgments correlating with GPT-4's choices would substantially strengthen confidence in Table 1.
-
-3. **Report HumanEval numbers explicitly** to support the claim that forgetting can be "entirely mitigated" by adapter routing.
+- Conduct a small-scale human validation of the GPT-4 evaluation on a subset of the static benchmark data (e.g., 3 authors, ~20 comparisons each) to directly verify that the automatic judgments track human perception of style similarity. This is the single most impactful improvement the authors could make.
+- Report the number of DITTO iterations (K) used in experiments, and ideally include a plot of performance vs. iteration to show when the method saturates.
+- Add confidence intervals or bootstrapped error bars to the user study win rates.
+- Include an experiment with deliberately degraded demonstrations (e.g., 10-20% of tokens corrupted, unnatural phrasing injected) to characterize the method's robustness to imperfect user input.
+- Explicitly note in the main paper's limitations section that the user study participants were mostly PhD students familiar with prompting, and discuss how this might affect generalization to non-expert users.
 
 ## Score and Decision
 
-DITTO proposes a genuinely useful method for an important problem (few-shot LLM personalization). The core algorithmic idea is sound and well-motivated. The empirical evidence spans two evaluation modalities (automatic benchmarks + user study) that point in the same direction, which is more than many papers provide. The ablations are informative and the theoretical connection to online imitation learning adds depth.
+Originality: Good — the idea of using demonstrations as a direct feedback modality for alignment via online comparison generation is novel and well-motivated.  
+Importance: High — enabling few-shot personalization of LLMs addresses a real practical need.  
+Claims: Reasonably supported but the main quantitative evaluation relies on an unvalidated automatic judge.  
+Soundness: Solid overall; the ablations and user study strengthen confidence, but the GPT-4 evaluation gap is notable.  
+Clarity: Generally well-written and clear.  
+Value: The method and results are likely to be useful and influential; the sample efficiency finding is particularly valuable.
 
-The paper's two major weaknesses are real but not fatal. The GPT-4 evaluator concern is partially addressed by the user study and the paper's own acknowledgment of the bias. The Section 5.3 framing issue is a presentational over-claim rather than an invalid experiment — the underlying ablation still shows something useful, just not what the title advertises. Both are fixable with clearer framing and/or a modest additional experiment.
-
-Given the novelty of the method, the breadth of evaluation (static benchmarks + user study + ablations), and the fact that neither weakness undermines the core contribution, this paper merits acceptance.
+The paper presents a genuinely useful idea with promising evidence across multiple evaluation setups. The main concern — reliance on an unvalidated GPT-4 evaluator for the primary quantitative results — is significant enough to temper the strength of the conclusions but not to reject the paper outright, given the complementary user study and consistent pattern across evaluations. The method is sound, the ablations are informative, and the core claim (that demonstrations can serve as efficient preference feedback) is well supported.
 
 MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

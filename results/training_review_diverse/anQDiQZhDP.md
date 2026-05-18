@@ -1,20 +1,20 @@
-Now I have all the evidence needed to produce the final consolidated review.
+Now I have all the information I need. Let me construct the final review.
 
 ## Summary
 
-Vevo presents a self-supervised framework for controllable zero-shot voice imitation that disentangles timbre, style, and linguistic content by applying VQ-VAE tokenizers at different vocabulary sizes (K=32 for content, K=4096 for content-style) on HuBERT features. These tokens drive a two-stage pipeline: an autoregressive transformer for content-to-content-style modeling (style-controllable), and a flow-matching transformer for acoustic generation (timbre-controllable). The framework is evaluated across timbre imitation, style imitation (accent/emotion conversion), voice conversion, and TTS tasks.
+Vevo proposes a unified, zero-shot voice imitation framework that decouples timbre, style, and linguistic content by using VQ-VAE vocabulary size as a controllable information bottleneck applied to HuBERT features. A two-stage pipeline — autoregressive transformer for content→content-style modeling and flow-matching transformer for content-style→acoustic — enables controllable timbre, style, and voice imitation from a single set of pre-trained models. Trained on 60K hours of audiobook data without style-specific fine-tuning, Vevo matches or exceeds existing methods on accent and emotion conversion, voice conversion, and TTS tasks.
 
 ## Strengths
 
-- **Novel and validated disentanglement via VQ codebook-size bottleneck**: The paper demonstrates that varying the VQ-VAE vocabulary size on HuBERT features progressively filters timbre first, then style. Table 2 provides clear quantitative evidence (e.g., at K=4096, speaker similarity to source drops to 0.236 vs. 0.737 for continuous features while F0 correlation stays high at 0.797; at K=32, FPC falls to 0.706). This is a clean, fully self-supervised approach.
+- **Novel progressive disentanglement via VQ-VAE vocabulary size.** The paper introduces a clean idea: treat the codebook size K as an information bottleneck and empirically demonstrates that reducing K filters timbre first (K=4096 → content-style tokens) and then style (K=32 → content tokens), all without labels. Table 2 provides systematic evidence: S-SIM to source drops from 0.306 (K=16384) to 0.236 (K=4096), and FPC drops from 0.797 to 0.706 when reducing from 4096 to 32, while WER stays low until K<16. This is a well-executed analysis that directly supports the design.
 
-- **Strong and properly-controlled results on timbre imitation and voice conversion (Table 3)**: Vevo-Timbre and Vevo-Voice are evaluated against four SOTA baselines on a fixed 700-sample set from LibriSpeech, CommonVoice, ACCENT, and EMOTION. Vevo-Timbre achieves the best S-SIM (0.494), SS-MOS (4.02), and FPC (0.763) among all methods. This evaluation is well-controlled and supports the framework's effectiveness.
+- **Unified zero-shot framework with strong style imitation results.** Vevo matches or surpasses existing methods in zero-shot accent and emotion conversion despite never being fine-tuned on style-specific corpora. In Table 4, Vevo-Style outperforms all baselines (ASR-AC, VoiceShop, Conv-Speak, Emovox) on every reported metric — e.g., A-ACC 83.3 vs. 72.4 (best baseline), E-ACC 73.2 vs. 56.8. This demonstrates genuine zero-shot generalization from neutral audiobook data to expressive domains.
 
-- **Competitive TTS performance despite training data limitations (Table 5)**: Vevo-TTS is compared against Voicebox (same 60K-hour audiobook data), VALL-E, VoiceCraft, CosyVoice, and MaskGCT. Against Voicebox (identical training data), Vevo-TTS excels across all style-related metrics (A-SIM 0.541 vs. 0.543, ES-MOS 4.03 vs. 3.94). Despite training only on audiobook data, it matches models trained on larger in-the-wild data on emotion similarity.
+- **Controllable attribute imitation from the same pre-trained models by varying inference pipeline.** Four variants (Vevo-Timbre, Vevo-Style, Vevo-Voice, Vevo-TTS) share the same M_style and M_acoustic models, differing only in tokenizers and references during inference (Section 3.4). Table 3 shows Vevo-Timbre preserves source style (PS-MOS 4.12) while Vevo-Voice achieves both high accent and emotion similarity (AS-MOS 4.02, ES-MOS 3.98), demonstrating independent control of timbre and style.
 
-- **Thorough ablation and analysis**: Section 4.1 systematically investigates the effect of vocabulary size, compares K-means vs. VQ-VAE, and selects K values empirically with reasoned tradeoffs. Table 6 further validates the duration reduction strategy and two inference modes, strengthening technical soundness.
+- **Rigorous empirical analysis of the design space.** Section 4.1 provides a thorough ablation across vocabulary sizes (8 to 16384) and compares VQ-VAE tokens against HuBERT continuous features, K-means tokens, ASR tokens, and PPG features (K-means at K=1024 yields WER 6.6 vs. VQ-VAE 3.7), validating the choice of VQ-VAE over prior quantization approaches.
 
-- **Scalable, annotation-free training**: The entire pipeline is trained via self-supervised objectives (next-token prediction and conditional flow matching) on 60K hours of audiobook data without style labels or parallel corpora, supporting the claim of reduced annotation dependence.
+- **Practical efficiency contributions.** Duration reduction (merging consecutive duplicate units) improves duration conversion (DDUR 0.70 vs. 0.80) while shortening input sequences. The reference-global-guided continuation mode reduces input length to 42% with only 0.1–0.2 drop in similarity metrics (Table 6), offering a practical speed/quality trade-off.
 
 ## Weaknesses
 
@@ -22,61 +22,53 @@ Vevo presents a self-supervised framework for controllable zero-shot voice imita
 None.
 
 ### Major
-
-- **Style imitation evaluation (Table 4) uses uncontrolled, non-overlapping demo website samples, undermining the core claim of matching/surpassing existing methods in accent and emotion conversion.** The paper explicitly states that "Evaluation samples for each group are sourced from the baseline's demo website" (Table 4 caption). This means: (a) test sets are tiny and curated by each baseline team to showcase their best outputs; (b) test sets are non-overlapping across methods (different speakers, utterances, recording conditions); (c) the comparison is not controlled. The paper's abstract and contributions prominently emphasize that Vevo "matches or surpasses existing methods in accent and emotion conversion tasks," but this claim rests on an evaluation protocol that does not meet standard experimental practice. The other tasks (timbre imitation, voice conversion, TTS) are properly evaluated and remain convincing, but the most distinctive claim about zero-shot style imitation is unsubstantiated. Without a controlled evaluation — either on a common benchmark (e.g., accented/emotional subsets of VCTK, ESD, or the Expresso data already used for other experiments) with all methods re-evaluated, or at least on a fixed independently-collected test set — this central contribution cannot be verified.
+None.
 
 ### Minor
 
-- **No statistical significance or variance reported.** None of the tables report confidence intervals, standard deviations, or significance tests. Given the moderate sample sizes (e.g., 700 for Table 3, smaller for Table 4), some observed differences could be within noise. This is standard practice for large-scale speech generation papers, but its absence is worth noting.
+- **Timbre preservation in style imitation is not directly evaluated.** The paper defines style imitation (Vevo-Style) as preserving the source's timbre while imitating the reference's style. However, Table 4 reports only accent/emotion similarity and intelligibility — it does not report S-SIM to source or any subjective speaker-preservation score for Vevo-Style generations. Table 2 shows that content-style tokens (K=4096) retain some timbre information (S-SIM to source = 0.236), and without measuring speaker similarity between the source and the Vevo-Style output, it is difficult to verify that timbre is truly preserved rather than contaminated by the style reference. While the paper's design (using the source as timbre reference in the acoustic model) provides theoretical grounding, direct empirical evidence would strengthen the controllability claim.
 
-- **No discussion of limitations or failure cases.** The paper does not address scenarios where the method might struggle (e.g., very short style references, heavy background noise, non-speech content in reference, the higher WER observed in autoregressive stages). While common in conference papers, this omission prevents a balanced understanding of the approach's boundaries.
+- **Style imitation comparison (Table 4) relies on demo website samples.** The paper transparently states it uses baseline demo samples as the evaluation set. This introduces potential selection bias (baselines showcase their best results) and limits reproducibility. While the zero-shot capability is demonstrated by the approach itself, the comparative claims of state-of-the-art performance would be more persuasive with a controlled experiment on a fixed, publicly available test set (e.g., Expresso or Audiobox subsets) where all systems are evaluated under identical conditions.
 
-- **F0 correlation (FPC) as the sole prosody/style metric in the disentanglement analysis (Table 2).** While FPC is a standard and meaningful proxy, the "progressive disentanglement" claim would be strengthened by additional metrics capturing rhythm, energy, or broader prosodic patterns. The paper's downstream results partially address this, but the core validation in Section 4.1 relies heavily on this single style-related metric.
+- **"Self-supervised" framing is slightly overstated for the TTS variant.** The core framework (VQ-VAE, speech-to-speech M_style, M_acoustic) is indeed self-supervised. However, the abstract states "Solely self-supervised trained on 60K hours," and the Vevo-TTS variant requires ASR-transcribed audiobooks for the text-to-content-style model. The paper acknowledges this in Section 4 (training data uses ASR transcriptions), but the abstract and conclusion language could more precisely delineate which components are self-supervised and which use transcription supervision.
+
+- **Global style encoder training signal is underspecified.** The paper describes the global style encoder as "WavLM-based representation layers and TDNN-based feature extraction layers" and includes its output g(u) in the transformer input sequence. However, it is not explicitly stated whether the encoder is jointly trained with the AR transformer via the next-token prediction loss, or trained separately. This detail matters for reproducibility.
 
 ### Trivial
-None.
+
+- **No confidence intervals reported for objective metrics.** Evaluation sets are modest (700 samples total, with subsets of 150–200). While single-run evaluation is common in large-scale speech benchmarks, reporting standard deviations or significance tests for key metrics (WER, S-SIM) would strengthen the results.
+
+- **The content token trade-off is acknowledged but could be discussed more.** The paper states "such Kc and Ks may not be optimal" and speculates that residual style information in Q_c may limit style imitation (Section 4.3). This is honest but the paper could expand on whether residual style information in content tokens might reduce the model's ability to accept style from the reference.
 
 ## Nice-to-Haves
 
-- **Controlled style imitation evaluation on a standard benchmark** (e.g., evaluating all methods on the same accented/emotional test set) would resolve the main weakness. This is a must-fix rather than a nice-to-have, but since it would require a substantial additional experiment, it is noted here as the single highest-priority revision.
-
-- **TTS results on LibriSpeech test-clean or CommonVoice** to complement the ACCENT/EMOTION-focused evaluation in Table 5 and enable comparison with the broader TTS literature. The paper already evaluates on these datasets for timbre/voice conversion, so extending to TTS would be natural.
-
-- **A direct validation of the content-style token's style-preservation** (e.g., training a linear classifier on the tokens to measure accent/emotion classification accuracy) would strengthen the disentanglement claim independently from the downstream tasks.
+- A controlled listening test for style imitation on a fixed set (e.g., Expresso + accented data) with MOS and confidence intervals.
+- S-SIM to source for Vevo-Style generations to directly verify timbre preservation.
+- An ablation varying K_s (e.g., 2048, 4096, 8192) and measuring the timbre/style trade-off in style imitation.
 
 ## Removed Points
 
-- **"Evaluation of zero-shot style imitation is fundamentally flawed, invalidating the boldest claims"** — This is kept as the Major weakness above. However, the characterization that it "invalidates the paper's central thesis" is overstated. The paper has multiple contributions (disentanglement methodology, unified framework, TTS/VC results) that are independently valid. The style imitation claim is one important contribution, not the sole thesis.
+These points are flagged to be removed; treat them with caution.
 
-- **"The progressive disentanglement claim is supported only by indirect and insufficient evidence"** — Partially removed. Point (b) about circular reasoning is incorrect: the downstream experiments in Tables 3 and 5 directly validate that the tokens preserve usable style information, and Table 2 independently measures FPC. Point (c) about missing comparison to adversarial/MMI techniques is scope creep — the paper compares against K-means and ASR features, which are the most directly relevant baselines.
+- **Subjective evaluation methodology is critically underspecified.** *Reason for removal:* The paper provides no details about number of listeners, confidence intervals, or test protocol for MOS evaluations. However, per the hard rule about parser-stripped content (appendices containing supplementary methodological details are stripped from all papers), these details plausibly exist in the original submission and may be restored upon publication.
 
-- **"Strength: Outperforms existing methods in zero-shot style imitation"** — Removed because it conflicts with the verified weakness about Table 4's uncontrolled evaluation. The evidence for this claim is not reliable.
-
-- **"Zero-shot TTS evaluation on standard benchmarks (LibriSpeech test-clean)"** — Demoted to Nice-to-Have. The paper already evaluates on LS/CV for other tasks. Focusing TTS evaluation on ACCENT/EMOTION is a reasonable scope decision for a style-focused paper.
-
-- **"Missing comparison to other disentanglement techniques (adversarial, mutual information minimization)"** — Removed as scope creep. The paper compares against K-means and ASR features, which are the most relevant baselines for VQ-based disentanglement.
-
-- **"The paper uses an information bottleneck approach that is not new"** — The harsh critic acknowledges this is "a novel combination." The reviewer does not present this as a weakness. Not included.
+- **Table 3 confusion about EMOTION-specific metrics.** *Reason for removal:* The paper's table caption already clarifies which metrics are evaluated on which subsets ("PS-MOS, E-SIM, and ES-MOS are evaluated only on EMOTION. A-SIM and AS-MOS are evaluated only on ACCENT"). The reviewer's concern is addressed by the existing text.
 
 ## Novel Insights
 
-The most insightful observation from the reviews is that the paper's strongest and most distinctive claim (zero-shot style imitation matching/surpassing existing methods) rests on an evaluation protocol that would be considered weak even in a workshop paper: comparing against baselines using each baseline's own cherry-picked demo samples. This is not a subtle methodological nitpick — it is a basic failure of controlled experimentation that means the reader simply cannot trust the reported superiority in accent and emotion conversion. Meanwhile, the other evaluations (Tables 3 and 5) are properly controlled and show genuine promise for the disentangled token approach, particularly in timbre imitation and TTS. The disconnect between the rigor of the controlled experiments and the lack of rigor in the style imitation experiment is striking and suggests the authors should either (a) conduct a proper controlled evaluation or (b) recalibrate their claims to match what the evidence actually supports.
+The key insight that emerges from this review is that the paper's contribution is strongest in its *design principle* (vocabulary size as a progressive information bottleneck) and weakest in the *evaluation of targeted attribute control*. The progressive filtering story is well-told and empirically supported for the tokenizer stage, but the downstream verification of controlled generation — particularly the claim that timbre is preserved in style imitation — relies on architectural reasoning rather than direct measurement. This gap is common in the disentanglement literature, but the paper would be significantly strengthened by closing it. Additionally, the demo-sample-based style imitation comparison, while practically motivated, means the paper's most impressive comparative claims (zero-shot style imitation beating task-specific models) rest on weaker empirical ground than the voice conversion and TTS results, which use a fixed test set.
 
 ## Suggestions
 
-1. **Replace the style imitation evaluation (Table 4) with a controlled experiment.** Use a standard benchmark dataset (e.g., the accented/emotional subsets of VCTK, ESD, or Expresso itself — which you already use in other experiments). Evaluate Vevo-Style and all baselines on exactly the same test utterances. If baselines' code/models are unavailable, at minimum include a strong disclaimer and present the current results as illustrative rather than comparative.
-
-2. **Report confidence intervals or standard deviations** for all metric tables, especially given the moderate sample sizes.
-
-3. **Add a limitations section** discussing known failure cases (short references, noise, the WER degradation in autoregressive stages, etc.).
-
-4. **Consider adding TTS results on LibriSpeech test-clean** to enable direct comparison with the broader TTS literature (VALL-E, VoiceCraft, etc.).
+1. Add S-SIM to source for Vevo-Style generations (Table 4) to directly verify timbre preservation.
+2. For a stronger version, conduct a controlled style imitation evaluation on a fixed test set (e.g., Expresso for emotion, accented Audiobox subset) with at least one open-source baseline.
+3. Reframe the abstract to clarify that the core disentanglement and speech-to-speech components are self-supervised, while the TTS variant additionally uses ASR transcriptions.
+4. Explicitly state whether the global style encoder is jointly trained with the AR transformer and what loss signal reaches it.
+5. Add confidence intervals or significance markers for key objective and subjective metrics.
 
 ## Score and Decision
 
-The paper presents a well-motivated, technically sound approach to disentangled speech representation learning and a versatile framework for multiple voice imitation tasks. The controlled experiments on timbre imitation, voice conversion, and TTS (Tables 3 and 5) provide reasonable evidence for those contributions. **However, the paper's most distinctive advertised contribution — matching or surpassing existing methods in zero-shot accent and emotion conversion — is evaluated using a fundamentally flawed protocol (demo website samples), rendering that central claim unsubstantiated.** Since the abstract, introduction, and conclusion all prominently feature this as a key result, the paper cannot be accepted in its current form. With a proper controlled evaluation, the paper would be a strong contribution.
+This paper presents a well-motivated and novel approach to controllable voice imitation, with clean design and extensive experiments. The core idea — using VQ-VAE vocabulary size as a progressive information bottleneck — is original and well-validated. The weaknesses are addressable and do not undermine the central contribution. I recommend acceptance.
 
-**Score: 5.0** — Marginally below the acceptance threshold. The paper has real strengths but the main novel claim is not properly supported.
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

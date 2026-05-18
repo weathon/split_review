@@ -1,87 +1,77 @@
-Now I have thoroughly verified the claims against the paper. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper. Let me compile the final review, carefully verifying every claim against the actual text.
 
 ---
 
 ## Summary
 
-This paper extends the Gaussian Process (GP) limit for infinitely-wide neural networks from i.i.d. weight distributions to a broader class called "pseudo-iid" that only requires exchangeability, uncorrelatedness, and moment conditions. It proves GP convergence for fully connected networks (Theorem 1) and convolutional networks (Theorem 2) under this relaxed regime, with examples including low-rank, structured sparse, and orthogonal CNN initializations. The paper also discusses implications for Bayesian inference and Edge-of-Chaos analysis.
+This paper extends the infinite-width Neural Network Gaussian Process (NNGP) limit to a broader class of weight distributions called "pseudo-iid," which relaxes the standard i.i.d. assumption to allow exchangeable, uncorrelated entries with controlled moment conditions. The authors prove (Theorem 1) that deep fully-connected networks under the pseudo-iid regime converge to a GP, and extend this result to convolutional networks (Theorem 2, Definition 3). Three example families are presented — low-rank (via random orthonormal basis + i.i.d. factors), structured sparse (via randomly permuted masked matrices), and orthogonal CNN filters — as concrete instantiations. Numerical simulations for the fully-connected case validate finite-width convergence, and the paper discusses implications for Bayesian inference and Edge-of-Chaos analysis.
 
 ## Strengths
 
-- **Unifies GP limits under a single, relaxed condition that subsumes prior cases.** The pseudo-iid definition (Definition 1) requires only exchangeability, uncorrelatedness, and four moment conditions rather than full independence. This explicitly includes the established i.i.d. and orthogonal cases while also covering low-rank and structured sparse initializations — settings where the GP limit could not previously be derived. The paper clearly states: "extend the seminal proof of [Matthews_2018] to a larger class of initial weight distributions (which we call \pseudoiid), including the established cases of \iid\ and orthogonal weights, as well as the emerging low-rank and structured sparse settings."
+- **Unified theoretical framework for GP limits under non-i.i.d. weights.** The pseudo-iid definition (Definition 2) cleanly captures a broad class of dependent weight distributions via exchangeability, variance scaling, an eighth-moment bound, and a vanishing cross-correlation condition. Theorems 1 and 2 prove GP convergence for both fully-connected and convolutional architectures under these conditions. This generalizes prior work (Matthews+18, Lee+17, Huang+21) under a single, well-structured formalism.
 
-- **First theoretical result establishing GP limits for CNNs with non-i.i.d. convolutional filters.** Theorem 2 proves convergence to a GP for CNNs whose convolutional kernels satisfy the pseudo-iid conditions (Definition 3). The paper provides a concrete construction of orthogonal CNN filters via matricization of the kernel (Section 3.1) and checks the pseudo-iid conditions for this construction.
+- **Extension to convolutional networks with a novel filter construction.** Definition 3 provides the first pseudo-iid conditions for convolutional kernels, and Theorem 2 derives the corresponding GP limit. The orthogonal CNN filter construction (Equation 4, Section 3.1) via matricization of the kernel and imposing \(\widetilde{\mathbf{U}}^\top\widetilde{\mathbf{U}} = (1/k^2)I\) is a novel approach that is meaningfully different from prior orthogonal CNN definitions (Xiao+18, Wang+20, Qi+20). The verification of conditions (i), (ii), and (iv) for this example (lines 447–458) is reasonably explicit, referencing Lemma 3 of Huang+21 for the four-cross expectation.
 
-- **Provides explicit constructions for each new distribution class.** Section 3.1 gives concrete generating procedures: low-rank weights via $A = CP$ with random orthonormal $C$ and i.i.d. $P$; structured sparse weights via random row/column permutations of a sparse mask; and orthogonal CNN filters via reshaping an orthogonal matrix. These constructions demonstrate that the pseudo-iid framework is not vacuous.
+- **Empirical validation of finite-width convergence.** Numerical experiments (Figures 2 and 3) for fully-connected networks with widths \(n=3, 30, 300\) show that the empirical distribution of preactivations matches the predicted GP for low-rank, structured sparse, and orthogonal weight distributions. The convergence is clearest for the orthogonal case, but all cases show good agreement by \(n=300\). The code is provided.
 
-- **Code is provided for reproducibility.** The paper includes a footnote with a URL to code for reproducing all figures.
+- **Careful treatment of the first-layer restriction.** The paper explicitly notes (lines 66–68 and footnote) that the first layer requires i.i.d. rows (or Gaussian i.i.d. entries) because its scaling dimension does not permit the dependencies that deeper layers can accommodate. This technical limitation is honestly stated rather than glossed over.
 
 ## Weaknesses
 
 ### Fatal
-
-None that invalidate the core mathematical possibility of the claim. However, see the Major weaknesses below.
+None.
 
 ### Major
 
-- **The proof sketch for both main theorems is not present in the visible manuscript.** The section titled "Sketch of the proof of Theorem 1" (lines 100–124) is enclosed in a `\begin{comment}...\end{comment}` block, which means it does not appear in the compiled PDF. The reader therefore has no way to assess the validity of the paper's central theoretical claim. Theorems 1 and 2 are the core contributions; without at minimum a self-contained proof sketch in the main text — explaining how the pseudo-iid conditions (i)–(iv) replace the i.i.d. assumption in the Matthews et al. argument, how the Blum–DeHardt CLT for exchangeable arrays is applied, and how the induction proceeds — the paper's central result is unsubstantiated. This is a **structural** flaw, not a presentation nitpick. (Note: this is not about a parser-stripped appendix; the proof sketch is in the main body but deliberately commented out by the authors.)
+1. **Proof sketch is inside a LaTeX `comment` environment in the main text and thus not visible to readers.** Lines 100–124 contain a bullet-point proof sketch (outlining the 4-step argument: reduction to finite-dim convergence, linear projections, exchangeable CLT, induction) entirely within `\begin{comment}...\end{comment}`. A reader of the rendered document sees no proof sketch at all. While the paper does describe its proof approach verbally (references to Matthews+18, the exchangeable CLT of Blum et al., and induction over layers), the visible main text lacks a self-contained outline. For a theoretical paper whose central contribution is a proof, this is a significant presentation gap. *(Note: The full proof is presumably in the appendix, which the parser stripped — that is not the authors' fault. But the commented-out sketch is an author-level decision and means the main text, as submitted, is incomplete.)*
 
-- **Verification of the pseudo-iid conditions for the examples is incomplete in parts, and some steps rely on unsubstantiated claims.**
-  - **Low-rank weights (Section 3.1):** The paper derives a four-point expectation and then states "Using the expression in Lemma 3 of [Huang 2021] we can calculate the above expectation and deduce condition (iv) when r is linearly proportional to m." The calculation is not performed, the resulting limit is not stated, and the dependence on the rank scaling ratio is not made explicit. The reader must take the claim on faith.
-  - **Structured sparse weights (Section 3.1):** The paper says "for suitable choices of underlying distribution D, it satisfies the moment conditions." No specific distribution D is given, no verification of conditions (iii) or (iv) is attempted, and the reader is left to guess whether any realistic D works. This is too vague to constitute a valid example.
-  - **Orthogonal CNN filters (Section 3.1):** The verification of condition (iv) relies on Lemma 3 of [Huang 2021], which was derived for random orthogonal matrices drawn uniformly from the Stiefel manifold. The paper's construction (reshaping a matrix with $\mathbf{\Tilde{U}}^\top \mathbf{\Tilde{U}} = (1/k^2)I$) does not guarantee a uniform draw. The paper acknowledges this ("we do not claim the generated orthogonal convolutional kernel U is uniformly distributed over the set of all such kernels"), but does not address whether Lemma 3's result still applies under the paper's non-uniform construction. This gap needs to be resolved or at least discussed.
-
-- **Experimental validation covers only fully connected networks and lacks quantitative convergence measures.** Theorem 2 (the CNN limit) receives no experimental verification whatsoever — all simulations use fully connected architectures. Even for the fully connected case, the evidence is purely visual (histograms and scatter plots with overlaid level curves). No Wasserstein distance, Kolmogorov–Smirnov statistic, or any other quantitative metric is reported, despite the paper mentioning a Wasserstein-distance figure that is itself commented out (lines 461–468). The histogram at width $n=3$ is barely Gaussian, and no error bars or repeated-seed variability is shown. For a paper whose main contribution is theoretical, the experiments are supportive but too thin to rigorously confirm the convergence.
+2. **Verification of pseudo-iid conditions for the examples is uneven and incomplete in two of three cases.**  
+   - **Structured sparse weights (line 185):** The paper states that "for suitable choices of underlying distribution \(\mathcal{D}\), it satisfies the moment conditions." No concrete \(\mathcal{D}\) is specified, and no computation or argument is given for conditions (iii) or (iv). This is effectively a placeholder rather than a verification.  
+   - **Low-rank weights (lines 179–183):** The computation for condition (iv) is sketched and references Lemma 3 of Huang+21, but only when "\(r\) is linearly proportional to \(m\)." Condition (iii) (the eighth-moment bound) is not addressed at all — the paper merely notes it is "controlled by the choice of distribution \(\mathcal{D}\)" without any bound or concrete example.  
+   - **Orthogonal CNN (lines 447–458):** This case is reasonably well-verified, with explicit checks of exchangeability and condition (iv) via the known four-cross expectation for Haar-orthogonal matrices.  
+   The unevenness is a concern because the paper's practical claims depend on these examples being genuine instances of the pseudo-iid regime. The structured sparse case in particular lacks any real verification.
 
 ### Minor
 
-- **The first-layer weights must be i.i.d. Gaussian (not pseudo-iid).** The paper acknowledges this (Definition 1: "When $W^{(1)}$ has i.i.d. Gaussian entries and the other weight matrices... are drawn from a pseudo-iid distribution"). The title "Beyond IID weights" is therefore slightly overstated — the relaxation to pseudo-iid applies only from layer 2 onward. The paper explains why (the first layer has only one dimension scaling up), but the limitation is real and somewhat undermines the generality implied by the title.
+3. **Title overstates the scope of the result.** The title "Beyond IID weights: sparse and low-rank deep Neural Networks are also Gaussian Processes" implies that *arbitrary* sparse or low-rank weight matrices (e.g., those arising from magnitude-based pruning, unstructured SVD, or the lottery ticket hypothesis) fall under the result. What the paper actually proves covers specific *constructed ensembles*: low-rank via a random orthonormal basis with i.i.d. factors, structured sparse via randomly permuted masked matrices, and orthogonal CNN filters under a specific matricization. The motivational discussion (Section 1, paragraph 3) tying the work to the lottery ticket hypothesis and pruning-at-initialization methods suggests wider applicability than is actually established. The paper would benefit from more precise language.
 
-- **Simulations test only a special case (bias-free) of Theorem 1.** The footnote for the experiments states they used "weight variance σ_w=2 and without bias." Theorem 1 includes biases with variance σ_b². The bias-free setting is a valid special case, but the paper does not test the full claim.
+4. **No CNN simulations are shown.** Theorem 2 and the orthogonal CNN example are presented in Sections 2.2 and 3.1, yet all numerical experiments (Figures 2 and 3) are restricted to fully-connected networks. Given the non-trivial nature of the orthogonal CNN construction, empirical validation would substantially strengthen the paper's claims for the convolutional case.
 
-- **Implications section (Section 3.3) is expository and does not contain new calculations or experiments.** The Bayesian NNGP and Edge-of-Chaos discussions describe what *could* be done with the results rather than demonstrating anything new. The paper states "our main contributions … allow similar calculations to be made" but does not make them. This does not weaken the theoretical contribution but means the "implications" are prospective, not demonstrated.
+5. **First-layer restriction limits practical applicability.** The paper requires the first layer to have i.i.d. rows (or Gaussian i.i.d. entries), so low-rank and structured sparse initializations cannot be applied to the first layer — which is often the largest layer in terms of parameters. This is acknowledged in a footnote but the practical implications (e.g., on the claimed computational speed-up from sparsity/low-rank at initialization) are not discussed.
 
 ### Trivial
 
-- Line 65–66 has a cut-off sentence: "The importance of condition (iii) is" with no continuation — a drafting error.
-- The proof sketch section (§sec:fcn_proof_sketch) is referenced in the paper but exists only in the commented-out block, creating a dead reference in the visible text.
+None beyond the issues captured above.
 
 ## Nice-to-Haves
 
-- Provide a rigorous verification of at least one non-trivial example. For low-rank weights, carry out the full computation of conditions (iii) and (iv) explicitly, stating the scaling assumptions (rank proportional to width, scaling constant). For structured sparse, specify a concrete distribution D (e.g., Gaussian entries) and verify the moment conditions.
-- Add quantitative convergence experiments for the fully connected case (e.g., Wasserstein distance vs. width, QQ plots) and include at least one CNN simulation (e.g., a single convolutional layer with random filters).
-- Clarify whether condition (iv) in Definition 1 is required for all index choices or only for distinct rows/columns, and whether the notation assumes distinctness of $i_a, i_b, i_c, i_d$.
+- A more complete verification of condition (iii) (the eighth-moment bound) for the low-rank example, or alternatively, specifying a concrete distribution \(\mathcal{D}\) that works.
+- Numerical simulations for the CNN case (Theorem 2), even for a simple architecture.
+- A brief discussion of known counterexamples or boundary cases where pseudo-iid conditions fail despite superficial similarity (e.g., unstructured magnitude-based sparsity), to clarify the regime's scope.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-- **Harsh critic's concern about the structured sparse example "no explicit distribution is given"** → Kept as Major weakness because it is factually correct and substantive. The paper genuinely does not specify D.
-- **Harsh critic's concern about Lemma 3 [Huang 2021] requiring uniform draws** → Kept as a Major weakness because it raises a genuine technical gap.
-- **Strength Finder's claim that "Numerical validation directly supports the theory"** → Weakened (not removed) because the experiments are real but limited to visual evidence and FC-only architectures. The strength is partial.
-- **Harsh critic's claim that "the paper as currently written provides the reader with no way to assess the validity of the central theoretical claim"** → Kept as Major weakness; it is factually accurate and fundamental.
-- **Criticism that experiments use bias-free setting while theorem includes biases** → Kept as Minor weakness; it is factually correct.
-- **Criticism about Implications section being purely expository** → Kept as Minor weakness; it is factually correct but not a fatal flaw.
-- **Criticism about the cut-off sentence "The importance of condition (iii) is"** → Kept as Trivial; it is a drafting error.
+- **"No proof exists at all" / "paper relies entirely on the appendix which was stripped"**: The hard rules require removing weaknesses about missing appendix content since the parser strips these sections. The full proof presumably exists in the appendix. The visible weakness is the *commented-out sketch*, which is genuine and retained above as Major #1.
+- **"The Edge of Chaos and BNN sections are purely commentary"**: These are discussion/implication sections, not claimed as novel results. Faulting them for not deriving new results is an expectation mismatch — the paper's main contribution is the GP limit, and noting its implications is standard.
+- **"The paper does not mention any counterexample"**: This is a nice-to-have, not a weakness.
+- **"Missing related works"**: Hard rules prohibit mentioning missing related works.
+- **Orthogonal CNN verification complaints** (ambiguous distribution, exchangeability complications): The paper's description ("drawn uniformly random with orthogonal columns") is standard language for the Stiefel manifold, and the exchangeability argument for row/column blocks is correctly reasoned. The reviewer's pedantry here is not justified by the actual text.
 
 ## Novel Insights
 
-The reviews do not surface any genuinely novel insight beyond the paper's own contributions. The central observation — that exchangeability plus moment conditions suffice for GP convergence — is the paper's own idea, and the reviewers primarily identify gaps in its execution rather than adding new perspective.
+None beyond the paper's own contributions. The reviews do not surface an observation about the paper that the paper itself does not make.
 
 ## Suggestions
 
-1. **Uncomment the proof sketch (or include a self-contained one) in the main text.** The sketch currently in the `\begin{comment}` block is a reasonable outline (reduction to finite-dimensional vectors → linear projections → exchangeable CLT → induction). Restore it and ensure it is self-contained enough for a reader to follow the logic. This is essential — without it, the paper is a collection of claims with no argument.
-2. **Complete the verification of the low-rank example.** Carry out the full calculation of condition (iv) for $A = CP$ when $r = \alpha m$, showing that the limit equals $\delta_{i_a,i_b}\delta_{i_c,i_d}$ and stating the required scaling constant explicitly.
-3. **Specify a concrete distribution for the structured sparse example.** Show that e.g. Gaussian entries with a block-sparse mask and random permutations satisfy conditions (iii) and (iv), or at minimum give a plausible D and sketch why the moments converge.
-4. **Address the uniformity concern for orthogonal CNN filters.** Either argue that Lemma 3 of [Huang 2021] holds for the specific non-uniform distribution generated by the paper's construction, or provide an alternative verification of condition (iv).
-5. **Add quantitative metrics to the experiments** (e.g., Wasserstein distance between the empirical preactivation distribution and the limiting Gaussian, as a function of width) and include at least one CNN simulation to validate Theorem 2.
-6. **Fix the cut-off sentence** at line 65–66 and remove or properly include the commented-out proof sketch and Wasserstein figure.
+1. **Uncomment and expand the proof sketch** in Section 2.1. Even a 4-bullet sketch (as exists in the commented-out lines) would make the main text self-contained for a reader who does not immediately dive into the appendix.
+2. **Replace the placeholder verification for structured sparse weights** with a concrete example. Choose a specific \(\mathcal{D}\) (e.g., a centered distribution with finite eighth moment such as Gaussian or uniform), compute or bound the relevant moments, and show condition (iv) holds. This would take no more than a few lines.
+3. **Add a qualifying phrase to the title** (e.g., "...are also Gaussian Processes under exchangeability conditions") or at minimum rephrase the abstract and introduction to clarify that specific *constructed ensembles* are covered, not all sparse/low-rank networks that arise in practice.
+4. **Add at least one CNN simulation** validating Theorem 2 for the orthogonal CNN construction, even on a small-scale task like CIFAR-10 with a 2-layer CNN.
+5. **Discuss the practical impact of the first-layer restriction** more explicitly — does the computational benefit of low-rank/sparse initialization survive when the largest layer cannot use it?
 
 ## Score and Decision
 
-The paper proposes an interesting and well-motivated extension of GP limits to a broader class of weight distributions. The pseudo-iid definition is clean, the theorem statements are precise, and the practical motivation (low-rank, structured sparse, orthogonal CNNs) is timely. However, the paper in its current form has a structural problem that prevents evaluation of its central contribution: the proof sketch for both theorems is commented out and invisible to the reader, meaning the theoretical claim — which is the entire contribution — cannot be assessed. Additionally, the verification of the central examples is incomplete, and the experimental validation is thin and does not cover CNNs. These are not minor presentation issues; they are gaps in the substance of the paper.
+The paper introduces a genuinely useful theoretical framework (the pseudo-iid class) and proves meaningful generalizations of the NNGP limit. However, the main text's visible proof is essentially absent (commented out), and the example verifications that demonstrate the framework's applicability are incomplete for two of three cases. The title overclaims. These are fixable issues, but in their current form they prevent the paper from being a clean accept. 
 
-The paper could become a solid contribution if the proof sketch (or a full proof) is restored, the example verification is completed, and the experiments are strengthened. In its present state, the paper does not meet the standard for acceptance because its core claim is unverifiable without the missing proof argument.
-
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

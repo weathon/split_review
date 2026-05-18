@@ -1,22 +1,20 @@
-Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
+Now I have thoroughly verified all claims. Let me produce the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper introduces NeuroQuant, a post-training quantization (PTQ) method for implicit neural representation–based video coding (INR-VC). NeuroQuant achieves variable-rate coding by adjusting quantization parameters (QPs) of a single pre-trained model rather than retraining for each target bitrate. The method combines: (1) a mixed-precision bit allocation strategy guided by a Hessian-vector sensitivity criterion Ω = Δwᵀ H Δw that accounts for inter-layer dependencies and perturbation directionality; (2) network-wise calibration and channel-wise quantization to minimize reconstruction distortion. Experiments on UVG show NeuroQuant outperforms existing PTQ methods (AdaRound, BRECQ, QDrop, RDO-PTQ) and QAT-based INR-VC methods (FFNeRV, HiNeRV) across bitwidths, with up to 7.9× encoding speedup for achieving a new bitrate.
+This paper introduces NeuroQuant, a post-training quantization (PTQ) framework for variable-rate implicit neural representation video coding (INR-VC). The core idea is to avoid retraining separate weights for each target bitrate by instead adjusting quantization parameters of pre-trained weights via (1) mixed-precision bit allocation guided by a Hessian-vector product sensitivity criterion (Ω), and (2) network-wise QP calibration. The paper provides a theoretical analysis of why traditional diagonal-Hessian methods fail for non-generalized INR-VC (inter-layer dependencies, anisotropy) and demonstrates state-of-the-art results across multiple INR-VC architectures, achieving up to 7.9× encoding speedup and >3dB gains at low bitwidths over existing quantization approaches.
 
 ## Strengths
 
-- **First PTQ framework for variable-rate INR-VC.** The paper is the first to demonstrate that variable-rate INR-VC can be achieved by adjusting quantization parameters of pre-trained weights rather than retraining for each bitrate (Sec. 1, Fig. 1). Table 2 provides concrete evidence: NeuroQuant supports a new bitrate in 1.8–2.8 hours compared to 10–22 hours for retraining, a speedup of up to 7.9×. This fills a practical gap in the INR-VC literature.
+- **Novel sensitivity criterion that addresses shortcomings of prior Hessian-based criteria for the INR-VC setting.** The paper demonstrates via Examples 1 and 2 that eigenvalue/trace-based criteria fail when inter-layer dependencies and anisotropy exist, which is characteristic of non-generalized INR-VC. The proposed Ω = Δw^T H^(w) Δw captures both off-diagonal Hessian structure and weight perturbation direction, with a practical Hessian-vector product approximation (Eq. 10) that avoids explicit Hessian construction. This is theoretically and empirically well-motivated.
 
-- **Theoretically motivated sensitivity criterion that addresses inter-layer dependencies.** Theorem 1 and the derivation in Sec. 3.1 define Ω = Δwᵀ H^(w) Δw, which captures off-diagonal Hessian terms and perturbation direction. The paper provides concrete counterexamples (Eq. 7–8) showing why prior Hessian-based criteria (HAWQ, HAWQ‑V2) that assume layer independence and isotropy are insufficient for non-generalized INR-VC. The Hessian-vector product approximation (Eq. 10) makes the criterion tractable.
+- **Network-wise calibration and channel-wise quantization tailored to non-generalized INR-VC.** The paper identifies that layer/block-wise calibration (standard in generalized networks) is suboptimal for INR-VC due to strong cross-layer dependencies, shown empirically in Figure 3(c). It derives a unified MSE-oriented calibration objective (Eq. 15) and implements network-wise calibration. The channel-wise quantization accounts for the heterogeneous weight distributions across channels (Fig. 3a-b).
 
-- **State-of-the-art quantization results across architectures and bitwidths.** Table 1 shows NeuroQuant consistently outperforms AdaRound, BRECQ, QDrop, and RDO-PTQ at all bitwidths on UVG, with the advantage growing at lower bitwidths. At INT2, NeuroQuant surpasses QAT-based HiNeRV by >3 dB PSNR across all model sizes. The method works across three different INR-VC architectures (NeRV, HNeRV, HiNeRV).
+- **Strong empirical results demonstrating practical variable-rate INR-VC without retraining.** NeuroQuant achieves up to 7.9× encoding speedup (Table 2) compared to retraining for new bitrates, and outperforms existing PTQ methods (AdaRound, BRECQ, QDrop, RDO-PTQ) and QAT methods (FFNeRV, HiNeRV) across multiple architectures and bitwidths (Table 1, Figure 4), including >3dB gains at low bitwidths and 4.8% BD-rate improvement over HiNeRV's built-in QAT.
 
-- **Empirical validation of variable-rate capability.** Fig. 4 presents R-D curves where NeuroQuant achieves 25.5–27.8% bitrate savings over direct 8-bit quantization baselines, and 4.8% over HiNeRV's built-in QAT. The analysis of mixed-precision vs. unified precision (Fig. 5) demonstrates that mixed precision enables finer-grained rate control.
-
-- **Theoretical grounding connecting representation and compression.** Sec. 3.3 reframes NeuroQuant through variational inference, explaining that prior INR-VC methods optimize p(x|w) (representation only), while NeuroQuant directly optimizes p(x|w̃) (representation after quantization), resolving a mismatch that degrades performance after compression (Remark 2).
+- **Systematic analysis of why traditional quantization assumptions fail for INR-VC.** The paper provides concrete counterexamples (Example 1 inter-layer dependencies, Example 2 perturbation direction effects) and empirical evidence (Figure 2) showing that layer independence and isotropy assumptions break down for non-generalized INR-VC, justifying the need for the proposed approach.
 
 ## Weaknesses
 
@@ -24,65 +22,52 @@ This paper introduces NeuroQuant, a post-training quantization (PTQ) method for 
 None.
 
 ### Major
-None that threaten the core contribution. The paper's claims (first PTQ for INR-VC, principled sensitivity criterion, SOTA results) are all reasonably supported.
+None. The paper's core claims are supported by the evidence presented. No weakness fundamentally invalidates the results or the contribution.
 
 ### Minor
 
-- **Mixed-precision allocation algorithm is underspecified.** The paper mentions that the sensitivity criterion Ω "enabl[es] efficient mixed-precision search using techniques like integer programming, genetic algorithms, or iterative approaches" (line 127), but does not specify which method was actually used, nor its hyperparameters. This is a reproducibility gap. Additionally, the paper does not clarify how the circular dependency is resolved: Ω = Δwᵀ H Δw depends on Δw, which itself depends on the chosen bitwidths. While iterative/greedy schemes are standard in practice, the paper should specify the actual procedure.
+- **Overclaimed "optimality" of the sensitivity criterion in Theorem 1.** The paper calls Ω the "optimal sensitivity criteria" but the justification is simply the second-order Taylor expansion showing that Ω captures loss degradation (Eq. 11). This demonstrates that Ω is an *accurate* measure of sensitivity, but the paper does not formally prove that optimizing bit allocation via Ω (under a rate constraint) yields a theoretically optimal bit assignment. The term "optimal" is unnecessarily strong; "complete" or "second-order accurate" would be more precise. This does not undermine the practical value of Ω, which demonstrably outperforms simpler criteria.
 
-- **The claim that network-wise calibration is necessary is not isolated by ablation.** The paper argues that layer/block-wise calibration fails for INR-VC due to inter-layer dependencies, and adopts network-wise calibration. However, NeuroQuant differs from the compared baselines (AdaRound, BRECQ, QDrop, RDO-PTQ) along multiple dimensions simultaneously: mixed-precision allocation, the Ω sensitivity criterion, channel-wise granularity, *and* network-wise calibration. No ablation is presented where only calibration granularity is varied (e.g., NeuroQuant with layer-wise vs. block-wise vs. network-wise calibration while keeping all other components fixed). The qualitative evidence in Fig. 3(c) ("statistic of the weight distribution") is not accompanied by a quantitative metric (e.g., block-wise Hessian off-diagonal magnitude). This weakens the attributability of the gains to the proposed calibration granularity specifically.
+- **The bit allocation search algorithm used in experiments is not specified.** The paper mentions "integer programming, genetic algorithms (Guo et al., 2020), or iterative approaches" (line 127) as possible techniques but never states which one was actually implemented. This is a reproducibility gap. The authors should specify the exact search procedure and its computational cost.
 
-- **Figure 5 (left) shows available rate points but not a direct R-D comparison.** The left subplot of Fig. 5 shows the number of available rate points for mixed vs. unified precision, but does not compare actual R-D performance at the same total bitrate. A direct R-D curve comparing mixed-precision NeuroQuant against the best unified-precision model (at matched bitrates) would more cleanly demonstrate the benefit of mixed-precision rate control.
+- **Missing controlled ablation on calibration granularity.** The paper argues that network-wise calibration is necessary for INR-VC (Sec. 3.2), but the experimental comparison (Table 1) compares NeuroQuant against methods that differ in calibration granularity *and* other aspects (diagonal Hessian approximations, rounding procedures). A controlled ablation varying only the calibration granularity (network-wise vs. block-wise vs. layer-wise) within the same optimization framework would more cleanly isolate the effect of granularity.
 
-- **Calibration time per bitrate point is not reported.** Table 2 usefully reports encoding time to support a new bitrate, but the per-bitrate calibration time (which is the true "cost" of adding a bitrate point with PTQ) is not broken out. This would help users understand the practical overhead.
+- **Comparison against QAT baselines conflates mixed precision with PTQ.** NeuroQuant uses mixed precision (Table 1, marked with *), while the QAT baselines (FFNeRV, HiNeRV) use uniform precision. Part of the >3dB gain at low bitwidths may come from mixed-precision flexibility rather than from PTQ calibration. A comparison against a mixed-precision QAT baseline (or an ablation holding bitwidth allocation constant) would clarify the source of improvement. (The paper's overall claim — "NeuroQuant outperforms baselines" — is not invalidated, but the attribution of gains is ambiguous.)
 
-- **Only the UVG dataset is evaluated.** While UVG is the standard benchmark in INR-VC literature, adding a second dataset (e.g., a subset of JVET sequences) would strengthen claims of generalizability. This is a minor scope limitation.
-
-- **Statistical variance is not reported for PSNR results.** Table 1 reports PSNR without variance across sequences. Given the small number of sequences, reporting mean ± std would provide a more complete picture.
+- **Encoding time comparison (Table 2) does not account for the mixed-precision search overhead.** Table 2 reports the calibration time for NeuroQuant but does not include the time required for the bit allocation search. If the search cost is non-negligible, the "up to 7.9× speedup" figure may overstate the practical advantage. The authors should report the total end-to-end cost (search + calibration).
 
 ### Trivial
-
-- Theorem 1 calls Ω the "optimal sensitivity criteria." Under the stated assumptions (converged weights, zero gradient), Ω is the second-order Taylor term. Calling it "optimal" is a slight overstatement—it is the best *quadratic* approximation, but optimality under a well-defined objective (e.g., minimizing task loss increase) is not formally proven. The practical value of the criterion is clear; the wording could be softened.
+- The paper does not compare against general mixed-precision PTQ methods (e.g., HAWQ-V2). While such methods assume layer independence and would likely underperform on INR-VC (as the paper argues), demonstrating this would strengthen the paper. This is a nice-to-have rather than a required comparison.
 
 ## Nice-to-Haves
 
-- **Validate that Ω correlates with actual task loss increase.** The paper uses Ω for bit allocation but does not empirically verify that Ω values correlate well with the measured loss increase under different bitwidth assignments. A correlation plot (predicted Ω vs. measured Δℒ for random bitwidth assignments) would strengthen the motivation for the sensitivity criterion.
-
-- **Direct comparison of R-D curves with mixed-precision baselines.** If the compared PTQ baselines use unified precision, the comparison in Fig. 4 conflates the benefit of mixed-precision allocation with that of network-wise calibration. Running the best baseline (e.g., BRECQ or RDO-PTQ) with the same mixed-precision allocation would provide a fairer comparison.
-
-- **Computational cost of the sensitivity search.** The paper mentions efficiency but does not report the wall-clock time or number of candidate evaluations needed for the mixed-precision search itself.
+- A controlled ablation comparing bit allocations from the proposed Ω criterion against allocations from trace-based or eigenvalue-based criteria using the same search algorithm, to directly test whether the off-diagonal and directional information contributes empirically.
+- A comparison against a mixed-precision QAT baseline to disentangle the benefits of mixed precision from the benefits of PTQ calibration.
+- Adding the mixed-precision search time to the encoding time comparison.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+The following reviewer criticisms were removed per the hard rules:
 
-- *No comparison to standard video codecs (H.265/H.266).* This is scope creep — the paper is about quantization methods for neural video representations, not about competing with traditional codecs as a video coding standard. The paper's contribution (PTQ for INR-VC) does not require this comparison.
-
-- *"First time" claim is too strong given prior QAT methods.* The paper explicitly acknowledges QAT methods and compares against them. The claim is specifically about achieving variable-rate INR-VC through (post-training) weight quantization, which QAT methods do not do — they optimize weights during training with quantization awareness. The claim is defensible.
-
-- *Criticism of the "optimal" label in Theorem 1 as overstated.* Under the stated assumptions (zero gradient, PSD Hessian), the second-order term is the dominant approximation. This usage is standard in optimization and not misleading in context.
-
-- *Only one dataset / missing additional datasets.* This is a minor limitation acknowledged in the review; the paper follows the convention of the INR-VC literature (UVG is the standard benchmark). Demanding a second dataset is a nice-to-have, not a structural weakness.
-
-- *Missing formatting details / parser artifacts.* These are not author errors.
+- *"The results in Table 1 are partially garbled in the provided text"* — This is a parser artifact introduced during PDF extraction, not an error in the original paper.
+- *"The uniform distribution assumption is only valid when the quantization step s=1"* and *"the overhead defeats the purpose"* — The U(-0.5, 0.5) assumption is standard in the quantization literature (Ballé et al., 2017) and is used to justify the straight-through estimator approximation, not to actually sample Δw values. Computing Δw for a candidate bitwidth is simply quantize-and-subtract, which is trivially cheap. The critic's concern about overhead is not well-founded given the linear-time computation described.
+- *Missing appendix / proofs in appendix complaints* — The parser strips appendix content from all papers; nothing suggests the original submission lacks these.
 
 ## Novel Insights
 
-The key insight that emerges from this review is that NeuroQuant's contribution lies not in any single novel component (the sensitivity criterion is a standard second-order approximation; the calibration objective follows AdaRound's framework; the variational inference perspective is not new to compression) but rather in the *composition* of these components adapted to the specific properties of non-generalized INR-VC models. The paper correctly identifies that INR-VC models violate two assumptions underlying existing PTQ methods — inter-layer independence and loss isotropy — and shows that addressing both simultaneously is necessary for good performance. This is a principled adaptation rather than a paradigm shift. The most practically significant claim is the dramatic encoding time reduction (up to 7.9×) while maintaining or improving compression quality, which directly addresses a real bottleneck in deploying INR-VC systems.
+The reviewer observes something not fully articulated by the paper itself: the paper's framing of variable-rate INR-VC as a mixed-precision PTQ problem is interesting because it inverts the typical logic of neural compression. Normally, variable-rate is handled at the *training* stage (e.g., with Lagrange multipliers swept across runs, or with conditional models). Here, the authors treat quantization precision as the *only* degree of freedom and show that for INR-VC (where each video is a unique network), this is sufficient to cover a meaningful range of rate-distortion points. This suggests a different perspective on the INR-VC pipeline: the heavy lifting (learning the video representation) is done once at high precision, and the rate-distortion frontier is explored entirely in the *quantization* stage. This distinction could inform future INR-VC system design beyond the specific PTQ method.
 
 ## Suggestions
 
-1. **Specify the mixed-precision search algorithm.** State whether you used greedy iterative rounding, integer programming, or another method, and report its wall-clock time and the number of candidate evaluations. Clarify how the circular dependency (Ω depends on Δw, Δw depends on bitwidth) is broken.
-
-2. **Add a calibration-granularity ablation.** Run NeuroQuant with layer-wise, block-wise, and network-wise calibration keeping all other components (Ω criterion, channel-wise QPs, mixed-precision allocation) fixed. Report the PSNR difference. This directly tests whether network-wise calibration provides the claimed benefit.
-
-3. **Add a direct R-D comparison of mixed vs. unified precision at matched bitrates.** Replace or augment Fig. 5(left) with a plot showing R-D curves for NeuroQuant with mixed precision vs. the best unified-precision model at the same total bitrate.
-
-4. **Report per-bitrate calibration time separately from total encoding time in Table 2**, so readers can see the cost of adding each additional rate point.
+1. **Replace "optimal" with "second-order accurate" or "complete"** in the statement of Theorem 1, or provide a formal argument for bit-allocation optimality under a rate constraint.
+2. **Specify the bit allocation search algorithm** used in experiments (which of the mentioned techniques was actually implemented) and report its computational cost.
+3. **Add a controlled ablation** comparing network-wise, block-wise, and layer-wise calibration within the same optimization framework.
+4. **Report total encoding time including search overhead**, or clarify that the search time is negligible and provide its measured cost.
+5. **(Nice-to-have) Add a comparison against a mixed-precision QAT baseline**  or an ablation controlling for bitwidth allocation to clarify attribution of gains.
 
 ## Score and Decision
 
-This is a solid technical paper that makes a practical contribution (first PTQ tailored to INR-VC with demonstrated speedup and quality improvements) with sound theoretical motivation. The identified weaknesses — underspecified allocation algorithm, missing ablation for calibration granularity, and minor presentation gaps — are all addressable and do not invalidate the core claims. The paper would benefit from a revision addressing reproducibility (especially the allocation algorithm) and strengthening the ablation evidence. On balance, the contribution is real and the paper is above the acceptance threshold.
+The paper tackles a practically important problem (efficient variable-rate INR-VC), provides a well-motivated method with a clear theoretical rationale, and supports it with strong empirical results across multiple architectures and baselines. The weaknesses are minor and addressable — overclaimed optimality, missing ablation details, unspecified search algorithm — and do not threaten the core contribution. The encoding speedup and compression efficiency gains are substantial and practically meaningful.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

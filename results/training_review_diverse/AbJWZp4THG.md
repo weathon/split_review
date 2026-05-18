@@ -1,88 +1,89 @@
-Now I have a thorough understanding of the paper. Let me construct the final consolidated review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper introduces FedAda², a class of jointly adaptive federated learning algorithms that avoid transmitting preconditioners between the server and clients (saving communication) while using memory-efficient local optimizers (SM3) to reduce on-device memory cost. The authors provide a theoretical convergence analysis (O(T^{-1/2}) for non-convex objectives) and empirical results on StackOverflow (with differential privacy), CIFAR-100, and GLD-23K, showing that FedAda² retains the accuracy benefits of joint adaptivity at a fraction of the communication cost.
+This paper introduces FedAda², a class of jointly adaptive federated learning algorithms that eliminate server-to-client preconditioner communication and use memory-efficient local optimizers (SM3) to make joint adaptivity practical in cross-device FL. The paper provides a convergence analysis showing FedAda² achieves the same O(T^{-1/2}) rate as expensive full-communication joint adaptivity, and presents empirical results on StackOverflow (with and without DP), CIFAR-100, and GLD-23K showing competitive or better accuracy with substantially lower communication cost.
 
 ## Strengths
 
-- **Communication efficiency without sacrificing accuracy**: The paper demonstrates that removing preconditioner transmission and using zero-initialized client preconditioners achieves competitive or better accuracy than full preconditioner transmission. When evaluated on a communicated-bits basis (Figure 2), FedAda² and the communication-efficient baseline converge the fastest. This is the central practical contribution and is well-supported by the experimental design (a natural ablation chain: server-only → joint with transmission → joint w/o transmission → SM3-compressed).
+- **Theoretical convergence guarantee matching resource-intensive counterparts**: Theorem 6 and Corollary 8 prove that FedAda² achieves O(T^{-1/2}) convergence for general non-convex objectives under standard assumptions — the same rate as expensive full-communication joint adaptivity — directly showing that the proposed efficiency improvements do not compromise theoretical performance. The paper correctly notes that this matches the state of the art (line 70).
 
-- **Memory-efficient client-side adaptivity via SM3**: By instantiating client-side preconditioners with SM3, FedAda² maintains statistics at parameter-group granularity rather than per-coordinate, reducing on-device memory overhead. The paper explicitly notes that SM3 "exploits natural activation patterns…to efficiently synthesize a low-rank approximation of the preconditioner," and this compression is key to scalability on resource-constrained devices.
+- **Empirical demonstration that communication savings do not harm accuracy**: The results across three datasets (Figure 1) show that "Joint Adap. w/o Precond. Commu." and FedAda² match or exceed the accuracy of "Direct Joint Adap." while using fewer bits. Figure 2 further confirms faster convergence in terms of total transmitted bits. The DP experiment on StackOverflow (line 90) is particularly compelling: zero-initialized client preconditioners outperformed full preconditioner transmission.
 
-- **Theoretical convergence guarantee matching state-of-the-art**: Theorem 6 and Corollary 8 prove that FedAda² converges at rate O(T^{-1/2}) for general non-convex objectives, matching the best known rates for federated non-convex optimization. The paper claims (line 70) that no prior work provides convergence results for jointly adaptive optimization that explicitly support methods like Adam and AdaGrad, which would be a useful theoretical contribution if substantiated.
+- **Practical viability of memory-efficient joint adaptivity via SM3**: Section 6.2 (line 107) reports that compressing preconditioners with SM3 *restabilizes* training after removing preconditioner communication caused instability — a non-obvious finding that the paper attributes to the denoising effect of SM3 projections.
 
-- **Empirical validation across diverse domains and tasks**: FedAda² is tested on text classification (StackOverflow with DP), image classification (CIFAR-100), and fine-grained visual recognition (GLD-23K with ViT finetuning). Across all three, jointly adaptive methods outperform FedAvg and server-only adaptive baselines.
+- **Generality via blended optimization framework**: Section 5.1 (line 74) introduces a framework that permits different per-device adaptive optimizers (Adam, AdaGrad, SGD) each round, extending the method's applicability beyond a single optimizer choice. Appendices C.1 and C.2 cover both SM3 and Adam instantiations.
 
-- **Robustness to asymmetric server-client optimizer configurations**: Section 6.2 (Figure 7) investigates asymmetric setups (e.g., Adam on server, AdaGrad on client) and reports stable performance, highlighting the flexibility of the framework.
-
-- **Interesting empirical insight about SM3 stabilization**: The paper observes that removing preconditioner transmission destabilizes worst-case runs, but SM3 compression "restabilizes the losses" — the authors hypothesize a denoising effect of the low-rank projection. This is an actionable, non-obvious finding.
+- **Broad empirical evaluation**: The experiments span text classification with DP (StackOverflow), image classification (CIFAR-100), and domain-shifted fine-tuning (GLD-23K with ViT), with 20 random seeds and 95% confidence intervals (line 81), plus ablations on local epochs (Figure 3) and hyperparameter sensitivity (Section 6.2).
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **The convergence analysis is presented in a form too minimal to verify**: Theorem 6 is given only as asymptotic orders (Ψ₁–Ψ₆ with Θ/Ω/O notation) with undefined constants, piecewise conditions that are not fully explained, and the full proof deferred to the (stripped) appendix. The notation is dense and confusing in places (e.g., the relationship between η and ηℓ, the conditions on the piecewise cases in Ψ₅ and Ψ₆). The strong claim (line 70) that "there are no known convergence results of jointly adaptive federated optimization that explicitly support several popular methods including Adam and AdaGrad" is a significant literature claim that the available text does not substantiate. While the asymptotic rate O(T^{-1/2}) matches best-known results, it is also the same rate as standard SGD for non-convex optimization, and it is unclear whether joint adaptivity provides any advantage in the convergence rate itself or only in the constants / practical behavior.
-
-- **Gap between theoretical assumptions and experimental setup**: The theory assumes full-batch client gradients (line 19), which is a strong assumption not used in the experiments (which use mini-batches). The paper acknowledges this as "a limitation of our theory" (line 72) but does not discuss how or whether the theory extends to the mini-batch stochastic setting that is actually evaluated. This limits the connection between the theoretical claims and the empirical validation.
+None.
 
 ### Minor
 
-- **The formal algorithm pseudocode is not visible in the extracted text**: Section 3 or 4 (likely "Algorithm 1" referenced on line 99, and "Algorithm 5" on line 31) appears to have been garbled during parsing, leaving only the fragment `\section{13: end for }`. While the algorithm is well-described conceptually throughout (avoid preconditioner transmission, zero-initialize client preconditioners, use SM3 for memory efficiency), the absence of the explicit update rules and communication protocol in the available text makes it harder to precisely understand the mechanism. This appears to be a parser artifact rather than an author omission.
+- **Imprecise claim about the ε_s → 0 limit**: The paper states that "by taking ε_s → 0, our algorithm recovers federated algorithms that do not utilize local gradient clipping" (line 31). However, the Lipschitz constant \(\widetilde{L} = \frac{2\sqrt{d}G}{\eta_\ell\varepsilon_s}\) (line 28) diverges as ε_s → 0, which would make any bound depending on \(\widetilde{L}\) vacuous in that limit. While the bound is valid for any fixed positive ε_s (and ε_s is fixed to a negligible non-zero value in experiments), the informal claim about recovering the clipping-free setting in the limit is not supported by the analysis as written. The authors should either clarify that the recovery is conceptual rather than a strict limit of the bound, or analyze the dependence more carefully.
 
-- **The "blended optimization" discussion (Section 5.1) feels tangential**: Paragraphs at lines 73–75 introduce a general framework for distributing local optimizer strategies, but this discussion is not clearly connected to the FedAda² algorithm or the paper's experiments. It reads as a forward-looking remark rather than a contribution of the current work.
+- **Full-batch gradient assumption limits practical applicability**: The convergence analysis assumes full-batch client gradients (line 19) rather than stochastic mini-batch gradients, which are standard in cross-device FL. The paper acknowledges this as a limitation (line 72: "While this constraint is a limitation of our theory…"), but the gap between the theoretical setting and practical usage is not discussed in depth. The results may not directly transfer to settings where clients use small mini-batches with high noise.
 
-- **Limited discussion of limitations**: The paper acknowledges only the full-batch assumption as a limitation. Other natural limitations — such as the impact of SM3's low-rank approximation error on convergence, sensitivity to extreme heterogeneity beyond bounded-gradient assumptions, or scenarios where FedAda² might underperform — are not discussed.
+- **Undefined "asymptotic" in a key claim**: The paper states the bound "deterministically guarantees asymptotic stabilization of the minimum gradient, regardless of initialization or client subsampling procedure" (line 72), but "asymptotic" is not formally defined. The bound depends on the finite horizon T and learning rates η, η_ℓ, so readers may misinterpret what "asymptotic" means in this context.
+
+- **Empirical protocol details are incomplete**: While the paper reports 20-seed runs with confidence intervals (line 81) and lists datasets/models, it omits some standard details such as exact client participation rates per round, hyperparameter search ranges and selection procedure, and per-dataset batch sizes. These would aid reproducibility and are expected for a methods paper with empirical claims.
 
 ### Trivial
-None.
+
+- **Notation formatting inconsistencies**: The paper uses "FedAda2" (no superscript), "FedAda²", and "$\mathtt{F e d A d a}^{\bar{2}}$" interchangeably, which can be confusing but does not affect comprehension.
 
 ## Nice-to-Haves
 
-- A table quantifying memory per client (in MB) and total communication per round (in bits) for each method would make the efficiency claims more concrete. Currently, savings are described qualitatively (e.g., "reduces overhead significantly").
-- Explicit reporting of key hyperparameters (number of clients per round, batch sizes, learning rate schedules) would improve reproducibility, though these details may reside in the stripped appendix.
+- Reporting wall-clock time or convergence rounds alongside communication bits (Figure 2) would strengthen the efficiency argument by showing end-to-end speedup.
+- A brief discussion of when the full-batch theoretical results are expected to transfer to mini-batch settings (perhaps via a variance-reduction argument) would tighten the theory-practice link.
 
 ## Removed Points
 
-These points are flagged to be removed — treat them with caution:
+These points from the harsh critic were removed because they are factually incorrect, based on parser artifacts, or misunderstand the paper:
 
-- **"Missing algorithm — the contribution is undefined"** (Harsh Critic's #1): Removed as factually overstated. The algorithm IS described in text: avoid preconditioner transmission, zero-initialize client preconditioners, use SM3 for memory efficiency. The formal pseudocode was likely stripped by the parser (the original paper references Algorithm 1 and Algorithm 5). The algorithm is sufficiently described to understand the contribution; the critic's framing of this as a fatal structural flaw is incorrect.
+1. **"The algorithm is never clearly specified"** — REMOVED. The paper references Algorithm 1 and Algorithm 5 (full version) which exist in the original submission but are stripped by the parser. The paper also provides a clear operational definition (lines 85–86): zero-initialize client preconditioners instead of transmitting server preconditioners, and compress via SM3. The algorithm description is present and intelligible.
 
-- **"Figures not included in extracted text — empirical claims unverifiable"** (Harsh Critic's #3, part): Removed as a parser artifact. Figures 1, 2, 3, and 7 are all referenced with image links in the extracted text; they exist in the original PDF submission.
+2. **"Full-batch assumption contradicts partial client participation"** — REMOVED. Full-batch client gradients (each selected client uses all its local data) and partial client participation (only a subset of clients are selected each round) are orthogonal concepts. There is no contradiction. The actual gap (full-batch vs. mini-batch local gradients) is acknowledged as a limitation by the paper (line 72).
 
-- **"Missing hyperparameter details"** (Harsh Critic's #3, part): Removed per the rule about reproducibility nitpicks and potential appendix content. The paper reports 20 random seeds, 95% CIs, dataset and model specifications. Fine-grained hyperparameter details (learning rate schedules, client counts, batch sizes) are standard content for the appendix, which is stripped.
+3. **All complaints about parser artifacts** (garbled section numbering, "\section{13: end for}" appearing after abstract, "fexibility" typo, spaces inside math mode) — REMOVED per the instruction that these are parser errors, not author errors.
 
-- **"Convergence bound uses same rate as SGD — no advantage"**: Removed as a strawman. The contribution is achieving the same rate *without* preconditioner transmission, which is the efficiency advantage. The rate matching SOTA is not a flaw.
-
-- **"Proof is in the appendix / unreviewable"**: Removed per the rule about missing appendix content being a parser artifact. The full proof exists in the original submission.
-
-- **"Reader cannot determine what FedAda² does"**: Removed. The paper clearly states: (1) avoid transmitting server preconditioners to clients, (2) zero-initialize client preconditioners, (3) use SM3 for memory-efficient local adaptivity. This is described in lines 4, 10–12, and 85.
-
-- **Strengths from Strength Finder removed**: None removed — all six strengths are grounded in specific paper content and do not conflict with verified weaknesses.
+4. **"Bound not supported" complaint about the asymptotic claim** — RE-FRAMED above as a minor imprecision about the undefined term "asymptotic" rather than an unsupported claim, since the bound and corollaries are explicitly stated.
 
 ## Novel Insights
 
-The harsh critic's review performs a valuable service by identifying that the main-text theory sketch is too minimal for independent verification and that the full-batch theoretical assumption creates a gap with the practical experiments. However, the critic overstates the "missing algorithm" claim to a fatal degree — the algorithm is clearly described in text even if the formal pseudocode was garbled by the parser. The strength finder's observation about the SM3 stabilization effect (the "denoising" hypothesis) is a genuinely interesting insight that goes beyond what the paper itself emphasizes: the counterintuitive result that compressing preconditioners (which introduces approximation error) actually *restabilizes* training compared to the uncompressed communication-efficient baseline. This is a non-obvious phenomenon worth highlighting.
+None beyond the paper's own contributions. The reviewers' comments do not surface a non-obvious insight about the method or theory that the paper itself does not already contain.
 
 ## Suggestions
 
-1. **Present the algorithm pseudocode explicitly** in the main text (not just the appendix) so that the update rules, communication protocol, and the gradient-clipping step used in the analysis are transparent at a glance.
-2. **Provide an interpretable bound** rather than asymptotic orders alone — even a simplified explicit bound showing how the local and global learning rates interact would make the theoretical contribution more accessible.
-3. **Discuss how the full-batch theoretical assumption relates to the mini-batch experiments**, or extend the analysis to the stochastic setting, to close the gap between theory and practice.
-4. **Acknowledge limitations** more thoroughly: when might FedAda² underperform? How does SM3 approximation error affect convergence? What about extreme data heterogeneity?
+- Clarify the ε_s → 0 claim: explicitly state that the analysis assumes a fixed positive ε_s and that the limit is informal/conceptual, or re-derive the bound without the ε_s dependence for the non-clipping case.
+- Add standard experimental protocol details (participation rate, hyperparameter selection method, batch sizes) in the main text or appendix to improve reproducibility.
+- Define "asymptotic" precisely in the context of the convergence bound (line 72) to avoid ambiguity.
 
 ## Score and Decision
 
-This paper addresses a well-motivated practical problem (communication and memory overhead in jointly adaptive federated learning) with a clean algorithmic idea, a theoretical convergence guarantee, and empirical validation across three datasets. The main weaknesses are that the theory is presented in a form too minimal to verify from the main text alone, and the full-batch assumption creates a gap with the stochastic experiments. Neither weakness is fatal — the algorithm is clearly described, the empirical results are present (parser artifacts notwithstanding), and the core contribution is sound. The paper would benefit from a more detailed theory presentation and a limitations discussion, but the current submission communicates the key ideas effectively.
+**Originality**: Good — the paper introduces a principled approach to removing preconditioner communication in jointly adaptive FL and validates it theoretically and empirically.
 
-**Score**: 6.5
+**Importance of research question**: High — communication and memory efficiency are first-order concerns in cross-device FL.
 
-**Decision**: Accept
+**Claims supported**: Mostly yes — the core claims are supported by theory and experiments, with minor imprecisions (ε_s limit, "asymptotic" definition) that do not invalidate the contributions.
+
+**Soundness of experiments**: Adequate — 20 seeds, confidence intervals, three datasets, DP setting, ablation studies. Some protocol details are missing.
+
+**Clarity of writing**: Moderate — the paper is comprehensible but has notation inconsistencies and some imprecise phrasing.
+
+**Value to community**: Positive — provides a practical method with theoretical backing for making joint adaptivity scalable.
+
+**Score**: 6.5 — A solid paper with clear contributions and minor, addressable weaknesses.
 
 MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

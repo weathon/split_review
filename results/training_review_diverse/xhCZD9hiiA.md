@@ -1,16 +1,18 @@
-Now I have all the information needed. Let me produce the final consolidated review.
+Now I have thoroughly verified all claims against the paper. Let me write the consolidated review.
 
 ## Summary
 
-This paper proves that an MLP with batch normalization and orthogonal random weight matrices (drawn from the Haar distribution) avoids gradient explosion at initialization while maintaining orthogonalization of representations. The key contributions are non-asymptotic, finite-width theoretical guarantees: (1) exponential decay of the isometry gap with depth (Theorem 1), and (2) a depth-independent bound on expected log-gradient norms (Theorem 2), directly contradicting prior mean-field results that suggested gradient explosion is unavoidable in BN networks. The paper also presents empirical results on training stability and a heuristic activation shaping scheme for non-linear activations.
+This paper proves that an MLP with batch normalization (BN) and random orthogonal weight matrices at initialization avoids both rank collapse (exponential decay of the isometry gap with depth) and gradient explosion (log-gradient-norm bounded independently of depth) for linearly independent inputs with n=d. The theoretical results are non-asymptotic (finite-width), using Weingarten calculus, and stand in direct contrast to the established exponential gradient explosion for Gaussian weights (Yang, 2019, Theorem 3.9). Experiments confirm the theory and extend it to training dynamics and, via a heuristic activation shaping scheme, to certain nonlinear activations. The paper also documents an implicit orthogonality bias during SGD training.
 
 ## Strengths
 
-- **First non-asymptotic proof that gradient explosion is avoidable in BN networks.** Theorem 2 proves that the expected log-norm of per-layer gradients is bounded by a constant depending only on width and input isometry gap — with no dependence on depth — directly refuting the previously believed inevitability of exponential gradient explosion in BN networks [Yang 2019, Theorem 3.9]. This is a genuine theoretical contribution, supported by clean experimental validation (Figure 4 shows log-gradient norms staying flat for orthogonal weights while exploding for Gaussian weights).
+- **First non-asymptotic proof of depth-independent gradient bounds for BN networks.** Theorem 2 provides a bound on the expected log-gradient-norm that does not depend on depth — only on width and input isometry. This contrasts qualitatively with the exponential-in-depth explosion proven for Gaussian weights (Yang, 2019, Theorem 3.9), as empirically validated in Figure 2.
 
-- **Non-asymptotic, finite-width analysis with explicit rates.** Unlike prior mean-field analyses that are asymptotic in width or rely on hard-to-verify assumptions [Yang 2019, Daneshmand 2021], Theorem 1 gives an explicit exponential decay rate for the isometry gap ($\E[\IG(X_{\ell+1})] \le \IG(X_0)e^{-\ell/k}$ with $k = C d^2(1+d\,\IG(X_0))$) that holds for any finite width $d$ without taking limits. This finite-width regime is precisely the setting of practical neural networks, making the analysis more directly applicable than prior work.
+- **Exponential convergence of representations to perfect orthogonality.** Theorem 1 proves the isometry gap decays at rate \(\mathcal{O}(e^{-\ell/k})\) with \(k = Cd^2(1 + d\cdot\IG(X_0))\), which is stronger than the prior non-asymptotic bound of Daneshmand et al. (2021) that only guarantees proximity within an \(\mathcal{O}(\text{width}^{-1/2})\) ball. Figure 1 confirms exponential decay empirically.
 
-- **Careful experimental validation of theoretical predictions.** Figures 1–4 systematically confirm the theoretical claims: isometry gap decay matches the predicted exponential rate, gradient norms remain flat across depth for orthogonal weights (vs. exponential growth for Gaussian weights), and degenerate inputs trigger gradient explosion while non-degenerate inputs do not. All experiments use 10 independent runs with confidence intervals.
+- **Depth-independent training convergence validated experimentally.** Figure 3(c) shows that SGD training accuracy curves for depths 100, 200, 500, and 1000 are nearly identical on CIFAR-10, demonstrating that the theoretical bounds translate to stable, depth-agnostic optimization at practical finite widths.
+
+- **Empirical discovery of an implicit orthogonality bias during training.** Figure 6 shows that weight matrices in a 1000-layer network remain nearly orthogonal even after many SGD steps despite non-negligible gradients. This suggests the dynamics naturally preserve orthogonality, pointing to an interesting direction for future work.
 
 ## Weaknesses
 
@@ -22,49 +24,50 @@ None.
 
 ### Minor
 
-- **The $n=d$ (batch size equals width) requirement is a significant practical limitation that is not empirically tested for robustness.** The entire theory requires the input matrix to be square ($d \times d$), which means batch size must equal network width. In modern deep learning, widths are often much larger than typical batch sizes. The paper states this requirement (line 71) but does not explore whether gradient properties degrade gracefully when $n \neq d$, nor does it provide any theoretical or experimental evidence about how the bounds change when this condition is violated. For a paper with "Training Without Depth Limits" in its title, this constraint is a substantial gap between theory and practice that deserves more explicit discussion and experimental probing.
+1. **The gradient bound is loose for realistic widths.** Theorem 2 gives \(\mathbb{E}[\log \|\nabla\|] \leq C d^5 (\phi(X_0)^3 + 1)\). For \(d=1000\), the right-hand side is on the order of \(10^{15} \times\) constants, meaning the bound does not rule out astronomically large gradients in principle — it only proves depth-independence, not practical boundedness. The experiments (Figure 2) confirm that gradients stay small in practice, partially mitigating this concern. The paper should qualify this bound as showing *depth-independence* rather than tightness, and ideally provide a sharper analysis reducing the \(d^5\) factor or at least tabulate the numerical magnitude for typical widths.
 
-- **The activation shaping section (Section 5) is heuristic and lacks a reproducible prescription in the main text.** While the paper defines the "rate of explosion" $R(\ell, \alpha_\ell)$ and states that gains should decay "faster than a harmonic series," the main text does not provide a concrete algorithm or formula for selecting the gain $\alpha_\ell$ as a function of depth and width. The paper references Appendix~\ref{sec:shaping} for details, but a self-contained main-text prescription is missing. Since activation shaping is presented as a contribution ("we also design an activation shaping scheme"), the lack of a concrete, reproducible scheme weakens this component of the paper. The empirical evidence (Figure 5) is suggestive but does not constitute a fully specified method.
+2. **The theory covers initialization only, not the training trajectory.** All theoretical results are expectations over random orthogonal weight matrices at initialization. The paper's framing ("Towards Training Without Depth Limits") and the experimental section demonstrate that training *works*, but there is no theoretical guarantee about gradient behavior after weights are updated by SGD. The gap is acknowledged in the discussion of "implicit orthogonality bias" (Section 7) as future work, but the abstract and introduction could more clearly delimit the scope of the formal results versus the empirical observations.
 
-- **The theoretical guarantees hold at initialization, while the training claims are empirically supported but not theoretically justified.** Theorems 1 and 2 analyze expectations over random weight matrices drawn at initialization, yet the paper's title ("Towards Training Without Depth Limits") and Section 4 ("Implications on training") focus on training behavior. The paper acknowledges this gap ("While the SGD trajectory strongly diverges from the initial conditions that we analyze theoretically," line 214), and the training experiments are legitimate empirical contributions. However, the framing could more clearly separate what is proven (initialization properties) from what is observed (training stability) to avoid overclaiming the scope of the theory.
+3. **The \(n = d\) assumption is restrictive and insufficiently discussed.** The analysis requires the batch size to equal the width. The paper states this requirement (line 71) but does not discuss why it is needed, whether it can be relaxed to \(n < d\) (e.g., via subspace projection or covariance analysis), or how limiting it is for practical architectures. The experiments use \(d=100, n=100\), which conforms to the assumption. This restriction deserves a more prominent caveat and ideally a discussion of potential extensions.
+
+4. **The simplified BN operator differs from standard BN.** Equation (3) omits mean reduction and the \(1/n\) scaling factor. The paper acknowledges these are "minor differences" and points to Figure 1(c) for empirical validation. However, the theoretical analysis relies on the eigenvalue structure induced by the simplified operator (eigenvalues of \(\bn(X)\bn(X)^\top\) lying in \((0,1]\)). A formal justification that mean subtraction does not affect the isometry gap decay or gradient bound would strengthen the contribution beyond a single empirical figure.
+
+5. **The activation shaping scheme for nonlinear activations is heuristic and lacks theoretical support.** Section 5 describes tuning per-layer pre-activation gains \(\alpha_\ell\) with the criterion that they "ensure faster decay than a harmonic series." No theorem connects the gain schedule to gradient bounds, and no concrete algorithm or formula for \(\alpha_\ell\) is provided in the main text. The paper references an appendix for details (which was stripped by the parser). As presented in the main text, this reads as a promising but incomplete direction whose presentation alongside the formal contributions risks overclaiming.
 
 ### Trivial
+
 None.
 
 ## Nice-to-Haves
 
-- Experiments systematically varying batch size and width independently ($n \neq d$) to probe how gradient behavior degrades — or whether the phenomenon is more robust than the theory requires.
-- A brief comparison with alternative approaches to managing gradients in BN networks (e.g., gradient clipping, controlling BN scale parameters) to contextualize the contribution.
-- Discussion of the computational cost of generating Haar-distributed orthogonal matrices for large widths, since this is more expensive than sampling Gaussian weights.
-- Training experiments on higher-dimensional datasets (e.g., CIFAR100) where the width must match the batch size.
+- A sharper gradient bound (e.g., reducing \(d^5\) to \(d\) or \(d^2\)), or an explicit numerical evaluation of the bound's magnitude for typical widths and inputs.
+- A discussion of whether the \(n = d\) constraint can be relaxed, e.g., via zero-padding, subspace projection, or covariance analysis.
+- A concrete algorithm or explicit gain schedule for activation shaping, even if only empirically validated.
+- A small ablation study isolating the effect of the two BN simplifications (mean removal, \(1/n\) factor) on gradient behavior.
+- A brief comparison with other practical methods for stabilizing deep BN networks (e.g., gradient clipping, learning rate tuning).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **"The activation shaping lacks a formal definition of 'rate of explosion.'"** — Removed because the paper explicitly defines it as "the slope of the log norm of the gradients $R(\ell, \alpha_\ell)$" (line 243). This criticism is factually wrong.
-
-- **"The reference to Appendix B does not help a reader who only has the main text."** — Removed because the parser strips appendices; they exist in the original submission. The substance about the main text being vague is retained in Minor Weakness #2 above.
-
-- **"The linear network's lower accuracy undermines the practical relevance."** — Removed because the paper explicitly addresses this (line 214: "confirming that the sin and tanh networks are not operating in the linear regime"). The linear construction is a theoretical tool, not a practical recommendation.
-
-- **"Missing comparison to gradient clipping and other competing approaches."** — Removed as scope creep. The paper's contribution is a theoretical construction and analysis, not an empirical comparison of training techniques.
-
-- **"Only CIFAR10 experiments."** — Downgraded to Nice-to-Have. The theoretical experiments (Figures 1–4) use random data, and the training experiments on CIFAR10 are sufficient to validate the theory's implications.
+- **"The gradient bound is nearly vacuous"** — kept as Minor but downgraded: the bound is loose but its *qualitative* contribution (depth-independence vs. exponential explosion for Gaussian weights) is genuine and empirically validated.
+- **"Activation shaping is underspecified"** — the paper references App.~\ref{sec:shaping} for details, which was stripped by the parser; the claim cannot be fully verified from the main text alone.
+- **"No comparison with gradient clipping or learning rate reduction"** — this is scope creep; the paper's contribution is a theoretical construction, not an empirical comparison of stabilization methods.
+- **"No ablation on BN simplifications"** — this would strengthen the paper but is not a weakness; the paper provides experimental evidence that standard BN yields similar results.
+- **"Computational cost of Haar sampling not mentioned"** — a technical footnote, not a weakness affecting the paper's claims.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface a useful observation about the tension between theoretical elegance and practical applicability. The paper's core finding — that orthogonal weights + BN + square batch size avoids gradient explosion — is clean and mathematically rigorous. But the $n=d$ constraint and the reliance on initialization-only guarantees create a gap between what the theory proves and what the title/presentation suggests about training. This is not a fatal flaw (every theoretical paper has assumptions), but it is a pattern worth noting: reviewers will rigorously probe whether simplifying assumptions are acknowledged and tested for robustness. The activation shaping section additionally reveals that when a paper presents a heuristic as a contribution, reviewers expect it to be concrete and reproducible, not merely suggestive.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-- Explicitly test and report how gradient behavior changes when $n \neq d$ (e.g., width 100, batch sizes 50 and 200) to either show robustness or honestly document degradation. This single experiment would substantially strengthen the paper.
-- Provide a concrete formula for activation gains (e.g., $\alpha_\ell = 1/\sqrt{\ell}$ or similar) in the main text, not just the appendix, so the activation shaping scheme is self-contained and reproducible.
-- Clarify the scope in the title and abstract: e.g., change "Towards Training Without Depth Limits" to "Gradient Stability at Initialization in Deep Batch-Normalized Networks with Orthogonal Weights" — or at minimum add a sentence in the abstract explicitly stating that the theoretical guarantees are at initialization while training results are empirical.
+1. In the abstract and introduction, more precisely delimit what is proved (initialization, linear activations, simplified BN, \(n=d\)) versus what is empirically observed (training dynamics, nonlinear activations).
+2. Discuss why \(n = d\) is required and whether the analysis extends to \(n < d\), even via an informal argument.
+3. Provide a concrete example gain schedule for activation shaping in the main text (e.g., \(\alpha_\ell \propto 1/\ell\) or similar) to give readers a usable recipe.
+4. Explicitly note that the \(d^5\) bound is a proof of *depth-independence*, not a tight numerical guarantee, and state that experiments confirm practical boundedness.
 
 ## Score and Decision
 
-This is a solid theoretical paper with a genuine contribution: the first non-asymptotic proof that gradient explosion can be avoided in BN networks, with explicit finite-width bounds. The experimental validation is clean and supports the theory. The main weaknesses are the practical $n=d$ constraint (an honestly stated but underexplored limitation) and the heuristic nature of the activation shaping section. Neither is fatal — the core theoretical contribution stands on its own. The paper is well-written, clearly motivated, and addresses an important open question in the theory of deep learning.
+The paper makes a genuine and novel theoretical contribution — proving depth-independent gradient bounds for a BN network with orthogonal weights, using Weingarten calculus for non-asymptotic analysis. This directly challenges the prevailing view that gradients *must* explode in BN networks (Yang, 2019). The experiments support the theory and extend it to training. The main weaknesses are: (1) the gradient bound is loose (\(d^5\) factor), though the key insight of depth-independence is preserved; (2) the theory covers initialization only, though experiments confirm training works; (3) the \(n = d\) and simplified-BN assumptions are restrictive, though clearly stated. None of these are fatal. The paper is well-written, the proofs are sketched sufficiently, and the contribution is significant for the theory of batch-normalized networks. I recommend acceptance.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

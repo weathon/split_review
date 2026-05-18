@@ -1,80 +1,79 @@
+Now I have all the information I need to produce the final consolidated review.
+
+---
+
 ## Summary
 
-This paper proposes ER-AAE, a classical two-stage algorithm for approximate amplitude encoding of vectors into quantum states. The first stage greedily constructs a circuit by adding CZ-containing two-qubit blocks that maximally reduce the linear entropy of the evolving state. The second stage fine-tunes all circuit parameters via Adam to minimize infidelity. The method is evaluated on MNIST, CIFAR-10, random vectors, and random quantum circuit states, using N=10–11 qubits.
+This paper proposes ER-AAE, a classical algorithm for constructing approximate amplitude encoding (AAE) circuits by greedily reducing linear entropy. The method builds circuits using CZ gates and single-qubit rotations, introduces a theoretical bound linking the final infidelity to the linear entropy of intermediate states (Proposition 2), and provides a tensor-network-based initialization (Proposition 1) to avoid barren plateaus. Experiments on MNIST, CIFAR-10, random vectors, and random quantum circuit states show ER-AAE outperforming existing AAE methods (MPS, AQCE, AQCE-MPS, ADAPT-VQE, hardware-efficient circuits) at the chosen operating point.
 
 ## Strengths
 
-- **Consistently achieves lower infidelity and higher PSNR than all compared baselines (MPS, AQCE, AQCE-MPS, ADAPT-VQE, HE) across four datasets.** Tables 2 and 3 show ER-AAE-0 and ER-AAE-100 outperforming competing methods, using at most 100 CZ gates while baselines are constrained to use ≥100 gates. The margin is sometimes substantial (e.g., orders of magnitude on MNIST and CIFAR-10).
+- **Novel greedy circuit construction via linear entropy minimization.** Algorithm 1 inductively builds a circuit by selecting, at each step, the two-qubit gate that maximally reduces linear entropy. This differs from prior AAE methods that either fix the circuit topology beforehand or rely on tensor-network decompositions without optimizing gate order based on an explicit entanglement metric. The effectiveness is demonstrated in Fig. 2(a), where linear entropy drops rapidly on real-world datasets.
 
-- **Gate-efficient design: each two-qubit block uses exactly one CZ gate.** The gate set in Eq. (1) is structurally justified (rotations that commute through CZ are removed), giving 4 parameters per block vs. the 15‑parameter general two-qubit unitary that would decompose to 3 CNOT/CZ gates. This directly addresses the inefficiency the paper identifies in prior tensor‑network AAE methods.
+- **Theoretical infidelity bound linked to linear entropy.** Proposition 2 proves that the initial fidelity after the entropy-reduction phase is at least \(2^{\lfloor-2L\rfloor}\), where \(L\) is the linear entropy of the intermediate state. This provides a formal guarantee that reducing entanglement directly improves approximation accuracy—a connection not established in previous AAE works. The bound is verified empirically in Fig. 2(b), where initial infidelity is away from zero for moderate gate counts.
 
-- **Theoretical guarantee linking initial fidelity to linear entropy.** Proposition 2 gives |⟨v_target|V(θ)|0⟩|² ≥ 2^{⌊−2L⌋}, which ensures the initial state (after TN initialization) has non-vanishing overlap with the target, avoiding barren plateaus. Figure 2(b) empirically confirms that initial infidelity stays well below 1.
+- **Consistent outperformance at the chosen operating point.** Across all four datasets, ER-AAE achieves the lowest infidelity (Tab. 2) and highest PSNR (Tab. 3) compared to MPS, AQCE, AQCE-MPS, ADAPT-VQE, and hardware-efficient circuits. The comparison uses gate counts matched to at least 100 two-qubit gates for all baselines (the smallest feasible number in \([100,\infty)\) per Tab. 1), and ER-AAE uses exactly 100 CZ gates.
 
-- **Observation that real-world data (MNIST, CIFAR-10) exhibits much faster linear-entropy decay than random vectors (Figure 2(a)).** This is a genuinely useful empirical finding that could guide future AAE research toward data-dependent circuit construction.
+- **Observation of faster entropy decay on real-world data.** Figure 2(a) shows that MNIST and CIFAR-10 images exhibit substantially faster reduction of linear entropy than random vectors and random quantum circuit states. This insight—that natural image distributions are "easy to encode" in terms of low entangled structure—is a useful observation for future AAE research.
+
+- **Practical initialization to avoid barren plateaus.** Propositions 1 and 2 together ensure that the initial encoding state has non-zero fidelity with the target, mitigating the barren-plateau problem. The strategy is specific to ER-AAE and is shown to work in experiments.
+
+- **Gate-slide mechanism to improve global optimality.** The comparison of ER-AAE-0 (no retraining) and ER-AAE-100 (periodic retraining) demonstrates the benefit of the gate-slide mechanism, with the latter consistently yielding lower infidelity.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None.
+
+1. **Experimental comparison at a single operating point without trade-off curves.** The central claim (abstract, Section 5) is that ER-AAE "surpasses the best existing encoding techniques, achieving lower error with an equivalent or fewer number of CNOT or CZ gates." The experiments compare all methods at essentially one gate budget per method: ER-AAE uses exactly 100 CZ gates, while baselines use the smallest feasible number ≥100 (per Tab. 1). Although this yields roughly comparable gate counts (e.g., MPS would use ~108 CNOT, AQCE-100 uses 300 CNOT), the comparison lacks trade-off curves of infidelity versus number of two-qubit gates across a range of budgets for *all* methods. Such curves are standard in the AAE literature (Shirakawa et al., 2021; Rudolph et al., 2023) and are necessary to establish whether ER-AAE's advantage holds across different resource regimes. Without them, the reader cannot evaluate whether the observed advantage is robust or specific to the chosen operating point. This is the paper's most significant weakness.
 
 ### Minor
 
-1. **Gate counts for baselines are not reported in the results tables.** The paper states that baselines use "the smallest value in [100, +∞) according to constraints in Tab. 1" — this *does* mean baselines use ≥100 gates while ER-AAE uses exactly 100, supporting the "fewer or equal" claim. However, Tables 2 and 3 do not actually list the gate counts for each method/experiment. A reader must compute them from Table 1 constraints, and for AQCE/AQCE-MPS the total gate count is not clearly derivable from the description given. Reporting exact gate counts alongside infidelity values would remove all ambiguity.
+2. **No standard deviations or error bars.** Results in Tables 2–3 are reported as averages over \(M\) samples (\(M=10\) or \(50\)), but no uncertainty estimates are provided. This makes it difficult to assess the statistical reliability of the comparisons.
 
-2. **The claim that the infidelity bound "scales as O(L)" (line 14, Introduction) is imprecise.** Proposition 2 gives fidelity ≥ 2^{⌊−2L⌋}, so the infidelity bound is 1 − 2^{⌊−2L⌋}. The floor function makes this piecewise constant (e.g., 0.5 for all L ∈ (0, 0.5)), not O(L) in the usual asymptotic sense. The bound serves its practical purpose (non-vanishing initial fidelity), but the O(L) characterization should be corrected or qualified.
+3. **Computational cost of the gate-slide mechanism not discussed.** Setting \(C_{ER}=1\) means global re-optimization of all parameters using Adam after every single gate addition. This is computationally expensive (100 global optimizations for \(C=100\)), and the paper does not report wall-clock time, optimization step counts, or sensitivity to \(C_{ER}\). For larger systems this may become a practical bottleneck.
 
-3. **No ablation of the restricted gate set (1 CZ + 4 rotations).** The paper motivates this design choice (Eq. (1), lines 82–88) by noting that single-qubit rotations commute through CZ and can be absorbed. But it does not compare against a more expressive ansatz (e.g., general two-qubit unitaries with 3 CNOT gates) to show whether the restriction helps, hurts, or is neutral. An ablation on a small N would strengthen the paper.
-
-4. **C_ER = 1 is used throughout without justification or ablation.** The gate slide parameter controls how often all parameters are jointly re-optimized. Using C_ER = 1 means full retraining after every added gate, which is the most expensive setting. Running even one comparison with C_ER > 1 (e.g., 10 or 100) would clarify the trade-off.
-
-5. **Missing standard deviations / error bars for infidelity.** Tables 2 and 3 report only averages over M = 10 (RQC) or M = 50 (other) samples. For methods with close performance, variance matters. The paper would benefit from including standard deviations or at least noting when differences are within noise.
-
-6. **No discussion of limitations or classical computational cost.** The algorithm simulates 2^N-dimensional vectors (classical), which is feasible for N = 10–11 but becomes prohibitive for larger N. The paper does not mention this regime of applicability, nor does it provide any runtime or complexity analysis (e.g., O(N²) BFGS minimizations per gate added, plus full-parameter retraining at each gate when C_ER = 1). A brief limitations paragraph would improve the paper.
-
-7. **Proposition 2's bound is loose in practice.** The bound decays exponentially in L, but Figure 2 shows that for real data at C = 100, L is near 0, giving a trivial bound near 1. The paper does not report actual L values from experiments, so the reader cannot assess how informative the bound is. This is not a flaw — the bound still guarantees non-zero initial fidelity — but its practical significance is overclaimed relative to its tightness.
-
-8. **The AQCE gate count is underspecified.** The paper says AQCE does forward-backward sweeps (1 or 100 iterations) but does not state how many two-qubit gates the circuit contains. The total gate count depends on whether gates are added during sweeps or only updated. This makes it hard to independently verify the comparison.
+4. **No discussion of limitations.** The paper lacks a limitations section. Key limitations worth acknowledging: (a) the algorithm requires classically simulating the full \(2^N\)-dimensional state during circuit construction (memory cost exponential in \(N\)), (b) the greedy search over all \(\binom{N}{2}\) qubit pairs per iteration scales quadratically in \(N\), and (c) the theoretical bound (Proposition 2) ensures a non-zero starting fidelity but does not provide a meaningful guarantee on the final approximation error after training.
 
 ### Trivial
-- The O(L) characterization in the Introduction (discussed in Minor #2 above) should be corrected.
-- The conclusion is brief and repeats results without reflecting on limitations; this can be expanded.
+
+5. **The abstract's phrasing "infidelity bounded by the linear entropy" is a minor oversimplification.** The actual bound is \(|\langle v_{\mathrm{target}}|V(\theta)|0\rangle|^2 \ge 2^{\lfloor-2L\rfloor}\), which gives \(\mathrm{infidelity} \le 1 - 2^{\lfloor-2L\rfloor}\). For small \(L\) this scales as \(\mathcal{O}(L)\) (as correctly stated in the introduction), but the abstract's wording could be read as implying a simpler direct relationship. This is a presentational nitpick — the introduction and Proposition 2 are precise.
 
 ## Nice-to-Haves
-- **Matched-gate infidelity curves**: Present infidelity vs. number of two-qubit gates (e.g., 20, 40, 60, 100) for all methods on a single plot. This is the cleanest way to demonstrate gate savings.
-- **Ablation of C_ER values** (e.g., 1, 10, 100) to show the effect of gate-slide frequency.
-- **Ablation of gate-set expressiveness**: Compare the proposed 1-CZ gate against general two-qubit unitaries (3 CNOT) on a small-N task.
-- **Standard deviations** added to Tables 2 and 3.
+
+- Add trade-off curves of infidelity vs. number of two-qubit gates for all methods across a range of budgets (e.g., 20–200 gates). This would directly validate the central claim about gate-count efficiency.
+- Provide an ablation study on the gate-slide parameter \(C_{ER}\) and the number of slide steps \(T_{ER}\) to justify the chosen values and quantify the cost-benefit trade-off.
+- Report standard deviations or confidence intervals for the main results.
+- Discuss why real-world data (MNIST, CIFAR-10) exhibit faster entropy decay than random vectors — e.g., analyze the singular value decay or low-rank structure of the data.
 
 ## Removed Points
-These points were removed from the main review with justification:
 
-1. **"The central claim about gate counts is not supported by the comparisons"** — Removed because the paper explicitly says baselines use "the smallest value in [100, +∞)" (i.e., ≥100 gates), while ER-AAE uses 100. The experimental design *does* support the "fewer or equal gates" claim. The critic misread the phrase. Replaced with a transparency issue (Minor #1 above).
+These points are flagged to be removed; treat them with caution.
 
-2. **"Table 1 is hard to read"** — This is a PDF-parser formatting artifact, not a paper problem.
+1. **Criticism that MPS uses 27 CNOT vs ER-AAE's 100 CZ, and the "equivalent or fewer gates" claim is false.** The reviewer calculated 27 CNOT for a single MPS layer, but the paper explicitly states that "the number of CZ/CNOT gates in other methods is chosen to be the smallest value in \([100,+\infty)\) according to constraints in Tab. 1." For N=10, MPS with multiple layers would use at least 108 CNOT (~4 iterations × 9 unitaries × 3 CNOT). The comparison is consistent with the paper's stated methodology. This criticism reflects a misunderstanding of the experimental setup.
 
-3. **"HE circuits are a weak baseline"** — HE circuits are a standard baseline in quantum circuit literature. Its inclusion is not a weakness; it merely provides a lower bound.
+2. **Criticism that the CIFAR-10 "compact amplitude encoding" is non-standard.** The paper clearly describes the construction (splitting the 3072-dimensional vector into real and imaginary parts padded to 2048 dimensions for 11 qubits) and cites prior work (Mitsuda et al., 2024) that uses the same approach. This is a legitimate construction, not a flaw.
 
-4. **"The conclusion is weak"** — Subjective. Concluding sections typically summarize. Not a substantive weakness.
+3. **Criticism that hardware-efficient circuits are a "very weak baseline."** HE circuits are a standard baseline in the quantum ML literature. The paper is transparent about including them, and the significant margin over HE is not claimed as a core result — it provides a lower-bound comparison. Disagreement on baseline choice is a matter of taste, not a weakness.
 
-5. **"The paper does not discuss whether this choice affects the comparison" (regarding CIFAR-10 encoding)** — The paper describes exactly how each dataset is encoded and states that all methods target the same state. This is sufficient.
-
-6. **"The bound in Proposition 2 contradicts the O(L) claim"** — The critic's claim is too strong. The infidelity bound 1 − 2^{⌊−2L⌋} is imprecise as O(L), but not contradictory. Moved to Minor #2 with corrected explanation.
+4. **Criticism that Proposition 2 is "mischaracterized" in the abstract.** The abstract says "infidelity bounded by the linear entropy" and the introduction says "scales as \(O(L)\)." Both are reasonable descriptions: Proposition 2 gives fidelity \(\ge 2^{-2L}\) (ignoring floor), which for small \(L\) gives infidelity \(\lesssim (2\ln 2)L \approx 1.39L\). The bound is indeed a function of \(L\) that scales as \(O(L)\). The reviewer's objection that the exponential form "is not mentioned" ignores that the introduction explicitly states "scales as \(O(L)\)." This criticism substantially overstates the imprecision.
 
 ## Novel Insights
-The most interesting insight from the review process is that the reviewers agreed on the paper's core contribution (entropy-reduction as a heuristic for AAE) being sound and the experiments showing good empirical performance, but disagreed on whether the gate-count comparison was properly controlled. This tension reveals that the paper's main weakness is not methodological but presentational: the gate-count claim is technically supported by the experimental design (≥100 gates for baselines), but the lack of explicit per-experiment gate counts in the results tables creates unnecessary ambiguity that could be resolved with a simple formatting change.
+
+None beyond the paper's own contributions. The reviews substantially converge on the paper's framing and do not surface a genuinely novel interpretation that the authors themselves missed.
 
 ## Suggestions
-1. **Report the exact gate count used for every baseline in every experiment directly in Tables 2 and 3** (or in a supplementary column). This single change would eliminate the main source of confusion about the central claim.
-2. **Correct the O(L) scaling description in the Introduction** — either remove it or clarify that the bound from Proposition 2 gives an infidelity bound that is piecewise constant due to the floor function.
-3. **Add a brief "Limitations" paragraph** discussing classical computational cost (O(2^N) simulation), the restricted gate set, and the fact that the theoretical bound is loose.
-4. **Add standard deviations to Tables 2 and 3.**
+
+1. **Most important:** Add trade-off curves of infidelity vs. number of two-qubit gates (e.g., 20, 40, 60, 80, 100, 120) for ER-AAE and all baselines. This single addition would resolve the main weakness and directly validate the paper's central claim about gate-count efficiency.
+2. Add error bars / standard deviations to Tables 2 and 3.
+3. Add a brief ablation or discussion of the gate-slide mechanism's computational cost and sensitivity to \(C_{ER}\).
+4. Add a "Limitations" section discussing exponential classical memory, \(\mathcal{O}(N^2)\) per-iteration search cost, and the scope of the theoretical guarantee.
+5. Correct the abstract to read "infidelity bounded by a function of the linear entropy" for precision, though this is a minor point.
 
 ## Score and Decision
-
-This paper proposes a genuinely new approach (entropy-reduction-guided circuit construction for AAE), validates it on multiple datasets, provides a theoretical guarantee against barren plateaus, and outperforms several established baselines. The main advertised claim ("fewer or equal gates") is in fact supported by the experimental design — the critic's central objection was based on a misreading. The remaining weaknesses are presentation improvements, ablations, and quali cations, none of which threaten the core contribution. The paper makes a solid empirical and theoretical contribution to the AAE literature.
 
 MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

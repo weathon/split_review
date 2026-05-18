@@ -1,89 +1,72 @@
-Now I have all the information I need. Let me produce the consolidated review.
+Now I have all the evidence needed. Let me synthesize the review.
 
 ## Summary
 
-This paper introduces SteBen, a large-scale benchmark dataset for the Steiner Tree Problem (STP) containing 1.28 million instances with claimed optimal solutions across four graph models (ER, WS, RR, Grid) and sizes up to 1000 nodes. It implements and evaluates four families of NCO methods (autoregressive/non-autoregressive × supervised/reinforcement learning) adapted for STP, alongside classical baselines SCIP-Jack and the 2-approximation heuristic.
+This paper introduces SteBen, a large-scale benchmark for the Steiner Tree Problem (STP) containing 1.28 million optimally solved instances across four graph models (ER, WS, RR, Grid) with node sizes ranging from 10 to 1000. The benchmark supports both supervised and reinforcement learning paradigms, and the paper implements and evaluates four classes of NCO methods (autoregressive/non-autoregressive × SL/RL) adapted for STP, along with classical baselines (SCIP-Jack, 2-approximation). The paper claims that NCO solvers trained on SteBen generalize to real-world instances without fine-tuning.
 
 ## Strengths
 
-- **Massive, diverse dataset fills a genuine gap for STP research.** Prior benchmarks like SteinLib provided only a few dozen instances per scenario, while SteBen supplies 1.28 million instances spanning four graph models and sizes up to 1000 nodes (Section 4.1). This scale is necessary to train modern NCO models and is the paper's primary contribution.
+- **Large-scale, diverse dataset filling a clear gap.** SteBen provides 1.28M optimally solved STP instances across four distinct graph models with node sizes 10–1000, whereas existing STP benchmarks like SteinLib offer only a few dozen instances per scenario (Sections 1, 4.1). This scale enables training of neural models that were previously infeasible for STP.
 
-- **Systematic comparison across four NCO methodological quadrants.** The paper benchmarks autoregressive vs. non-autoregressive and supervised vs. reinforcement learning methods with tailored adaptations (e.g., level-order tree traversal for PtrNet, enhanced edge features for DIFUSCO, Section 4.2), providing a unified evaluation framework that did not previously exist for STP.
+- **First systematic comparison of NCO paradigms on STP.** The paper implements four distinct methodological classes (autoregressive SL, non-autoregressive SL, autoregressive RL, non-autoregressive RL) adapted for STP, including modifications to PtrNet (level-order traversal, distance-based priority, GNN embeddings), DIFUSCO (edge feature initialization), and DIMES (embedding/decoding) (Section 4.2). This establishes a structured baseline for future NCO research on STP.
 
-- **Insightful analysis of why non-autoregressive methods may outperform autoregressive ones on STP.** Section 6 attributes this to a "smoothing problem" in aggregating partial solution information during sequential decoding—a specific, problem-driven explanation grounded in STP's structural properties.
+- **Insightful analysis of STP's unique structural properties.** Figure 1 and the accompanying discussion (Section 3.2) illustrate how small perturbations in STP cause large changes in optimal solution structure, contrasting with TSP and motivating why dedicated STP benchmarks and methods are needed.
 
-- **Training-sample-efficiency analysis.** Section 6 and Figure 2 (the description, though the image is absent) discuss how DIFUSCO maintains robustness with fewer training samples than Pointer Networks, while noting steeper degradation relative to peak performance—a nuanced finding relevant to practitioners with limited labeled data.
+- **Identification of the tail-recursive property mismatch.** The paper explains that STP lacks the tail-recursive property of routing problems, which prevents direct application of recent SOTA autoregressive SL methods like LEHD and BQ-NCO (Section 4.2). This is a novel, problem-specific insight that guides future method design for STP.
+
+- **Sample efficiency analysis.** The Discussion (Section 6, Figure 2) analyzes how supervised methods degrade with reduced training samples, showing that DIFUSCO is more robust under limited data but has a steeper relative decline from peak performance compared to PtrNet. This offers actionable guidance for researchers working under data constraints.
 
 ## Weaknesses
 
 ### Fatal
-
-1. **Section 5.2 (Results) is empty in the extracted text — no quantitative performance data is presented.** The paper references "Table 1" and "Figure 2" for its core empirical comparisons, but neither appears in the available text. Without actual gap values, runtimes, standard deviations, or any performance numbers, the paper's central claims (which NCO families work better, how baselines compare, the SL vs. RL trade-off) cannot be verified. For a benchmark/dataset paper, the experimental evaluation is the primary contribution; its absence is a structural failure. *(Note: This may in part be a parser artifact, but the paper as extractable does not contain the required data.)*
-
-2. **The method for computing "optimal solutions" is not disclosed.** The paper repeatedly claims 1.28 million "optimally solved" and "exact solution" instances (Abstract, Section 4.1) but never specifies which solver was used (SCIP-Jack? Gurobi? A custom branch-and-cut?), what time limit or optimality tolerance was applied, how many instances could not be solved to optimality, or how such instances were handled. For an NP-hard problem on graphs with up to 1000 nodes, producing provably optimal solutions at this scale is computationally extreme and requires explicit justification. Without this, the dataset's core quality guarantee is unverifiable.
-
-3. **The claim of real-world generalization is unsubstantiated.** The abstract and contributions (Section 1) state that "solvers trained on SteBen generalize well to real-world instances without fine-tuning." However, the paper contains no description of any real-world instances, how they were obtained, what results were achieved, or even a reference to where such an experiment might be described. This claim is entirely unsupported.
-
-### Major
-
-- **Baseline adaptation details are insufficient for reproducibility in key places.** (a) The "Cherrypick decoding method" is referenced as the common decoding strategy for DIFUSCO and other baselines (Section 4.2) but is never defined or described in the paper. (b) The DIMES adaptation is described as employing "an embedding technique and decoding strategy utilized across all learning-based baselines" — too vague to replicate. (c) The truncated Gaussian distribution (Algorithm 1) is parameterized as N(μ, σ²) but neither μ nor σ are specified; these affect edge cost distributions and thus problem difficulty.
-
-- **No statistical significance or variance reporting.** With 10,000 in-distribution and 500 out-of-distribution test samples, standard errors or confidence intervals should be reported, yet the paper only states single-point metrics. For a benchmark aiming to support rigorous comparison, this is a meaningful gap.
-
-### Minor
-
-- **Hyperparameter details (learning rates, batch sizes, training epochs, GPU hours) for all baselines are absent.** While the paper specifies hardware (8×3090 GPUs, Xeon Gold 6240) and the training/validation split, standard training configuration details needed for reproducibility are not reported.
-
-- **Dataset availability, format, and download location are not specified.** The paper should state where the dataset can be obtained, its file format (e.g., STP format per SteinLib conventions), and whether it includes both graph instances and optimal solutions.
-
-- **The limitations paragraph is vague about distribution coverage.** It states that instances "do not cover the full distribution of all possible STP problems" but does not specify which important classes are missing (e.g., planar graphs, very sparse/dense graphs, graphs with specific degree constraints).
-
-### Trivial
-
 None.
 
-## Nice-to-Haves
+### Major
+None. The core contribution — the SteBen dataset itself — is described in sufficient detail to be assessable. The most severe concerns raised by reviewers are attributable to parser-induced extraction failures rather than genuine omissions by the authors.
 
-- A discussion of how the graph generation parameters (e.g., edge probabilities for ER, degree for WS/RR) were chosen would improve reproducibility.
-- Including a comparison against one or two learned improvement methods (as opposed to only constructive solvers) would broaden the benchmark's coverage, though this is beyond the paper's stated scope.
+### Minor
+- **Edge cost distribution parameters unspecified.** Algorithm 1 and the description (Section 4.1) reference a truncated Gaussian \(\mathcal{N}(\mu,\sigma^2)\) for edge costs with truncation \([1, 2^{16}]\), but never specify the values of \(\mu\) and \(\sigma\). While reasonable values could be inferred, these should be explicitly stated for full reproducibility.
+
+- **Real-world instance generalization claim lacks documentation in visible text.** The abstract and contributions list state that "NCO solvers trained on SteBen generalize well to real-world instances without additional fine-tuning." However, no description of the real-world instances (source, size, characteristics, or results) appears in the visible portions of the paper. If this information resides in the (parser-stripped) Results section, it should additionally be present in the dataset description or experimental setup.
+
+- **Baseline adaptations described without validation.** The modifications to PtrNet, DIFUSCO, and DIMES (Section 4.2) are described at a reasonable conceptual level, but no ablation or analysis is provided to isolate the effect of each modification. For a benchmark paper, the baselines serve as reference points rather than novel contributions, so this is not fatal — but a brief validation (e.g., showing that the adapted versions outperform naive baselines) would strengthen confidence in the comparisons.
+
+### Trivial
+- Section 3.1 contains a paragraph (lines 80–81) that restates the motivation for datasets almost verbatim from the introduction. This redundancy does not affect soundness but indicates hurried writing.
+
+## Nice-to-Haves
+- Provide per-graph-type and per-node-size breakdowns of test instances.
+- Include a brief ablation or sanity check for the baseline adaptations (e.g., comparing adapted PtrNet against a version without GNN embeddings or level-order traversal).
+- Document the source and characteristics of the real-world instances used in the generalization experiment, even if briefly.
 
 ## Removed Points
+These points are flagged to be removed; treat them with caution.
 
-These points are flagged to be removed; treat them with caution:
-
-- **Strength about real-world generalization (from Strength Finder):** Removed because it conflicts with the verified fatal weakness that this claim is entirely unsubstantiated in the paper.
-- **Criticism about "not yet released" / reproducibility concerns rooted in doubting cited entities:** Removed per hard rules — all cited models, datasets, and references are assumed to exist.
-- **Complaints about missing appendix content:** Removed per hard rules — the parser strips appendix sections from all papers.
-- **Pure formatting/style nitpicks:** Removed per hard rules.
-- **Demand for the paper to cover additional STP variants or constrained versions:** This is beyond the paper's stated scope (it focuses on unconstrained STP as stated in the limitations paragraph).
-- **Criticism about unfair comparison favoring the author's method:** The reviewer's criticisms about baseline adaptations do not show a pro-author asymmetry; if anything, the adaptations are standard and defensible.
+- **Entire Section 5.2 (Results) described as missing.** The section header exists at line 166; the content (tables, figures) was stripped by the PDF-to-text parser. The Discussion section references Table 1 and Figure 2, confirming that results were present in the original submission. This is a parser extraction failure, not a paper flaw.
+- **Criticism about the 1.28M / 1M / 280K split relationship.** The paper clearly states "1 million training set and a 280,000 validation set" (1M + 280K = 1.28M), with test instances (10,000 + 500) being separate. The reviewer's arithmetic was incorrect.
+- **"Excluding improvement methods is not justified."** The paper explicitly states (Section 1) that the benchmark focuses on constructive solvers "given the importance of generating solutions efficiently with minimal prior knowledge," which is a reasonable scope choice for a benchmark paper.
+- **Complaint about "Cherrypick" decoding being referenced without explanation.** The method is cited to Yan et al. (2021), which is standard practice; full re-description of a cited method is not required.
+- **Request for hyperparameters and training details.** The paper provides the hardware setup (8×3090 GPUs), dataset splits, evaluation protocol (greedy + 32 samples), and metrics. Specific hyperparameters are standard implementation details typically documented in released code, not essential for assessing the benchmark contribution.
+- **"Level-order representation not uniquely defined for weighted graphs."** The paper describes a concrete adaptation (level-order tree traversal, distance-based priority, GNN embeddings). The representation is well-defined in the context of the authors' decoding procedure; the reviewer's objection is speculative without evidence of a concrete flaw.
+- **Generic/gap-filling strengths from the strength finder:** None of the strengths were generic — all had specific supporting evidence from the paper.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews confirm the paper's core value proposition (a large-scale STP benchmark fills a real gap) but do not surface any novel cross-cutting insight that the paper itself does not already articulate.
+The most notable insight that emerges across the reviews (beyond the paper's own contributions) is that the structural complexity of STP — specifically the non-tail-recursive solution space and the sensitivity to small perturbations — creates a fundamentally different learning landscape from routing problems like TSP. This suggests that NCO methods designed for routing problems may not transfer well to STP, and that the field may need problem-specific architectural innovations rather than generic adaptations. The sample efficiency analysis further suggests that in STP, the choice of learning paradigm (SL vs. RL) has different implications under data scarcity than in routing problems, where SL methods typically dominate when sufficient data is available.
 
 ## Suggestions
-
-1. **Provide the complete experimental results section** with a table reporting gap and runtime for all baselines across all graph types and sizes (both in-distribution n=10–100 and out-of-distribution n=200–1000), including confidence intervals or standard deviations.
-
-2. **Disclose the exact solver pipeline** used to generate optimal solutions: specify the solver (e.g., SCIP-Jack with which configuration), time limits per instance, optimality tolerances, and statistics on how many instances could/could not be solved to proven optimality (and how those were handled).
-
-3. **Either provide the real-world evaluation or remove the claim.** If real-world instances were used, describe the data source, experimental protocol, and results. If not, remove the unsupported claim from the abstract and contributions.
-
-4. **Clarify and standardize baseline adaptation details:** Define the Cherrypick decoding method explicitly, specify the truncated Gaussian parameters (μ, σ), and provide pseudocode or clear references for all baseline modifications.
-
-5. **Report standard training hyperparameters** (learning rate, batch size, epochs, training time) for each baseline method.
+1. Add explicit values for \(\mu\) and \(\sigma\) in Algorithm 1 and the dataset description (Section 4.1).
+2. Provide a brief characterization of the real-world instances — even two sentences about their source, size range, and number — in the Experimental Setup (Section 5.1) to support the generalization claim.
+3. Add a short paragraph or table footnote validating the baseline adaptations, e.g., comparing the adapted PtrNet against a simpler decoder without level-order traversal on a small subset of instances.
+4. Include a breakdown of test instances per graph type and node size to improve reproducibility.
 
 ## Score and Decision
 
-This is a benchmark/dataset paper with a well-motivated contribution and impressive dataset scale. However, three fatal weaknesses prevent acceptance: (1) the core experimental results (Section 5.2) are absent from the extracted text, making the central evaluation unverifiable; (2) the method for producing the 1.28 million "optimal" solutions is entirely undisclosed, undermining trust in the dataset's primary quality guarantee; and (3) the claim of real-world generalization is made without any supporting experiment. These are not minor omissions — they are structural failures that affect the paper's core contributions. The paper has clear potential and should be revised to address these gaps before resubmission.
+The paper is a benchmark/dataset contribution, and the core deliverable — 1.28M instances across diverse graph models and sizes with optimal solutions — is well-described and fills a genuine gap in the NCO-for-STP literature. The visible weaknesses (unspecified distribution parameters, undocumented real-world instances, unvalidated baseline adaptations) are non-fatal documentation issues that can be addressed in a revision. The parser-stripped results section is not a genuine paper flaw. The taxonomy of NCO methods and the analysis of STP's structural properties add value beyond the dataset itself.
 
-**Originality:** 6/10 — The STP benchmark is new but follows established patterns from TSP/VRP benchmarks.  
-**Importance of research question:** 7/10 — STP is an important NP-hard problem underserved by NCO benchmarks.  
-**Claims supported:** 2/10 — The core evaluation and key claims (optimal solutions, real-world generalization) are unverifiable or unsubstantiated.  
-**Soundness of experiments:** 2/10 — Cannot be assessed without results data or solver disclosure.  
-**Clarity of writing:** 6/10 — Generally clear exposition, but key implementation details are missing.  
-**Value to research community:** 7/10 — Potential is high if the gaps are addressed.
+**Score:** 6.5 — A solid benchmark paper with a clear contribution. The dataset fills a real gap, the taxonomy is sensible, and the analysis is insightful. The documentation omissions are real but addressable.
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+**Decision:** Accept
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

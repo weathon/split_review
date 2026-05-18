@@ -1,14 +1,20 @@
-Now I have a thorough understanding of the paper and can verify each claim against the source. Let me compile the final consolidated review.
+Now I have all the information needed. Let me construct the final consolidated review.
+
+---
 
 ## Summary
-This paper proposes the **star domain conjecture**: that neural network solution sets reachable via SGD form a star domain (modulo permutation symmetries) — a relaxation of the convexity conjecture that still implies a single "star model" linearly connected to all other solutions. The authors introduce **Starlight**, a Monte-Carlo algorithm that finds a candidate star model by minimizing expected loss on linear paths to a set of source models. Empirical evidence shows star models have substantially lower loss barriers to held-out solutions than regular models have to each other (e.g., 0.078 vs 0.383 for CIFAR-10 ResNet-18). Additional experiments explore star models for Bayesian Model Averaging and model fusion.
+
+This paper proposes the **star domain conjecture**: that neural network solution sets (modulo permutation symmetries) form a star domain — i.e., there exists a single "star model" that is linearly mode-connected to all other solutions — as a relaxation of the convexity conjecture, which is known to fail for narrow and deep networks. The authors introduce the **Starlight** algorithm, which trains a candidate star model by minimizing expected loss along linear paths to a finite set of source models with periodic permutation alignment. Empirical results across ResNet, VGG, DenseNet, and WideResNet architectures on CIFAR-10/100 and ImageNet show that star models have substantially lower loss barriers with held-out solutions than regular-regular barriers. The paper also explores practical benefits in Bayesian Model Averaging and model fusion.
 
 ## Strengths
-- **Novel and well-motivated conjecture.** The star domain conjecture is a clean geometric relaxation of the convexity conjecture, positioned to cover cases (narrower/deeper networks, complex datasets, Adam-trained models) where convexity provably fails. The paper carefully distinguishes it from both convexity and mode connectivity (Section 2, Conjecture 2).
-- **Starlight algorithm is clearly described and empirically validated.** Algorithm 1 combines Monte-Carlo path sampling with periodic weight-matching permutations. Table 1 shows star models achieve dramatically lower star–heldout barriers than regular–regular barriers across ResNet-18, VGG11/19, DenseNet, and ImageNet (e.g., 0.078 vs 0.383 for CIFAR-10 ResNet-18; 0.756 vs 2.905 for CIFAR-100 ResNet-18).
-- **Ablation studies strengthen the case.** Figure 3 shows star–heldout barriers decrease monotonically as more source models are used (|Z| from 2 to 50), with no saturation. Figure 4 (width × depth) shows star–regular barriers are consistently about one-third of regular–regular barriers across WideResNet widths (1× to 8×) and depths (22–40). Adam-trained models also benefit (barrier 0.335 vs 1.368).
-- **Practical utility demonstrated.** The star domain improves BMA uncertainty ranking (AUROC) over deep ensembles (Figure 5), and star models modestly outperform single regular models on accuracy (78.4% vs 77.3% on CIFAR-100) while requiring O(1) inference cost vs O(n) for ensembles (Table 2).
-- **Honest positioning.** The Caveats paragraph (Section 3.4) and the Conclusion acknowledge that the conjecture remains unproven and that barriers are often non-zero — the paper presents a lower bound of evidence rather than a definitive proof.
+
+- **Well-motivated relaxation of the convexity conjecture.** The star domain conjecture (Conjecture 2) is clearly stated and formally positioned as a weaker condition than convexity but stronger than general mode connectivity. Table 1 provides concrete evidence across multiple settings (e.g., ResNet-18 on CIFAR-10: regular-regular barrier 0.383 vs. star-regular barrier 0.078), demonstrating the gap the conjecture fills.
+
+- **Broad empirical sweep across architectures, datasets, and optimizers.** The paper validates the conjecture using ResNet-18, VGG11, VGG19, DenseNet, and WideResNets on CIFAR-10, CIFAR-100, and ImageNet, with both SGD and Adam. In every case, star-regular barriers are substantially lower than regular-regular barriers, establishing that the finding is not an artifact of a single experimental setup.
+
+- **Starlight algorithm is clearly described and computationally feasible.** The algorithm (Algorithm 1) uses Monte Carlo sampling over interpolation points and periodic weight-matching alignment, making the optimization of Eq. (3) tractable. Figure 2 shows that increasing the number of source models monotonically reduces the barrier to held-out models, which is the paper's key piece of evidence that the star model generalizes beyond the finite training set.
+
+- **Honest discussion of limitations.** The Caveats section (line 391) explicitly states that the conjecture is not theoretically proven and that loss barriers remain non-zero, tempering the paper's claims appropriately.
 
 ## Weaknesses
 
@@ -16,47 +22,59 @@ This paper proposes the **star domain conjecture**: that neural network solution
 None.
 
 ### Major
-- **The star model's training loss is sometimes substantially higher than that of regular models, straining the definition of "solution set."**  The solution set is defined as $S := \{\theta \mid \mathcal{L}(\theta) \approx 0\}$. For some experiments (DenseNet on CIFAR-100: star loss 0.635 vs regular 0.006; ImageNet: 1.380 vs 0.711; DenseNet on CIFAR-10: 0.157 vs 0.001), the star model's training loss is orders of magnitude above the corresponding regular models'. While the paper acknowledges this in the Caveats section, it does not justify whether such high-loss points still qualify as members of $S$.  The conjecture requires a star point *inside* the solution set; if the star model is not a low-loss solution, the object of study shifts.  This is partially mitigated because (a) the main experiments (ResNet-18 on CIFAR-10/100) show star loss ≈ regular loss, and (b) the barrier evidence is the primary validation signal regardless.  Nevertheless, the paper should either demonstrate that such star models still have low test error or modify the algorithm to enforce near-zero training loss.
+
+1. **Insufficient diversity in verification of the star domain property.** The central claim is that a star model is linearly connected to *all* other solutions in the solution set, but the verification uses held-out models trained with the *same hyperparameters, optimizer, and training recipe* as the source models (line 364: "We largely use standard recipes to train the models in our experiments"). The paper tests only one meaningful variation — switching SGD to Adam (Table 1, second row) — but does not systematically evaluate against models trained with different learning rates, batch sizes, augmentation strengths, or training budgets. Since all held-out models are produced by the same training pipeline with only seed-level variation, they occupy a narrow region of the solution space. The evidence is thus consistent with the possibility that the star model is only connected to this specific *type* of solution, rather than to the diverse set of all SGD-reachable solutions. The paper acknowledges this in the Caveats (calling it a "lower bound in evidence"), but the abstract and introduction still assert connectivity to "all the other solutions" without this qualification. This gap between the strength of the claim and the narrowness of the verification is the paper's most significant weakness.
 
 ### Minor
-- **Verification uses only 5 held-out models per setting, which is thin for a claim about "all solutions."** The conjecture states that the star model is linearly connected to *every* solution in $S$. Testing against only 5 held-out models provides limited statistical evidence. The trend in Figure 3 (lower barrier with more source models) is suggestive, but it does not extrapolate to all unseen solutions. Expanding the held-out set would strengthen the claim considerably.
-- **The number of independent runs is not reported for any experiment.** Table 1 says "over several runs" without specifying how many. Standard deviations are reported but without sample sizes, the reader cannot assess the reliability of the point estimates. This should be stated explicitly in every table/ figure caption.
-- **Computational cost of per-epoch weight matching is not discussed.** Algorithm 1 computes $N$ permutations (via weight matching) every $m$ steps. The cost of this for large $N$ and large models (e.g., ImageNet-scale) is not reported, leaving practical feasibility unclear. The paper briefly notes stopping at 50 source models due to "computational limits" but gives no runtime or scaling analysis.
-- **The width/depth experiments (Figure 4) do not specify how many source models were used for each architecture.** If the number varied across widths/depths, the comparison is confounded. This parameter should be fixed and stated.
-- **The winning permutation is approximated by weight matching (maximum dot product) rather than the true $\operatorname{argmin}_\pi B(\pi(\theta_n), \theta)$.** Although weight matching is standard in prior work (Ainsworth et al. 2022), the paper provides no analysis showing that the dot-product criterion yields barriers close to those of the true winning permutation. A small-scale validation or comparison with alternative permutation algorithms (e.g., Sinkhorn re-basin, activation matching) would increase confidence in the reported barriers.
+
+1. **Permutation alignment method specificity.** The Starlight algorithm uses weight matching (maximizing dot product) for permutation alignment throughout training and evaluation. The paper does not examine whether the low barriers for held-out models would persist if a different permutation-finding method (e.g., Sinkhorn re-basin or activation matching) were used for evaluation. Since the star model is *trained* with weight-matching alignment, the low barriers could partly reflect that the same alignment method works well for the held-out models, rather than a genuinely robust geometric property of the solution set. Adding one alternative permutation method for evaluation on a subset of experiments would help rule out this artifact.
+
+2. **Gradient update in Algorithm 1 needs clarification.** Step 4 computes gradients \(v \leftarrow \nabla_\theta \mathcal{L}((1-t)\cdot\theta + t\cdot\theta_n)\), which by the chain rule already includes a factor of \((1-t)\). Step 5 then multiplies by an additional \((1-t)\): \(\theta \leftarrow \theta - \lambda(1-t)\cdot v\). This results in an effective scaling of \((1-t)^2\) on the gradient of the loss w.r.t. the interpolation point. This may be an intentional learning-rate modulation (putting more weight on updates near the star model), but the paper does not discuss or justify this design choice, making it difficult to verify that the algorithm correctly minimizes the stated objective in Eq. (3).
+
+3. **Star-regular barriers at large widths approach the convex regime.** Figure 3 shows that the star-regular barrier at 8× width is approximately 0.004, which is very close to zero. This raises a question the paper does not address: is the star model simply approximating the convex regime (which is known to emerge at large widths), rather than demonstrating a *distinct* star domain property that holds where convexity does not? A discussion of whether the star model's advantage persists or collapses as width increases would strengthen the conceptual framing.
+
+4. **Practical applications are exploratory with mixed results.** The BMA experiments (Figure 4) show better AUROC but *worse* ECE compared to ensembles — a mixed outcome that the paper acknowledges. The model fusion results (Table 2) show star models underperform ensembles by non-trivial margins (e.g., 78.4% vs. 81.3% on CIFAR-100 with 50 models). While star models offer an inference-cost trade-off, the incremental improvement over individual models is modest (≈1 point). These sections are clearly secondary contributions, but the paper overstates them somewhat in the abstract ("better uncertainty estimates" without noting the ECE degradation).
 
 ### Trivial
-- The wrapfigures in the parsed text lack visible in-text references; these appear to be cleveref/parser artifacts rather than author errors. The authors should verify all figure references render correctly in the final submission.
+
+1. **Figure 3 (width/depth ablation) lacks error bars.** The paper reports "one standard deviation over several runs" for other experiments but the width/depth plots show only single points per condition. Given the stochasticity of SGD and the Starlight algorithm, error bars would increase confidence in the observed trends.
 
 ## Nice-to-Haves
-- A comparison with Model Soups (Wortsman et al. 2022) for the model fusion experiments would help contextualize the practical improvements, though this is outside the paper's core geometric contribution.
-- An analysis of whether star models with higher training loss still achieve low test error (statistically indistinguishable from regular solutions) would directly address the star-model-loss concern.
-- Reporting the number of source models used per architecture in the width/depth study would improve reproducibility.
+
+- **Evaluate with an alternative permutation method** on held-out barriers (e.g., Sinkhorn re-basin) to rule out alignment artifact.
+- **Widen the held-out set** to include models trained with varied hyperparameters (different learning rates, batch sizes, augmentation strengths) to strengthen the central claim.
+- **Analyze cases where Starlight fails** to find a low-barrier star model, to bound the conjecture's applicability.
+- **Empirical comparison with the "simultaneous linear connectivity" approach** of Sharma et al. (2024) mentioned in related work would be informative.
 
 ## Removed Points
+
 These points are flagged to be removed; treat them with caution.
 
-1. **"The wrap-figure (posterfigure) and Figure 1 are orphaned/unreferenced."** — The parsed text strips cleveref commands. The original LaTeX submission likely references these figures. This is a parser artifact, not an author error.
-2. **"Step 1 of Algorithm 1 permutes source models, potentially changing the functions they represent."** — The paper explicitly defines permutation invariances as function-preserving (line 104: "the functions represented by them are identical"). Weight matching finds function-preserving permutations by construction. This criticism misunderstands the paper.
-3. **"BMA experiments are circular; the star model is guaranteed to be connected to source models used to construct it."** — The BMA baseline also uses the same source models (standard deep ensemble). Both methods operate on overlapping sets, so the comparison is fair. The BMA evaluation is about uncertainty estimation quality on *test* data, not about validating connectivity.
-4. **"Model fusion results (78.4% vs 77.3%) are modest and likely not statistically significant."** — The reported error bars (78.4 ± 0.10 vs 77.3 ± 0.28) do not overlap over roughly 3–4 standard deviations, indicating statistical significance. This criticism is factually wrong.
-5. **"The star domain conjecture vs mode connectivity comparison is misleading."** — The paper correctly states that a star domain implies mode connectivity (via the shared star point), while the converse is not true. This is a mathematically sound claim.
-6. **"No comparison with model soups."** — Scope creep; the paper's primary contribution is the geometric conjecture, not a SOTA model fusion method.
-7. **Various formatting/style nitpicks and vague criticisms about "≈ 0" being imprecise** — Such imprecision is standard practice in the mode connectivity literature (including in the cited works).
+- **Criticism that "held-out models are trained with the same hyperparameters...so they occupy a very narrow region" was kept** (it is a valid concern about insufficient verification scope, retained as Major weakness #1). However, the reviewer's characterization that the paper "does not test against solutions obtained with different learning rates, different batch sizes, different amounts of data augmentation, or different training budgets" was cross-checked and confirmed as accurate — the paper does not systematically vary these. The Adam experiment provides one point of diversity but is not a systematic sweep. **Kept with adjusted framing.**
+- **Request for error bars in Figure 3** is a valid point (kept as Trivial).
+- **Request for comparison with Sharma et al. (2024)** was moved to Nice-to-Haves — this is a useful extension but not a core flaw.
+- **Request for analysis of failure cases** was moved to Nice-to-Haves.
+- **Critique that "practical benefits section does not provide strong evidence for the paper's core thesis"** was downgraded to Minor — the practical applications are labeled as secondary contributions and the paper is candid about the mixed results. The thesis of the paper is the star domain conjecture, not the practical benefits.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews affirm that the paper's core idea — relaxing convexity to star-domain structure for DNN solution sets — is the key novelty, and the algorithmic recipe (Starlight) is a reasonable first attempt at finding star models. No reviewer offered a structural alternative explanation for the observed phenomena or a novel theoretical angle not already present in the paper.
+
+None beyond the paper's own contributions. The reviews do not surface an observation about the paper not already present in its own discussion.
 
 ## Suggestions
-1. **Address the star model loss problem directly.** Either (a) add a regularizer or early-stopping criterion to the Starlight objective to keep the star model's training loss within the same order as regular models', or (b) present test-error statistics for star models to show they remain statistically indistinguishable from regular solutions.
-2. **Expand the held-out verification.** Increase held-out set size from 5 to at least 20–50 models per setting, or provide a statistical bound (e.g., confidence intervals from bootstrap).
-3. **Validate the permutation approximation.** In a small-scale setting (e.g., ResNet-18 on CIFAR-10), compare weight-matching barriers against those from Sinkhorn re-basin or activation matching to show the approximation is empirically sound.
-4. **Report the number of independent runs** explicitly in every table caption.
-5. **State the number of source models used for each architecture** in the width/depth ablation.
-6. **Add a brief computational cost analysis** showing how Starlight scales with $N$ and model size, especially for the ImageNet experiment.
+
+1. **Broaden the held-out verification.** Evaluate the star model's barrier against models trained with a range of learning rates (e.g., factors 0.1×, 0.5×, 2× of the default), different batch sizes, and different levels of data augmentation. Report the distribution of barriers (e.g., violin plots) rather than a single mean. This directly addresses the gap between the "all solutions" claim and the current evidence base.
+
+2. **Add an alternative permutation method for evaluation only.** Compute barriers between the star model and held-out models using Sinkhorn re-basin or activation matching in addition to weight matching. If barriers remain low, this rules out the concern that results are an artifact of the alignment procedure.
+
+3. **Clarify the gradient update in Algorithm 1.** Explain whether the extra \((1-t)\) factor in Step 5 is intentional and what effect it has on optimization (e.g., damping updates when \(t\) is large, near the source model side). Providing the full derivation of the gradient of Eq. (3) with respect to \(\theta\) would help.
+
+4. **Qualify the abstract's claims** to match the evidence level (e.g., "linearly connected to a diverse set of other solutions" instead of "all the other solutions"), and note the mixed ECE results when claiming "better uncertainty estimates."
+
+5. **Add error bars to Figure 3** by running each width/depth condition with at least 3 random seeds.
 
 ## Score and Decision
-This paper presents a novel and well-motivated geometric conjecture about DNN solution sets, supported by a reasonable algorithm and a body of empirical evidence across multiple architectures, datasets, and optimizers. The main weaknesses — star model loss being sometimes substantially higher than regular loss, thin held-out verification (5 models), lack of permutation-validation analysis, and missing run-count details — are real but addressable. None are fatal: the core empirical pattern (star model barriers are consistently and substantially lower than regular–regular barriers) holds across all settings. The paper is honest about its limitations and positions itself as presenting a "lower bound of evidence." With the suggested revisions, this would be a solid contribution.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+The paper makes a genuine conceptual contribution (the star domain conjecture) and provides a practical algorithm (Starlight) for finding candidate star models. The empirical evidence is suggestive and spans a reasonable range of architectures and datasets. However, the central claim is only partially supported because the held-out verification set lacks diversity in hyperparameters and training configurations. The practical applications are exploratory and do not add substantial weight. With strengthened verification and tempered claims, this paper would represent a meaningful advance in understanding neural network loss landscape geometry. As it stands, the contribution is worthwhile but the evidence falls short of fully substantiating the headline claim.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

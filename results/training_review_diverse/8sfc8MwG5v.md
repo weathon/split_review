@@ -1,72 +1,68 @@
-Now I have all the information needed. Let me synthesize the final review.
+Now I have a complete picture. Let me carefully cross-validate each claim from the reviewers against the paper's content and produce the consolidated review.
+
+---
 
 ## Summary
 
-The paper proposes CONDA, a test-time adaptation framework for Concept Bottleneck Models (CBMs) built on foundation models. It first formalizes a taxonomy of distribution shifts (low-level vs. concept-level) and identifies three failure modes of CBM pipelines. CONDA then addresses these via three components: Concept-Score Alignment (CSA), Linear Probing Adaptation (LPA), and Residual Concept Bottleneck (RCB). Experiments across five datasets with different shift types, multiple FM backbones (CLIP ViT-L/14, BioMedCLIP), and three CBM construction methods show accuracy improvements of up to 28%.
+This paper proposes CONDA, the first test-time adaptation (TTA) framework for Concept Bottleneck Models (CBMs) built on foundation models. It formalizes failure modes of CBM pipelines under low-level and concept-level distribution shifts (non-robust concept bottleneck, non-robust classifier, incomplete concept set) and designs three targeted adaptation components — Concept-Score Alignment (CSA), Linear Probing Adaptation (LPA), and Residual Concept Bottleneck (RCB) — each linked to a specific failure mode. Experiments across 5 datasets, 3 CBM construction methods, and multiple FM backbones show post-deployment accuracy gains of up to 28%, with adapted concept-based predictions matching or exceeding non-interpretable FM classifiers.
 
 ## Strengths
 
-1. **Principled framework where each component targets a formalized failure mode.** The paper provides the first formal taxonomy of distribution shifts for CBMs (Section 2.2) and maps three failure modes (non-robust concept bottleneck, non-robust classifier, incomplete concept set) directly to the three CONDA components (CSA, LPA, RCB). This design rationale is validated by the ablation analysis in Figure 3, which shows CSA dominates under low-level shifts while LPA/RCB dominate under concept-level shifts — confirming the connection between theory and method.
+1. **Formal categorization of CBM failure modes under distribution shifts (Section 2.2–2.3):** The paper provides a principled taxonomy of low-level vs. concept-level shifts and identifies three concrete failure modes (non-robust concept bottleneck, non-robust classifier, incomplete concept set). This conceptual framing grounds the design of targeted adaptation strategies rather than applying generic black-box TTA to an interpretable pipeline.
 
-2. **Strong empirical results across diverse settings.** CONDA improves test-time accuracy by up to 28% across low-level shifts (CIFAR-10/100-C), concept-level shifts (Waterbirds, Metashift), and natural shifts (Camelyon17), using three different CBM construction approaches (post-hoc, unsupervised, GPT-generated) and multiple FM backbones. Performance matches or exceeds non-interpretable baselines (zero-shot, linear probing) on worst-group accuracy, showing that interpretability does not come at a cost.
+2. **Component-specific adaptation with empirical validation of roles (Section 3, Figure 3):** Each CONDA component is explicitly linked to a failure mode. The ablation study (Figure 3) confirms this design: CSA dominates under low-level shifts (CIFAR10-C, Camelyon17), while LPA and RCB are key under concept-level shifts (Waterbirds, Metashift). This layered validation goes beyond simply reporting aggregate gains.
 
-3. **Component-wise ablation that validates the failure-mode analysis.** The paper explicitly tests each component in isolation (Figure 3) and finds that CSA alone excels under low-level shifts while LPA/RCB are critical for concept-level shifts. This empirically confirms the connection between the failure-mode taxonomy and the adaptation design, and the paper transparently reports that individual components can match the full pipeline on "pure" shift types.
+3. **Substantial empirical gains across diverse settings (Section 4, Table 1):** CONDA improves test-time accuracy by up to 28% and achieves worst-group accuracy competitive with non-interpretable zero-shot and linear-probing classifiers. The evaluation spans five datasets with different shift types, three CBM construction methods (general-purpose, unsupervised, GPT-3-based), and multiple FM backbones including adversarially robust CLIP and BioMedCLIP.
+
+4. **Interpretability adaptation is qualitatively informative (Section 4.4, Figure 4):** The analysis shows that CONDA adjusts concept-to-class mappings to reflect target-domain correlations (e.g., land-related concepts positively contributing to "waterbird" after background shift) and that the residual branch discovers missing bird-related concepts (feathers, wings, beak). While qualitative, this demonstrates that adaptation produces explanations aligned with human intuition.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None.
+
+- **No comparison against generic TTA baselines adapted to the CBM setting:** The paper claims to be the first TTA approach for CBMs, and its experiments compare against static (unadapted) CBM baselines and non-interpretable FM classifiers (ZS, LP). However, it never evaluates whether a simpler, off-the-shelf TTA method — e.g., entropy minimization (TENT) on the CBM label predictor's logits, or class-aware feature alignment (CAFA) applied to the CBM pipeline — would achieve similar or better results. The ablation in Figure 3 shows that LPA alone (cross-entropy + sparsity on the label predictor) already gives strong gains on concept-level shifts, sometimes matching full CONDA. This makes it impossible to determine whether CSA and RCB add value beyond a simple entropy-minimization baseline on the CBM's label predictor. Adding such a baseline is the most important missing piece for establishing that CONDA's multi-component design is necessary rather than just sufficient.
 
 ### Minor
 
-1. **No comparison against generic TTA methods applied to the CBM pipeline.** The paper claims to be the first TTA approach for CBMs, but does not compare against straightforward applications of generic TTA methods (e.g., TENT — entropy minimization on the CBM predictor, or on the full backbone+pipeline). The central claim that specialized CSA/LPA/RCB components are necessary would be strengthened by showing that a simple entropy-minimization baseline does not achieve comparable gains. Without this, the value of the specialized design over off-the-shelf TTA is partially unclear.
+- **Pseudo-label accuracy is not measured or reported:** The entire three-stage adaptation relies on pseudo-labels generated by an ensemble of zero-shot and linear-probing predictors. While this ensemble strategy is reasonable and standard in TTA, the paper does not report pseudo-label accuracy on any target domain, making it impossible to assess whether adaptation is driven by meaningful signal or partly memorizing noisy labels. An oracle experiment (comparing against ground-truth labels or a no-adaptation upper bound) would strengthen confidence, especially since three separate components all depend on these labels.
 
-2. **No statistical variance or significance reported.** All results in Table 1 and Figure 3 are single numbers without standard deviations, confidence intervals, or multiple seeds. The paper states it "randomly split" test data into batches, introducing randomness from batch order, yet no variance is reported. For a method claiming up to 28% improvement, uncertainty estimates are needed to assess reliability.
+- **Hyperparameter sensitivity is not analyzed:** CONDA has several hyperparameters (λ_frob, λ_sparse, λ_sim, λ_coh, α=0.99, number of residual concepts *r*). The paper does not report sensitivity to these choices or provide an ablation for *r* — a core design parameter of RCB. The interpretability section mentions *r*=5, but it is unclear whether this value is used across all experiments or how performance changes with *r*. Given the number of moving parts, some sensitivity justification is expected.
 
-3. **Pseudo-label quality is unexamined.** The pseudo-labeling strategy combines zero-shot and linear probing predictors. The paper does not report pseudo-label accuracy on test data, nor analyze sensitivity to labeling errors — a well-known failure mode in TTA (confirmation bias). Understanding whether the method is robust to moderate labeling noise or depends on high-quality pseudolabels would strengthen the analysis.
-
-4. **No hyperparameter sensitivity analysis.** The method introduces four regularization weights (λ_frob, λ_sparse, λ_sim, λ_coh) and the number of residual concepts r, but provides no analysis of how performance varies with these choices. For a method intended for deployment without labels, users need guidance on default settings.
-
-5. **No analysis of computational cost.** CONDA involves three separate optimization steps per batch plus pseudo-label generation from an ensemble. A wall-clock comparison to the unadapted CBM (and a simple TTA baseline) would help practitioners understand practical overhead.
+- **Interpretability analysis is purely qualitative:** The analysis in Section 4.4 (Figure 4) shows one example with no quantitative metric of interpretability (e.g., concept completeness score, concept-class alignment, or human evaluation). Given the paper's emphasis on interpretability, this limits the strength of the claim that CONDA adapts explanations "meaningfully."
 
 ### Trivial
 
-- **Mahalanobis Gaussian assumption unchecked.** CSA models class-conditional concept scores as Gaussians and uses Mahalanobis distance. The paper does not check whether this assumption holds or discuss robustness to its violation — a minor technical caveat standard in this literature.
-- **Top-k parameter for RCB coherency not specified.** The coherency regularization (Eqn. 13) uses top-k nearest neighbors but does not state how k is chosen.
-- **Interpretability analysis is qualitative.** The claim that three residual concepts correspond to "feathers, wings, and beak" relies on manual inspection without quantitative validation of semantic alignment. This is standard for interpretability analysis but should be caveated as qualitative.
+- The paper does not discuss the potential for batch-wise online drift when a batch has poor pseudo-labels, which is a known concern in TTA but not specific to this method.
 
 ## Nice-to-Haves
 
-- Adding TENT (or another simple TTA baseline) applied to the CBM predictor as a comparison would directly test whether the specialized components are necessary.
-- Reporting pseudo-label accuracy on each test set, broken down by domain, would clarify the method's robustness to labeling noise.
-- A brief analysis of performance variance across different random batch orders would address concerns about online adaptation stability.
-- Running 3–5 random seeds for the main results would provide variance estimates.
-- A standard CLIP backbone (non-FARE2) on CIFAR as a control would isolate the effect of the concept bottleneck from backbone robustness.
+- An oracle experiment comparing CONDA against a version that uses ground-truth labels (or target-domain upper bound) to assess the ceiling of adaptation.
+- A brief sensitivity figure for *r* and the main λ hyperparameters.
+- Reporting pseudo-label accuracy per dataset, even in the appendix.
 
 ## Removed Points
 
-- **Criticism about FARE2 backbone choice (Section 4.1):** The reviewer claimed using an adversarially robust CLIP variant "biases the backbone toward robustness, possibly making the CBM's lack of robustness less attributable to the concept bottleneck." This is removed because (a) the paper uses standard CLIP for Waterbirds and Metashift, not just FARE2, so there is a control; (b) using a robust backbone makes the CBM *failure more striking* (the bottleneck is the weak point even with a robust backbone), not less; and (c) the paper explicitly justifies the choice.
-- **Criticism about low-level shift definition vs. CSA need (Section 2.2):** The reviewer noted confusion about why CSA is needed if low-level shifts don't change concept scores. This is addressed in the paper: Failure Mode 1 (non-robust concept bottleneck) is precisely the case where the concept mapping *does* change under low-level shifts, violating the idealized definition. The taxonomy and failure modes are clearly separated.
-- **Criticism about component interference being a "structural weakness":** The paper directly acknowledges that CSA alone can beat the full method on low-level shifts and LPA alone on concept-level shifts, and explains this through the lens of Lee et al. (2023)'s framework about fine-tuning subsets of layers. The paper provides clear characterization of when each component is most useful. A gating mechanism would be a nice extension but its absence is not a structural flaw.
-- **Criticism about theoretical grounding of CSA loss:** The claim that the loss is "a heuristic, not a proper divergence" — the paper explicitly says it is "motivated by" CAFA and describes it as a heuristic alignment loss, not claiming it as a proper statistical divergence. This is standard in the feature alignment literature.
+- **"Formalization of shifts has limited practical grounding" (Harsh Critic #3):** This criticism is based on a misreading. The paper explicitly defines low-level and concept-level shifts as *ideal conditions* in Section 2.2, and then defines the three failure modes as *violations* of these ideal conditions in Section 2.3 (e.g., "Non-robust concept bottleneck under low-level shift" is precisely the case where Eqn. 2 is violated). The experiments in Figure 3 then *empirically validate* the taxonomy: low-level shifts cause concept-score misalignment (addressed by CSA), concept-level shifts cause classifier mismatch (addressed by LPA/RCB). The taxonomy is a framing device, but its predictions are tested and confirmed by the ablation study. This criticism does not hold.
+
+- **"Choice of backbone is ad hoc" (Harsh Critic, Other Observations):** The authors explain their choices for each dataset: adversarially robust CLIP for CIFAR (where robustness to low-level perturbations matters), standard CLIP for Waterbirds/Metashift, and BioMedCLIP for Camelyon17. These are principled choices appropriate for each domain, not ad hoc.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the most interesting insight from the review process is the tension between the paper's component-wise design and the empirical finding that components can interfere: CSA alone beats the full CONDA on low-level shifts. The paper's explanation (citing Lee et al. 2023 — different layers handle different shift types) is plausible but suggests an unresolved design question: should a CBM-TTA framework automate component selection, or is the current "apply all three" sufficient as a general strategy where performance is never catastrophically worse? The paper shows the full method is competitive overall, but this question is worth exploring in future work.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Add TENT as a baseline.** Apply entropy minimization to the CBM's linear predictor (and optionally to the full backbone+pipeline). This directly tests whether the specialized CSA/LPA/RCB design is needed or whether generic TTA already recovers most of the improvement.
-2. **Report variance across at least 3 random seeds** for the main results (Table 1). Also report performance across different random batch orders.
-3. **Include a brief pseudo-label quality analysis** showing test-set accuracy of the pseudo-labels per domain, and ideally a robustness analysis to label noise.
-4. **Add a hyperparameter sensitivity study** for the key parameters (at minimum λ_frob, λ_sparse, λ_sim, λ_coh, and r).
+1. Add at least one generic TTA baseline adapted to the CBM setting (e.g., entropy minimization on the CBM's label predictor logits, or applying CAFA at the concept-score level). This directly addresses the most significant gap in the evaluation and would isolate the contribution of CONDA's multi-component design.
+2. Report pseudo-label accuracy on the target domain for each dataset, and include a variant that uses oracle (ground-truth) labels to establish an upper bound for adaptation quality.
+3. Include a sensitivity analysis for the number of residual concepts *r* and at least one λ hyperparameter per component (e.g., λ_frob, λ_sparse).
 
 ## Score and Decision
 
-The paper addresses a timely and well-motivated problem, provides a principled framework with clear design rationale, and demonstrates consistent improvements across diverse settings. The weaknesses are real but fall short of being structural or fatal — they are gaps in the evaluation (missing baselines, no variance estimates, unexamined pseudo-labels) rather than flaws in the method or its motivation. The paper's core contributions (the failure-mode taxonomy, the CONDA framework, and the empirical demonstration) are solid. With the suggested additions, the paper would be significantly stronger.
+The paper makes a genuine contribution as the first TTA method specifically designed for concept bottleneck models with foundation models. The failure-mode taxonomy and component-specific design are well-motivated, and the empirical results are consistently positive across diverse settings. However, the evaluation has a notable gap: the absence of generic TTA baselines adapted to the CBM setting prevents the reader from assessing whether CONDA's complexity is justified over simpler alternatives. The other issues (missing hyperparameter analysis, unvalidated pseudo-labels, qualitative interpretability) are secondary and addressable in revision. The paper's core contribution is solid but not yet fully proven relative to the simplest possible baselines.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

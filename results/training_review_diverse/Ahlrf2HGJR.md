@@ -1,80 +1,67 @@
-Now I have verified all reviewer claims against the actual paper. Let me synthesize the final review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+
+## Final Review
 
 ## Summary
-
-This paper proposes "echo embeddings," a simple method for extracting text embeddings from autoregressive LLMs: repeat the input twice in context and pool embeddings from the second occurrence. This addresses the causal-masking limitation where early token embeddings cannot encode information from later tokens. The authors demonstrate (1) on synthetic data that echo embeddings capture bidirectional information while classical embeddings fail on structurally asymmetric comparisons, (2) consistent zero-shot improvements averaging ~9% across models and scales on MTEB, and (3) consistent fine-tuning improvements averaging ~0.7% in an apples-to-apples comparison, with a bidirectional-attention ablation showing echo's benefit is not solely due to the causal mask.
+This paper identifies a fundamental limitation of autoregressive LMs for text embeddings: due to causal attention, early-token embeddings cannot encode information from later tokens. The authors propose "echo embeddings"—repeating the input twice and extracting pooled embeddings from the second occurrence—which enables early tokens to attend to their first-pass counterparts and indirectly capture bidirectional context. On MTEB, echo embeddings outperform classical single-pass embeddings by over 9% zero-shot and ~0.7% after fine-tuning, across model families (Mistral, LLaMA-2) and scales (7B, 13B), and achieve state-of-the-art among open-source models that do not use synthetic fine-tuning data.
 
 ## Strengths
 
-- **Large and consistent zero-shot gains across models and tasks**: Echo embeddings outperform classical embeddings by over 9% on average for Mistral-7B, with consistent improvement across all MTEB categories for LLaMA-2-7B, LLaMA-2-13B, and Mistral-7B (Section 5.1). The gains are systematic, not a fluke on a single configuration.
+- **Addresses a genuine architectural limitation of autoregressive LMs**: The paper clearly identifies and demonstrates (via synthetic controlled experiments, Section 3.2–3.3) that classical causal-attention embeddings cannot encode later-token information into early-token representations. The echo mechanism is a principled response to this specific limitation, not an ad-hoc tuning trick. The synthetic experiments showing that echo embeddings let early tokens distinguish paraphrased from dissimilar completions (where classical embeddings cannot) are clean and convincing.
 
-- **Diagnostic synthetic experiments**: Paper constructs controlled synthetic datasets (Structures S1 and S2) where classical embeddings predictably fail when distinguishing information appears later in the sentence, while echo embeddings correctly capture that information (Section 3, Figure toy). This provides mechanistic evidence beyond just benchmark performance.
+- **Consistent empirical gains across models, scales, and settings**: The improvement from echo embeddings holds across Mistral-7B, LLaMA-2-7B, and LLaMA-2-13B, and across every MTEB task category. The zero-shot gains are large (~9–10 points), and the fine-tuning gains (~0.7% average) are smaller but consistent and arise from an apples-to-apples comparison where the only difference is repetition. This breadth and consistency rule out one-off artifacts.
 
-- **Ablation on last-token pooling and noise robustness**: Echo embeddings with mean pooling are robust to random noise appended to the end of inputs, whereas last-token pooling (which in principle can attend to all tokens) drops sharply in accuracy (Section 3, Figure toy_last_token). This demonstrates a practical advantage of echo over relying on the last token.
+- **Simple, plug-and-compatible method**: Echo embeddings require no architectural changes, no additional training data, and no special fine-tuning procedure. The method is orthogonal to other innovations (e.g., synthetic training data), making it immediately useful and likely to be adopted.
 
-- **Bidirectional attention control**: After fine-tuning, echo embeddings still outperform classical embeddings even when the causal attention mask is removed (Section 5.2), showing the improvement is not merely an artifact of the architecture but stems from the echo mechanism itself. This is a strong experimental control.
+- **Achieves competitive SOTA with autoregressive backbone**: Echo embeddings with Mistral-7B match or exceed prior open-source MLM-based models on the MTEB leaderboard (among models not using synthetic fine-tuning data), demonstrating that autoregressive LMs can compete with bidirectional models for embeddings when given echo-style inputs.
 
-- **Apples-to-apples comparison with honest scope**: The paper carefully separates the effect of the base model from the echo technique by fine-tuning both classical and echo on identical data, and the SOTA claim is explicitly qualified ("compared to prior open source models that do not leverage synthetic fine-tuning data"). The concurrent work using synthetic data is clearly delineated.
+- **Honest about limitations**: The paper transparently acknowledges the double inference cost and the lack of a full explanation for fine-tuning improvements (Section 6).
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **No variance reporting or statistical rigor**: The paper reports zero-shot improvements averaged across prompt randomizations without stating how many prompt variants were sampled, whether the reported score is an average or a single selection, or what the variance is. Across the MTEB evaluation, no confidence intervals, error bars, or significance tests are reported for any result. While the consistency of gains across models and tasks partially mitigates this — a ~9% gain that holds across 3 models and all task categories is unlikely to be noise — the lack of any variance characterization makes it impossible to judge the robustness of the exact figures, especially for the fine-tuned results where the gain is smaller (~0.7%). This is the single most impactful omission in the paper.
+- **Zero-shot prompt templates are underspecified, partially confounding the 9% gain attribution**: The paper states that prompt randomization was performed "for each of the embedding strategies" (Section 4.1), implying classical embeddings also used prompts. However, no concrete prompt templates are provided for any strategy in the visible text. The echo method's prompt inherently includes task-like framing ("Rewrite the sentence: x, rewritten sentence: x"), while classical could range from a bare sentence to a fully instructed prompt. Without knowing what prompts classical used, a reader cannot determine whether the large zero-shot gap is primarily due to the echo mechanism, the presence/absence of instruction wording, or interaction effects. This does **not** invalidate the paper's core claim—the fine-tuning setting (where both methods use identical "Instruct: ... Query: S" templates) provides a controlled comparison that confirms a consistent but smaller (0.7%) improvement—but it weakens the headline 9% claim and limits reproducibility until clarified.
 
 ### Minor
 
-- **Prompt randomization procedure is underspecified**: Section 4.1 mentions "prompt randomization where we sample prompts by randomizing the exact wording, punctuation, and capitalization" but gives no details — how many variants per prompt? How is the final embedding selected or aggregated across prompts? This matters for reproducibility of the zero-shot results.
+- **The bidirectional attention experiment is a weak intervention**: Section 5.2 removes the causal mask from Mistral-7B (pretrained causally) and fine-tunes with LoRA. The conclusion "architecture alone is not sufficient" is modest and defensible, but the experiment cannot separate the effect of the echo mechanism from the model's unfamiliarity with bidirectional attention (since it was never pretrained to use it). A comparison to a pretrained bidirectional model (e.g., BERT-large fine-tuned on the same data) would be more informative. The paper's claim is not wrong, but the experiment's support is weaker than presented.
 
-- **Synthetic data generation details are sparse**: The paper generates examples via GPT-4 but does not state how many examples were generated, whether they were manually validated for quality, or what the diversity of generated content is. This makes the synthetic experiment harder to reproduce precisely.
+- **"Quantitative evaluation of the failure mode" lacks visible support**: Section 5.1 states "We quantitatively measure… We find that classical embeddings systematically fail on examples which exhibit this structure, while echo embeddings do not" but provides no numbers, table, or figure in the parsed text. (This may be a parser-stripped figure, but as it stands the claim is asserted without visible quantitative backing.)
 
 ### Trivial
-None.
+
+- No concrete prompt templates are given for any of the zero-shot strategies (echo, classical, last-token, summarization). Given the acknowledged sensitivity of LLMs to prompt wording (citing Sclar et al., 2023), at least representative examples should appear in the main paper for reproducibility.
 
 ## Nice-to-Haves
 
-- **Probing why echo helps after fine-tuning**: The paper correctly identifies as a limitation (Section 7) that it does not fully explain why echo embeddings still outperform classical after fine-tuning despite no representational limitation. The two hypotheses offered (intermediate representations of early tokens degrading last-token pooling; initialization effects from poor zero-shot last-token performance) are plausible but untested. Testing these (e.g., probing intermediate representations, comparing random vs. pre-trained initialization) would strengthen the scientific contribution but is not required for the paper's core claims.
-
-- **Quantifying the inference cost tradeoff**: The paper mentions (Section 7) that echo doubles inference cost but does not report exact runtime or throughput. Reporting this would help practitioners assess the tradeoff for deployment decisions.
-
-- **Comparison to alternative repetition structures**: The paper could compare to other simple fixes for the causal-mask limitation (e.g., prefix-LM prompting, different prompt structures that repeat only partial input) to further isolate why echo specifically helps. The bidirectional-attention ablation already provides a strong control here.
+- A zero-shot ablation comparing classical embeddings with an instruction prompt (e.g., "Rewrite the sentence: x") vs. echo embeddings ("Rewrite the sentence: x, rewritten sentence: x") would cleanly isolate the repetition effect from the instruction presence. The fine-tuning comparison already does this, but the counterpart in the zero-shot setting would strengthen the headline result.
+- An analysis of why echo helps after fine-tuning beyond the two hypotheses offered (e.g., attention visualization showing second-occurrence early tokens attending to first-occurrence later tokens) would increase interpretability, but the paper is not deficient for omitting it.
 
 ## Removed Points
 
-These points are flagged to be removed — treat them with caution:
-
-1. **"The abstract says 'state-of-the-art' without qualification"** — The abstract actually reads: *"Echo embeddings with a Mistral-7B model achieve state-of-the-art compared to prior open source models that do not leverage synthetic fine-tuning data."* This includes the explicit qualification. The reviewer's claim that the qualification is missing is factually incorrect.
-
-2. **"Baseline comparison is muddled / SOTA claim is overstated"** — The paper performs an apples-to-apples comparison (classical vs. echo on identical data) and explicitly acknowledges that classical outperforms prior autoregressive models due to the stronger Mistral backbone. The SOTA claim is properly scoped to models without synthetic data. The reviewer's concern is already addressed in the paper.
-
-3. **"No analysis of why echo helps after fine-tuning"** — The paper explicitly acknowledges this as an open question in both Section 5.2 ("We leave it to future work to explore these hypotheses") and Section 7 ("Second, we do not fully explain why echo embeddings are improved... We leave it to future work"). The criticism faults the paper for being transparent about its limitations rather than for any actual flaw.
-
-4. **"Quantitative failure mode evaluation claims numbers without showing them"** — These results are in figures that were \input-ed from separate .tex files (standard LaTeX practice) and stripped by the parser. The numbers exist in the original submission.
-
-5. **"Missing training dataset list / hyperparameter details / appendix"** — These are likely in the appendix, which was stripped by the parser.
-
-6. **"Figure captions and table descriptions are missing"** — Parser artifact.
+- **"Zero-shot comparison confounded by presence vs. absence of an instructional prompt"** (Harsh Critic's Issue 1, framed as fatal): The paper states prompt randomization was performed "for each of the embedding strategies" (Section 4.1), so classical embeddings did use prompts—the concern is about what *kind* of prompts, not a complete absence. Moreover, the fine-tuning setting (Section 4.2) provides a fully controlled apples-to-apples comparison that independently validates the method with a consistent ~0.7% gain. The reviewer's framing as a confounding that "cannot be attributed to the proposed method" overstates the situation; the core claim survives. The legitimate specificity gap is preserved in the Major weakness above.
+- **"The bidirectional attention experiment is fundamentally unfair / cannot support any meaningful conclusion"**: The paper's claim is modest ("architecture alone is not sufficient to improve performance"), and the experiment is a reasonable ablation despite its limitations. Downgraded to Minor.
+- **"The paper does not report a direct comparison between echo and a classical baseline where both use similarly structured prompts"**: This exists in the fine-tuning setting (Section 4.2). Kept as a Nice-to-Have for the zero-shot setting only.
+- **"Missing main-text support for the quantitative failure mode analysis"**: Possibly a parser artifact (stripped figure). Kept as Minor with caveat.
+- **Strength Finder's unqualified "state-of-the-art performance"**: The paper's actual claim is qualified ("compared to prior open source models that do not leverage synthetic fine-tuning data"). The strength is kept with this qualification in the Strengths section above.
 
 ## Novel Insights
 
-The reviews converge on the fact that the paper's core contribution is clear and well-supported, but they disagree on severity. The harsh reviewer treats the lack of error bars as a near-fatal omission, while this judgment discounts that (a) the zero-shot gains are large (~9%) and consistent across 3 models and all task categories — a pattern unlikely to be noise — and (b) the paper's honest treatment of its own limitations (including the unexplained fine-tuning improvement) is a strength, not a weakness. The most genuinely novel observation from the synthesis is that the paper's consistency evidence (across models, scales, task categories, and the bidirectional-attention ablation) partially compensates for the missing error bars, and that the paper would be strengthened most by adding explicit variance numbers rather than by any new experiment.
+The Harsh Critic's observation that the echo prompt inherently includes instruction-like framing (while classical zero-shot may not) is a legitimate concern, but the reviewer's framing of it as a fatal confound overlooks the fine-tuning results which already control for this factor and independently corroborate the method. The more interesting tension is that the 9% zero-shot gain dramatically exceeds the 0.7% fine-tuning gain—this gap itself is under-analyzed in the paper and could reflect either (a) the zero-shot setting being more sensitive to the architectural limitation (so removing it helps more), or (b) prompt/instruction effects magnifying the zero-shot numbers. The paper would benefit from directly addressing this discrepancy rather than letting readers speculate.
 
 ## Suggestions
 
-1. Report mean and standard deviation (or range) across prompt randomizations for zero-shot results, and across multiple training seeds for fine-tuned results. Even showing the range for 3-5 runs would substantially increase confidence.
-
-2. Specify the number of prompt variants sampled and whether the reported score is an average or a selected best. Clarify whether MTEB scores are single-run or aggregated.
-
-3. Report the count and quality validation approach for the GPT-4-generated synthetic examples.
-
-4. Report exact inference throughput/memory overhead of echo vs. classical to help practitioners assess the tradeoff.
+1. **Provide the exact prompt templates** used for each zero-shot strategy (classical, echo, last-token, summarization). Even a single representative example per strategy would resolve the main reproducibility concern. Place them in the main text or a dedicated table.
+2. **Run the controlled zero-shot ablation**: classical with "Rewrite the sentence: [x]" (mean pooling, single occurrence) vs. echo with "Rewrite the sentence: [x], rewritten sentence: [x]" (pooling from second occurrence). This isolates repetition from instruction and directly addresses the confound.
+3. **Replace or reframe the bidirectional attention experiment**: Either compare against a pretrained bidirectional model (e.g., BERT-large) fine-tuned on the same data, or soften the claim to acknowledge that the causal-pretrained + bidirectional-fine-tuning intervention is a lower bound.
+4. **Provide quantitative support** for the "systematic failure" claim on real data (Table, figure, or at minimum summary statistics).
 
 ## Score and Decision
 
-The paper proposes a clever, well-motivated, and simple method. The experimental evidence is strong — consistent improvement across multiple models, scales, task categories, and in controlled synthetic settings. The paper is transparent about its limitations and provides meaningful ablations (bidirectional attention removal, last-token pooling comparison). The main gap is the absence of variance reporting, which is a meaningful methodological omission but not a fatal one: the consistency of the gains across diverse settings renders the core claims credible. The paper makes a real, practically useful contribution to the embedding literature.
+The paper proposes a simple, well-motivated method targeting a genuine limitation. The synthetic experiments convincingly demonstrate the mechanism, and the fine-tuning results provide a controlled validation. The main weakness is the underspecified zero-shot prompt setup, which limits confidence in the headline 9% figure but does not undermine the core contribution. This is a solid paper with a clean idea and adequate empirical support.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+**Score**: 6.0
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

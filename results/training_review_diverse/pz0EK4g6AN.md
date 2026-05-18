@@ -1,82 +1,77 @@
-Now I have verified the key claims against the paper. Let me produce the final consolidated review.
+I have thoroughly read the entire paper and cross-verified every claim. Here is my consolidated review.
 
 ---
 
 ## Summary
 
-QCircuitNet introduces the first structured dataset and benchmark for evaluating AI models on quantum algorithm design, formulated as quantum circuit code generation. The paper's central contribution is a carefully designed framework that (a) separates oracle definitions from algorithm circuits using `.inc` files to preserve the black-box nature of quantum oracles, (b) includes post-processing functions and automatic verification, and (c) covers a wide range of algorithms from primitives (Bernstein-Vazirani, Deutsch-Jozsa) to advanced applications (Generalized Simon's Problem). Five LLMs are benchmarked and fine-tuning results are reported.
+QCircuitNet introduces the first benchmark dataset specifically designed to evaluate large language models on quantum algorithm design tasks. It formulates three task categories (oracle construction, algorithm design, random circuit synthesis), provides a framework that separates oracle definitions from algorithm circuits to prevent information leakage, and includes automatic verification functions. The paper benchmarks five LLMs (GPT-4o, GPT-3.5, Llama-3, Phi-3, Mistral) under few-shot settings and presents primitive fine-tuning results on Llama-3.
 
 ## Strengths
 
-- **First dataset tailored for AI-driven quantum algorithm design.** The paper correctly identifies that prior benchmarks (QASMBench, MQTBench, VeriQBench) target NISQ machine or quantum software tool evaluation rather than AI model training for algorithm design. QCircuitNet fills this genuine gap.
+- **First dataset targeting AI-driven quantum algorithm design, filling a clear gap.** The paper correctly identifies that prior quantum circuit benchmarks (QASMBench, MQTBench, VeriQBench) were designed for NISQ hardware evaluation, not AI training/evaluation. The related work section (lines 48–53) supports this claim, and no existing dataset for this specific purpose is identified.
 
-- **Principled solution to the oracle black-box dilemma.** The design of storing oracle definitions in separate `oracle.inc` files (OpenQASM 3.0 `include` mechanism) allows LLMs to call oracles without accessing their internal gate implementation, preserving the theoretical black-box requirement while still producing executable circuits. This is a thoughtful and nontrivial design decision.
+- **Novel framework that resolves the oracle black-box vs. explicit-implementation dilemma.** The paper recognizes and solves a genuine design challenge: algorithm design requires the oracle to be a black box to avoid leaking the answer, but circuit execution requires its explicit gates. The solution — providing the oracle as a named "Oracle" gate with its definition in a separate `oracle.inc` file (line 123) — is principled and described in detail (Section 4.2).
 
-- **Automatic verification with syntax checking and functional correctness testing.** The verification function returns detailed error feedback, enabling iterative evaluation without human inspection. The framework also includes post-processing functions to derive final answers from measurement results (e.g., solving linear equations for Simon's algorithm), capturing the full pipeline of quantum algorithm design.
+- **Automatic verification functions that go beyond token-matching metrics.** The verification functions check both syntax and functional correctness via test cases (line 140), enabling automated evaluation without human inspection. The paper shows a concrete use case where BLEU scores are high but verification scores are low (swap test, line 257), demonstrating why functional verification matters.
 
-- **Broad algorithm coverage with demonstrated extensibility.** The dataset spans oracle construction, algorithm design, and random circuit synthesis, with implementations from basic primitives (GHZ, W-state) through textbook algorithms (Grover, QFT, phase estimation) to advanced research-level problems (Generalized Simon's Problem in both multi-str and ternary variants).
+- **Wide algorithm coverage from basic primitives to an active-research-level problem.** The dataset spans textbook algorithms (Deutsch-Jozsa, Simon's, Grover) through to Generalized Simon's Problem over ℤₚⁿ, an area of current research (line 106). This demonstrates the framework's extensibility beyond trivial examples.
+
+- **Systematic multi-model benchmarking revealing discriminative model rankings.** Tables 1–2 benchmark five LLMs under 1-shot and 5-shot settings with reported standard deviations. The results consistently show GPT-4o > GPT-3.5 > open-source models, and 5-shot > 1-shot, confirming the benchmark's ability to discriminate model capabilities.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **Dataset size and composition are underspecified.** For a dataset paper, the total number of circuit instances, per-algorithm instance counts, qubit ranges, and number of test cases per oracle are standard details that are entirely missing. The paper describes *what* algorithms are included but never states *how many* data points the dataset contains. This makes it difficult for readers to assess coverage, scale, or reproducibility. This is the single most consequential gap for a dataset contribution.
+- **Verification score scale contradicts the stated definition (Section 4.2, item 6).** The paper states (line 140): "If the program can execute successfully, the function returns a score between [0, 1] indicating the success rate on test cases." Yet Tables 1, 2, and 3 report values such as −0.8462, −0.5012, −0.5347 — consistently negative and outside the claimed range. Only a handful of values (e.g., 0.0135 in Table 1, 0.4300 in Table 3) are positive. Some values lie between −1 and 0 (e.g., −0.1300), which are neither the sentinel −1 for syntax errors nor inside [0, 1]. The paper provides no explanation for this discrepancy. While the relative ordering (higher = better) is consistent enough to compare models and settings, the reader cannot interpret the absolute meaning of any verification score. This undermines trust in the quantitative evaluation and must be fixed — either by correcting the definition or by explaining what the reported values actually represent.
 
-- **The fine-tuning results do not support the claim of "promising potential as a training dataset" without qualification.** In Table 4, fine-tuning Llama3-8B on oracle construction *degrades* the average verification score (−0.4327 → −0.5347), with 4 of 6 individual tasks worsening (Deutsch-Jozsa, Simon, Clifford, Universal). While the BLEU score improves (39.59 → 46.27) and the Bernstein-Vazirani case study convincingly shows that the model learned to selectively apply CX gates, these positives are task-specific. The paper's abstract and conclusion state "promising potential as a training dataset" without acknowledging the overall degradation in the most functionally relevant metric. This claim needs to be tempered or supported with additional evidence that fine-tuning helps *functionally* on at least a subset of tasks where it matters.
+- **Missing basic dataset statistics for a paper titled "Large-Scale" dataset.** A dataset paper should provide concrete quantitative characterization: total number of data points, number of circuits per algorithm, qubit size ranges, number of unique oracles, etc. The paper provides none of these. "Large-scale" in the title and "wide range of quantum algorithms" in the text are unsubstantiated without numbers. The description of random circuit synthesis (line 108–111) does not specify how many random circuits were generated. This is a significant omission for a resource paper whose primary contribution is a dataset.
+
+- **Random circuit synthesis (Task III) is absent from the main benchmarking results.** The task suite (Section 4.1) defines three core tasks, and Task III (random circuit synthesis) is described as crucial "for quantum supremacy" (line 91). Yet Tables 1 and 2 (the main benchmarking tables for algorithm design and oracle construction) contain no entries for Task III. The only results for Clifford and universal random circuit synthesis appear in the fine-tuning table (Table 3) and only for Llama-3. A reader cannot evaluate how models perform on this task relative to the others, which is a significant gap given it is one of three stated core tasks.
 
 ### Minor
 
-- **The verification score reporting conflates two distinct failure modes in the reported averages.** The function returns −1 for grammar errors and [0,1] for successful execution (line 140). The reported averages therefore mix −1 values with small positive scores, producing negative means. This is *explained* in the paper but presented without any decomposition (e.g., reporting pass rates separately from partial correctness). Tables 2 and 3 would be far more informative if they reported, for example, the fraction of runs with no grammar errors alongside the average partial correctness on those runs. The current presentation forces the reader to guess how many runs produced syntax errors vs. functional failures.
+- **Few-shot evaluation protocol is underspecified.** The paper describes a form of leave-one-problem-out cross-validation where the test problem is from a different algorithm than the training examples (line 163). This is an unconventional choice for few-shot learning (typically examples are from the same task type), and the paper provides no justification for this design, no detail on how the few-shot examples are sampled from the "remaining problems," and no discussion of whether prompt ordering was randomized or held fixed. These details are needed for reproducibility.
 
-- **Evaluation inconsistencies across experiments.** Byte Perplexity is listed as an evaluation metric (Section 5) but is only reported in the fine-tuning table (Table 4), not in the main benchmark results (Tables 2, 3). The Clifford and Universal columns (random circuit synthesis tasks) appear in the fine-tuning table but are absent from the benchmark tables, and it is never stated whether these tasks are part of the benchmark evaluation or only the fine-tuning experiment. These omissions are individually small but collectively undermine the coherence of the evaluation.
-
-- **The BLEU score bar charts (Figure 2) lack numeric labels**, making it difficult to compare values across models or to match against the fine-tuning BLEU table (which reports decimals). A table or labeled values would improve readability.
-
-- **The k-fold validation scheme for few-shot prompting is described but not analyzed for potential data leakage.** The paper states that different algorithms are used as train/test splits (line 163), but when the same algorithm type (e.g., Bernstein-Vazirani) appears with different parameters (secret strings) across folds, some information about the algorithm's circuit template could be shared. The paper should discuss whether this is a concern.
+- **Fine-tuning narrative is selectively framed.** The paper highlights (line 294) that for Bernstein-Vazirani, fine-tuning improved the verification score from −0.27 to −0.13 and states "this improvement significantly contributed to higher scores." However, Llama-3's overall average verification score went from −0.4327 (few-shot 5) to −0.5347 (fine-tuned) — *worse*. The BLEU score did improve (39.6 → 46.3) and perplexity improved (1.25 → 1.14), so the results are mixed. The paper's abstract honestly states "fine-tuning does not always outperform few-shot learning," but the main text's emphasis on improvement without flagging the overall verification regression is somewhat selective.
 
 ### Trivial
-None.
+
+- None that survive filtering. The formatting issues noted by the reviewer are parser artifacts.
 
 ## Nice-to-Haves
 
-- A data contamination analysis (checking whether pre-trained LLMs have already seen QASM patterns similar to the dataset's circuits) would strengthen the paper but is appropriately flagged as future work.
-- Test case generation methodology (number of test cases per oracle, whether they are exhaustive for small n, how random circuits are verified) would improve reproducibility.
-- For the random circuit synthesis task, the problem description is given as the "vector of the final state" (line 111) — an explicit example of how this state vector is formatted in the prompt would be helpful.
+- A systematic error categorization across models (beyond the single anecdote about GPT-4o using unsupported OpenQASM 3.0 features) would strengthen the qualitative analysis.
+- Reporting baseline difficulty (e.g., success rate from random circuit generation or trivial outputs) would help calibrate the verification scores.
+- Including random circuit synthesis results in the main benchmark (Tables 1–2) with the same model coverage would complete the evaluation of the three stated tasks.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviewer are flagged to be removed; treat them with caution:
 
-- **"Every single verification score ... is negative"** — Factually incorrect. Table 2 shows positive scores (e.g., gpt4o 5-shot Deutsch-Jozsa: 0.0135; Llama3 5-shot Bernstein-Vazirani: 0.0769). Table 3 shows positive scores (e.g., gpt4o 5-shot Deutsch-Jozsa: 0.0800). Table 4 shows positive scores (e.g., gpt4o few-shot(5) Deutsch-Jozsa: 0.4300; average 0.0457). Removed per Hard Rule (factually wrong).
-- **"The paper never explains this [negative values]"** — The paper explicitly states at line 140: "If there exist grammar errors, the function returns -1." Removed per Hard Rule (factually wrong).
-- **"No discussion of computational cost"** — Line 152 states: "The total computation cost is approximately equivalent to two days on an A100 GPU." Removed per Hard Rule (factually wrong).
-- **"Data contamination is mentioned but not tested"** — The paper flags this as a challenge/future direction (lines 303, 311), which is appropriate for a dataset paper. Removed per Hard Rule (scope creep — not a weakness to demand testing within the paper).
-- **Complaint about missing dataset release statement (license)** — A valid concern but the paper does not claim to release code/data in the manuscript; removal per Soft Rule (the paper is being reviewed on content, and license status is a post-acceptance administrative detail).
-- **Claim that Grover fine-tuning verification degraded** — Table 4 shows Grover verification: −0.52 (few-shot) → −0.33 (fine-tune), which *improved*, not degraded. Removed per Hard Rule (factually wrong).
-- **"The problem description for random circuit synthesis is not specified how it is presented"** — Line 111 states: "the problem description provides the vector of the final state." Removed per Hard Rule (factually wrong / misunderstanding).
+- *"Formatting error in evaluation metrics section"* — This is a parser artifact from PDF extraction; the original submission does not have this issue.
+- *"The observation about GPT-4o using unsupported OpenQASM 3.0 features is interesting but anecdotal"* — Retained in Nice-to-Haves above but downgraded from a weakness: a systematic error analysis would strengthen the paper but its absence is not a flaw in the current scope.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews confirm the paper's core novelty—the structured dataset with oracle isolation and automatic verification—but do not surface an angle unanticipated by the authors.
+None beyond the paper's own contributions. The reviews do not surface an unexpected synthesis that the paper itself does not already express.
 
 ## Suggestions
 
-1. **Add a dedicated dataset statistics section.** State the total number of circuit instances, the qubit range per algorithm, the number of test cases per oracle/algorithm, and the number of training examples used for fine-tuning. This is essential for a dataset paper and will also clarify the scope of the fine-tuning experiment.
-2. **Re-present verification scores with a two-metric decomposition.** Report (a) the fraction of runs passing syntax validation and (b) the average partial correctness score on runs that pass. This eliminates the ambiguity of the current −1/+1 mixing and makes the tables immediately interpretable.
-3. **Recharacterize the fine-tuning conclusions.** Explicitly state that fine-tuning improved surface-level BLEU scores and showed learning on specific tasks (Bernstein-Vazirani), but that overall verification scores did not improve—then discuss why this might be (e.g., the limited size of the fine-tuning set, the need for algorithm-specific training strategies) rather than claiming "promising potential" without caveats.
-4. **Align evaluation reporting.** Either report Byte Perplexity for the main benchmark or remove it from the metrics list. Clarify whether Clifford and Universal random circuit tasks are part of the benchmark or only the fine-tuning experiment.
-5. **Add numeric labels or a supplementary table for the BLEU bar charts.**
+1. **Fix the verification score definition.** Either correct line 140 to describe the actual range (which appears to be [−1, 1] or similar) or, if the scores are normalized or transformed, explain the transformation. Report raw success rates alongside any derived scores.
+2. **Add a "Dataset Statistics" subsection.** Include total data point count, circuits per algorithm, qubit ranges per task, number of random circuit instances, and any other relevant quantities. This is essential for a dataset paper.
+3. **Complete the main benchmark with Task III results.** Add random circuit synthesis results to Tables 1–2 (or a new comparable table) for all five models so the three-task evaluation is self-contained.
+4. **Clarify the few-shot protocol.** Specify how training examples are sampled from the remaining problems, whether prompts are randomized, and justify why cross-algorithm examples constitute a meaningful few-shot evaluation.
+5. **Align the fine-tuning narrative with the full data.** Acknowledge that verification scores degraded on average while BLEU and perplexity improved, rather than selectively highlighting only the improvements.
 
 ## Score and Decision
 
-The paper addresses a genuine gap with a thoughtfully designed dataset framework. The oracle black-box solution is the standout contribution. However, the missing dataset statistics are a significant omission for a dataset paper, and the evaluation presentation needs clarification. The paper's claims about fine-tuning are slightly overclaimed given the mixed results. None of these issues invalidate the core contribution—they are fixable with careful revision.
+The paper proposes a valuable resource — the first benchmark dataset for AI-driven quantum algorithm design — with a well-motivated framework and thoughtful design choices. The verification function approach and the oracle-algorithm separation are genuine contributions. The benchmarking is systematic and produces discriminative results.
 
-**Score:** 6.5/10
+However, the paper has three **major** weaknesses that prevent acceptance in its current form: (1) the verification scores directly contradict the stated metric definition, making the core evaluation uninterpretable in absolute terms; (2) the dataset is not quantitatively characterized despite claiming "large-scale" status; and (3) one of the three core tasks is omitted from the main benchmark. These are fixable in revision, but they are too significant to overlook.
 
-**Decision:** Weak Accept — the contribution is real and the framework is well-designed, but the manuscript requires revision to address the underspecified dataset statistics and evaluation presentation before it meets the standard for a strong dataset paper. I encourage the authors to address these issues.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

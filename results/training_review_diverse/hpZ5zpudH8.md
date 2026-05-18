@@ -1,18 +1,24 @@
-Now I have a thorough understanding of the paper. Let me compose the consolidated review.
+Now I have a thorough understanding of the paper and all reviewer inputs. Let me synthesize the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes SpikSSD, a full-spiking SNN-based object detector that improves both feature extraction (via MDS-ResNet, which stabilizes membrane synaptic input distributions) and feature fusion (via SBFM, the first spiking bi-directional fusion module). The system achieves state-of-the-art results among SNN-based detectors on GEN1 (40.8% mAP, first full-spiking SNN above 40%), VOC 2007 (76.0% mAP@0.5), and competitive results on COCO 2017, all at ultralow energy consumption.
+This paper proposes SpikSSD, a fully spiking object detector built on two novel components: (1) MDS-ResNet, a spiking residual backbone that introduces a Membrane-based Deformed Shortcut (LIF→Conv1×1→tdBN) to stabilize membrane synaptic input variance across layers, and (2) the Spiking Bi-direction Fusion Module (SBFM), which for the first time enables bidirectional (up-down *and* down-up) feature fusion while preserving full-spiking operation. On the GEN1 event dataset, SpikSSD-L achieves 40.8% mAP (first full-spiking SNN to exceed 40%), and it obtains state-of-the-art or runner-up results among directly-trained SNNs on VOC 2007 (76.0% mAP@0.5) and COCO 2017, all at ~10% firing rate and drastically lower energy than ANN counterparts.
+
+---
 
 ## Strengths
 
-- **MDS-ResNet provides a principled improvement to spiking feature extraction, supported by convincing empirical evidence.** Figure 1 and Table 1 (rows 1–4) demonstrate that MDS-ResNet18 achieves higher mAP (30.3%) with a lower firing rate (5.9%) compared to EMS-ResNet18 (28.9% mAP, 7.1% firing rate). The variance stabilization mechanism is well-motivated and the firing pattern visualizations credibly show sparser, more uniform activity across layers. The ablation showing monotonic improvement with depth (Table 1 rows 5–7: 30.3% → 33.5% mAP from ResNet18 to ResNet50) further corroborates that gradient flow is maintained.
+- **MDS-ResNet demonstrably stabilizes membrane synaptic input distributions and improves feature extraction.** The paper identifies a key instability in prior spiking ResNets (EMS-ResNet): variance accumulates across layers in identity shortcuts, producing extreme firing patterns. The proposed MDS (LIF→Conv1×1→tdBN) actively adjusts shortcut output variance. Figure 1 shows MDS-ResNet produces more uniform per-layer firing rates than EMS-ResNet, and Table 1 (rows 1–4) shows MDS-ResNet18 outperforms EMS-ResNet18, SEW-ResNet18, and MS-ResNet18 (31.5% vs. 30.8% mAP) with lower firing rate and energy.
 
-- **SpikSSD achieves state-of-the-art results among SNN-based object detectors on multiple benchmarks while maintaining ultralow energy.** On GEN1, SpikSSD-L reaches 40.8% mAP — the first full-spiking SNN above the 40% threshold — consuming only 0.80 mJ versus 5.03 mJ for the prior best SNN (EAS-SNN). On VOC 2007, it achieves 76.0% mAP@0.5 (best among SNNs). These results establish a new benchmark for SNN object detection and demonstrate that the system-level integration of backbone + fusion improvements is effective.
+- **First bidirectional spiking feature fusion module (SBFM) that improves multi-scale detection in SNNs.** Prior SFM (Fan et al., 2024) is one-way (down-up only) and breaks spiking characteristics. SBFM performs both bottom-up and top-down fusion using membrane-addition-based fusion and spiking up/down blocks, maintaining full-spiking operation. Table 1 (rows 9–10) shows adding SBFM to MDS-ResNet18 and MDS-ResNet34 improves mAP by ~2 points (31.5→33.7, 32.8→35.2) while keeping energy nearly unchanged and reducing firing rate.
 
-- **Membrane-addition-based fusion is a clean alternative to concatenation-based spiking fusion.** Rather than concatenating spike trains (which expands channels and complicates feature alignment), SBFM adds membrane synaptic inputs from different scales, then processes the result with spiking depthwise separable convolution in the MDSF-Block. This design preserves spiking properties and avoids the non-spiking operations present in prior SFM (which used SEW-Block internally).
+- **State-of-the-art results across GEN1, VOC 2007, and COCO 2017 with ultralow energy consumption.** SpikSSD-L is the first full-spiking SNN to exceed 40% mAP on GEN1 (Table 2: 40.8% mAP). On VOC 2007 it achieves 76.0% mAP@0.5, best among directly-trained SNNs. On COCO 2017 it ranks second-best among directly-trained SNNs. These results are obtained with ~10% firing rate and energy consumption orders of magnitude lower than ANN detectors (e.g., 1/10 of EAS-SNN on GEN1, 1/3 of YOLOv5s on VOC).
 
-- **Comprehensive ablation study.** Table 1 systematically examines backbone choice, model depth, fusion module, event time window, and input scale — providing practical design insights (e.g., 100ms/200ms training/inference scheme yields best results).
+- **Comprehensive ablation study.** Table 1 systematically isolates the effect of each component (backbone type, model depth, SBFM, time window, input scale), providing clear evidence for design choices across 17 distinct configurations.
+
+---
 
 ## Weaknesses
 
@@ -20,53 +26,57 @@ This paper proposes SpikSSD, a full-spiking SNN-based object detector that impro
 None.
 
 ### Major
-
-- **The claimed benefit of *bi-directional* fusion over one-way fusion is not adequately supported.** The paper cites bidirectional fusion as a core contribution ("the first time realiz[ing] bi-direction fusion of spiking features"). However, the ablation (Table 1 rows 8–10) only compares models *with* SBFM versus *without any fusion* — this shows that fusion helps, but does not isolate whether the second (up-down) pass in the bi-directional design provides additional benefit over a one-way (down-up only) design. A controlled comparison between a one-way variant and the full bi-directional variant (with the same backbone and detection head) is missing. The only existing one-way fusion method (SFM) operates on a different backbone (DenseNet), making cross-table comparisons confounded. This weakens the evidential support for a central claimed contribution. The authors could add this ablation and likely resolve this issue — in its current form the claim outstrips the evidence.
+None.
 
 ### Minor
 
-- **The theoretical gradient analysis (Section 3.3) overreaches and is not essential to the paper's contributions.** The argument that LIF neurons qualify as "general linear transforms" is asserted via citation rather than justified in the text. Given that the empirical evidence (deeper MDS-ResNets improve performance) already adequately supports good gradient flow, the theoretical treatment is unnecessary and risks appearing hand-wavy. The paper would be stronger by either providing a rigorous justification or removing the section entirely.
+- **The gradient avoidance theory in Section 3.3 is presented in a compressed form that relies heavily on the supplementary material for full verification.** The main text states Lemma 1, Definition 1, Lemma 2, and Proposition 1–2, but the derivation linking the lemma conditions to the specific MDS-Block operators (showing that ϕ(JJ^T)≈1 concretely holds for each block type) is deferred. While empirical results (Table 1 rows 5–7) independently confirm that deeper MDS-ResNet variants improve performance—so the theory is supporting, not central—the paper's claim to "theoretically demonstrate" this in the main text would benefit from a brief sketch of how the jacobian moment computation works for each block, e.g., stating the approximate value for Conv1×1, tdBN, LIF, and maxpool within the MDS-Block configuration.
 
-- **The abstract's "around 10% firing rate" is inconsistent with the actual reported rates.** The abstract claims "only around 10% firing rate" but Table 1 shows MDS-ResNet18 at 5.9% and Table 2 shows SpikSSD firing rates of 5.7% and 7.6% (per the reviewer's reading). These are notably lower than 10%; the phrasing should be corrected to reflect the actual numbers (e.g., "under 8%" or the specific values).
+- **The energy comparison methodology with ANN detectors is not described in the main text.** The paper reports drastically lower energy for SpikSSD vs. YOLOv5s (1/3) and DETR (1/37), and notes that energy for ANN methods is "recalculated using our energy consumption method for fair comparison" (Table 3 footnote). However, the calculation method itself is deferred to supplementary material. SNN energy estimates typically count only spike-driven accumulation events at a fixed per-operation cost, whereas ANN MAC-based estimates involve different hardware assumptions. This is standard practice in the SNN literature and not a fatal flaw, but including a brief 2–3 sentence summary of the assumed per-operation costs in the main text would strengthen transparency and prevent over-interpretation.
 
-- **Architectural specificity for reproducibility:** The MDSF-Block uses "spiking depthwise separable convolution" but does not specify whether LIF neurons follow each of the depthwise and pointwise convolutions separately, or only once after the combined operation. This should be clarified for reproducibility.
-
-- **No explicit limitations discussion.** The paper lacks a limitations section. While the conclusion mentions future work on detection heads, a brief discussion of failure cases (e.g., small object detection, high-speed event scenarios) would strengthen the paper.
+- **The ablation comparing MDS-ResNet18 with EMS-ResNet18 has a confound: MDS-Block3 introduces additional Conv1×1 parameters in the shortcut.** The paper attributes MDS-ResNet18's improvement entirely to the MDS mechanism's variance stabilization, but some portion of the gain could come from increased representational capacity. A control experiment (e.g., adding the same number of parameters to EMS-ResNet via a different architectural change) would sharpen the attribution. This does not invalidate the results—the improvement is plausible and consistent with the stated mechanism—but the current comparison is not perfectly controlled.
 
 ### Trivial
+- The claim "SpikSSD is the first SNN model to demonstrate performance on the VOC 2007 dataset through direct training" is already qualified with "since Hybrid-YOLO is a hybrid model," but this qualification could be moved earlier in the sentence for clarity.
 
-- The energy calculation method is deferred entirely to the supplementary; a one-paragraph summary in the main text (e.g., synaptic operations vs. MACs, assumed bit precision) would improve transparency without burdening the reader.
+---
 
 ## Nice-to-Haves
 
-- A controlled ablation comparing one-way (down-up only) vs. bi-directional fusion would directly support the bi-directional fusion claim. This is the single highest-leverage addition.
-- Gradient norm histograms during training (as a simpler alternative to the Block Dynamical Isometry analysis) would empirically validate the gradient flow claim.
-- Visual evidence of membrane potential distributions across layers (beyond firing rates) would further support the claimed mechanism of MDS-ResNet.
+- A plot showing the variance of membrane synaptic pre-activation values (e.g., before tdBN) for MDS-ResNet vs. EMS-ResNet at initialization or after training would make the variance-stabilization mechanism more concrete, beyond the firing-rate evidence in Figure 1.
+- An ablation that replaces membrane addition in SBFM with concatenation (the prior approach) would isolate the specific advantage of addition-based fusion.
+- An experiment with a slightly more expressive detection head (e.g., two conv layers) would help quantify the current head's contribution to the gap with ANN detectors, as the paper acknowledges head optimization as future work.
+
+---
 
 ## Removed Points
 
-These points from the input are flagged to be removed; treat them with caution:
+These points are flagged to be removed; treat them with caution.
 
-- **"The supplementary is referenced but cannot be evaluated"** → Removed because appendices/supplementary are stripped by the parser and do exist in the original submission.
-- **"The claim that 'the only fusion method designed for SNNs is SFM' may be too absolute"** → Removed per the rule against mentioning missing related works; I cannot independently verify whether other fusion methods exist.
-- **"Table is garbled in extraction"** → Removed as a parser artifact, not an author error.
-- **"The comparison of backbones includes DenseNet121-24... the claim of 'similar parameter sizes' is not supported by shown numbers (table is garbled)"** → Removed as a parser artifact; the original table reports parameter counts.
+- **Criticism that the proof of Propositions 1–2 is in the supplementary material and therefore cannot be assessed.** The parser strips supplementary/appendix sections from all papers; they exist in the original submission. Per instructions, weaknesses about missing appendices or deferred proofs are removed.
+- **Criticism about the "first SNN model on VOC 2007" claim lacking precision.** The paper already qualifies this with "since Hybrid-YOLO is a hybrid model," so the criticism is already addressed by the paper itself.
+- **The harsh critic's claim that the theoretical argument is "insufficiently supported" because the proof is missing.** As noted above, the proof exists in the supplementary. The compressed presentation in the main text is retained as a minor weakness above (not removed), but the complaint about missing proofs is removed.
+- **Several generic or one-size-fits-all suggestions from the Strength Finder that duplicate nice-to-haves or are already addressed.**
+
+---
 
 ## Novel Insights
 
-The most valuable insight from the review process is the recognition that the paper's strongest contribution is MDS-ResNet (supported by clean empirical evidence and ablation), while the SBFM contribution would benefit from sharper experimental design. The review also surfaces that the theoretical gradient analysis is largely ornamental — the empirical scaling with depth already makes the point. The firing rate discrepancy in the abstract is a small but meaningful presentation issue. Beyond these, no novel insight emerges beyond what the paper itself provides.
+None beyond the paper's own contributions. The reviews did not surface a non-obvious insight about the method that the authors themselves had not identified.
+
+---
 
 ## Suggestions
 
-1. **Add a controlled ablation**: Compare one-way (down-up only) vs. bi-directional fusion with the same backbone (MDS-ResNet) and detection head. This directly supports the core SBFM claim.
-2. **Correct the abstract's firing rate claim** to match the actual reported numbers (e.g., "under 8%" or state the specific rates).
-3. **Either substantiate or remove the Block Dynamical Isometry analysis** — the current treatment is too thin to be convincing and the paper does not need it.
-4. **Clarify the LIF neuron placement** in the spiking depthwise separable convolution within MDSF-Block.
-5. **Add a brief limitations paragraph** discussing failure modes or boundary conditions.
+- Add 2–4 sentences to Section 3.3 sketching the approximate jacobian moment computation for the key components in MDS-Block3 (e.g., "For Conv1×1 with tdBN, ϕ(JJ^T) ≈ 1/α₂; for LIF under the assumption of sufficient input drive, the moment condition similarly holds..."). This would make the theory self-contained without requiring the reader to consult the supplement.
+- Add a brief paragraph in Section 4.1 summarizing the energy calculation assumptions (per-SOP cost for SNN, per-MAC cost for ANN, whether memory/data movement is included) so the reader can assess the comparison directly in the main paper.
+- Acknowledge the parameter confound in the MDS vs. EMS ablation and discuss why the improvement is unlikely to be solely capacity-driven (e.g., because the extra Conv1×1 is only in non-downsampling blocks, adding a modest number of parameters relative to total model size).
+
+---
 
 ## Score and Decision
 
-The paper makes genuine contributions: MDS-ResNet is a well-motivated and empirically validated improvement to spiking feature extraction, SpikSSD achieves SOTA among SNN detectors across three benchmarks with ultralow energy, and the system-level design is coherent. The main weakness is that the bi-directional fusion claim lacks a controlled ablation isolating the effect of the second fusion direction. This is a significant gap but is addressable (a single ablation experiment) and does not invalidate the paper's other contributions or its overall empirical standing. I recommend acceptance with the expectation that the authors address the missing ablation and minor presentation issues.
+This paper presents a clean, empirically solid contribution to SNN-based object detection. The two proposed components (MDS-ResNet and SBFM) are well-motivated from SNN-specific principles, the ablation study is thorough, and the results are state-of-the-art on three datasets. The weaknesses are bounded and addressable: the theory section is compressed but the empirical evidence for deeper networks stands independently; the energy comparison follows standard SNN convention but would benefit from brief methodological disclosure; the ablation confound is minor. The paper does not have any fatal or major flaw. I recommend acceptance.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

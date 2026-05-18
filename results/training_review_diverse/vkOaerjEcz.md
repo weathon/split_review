@@ -1,75 +1,79 @@
+Now I have a thorough understanding of the paper and can verify each claim. Let me produce the final consolidated review.
+
+---
+
 ## Summary
 
-This paper introduces MTMC (Maximum Token Manifold Capacity), a simple regularization loss for Generalized Category Discovery (GCD) that maximizes the nuclear norm of the class-token matrix from a ViT backbone. Applied on top of existing GCD frameworks (SimGCD, CMS), MTMC prevents dimensional collapse by encouraging more uniform singular value distributions and higher von Neumann entropy. The method is remarkably concise (three lines of code), yields consistent accuracy gains across six benchmarks (notably +4.7% on ImageNet100 with SimGCD), and achieves 100% correct estimation of the number of categories on ImageNet100.
+This paper introduces MTMC (Maximum Token Manifold Capacity), a simple auxiliary loss for Generalized Category Discovery (GCD) that maximizes the nuclear norm of the class-token matrix from unlabeled samples in a batch. The core idea is to prevent dimensional collapse and promote richer intra-class representations, thereby improving clustering accuracy and category-number estimation. MTMC is designed as a lightweight plug-in for existing GCD methods (SimGCD, CMS) and is evaluated on six benchmarks, showing consistent improvements — most notably +4.7% on ImageNet100 with SimGCD and ~4% on CUB/Stanford Cars with CMS.
 
 ## Strengths
 
-- **Consistent and often substantial accuracy gains across diverse GCD benchmarks.** Table 1 shows MTMC improves both SimGCD and CMS on all six datasets. The gains are particularly notable on ImageNet100 (+4.7% for SimGCD, +2.4% for CMS), Stanford Cars (+2.9%/+3.2%), and Aircraft (+2.3%/+1.2%). This is the paper's strongest evidence that the method works.
+- **Consistent empirical improvements across multiple GCD backbones and benchmarks.** MTMC boosts SimGCD by 4.7% on ImageNet100 (All column) and CMS by ~4% on CUB and Stanford Cars without `K`. Improvements are consistent across coarse-grained and fine-grained datasets, though magnitude varies. [Verified: Table 1 and Section 4.2, lines 152.]
 
-- **Superior estimation of the number of clusters (K).** Table 2 shows CMS+MTMC achieves 100% correct K estimation on ImageNet100 and reduces estimation error on every other dataset (e.g., from 5→3 on CUB). This is an impressive result that directly supports the claim that richer representations yield decision boundaries better aligned with true data structure.
+- **Exceptionally simple and practical contribution.** The core loss is implementable in three lines of code (Section 3.2 code snippet) and integrates with any existing GCD framework via a single scalar hyperparameter λ. [Verified: code snippet in Section 3.2, line 103-105.]
 
-- **Theoretical grounding connecting nuclear norm maximization to increased von Neumann entropy** (Theorem 1, Section 3.3). Figures 2, 4, and 5 provide empirical backing that MTMC produces more uniform eigenvalue distributions, higher entropy, and lower Frobenius norm—consistent with preventing dimensional collapse. The analytical results are clean and informative.
+- **Empirical evidence that MTMC counteracts dimensional collapse.** Figures 2, 4, and 5 show that MTMC increases von Neumann entropy, reduces the Frobenius norm of the autocorrelation matrix, and produces more uniform eigenvalue distributions compared to baselines. These measurements directly support the claim that MTMC produces richer, less-collapsed representations. [Verified: Section 4.3, lines 168-173, and Figures 2, 4, 5.]
 
-- **Extremely simple, plug-and-play implementation.** The core loss is three lines of code and requires no architectural changes. Figure 3 shows robustness to the sole hyperparameter λ and feature dimensionality D, lowering adoption barriers.
+- **Accurate category-number estimation.** CMS+MTMC achieves 100% correct `K` estimation on ImageNet100 and sharply reduces error rates on other datasets (Table 2). This demonstrates a practical benefit beyond clustering accuracy. [Verified: Table 2, Section 4.2, line 154.]
 
-- **Honest analysis of limitations.** Section 4.3 candidly discusses why gains are smaller on CIFAR100 (low-resolution images lose high-frequency detail) and Herbarium19 (OOD data with high category overlap), demonstrating nuanced understanding of when the method is and isn't effective.
+- **Hyperparameter robustness.** The method is stable across a range of λ values and feature dimensionalities D (Figure 3), making it easy to use without extensive tuning. [Verified: Section 4.2, lines 159.]
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The paper's central narrative — that MTMC enhances "intra-class representation completeness" — is not directly supported by the method's design or evidence.** The loss (Eq. 5) maximizes the nuclear norm of a matrix formed from *all unlabeled samples in a mini-batch*, irrespective of class. This is a *global* regularizer that prevents dimensional collapse in the overall feature space. The paper then reinterprets this global effect as specifically enriching *intra*-class representations, but never measures per-class representation quality (e.g., average per-class nuclear norm, per-class eigenvalue distributions, or intra-class pairwise distances relative to baselines). The claim is *plausible* (preventing global collapse likely helps individual clusters too) but *unsubstantiated by the form of evidence the paper promises*. Figures 4 and 5 analyze the global autocorrelation matrix, not class-conditional statistics. Either the paper should reframe the contribution as "a global collapse-prevention regularizer for GCD" (which would be a different, weaker claim) or provide class-conditioned measurements that directly link the method to richer intra-class structure. This mismatch between the narrative and the evidence is the paper's most significant weakness.
+- **The theoretical link between the batch-level nuclear norm loss and per-sample manifold capacity is not adequately established.** The paper defines CTME = ||[cls]||_* for a single sample (Equation 3) but the actual loss L_MTMC = –||[cls]^u||_* operates on a *batch-level matrix* of class tokens from *different samples* (Equation 4). The paper invokes the MMCR literature (which operates on sample views) and Theorem 1 (which relates rank to von Neumann entropy of an autocorrelation matrix), but never bridges the gap between (a) maximizing the sum of singular values of a batch×dim matrix and (b) the claimed per-sample or intra-class benefits. The nuclear norm is not the rank — maximizing the sum of singular values does not necessarily produce more uniform eigenvalue distributions without additional constraints on the singular vector structure. The paper's claim (line 4, abstract) that MTMC's "efficacy is fundamentally rooted in its ability to leverage the nuclear norm... as a quantitative measure of manifold capacity" is asserted rather than derived or rigorously argued. This does not invalidate the empirical results, but the theoretical framing is overclaimed relative to what is actually shown. [Verified: compare Eqs 3-4 with Theorem 1 and accompanying discussion; the chain from L_MTMC → uniform eigenvalues → higher entropy is empirically observed (Figures 2, 4, 5) but not theoretically justified.]
 
 ### Minor
 
-- **No comparison to alternative collapse-prevention regularizers applied to the same backbone.** The paper shows MTMC improves over SimGCD and CMS, but does not ablate whether the gains come from nuclear-norm maximization *per se* or from *any* regularization that prevents dimensional collapse. Comparisons to simple baselines (e.g., ℓ2 penalty on feature covariance, Barlow Twins' redundancy-reduction term, or a uniform-loss regularizer applied to class tokens) would be needed to establish that nuclear norm is specifically beneficial. Without these, the novelty of the regularizer choice is unclear.
+- **No error bars or statistical significance tests are reported.** Given that several gains are small (CIFAR-100 +0.6%, Herbarium19 +0.4%), single-run results make it impossible to assess whether these improvements are systematic or noise. While this is common practice in the GCD literature, the paper would be strengthened by reporting results over multiple seeds with standard deviations. [Verified: No matches for "standard deviat", "random seed", or "multiple run".]
 
-- **No variance reporting.** All results in Tables 1 and 2 appear to come from a single run. Given the modest gains on several datasets (CIFAR100: +0.5–1.0%; Herbarium19: +0.7–1.4%) and the known sensitivity of clustering to initialization, the absence of multiple seeds or confidence intervals makes it difficult to assess whether the improvements are reliable or within random variation.
+- **The decision to apply MTMC only to unlabeled samples is not ablated.** The paper states that labeled samples are excluded because supervised signals already shape their manifolds (line 83). This is a reasonable design choice, but it is never tested — the reader cannot tell whether applying MTMC to all samples would work equally well or better. An ablation comparing "MTMC on unlabeled only" vs. "MTMC on all samples" would clarify whether the restriction is necessary or a missed opportunity. [Verified: The ablation study (line 159) covers only λ and D; no ablation of this design choice exists.]
 
-- **Notation ambiguity in Section 3.1.** Equation (3) defines CTME as the nuclear norm of a single sample's class token. For a vector (which a single class token is), the nuclear norm equals its ℓ2 norm, which is 1 after normalization. The paper apparently intends the nuclear norm of a *matrix* of stacked class tokens, but this is not made explicit until Equation (5). The derivation would benefit from clearer notation distinguishing the single-token case from the batch matrix.
+- **The hyperparameter sensitivity analysis (Figure 3) does not specify which dataset is used.** This makes it difficult to assess how general the claimed stability is across different data distributions. [Verified: Figure 3 caption (line 157) — no dataset specified.]
 
 ### Trivial
 
-- The rendered equations contain minor formatting artifacts (broken characters in Eq. 5, garbled symbols throughout) — these are parser issues, not author errors, but the authors should ensure the camera-ready version is clean.
+- None that are paper-specific and not parser artifacts.
 
 ## Nice-to-Haves
 
-- Add per-class measurements (e.g., average per-class nuclear norm of class-token matrices, or per-class eigenvalue distributions) to directly verify the intra-class completeness claim.
-- Compare against other simple collapse-prevention losses (variance regularization, Barlow-Twins-style decorrelation) applied to the class-token matrix.
-- Report main results over at least 3 random seeds with standard deviations.
+- Compare K-estimation performance against other GCD methods that can estimate category count (e.g., SimGCD's entropy-based estimation) rather than only CMS vs. CMS+MTMC. The current comparison is valid within scope (CMS does not require hyperparameters for K estimation), but a broader comparison would strengthen the claim.
+- Discuss why a nuclear-norm-based loss is preferable to covariance regularization approaches (e.g., Zbontar et al., Cogswell et al.) cited in related work. The paper references these methods but does not situate MTMC relative to them conceptually.
+- Include a brief discussion of what happens when the unlabeled batch size is smaller than the feature dimension D — the nuclear norm's behavior and gradient properties depend on the rank of the batch matrix.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points were removed per the filtering rules; they are listed here with brief justification in case they are useful:
 
-- **Harsh critic's claim that "the method as described cannot deliver on the paper's promise" (structural/fatal framing):** This overstates the issue. The paper's empirical evidence (Tables 1–2, Figures 2, 4, 5) is consistent with the method working as intended, even if the *mechanism* narrative is slightly inflated. The critique is downgraded from "fatal/invalidates" to a Major weakness about the need for better evidence tying global regularization to intra-class effects.
-
-- **Criticism about the introduction not answering the posed question:** The paper does answer "Can deep models... by enhancing the completeness of intra-class representations?" — it answers "yes, with MTMC" and provides Tables 1–2 as evidence. This is a matter of interpretation, not a factual omission.
-
-- **Strength Finder's generic framing** — the claimed strengths about "novel perspective" and "honest analysis" are kept but not over-weighted, as they are somewhat generic.
-
-- **Criticism about missing comparison to Barlow Twins/VICReg in Related Work section:** This is about experimental ablation, not missing citations. The paper's Related Work covers dimensional collapse methods adequately for context; the missing comparison belongs under experimental evaluation (already listed as a Minor weakness).
-
-- **Criticism about the connection between MMCR and token-level reasoning being unexplained:** The motivation section (2.3) provides three explicit reasons for the token-level extension. The connection may not be rigorous but is clearly articulated.
+1. **"Notation inconsistency and garbled equations (e.g., '3ttention')"** — This is a PDF parser artifact, not an author error. The original submission does not have this issue. [Rule: pure formatting/parser artifacts.]
+2. **"Equation 2 omits multi-head nature of attention"** — Simplified exposition is standard; not a substantive weakness. [Rule: nitpick about implementation detail.]
+3. **"The unlabeled-only justification is circular reasoning"** — The paper's justification (supervised signals already shape labeled-sample manifolds) is a reasonable design choice, not circular. The *absence of an ablation* is a separate valid point kept above, but the accusation of circularity is unwarranted. [Rule: strawman weakness.]
+4. **"Missing comparison with SimGCD for K estimation"** — The paper specifically uses CMS because CMS estimates K without additional hyperparameters. Criticizing the absence of a comparison with a method that uses a different mechanism is scope creep. [Rule: evaluating against wrong class of expectations / scope creep.]
+5. **"Related work on uniform eigenvalue distributions"** — The paper does cite whitening/decorrelation methods (Zbontar et al., Cogswell et al.) in Section 5.2 (line 192). The reviewer's claim that the paper does not compare "even conceptually" is inaccurate. [Rule: factually wrong.]
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a perspective that the authors missed. The core observation — that a global nuclear-norm regularizer on class tokens improves GCD — stands as the paper's own contribution.
+None beyond the paper's own contributions. The reviews surface the gap between the paper's theoretical framing and its actual theoretical content, but this observation is implicit in the paper's structure — the authors claim theoretical analysis but deliver only Theorem 1 (a known bound) plus empirical eigenvalue plots. The reviewers correctly identify this mismatch but do not contribute a novel resolution.
 
 ## Suggestions
 
-1. **Reframe the contribution.** Either (a) present MTMC as a dimensional-collapse prevention regularizer for GCD (which matches the evidence), or (b) add per-class measurements (average nuclear norm within predicted clusters, per-class eigenvalue distributions) to directly support the intra-class completeness narrative.
-
-2. **Add at least one alternative regularizer baseline.** Compare MTMC to a simple variance-regularization term or a Barlow-Twins-style decorrelation loss on class tokens, applied to the same SimGCD/CMS backbone. This would establish whether nuclear norm has specific advantages over other collapse-prevention techniques.
-
-3. **Report results over multiple seeds.** For the main tables, even three seeds would greatly increase confidence, especially for datasets with modest gains.
+1. **Strengthen the theoretical justification** by either (a) deriving a bound that connects the nuclear norm of the batch class-token matrix to properties of per-sample representations, or (b) explicitly reframing the contribution as a well-motivated empirical method rather than a theoretically grounded one.
+2. **Add multi-seed experiments** with standard deviations for the main results (Table 1), especially for datasets where gains are modest (CIFAR-100, Herbarium19).
+3. **Ablate the unlabeled-only restriction** — compare "MTMC on unlabeled samples only" vs. "MTMC on all samples" to determine whether the restriction is necessary.
+4. **Specify the dataset used in Figure 3** (hyperparameter sensitivity) in the caption.
+5. **Add a brief discussion** of what happens when batch_size < D, since the nuclear norm's properties change when the matrix is not full-rank.
 
 ## Score and Decision
 
-The paper makes a clear empirical contribution: a simple, well-motivated regularizer that consistently improves GCD performance across multiple benchmarks, with particularly strong results on cluster-count estimation. The main weaknesses are (i) a narrative—evidence gap in the "intra-class completeness" framing and (ii) missing ablations against other regularizers. Neither is fatal; both are addressable with additional experiments or reframing. The method's simplicity, empirical consistency, and honest analysis of its limitations are genuine strengths. On balance, the paper merits acceptance.
+**Originality:** The nuclear-norm-based loss for intra-class representation in GCD is novel, though the connection to MMCR is clearly acknowledged.  
+**Importance of research question:** GCD is a practically relevant problem, and improving intra-class representation completeness addresses a genuine limitation of existing methods.  
+**Claims support:** The empirical claims of improved accuracy and K-estimation are supported by the experiments. The theoretical claim of "maximum manifold capacity" is only partially supported — the empirical evidence is there (eigenvalue distributions, entropy), but the theoretical derivation is incomplete.  
+**Soundness:** The experimental setup follows standard GCD protocols. The main soundness concern is the gap between claimed theory and actual results.  
+**Clarity:** The paper is understandable despite parser artifacts; Sections 3.1-3.2 are reasonably clear about the method.  
+**Value to community:** The method's simplicity and consistent improvements make it practically useful. However, the overclaimed theory may mislead readers about what is established vs. conjectured.
+
+The method is simple, empirically effective, and easy to adopt. However, the paper overstates its theoretical contribution — what is presented as a "theoretical analysis" is largely a known theorem (rank vs. entropy) plus empirical observations, without actually deriving why maximizing the nuclear norm of the batch class-token matrix produces the claimed benefits. This gap between framing and substance is the paper's central weakness. The empirical contribution is real but modest in scale (most gains are 1-4%, with several near-zero gains on challenging datasets), and the lack of error bars makes it hard to fully trust the small improvements.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL DECISION: <orange>Reject</orange>

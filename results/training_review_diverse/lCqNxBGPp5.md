@@ -1,90 +1,67 @@
-Now I have a thorough understanding of the paper. Let me write the consolidated review.
+Now I have a complete picture. Let me compile the final consolidated review.
 
 ## Summary
 
-This paper makes two contributions: (1) **vVLM**, a benchmark of 300 questions (900 QIA pairs) designed to evaluate whether VLMs rely on visual cues versus language priors, using generated images that defy commonsense expectations. Formal selection criteria (Eqs. 1-3) guarantee that test answers require visual input. Humans achieve ~98% while GPT-4o scores only 66%. (2) **Image-DPO**, a method that creates chosen/rejected pairs by corrupting images (blur, pixelation, semantic edit) while keeping QA text identical, then trains the VLM to prefer the clean image through a modified DPO objective.
-
----
+This paper introduces vVLM, a benchmark of 300 questions (900 question-image-answer pairs) designed to test whether VLMs rely on visual evidence versus language priors. Using DALL·E-3 and Flux to generate images that deliberately contradict commonsense text-based expectations (e.g., a hexagonal moon, van Gogh painting the Mona Lisa), the benchmark creates scenarios where text-only inference yields high-confidence wrong answers. Human evaluation achieves >98% on test answers while GPT-4o scores only 66.17%, confirming the benchmark captures genuine visual reasoning difficulty. The paper also proposes Image-DPO, a training method that corrupts images (via blur, pixelation, semantic editing) while keeping question-answer pairs fixed, then uses these as good-bad pairs for preference optimization. Results show consistent improvements on LLaVA-1.5 and Cambrian across vVLM and general VQA benchmarks.
 
 ## Strengths
 
-- **Principled benchmark design with explicit formal criteria (Section 3.1).** The three mathematical conditions (Eqs. 1–3) are clearly stated and directly operationalized: a text-only prior answer, a visually-driven test answer with high divergence from the prior, and low probability of the test answer from text alone. This guarantees the benchmark specifically targets language-prior bias rather than general VQA difficulty.
+1. **Benchmark design effectively isolates visual reasoning from language-prior guessing.** The gap between GPT-4o text-only (~0% on test answers), GPT-4o with images (66.17%), and humans (>98%) convincingly demonstrates that the benchmark measures genuine visual understanding, not linguistic shortcut exploitation. The three-answer structure (one prior, two test) is a clean operationalization of the language-prior problem.
 
-- **Large, consistent human-VLM performance gap.** Humans achieve 98.33% on QIA_test while GPT-4o scores 66.17% (Table 2, reported in prose). The gap holds across multiple closed- and open-source models (Claude-3.5-Sonnet, Gemini-1.5-Pro, Llama-3.2-Vision), demonstrating that the benchmark reliably reveals visual reasoning failures that are not due to ambiguity.
+2. **Generative images create out-of-distribution scenarios impossible with internet photos.** Using DALL·E-3 and Flux, the authors construct deliberate visual contradictions (hexagonal moon, van Gogh painting the Mona Lisa) that cannot be found online. This forces models to override strong language priors, making the task fundamentally harder than recognition-based benchmarks — a genuine advancement over prior datasets (VQA v2, POPE) that use naturally occurring images.
 
-- **Counterintuitive distractor-fact analysis (Section 5).** The finding that strong models (GPT-4o) *improve* when misleading distractor facts are added, while weaker models (LLaVA-1.5-13B) are misled and instruction-following degrades (Cambrian-8B), is a genuine and non-obvious diagnostic insight about how VLMs use (or misuse) prior information.
+3. **The distractor-fact analysis reveals nuanced model behavior beyond a simple "language bias" narrative.** The finding that strong models (GPT-4o) improve when given misleading distractor facts, while weaker models (LLaVA-1.5) are misled (Figure 4), is genuinely interesting and somewhat under-discussed in the paper. This suggests distractors can help narrow the hypothesis space for some models, rather than uniformly acting as foils.
 
-- **Systematic image transformation analysis (Figure 5).** vVLM^F-Score drops sharply with increased Gaussian blur/pixelation while Prior scores remain stable, confirming that the benchmark genuinely requires visual signal and is not bypassable by text.
+4. **Controlled image degradation experiments (Figure 5) provide a diagnostic tool.** The systematic variation of blur, pixelation, and resizing shows vVLM-Score drops sharply with degradation while Prior Score stays near 50%, confirming the benchmark's sensitivity to visual quality and providing a method for diagnosing where models fail.
 
----
+5. **Image-DPO shows consistent empirical improvements across models and benchmarks.** Despite the technical concern discussed below, the approach of corrupting images (keeping QA fixed) yields gains on LLaVA-1.5 and Cambrian across vVLM, NaturalBench (+3–4%), CHAIR, MM-Vet, and SEED-Bench (Tables 3–4), suggesting genuine transfer benefits.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The Image-DPO objective uses an unjustified variant of the standard DPO loss (Section 4.1).** The paper writes `log σ(α·π_θ/π_ref (A|Q,I_w) − α·π_θ/π_ref (A|Q,I_l))` — note the *absence of the log* inside the sigmoid on each ratio. The standard DPO objective uses `log(π_θ/π_ref)`. Raw probability ratios can vary arbitrarily in magnitude, creating fundamentally different gradient dynamics (saturation, scaling issues). The paper acknowledges this "sets it apart from the original DPO objective" but provides **no derivation, gradient analysis, or theoretical motivation** for why raw ratios should work, nor any empirical comparison showing they outperform the standard log-ratio formulation. Since the method is the paper's secondary contribution, this is a significant gap: the central technical innovation is not properly defined or justified.
-
-- **No confidence intervals, error bars, or significance tests on any result.** The benchmark has only 300 questions (900 QIA instances), which is modest. Reported differences of a few percentage points between methods may not be statistically significant, yet no bootstrap, standard error, or significance test is reported anywhere. This weakens all comparative claims (Tables 3, 4). Given that the paper makes "outperforming" claims, this is a material omission.
-
-- **Human evaluation is described without essential methodological details.** The paper states "humans achieved nearly 100% / over 98%" but provides: no number of participants, no count of questions per participant, no instructions, no measure of inter-annotator agreement (e.g., Fleiss' κ). For a benchmark intended as a gold standard, this undermines confidence in the human ceiling.
+1. **The Image-DPO objective as presented deviates from standard DPO without adequate justification.** Equation (1) uses raw probability ratios:
+   \[
+   \log\sigma\left(\alpha\frac{\pi_\theta(A|Q,I_w)}{\pi_{\theta_{\text{ref}}}(A|Q,I_w)} - \alpha\frac{\pi_\theta(A|Q,I_l)}{\pi_{\theta_{\text{ref}}}(A|Q,I_l)}\right)
+   \]
+   whereas standard DPO (Rafailov et al., 2024) uses log-ratios: \(\beta\log(\pi_\theta/\pi_{\text{ref}})\). These are mathematically different — without the log, the sigmoid argument can range over arbitrary positive values depending on model confidence, fundamentally changing the gradient dynamics and losing the theoretical connection to the Bradley-Terry preference model. The paper acknowledges it "sets it apart from the original DPO objective" (line 110) but provides no theoretical reasoning, analysis of gradient behavior, or empirical comparison to show this variant is beneficial (or even valid). This is not necessarily fatal — the method still produces positive results — but it is a meaningful technical gap: readers cannot tell whether the results come from a sound variant or from an unvalidated modification of a well-understood algorithm. The authors must either (a) correct the equation if it is a typo and the implementation uses standard log-ratios, or (b) provide theoretical or empirical justification for the variant.
 
 ### Minor
 
-- **Training data statistics for Image-DPO are missing.** The number of QIA triplets generated from seed datasets (COCO, Text2VQA, Visual Genome) is never stated. The corruption parameters (kernel sizes for Gaussian blur, pixelation factors) are not quantified. This limits reproducibility.
+1. **No confidence intervals or variance estimates for any experimental result.** All reported numbers (Tables 2–4) are point estimates. The vVLM benchmark evaluates on 600 test QIAs (300 questions × 2 test answers), which is modest enough that differences of 1–2 percentage points between methods could fall within sampling noise. The paper does not mention whether DPO training was run with multiple random seeds or whether evaluation was repeated. While single-run evaluation is common in this field, the absence of any variance information makes it difficult to assess whether the claimed improvements are reliable, especially for small-margin comparisons (e.g., Image-DPO vs. Text-DPO on vVLM).
 
-- **Hyperparameter values for Image-DPO training are not reported.** The α scaling factor in the objective, learning rate, batch size, number of training epochs, and any regularization are absent. Without these, the method cannot be reproduced.
-
-- **Key numerical results for Image-DPO are only in the body text qualitatively (Tables 3, 4 are image-embedded).** The text says Image-DPO "achieved the highest performance" and shows "consistent improvements" but does not state the actual accuracy numbers, making it harder to assess effect sizes. While the tables exist in the original PDF (parser artifacts removed them), the authors should embed key numbers in the prose for robustness.
+2. **Benchmark size limits fine-grained diagnostic utility.** 300 questions (600 test QIAs) spread across multiple categories (texture, shape, conceptual combinations, proverbs, etc.) with an average of 1.6 categories per question means individual subcategories have very few examples. The paper does not provide per-category breakdowns of model performance, making it hard to determine whether failure patterns are systematic (e.g., all models fail on proverbs) or idiosyncratic. For a diagnostic benchmark, this analysis would significantly strengthen the contribution.
 
 ### Trivial
-None.
 
----
+None.
 
 ## Nice-to-Haves
 
-- A comparison of the proposed raw-ratio objective against the standard DPO log-ratio objective (ablating the log) would clarify whether the architectural innovation (image corruption) or the formulation change drives improvements.
-- Reporting the image generation failure/rejection rate during benchmark construction would help readers gauge dataset quality control.
-
----
+- The correlation between image generation difficulty and VLM difficulty (Section 3.2) is intriguing but heuristic. A quantitative analysis (e.g., number of generation attempts vs. VLM accuracy per QIA) would strengthen this observation.
+- An ablation comparing Text-DPO with vs. without new image generation would clarify whether the benefit comes from generating new images or from the DPO training itself.
+- The finding that weaker instruction-following models (Cambrian-8B) suffer 62% non-compliance with distractors (vs. 30% without) is presented only briefly. This raises important questions about the coupling between instruction-following and visual reasoning that could be explored further.
 
 ## Removed Points
 
-**These points are flagged to be removed, treat them with caution:**
-
-- *"Tables 3 and 4 are garbled beyond readability — the core experimental evidence is missing."* — The tables are embedded as images in the extracted text; this is a **parser artifact**, not an author error. The tables exist in the original submission. The criticism about missing specific numbers in prose is retained in Minor (weakened).
-- *"All models trained on LLaVA-7B but then mentions Cambrian-8B and LLaVA-1.5-13B — inconsistency."* — The reviewer misread the paper. The LLaVA-7B constraint applies only to the CSR/RLHF-V comparison (Table 3); Table 4 separately evaluates Image-DPO on other architectures to demonstrate generality. Not an inconsistency.
-- *"The objective is incorrectly specified"* — rephrased to "unjustified variant." The paper intentionally differs from standard DPO (it says so explicitly) but fails to justify the choice. It is not an error, but a gap in reasoning.
-- *"Missing appendix, missing proofs in appendix"* — parser artifact; appendices exist in the original submission.
-
----
+The following reviewer criticisms were removed per policy:
+- **Missing prompt details** and **missing synonym pipeline details** and **missing corruption severity levels** — These are likely detailed in the appendix, which was stripped by the parser. The paper mentions the prompt template ("please answer this question with one word"), describes the synonym pipeline, and Figure 5 shows severity levels; full parameter values belong in the appendix.
+- **Text-DPO vs. CSR distinction not ablated** — This asks for a specific experiment that is a reasonable extension but not required for the paper's core claims. Moved to Nice-to-Haves above.
+- **The finding about GPT-4o not being misled by distractors being "under-discussed"** — This is a subjective opinion about emphasis, not a weakness. The paper dedicates multiple paragraphs to this finding (lines 197–204).
 
 ## Novel Insights
 
-The distractor-fact analysis (Section 5) is the most insightful finding: strong VLMs *improve* with misleading text, while weaker models are misled. This differential effect suggests that language-prior reliance is not monolithic — it interacts with model scale and capacity in non-obvious ways. The image transformation experiment (Figure 5) is a clean sanity check validating that the benchmark genuinely measures visual reasoning rather than text-only inference. These diagnostic analyses are the paper's most novel contribution and could be useful beyond the specific benchmark.
-
----
+The most interesting observation that emerges from combining the paper's findings is the non-monotonic relationship between distractor facts and visual reasoning ability: strong models (GPT-4o) improve with distractors, mid-tier models (LLaVA-1.5) are misled by them, and weak instruction-following models (Cambrian-8B) simply break (62% non-compliance). This three-way pattern suggests that "language bias" is not a single phenomenon but interacts with both visual reasoning strength and instruction-following capability in distinct ways — a finding that deserves more exploration than the paper currently gives it.
 
 ## Suggestions
 
-1. **Provide a derivation or justification for the raw-ratio objective** (Section 4.1). At minimum, include a gradient comparison to standard DPO, or ablate the log/non-log choice empirically in an appendix. Without this, the method is not convincingly grounded.
+1. **Clarify or correct the DPO objective.** If Equation (1) is a typo, correct it to the standard log-ratio formulation. If it is a deliberate modification, provide: (a) a theoretical justification, (b) the role of α and how it was set, and (c) an empirical comparison to standard DPO on a validation set. Without this, the method's foundation is uncertain.
 
-2. **Add confidence intervals or bootstrap estimates** to all benchmark scores, especially given the 300-question size. Report how many human evaluators participated in the validation and their agreement level.
+2. **Add bootstrapped confidence intervals** for the vVLM benchmark scores (e.g., 95% CI via 1000 bootstrap resamples over the 300 questions). This is straightforward and would substantially increase confidence in the reported rankings.
 
-3. **Embed key numeric outcomes in the prose** for Tables 3 and 4 (e.g., "Image-DPO improved LLaVA-1.5-7B's vVLM^F-Score from X% to Y%"). This makes the paper robust to any rendering issues.
-
-4. **Report training data statistics and hyperparameters** (α, learning rate, batch size, epochs) for Image-DPO to support reproducibility.
-
----
+3. **Provide per-category breakdowns** of model performance on the vVLM benchmark. The paper notes 1.6 categories per question on average; reporting accuracy per category (texture, shape, conceptual combinations, proverbs, hallucinated components) would make the benchmark more diagnostically useful.
 
 ## Score and Decision
 
-The paper's primary contribution — the vVLM benchmark — is well-designed, principled, and supported by clear evidence (formal criteria, human validation, large human-VLM gap). The benchmark alone is a useful resource for the community. The Image-DPO method is a promising secondary contribution with a creative core idea (corrupting images, not answers), but it is undermined by an unjustified objective function that diverges from standard DPO without explanation. The missing error bars, human evaluation details, and training hyperparameters further weaken confidence but are addressable.
-
-The benchmark is strong enough to warrant publication; the method weakness is significant but not fatal (the benchmark stands on its own). A major revision to fix the objective justification and add missing numerics would substantially strengthen the paper.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Weak Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

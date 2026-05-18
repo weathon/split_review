@@ -1,16 +1,22 @@
-Now I have all the verification I need. Let me produce the consolidated final review.
+Now I have thoroughly verified the paper content and the reviewer's claims against the source text.
+
+Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes ExVideo, a post-tuning method to extend the temporal capacity of video diffusion models (specifically Stable Video Diffusion) from 25 frames to 128 frames. The approach modifies three temporal modules: it extends positional embeddings with a cyclic initialization, adds an identity-initialized 3D convolution layer, and fine-tunes temporal attention parameters. Training is conducted with parameter-efficient techniques (freezing non-temporal blocks, mixed precision, gradient checkpointing, flash attention, DeepSpeed) on 40k videos using 8 A100 GPUs for one week. The paper presents qualitative results across diverse styles and resolutions, along with optical flow visualizations of the training progression.
+This paper proposes ExVideo, a post-tuning method for extending video diffusion models to generate longer videos. Applied to Stable Video Diffusion, the method increases output from 25 to 128 frames (5×) using 1,500 GPU-hours on a 40K-video dataset. The approach modifies three temporal components—fine-tuning temporal attention, extending positional embeddings with cyclic initialization, and adding an identity-initialized 3D convolution—while freezing all other parameters. The paper presents qualitative case studies across diverse styles, resolutions, and a comparison against other models.
 
 ## Strengths
 
-- **Memory-efficient 5× frame extension with clearly documented engineering optimizations.** The paper achieves extension from 25 to 128 frames using only 1.5k GPU hours on 8 A100 GPUs with a dataset of 40k videos. The training recipe is concretely described: freezing all parameters outside the temporal blocks, mixed precision training, gradient checkpointing, flash attention, and DeepSpeed sharding. This combination makes a 5× length extension feasible with limited compute and is a genuine practical contribution.
+- **Significant frame extension with concretely stated training cost**: The method achieves 5× frame extension (25→128 frames) with 1,500 GPU-hours on 8×A100 GPUs and a 40K-video dataset. These numbers are explicitly reported in the abstract and Section 3.3, providing a concrete baseline for the method's resource requirements.
 
-- **Preservation of generalization across unseen styles and resolutions is qualitatively demonstrated.** The generated examples (Figures 2 and 4) show the extended model producing coherent videos in styles (flat anime, pixel art) and resolutions (1024×576, 768×768) that were absent from the training dataset. This provides initial evidence that the extension does not collapse the base model's adaptability, though it remains purely qualitative.
+- **Architecture-aware extension design**: The paper identifies three common temporal module types (3D convolution, temporal attention, positional embedding) and designs separate strategies for each (Section 3.2, Figure 1). The identity-initialized 3D convolution is a clean design choice that ensures the added component does not alter representations before training, and the approach is described in sufficient detail to be applicable to other video diffusion architectures beyond SVD.
 
-- **Principled identity initialization for the added 3D convolution layer.** Initializing the central kernel unit as an identity matrix with remaining parameters set to zero ensures that the added layer does not alter video representations before training, providing a clean starting point. This is a thoughtful design choice that avoids degrading the pre-trained model's behavior at initialization.
+- **Qualitative evidence of generalization preservation**: Figures 2 and 3 demonstrate that the extended model handles diverse styles (flat anime, pixel art) and resolutions (1024×576, 896×1152) not seen during training. This supports the claim that the base model's generalization capabilities are retained after extension.
+
+- **Concrete engineering optimizations for memory efficiency**: Section 3.3 lists five specific techniques used to enable 128-frame training on 8 GPUs (parameter freezing, mixed precision, gradient checkpointing, Flash Attention, DeepSpeed sharding). These are actionable details that strengthen the reproducibility and practical utility of the work.
+
+- **Principled motivation from LLM context extension**: The paper explicitly draws inspiration from LLM techniques (RoPE, ALiBi, LongLoRA; Section 2.3) to justify the post-tuning framing, connecting the video extension problem to an established literature.
 
 ## Weaknesses
 
@@ -19,63 +25,45 @@ None.
 
 ### Major
 
-1. **No quantitative evaluation whatsoever.** The paper's experimental section is titled "Case Studies" and contains only qualitative visual examples and optical flow visualizations. No standard video generation metrics are reported — no FVD, IS, CLIP score, frame consistency, or user preference. The paper's core claim that "the substantial increase in video length doesn't compromise the model's innate generalization capabilities" cannot be verified without numbers. The field standard for video diffusion papers (even lightweight adaptation papers) includes quantitative evaluation, and its complete absence is a structural gap. This is the single most serious weakness.
+1. **No quantitative evaluation of video quality.** The entire evaluation section is titled "Case Studies" and consists entirely of qualitative still frames and optical-flow visualizations. No standard video generation metrics are reported—no FVD, no CLIP score, no user study, no frame-wise similarity scores, no temporal consistency metrics. The paper's central claims are that ExVideo generates "coherent videos" and "does not compromise the model's innate generalization capabilities." These are empirical claims that require quantitative backing. Without any metrics, the reader cannot distinguish representative results from cherry-picked examples, and the paper's core contribution remains unsubstantiated by rigorous evidence. This is the most significant weakness.
 
-2. **No comparison against the baselines the paper itself identifies.** The introduction explicitly categorizes three existing strategies for longer videos (training on long clips, streaming/sliding window, frame interpolation) and criticizes them (e.g., streaming leads to "lower video coherence" and "error accumulation"). Yet the paper never empirically compares ExVideo against any of these alternatives. Even a simple baseline — e.g., generating overlapping 25-frame clips with the base SVD and blending, or using frame interpolation to upsample the base model's output — would contextualize the contribution. Without this, the claim that ExVideo is preferable to existing approaches is unsupported.
+2. **No ablation study isolating the method's components.** The method modifies three architectural elements (extending positional embeddings, fine-tuning temporal attention, adding an identity 3D convolution). The paper provides no experiment isolating which components drive any observed improvement. Minimal ablations such as (a) full ExVideo, (b) ExVideo without the identity 3D convolution, and (c) ExVideo with only fine-tuned temporal attention (no extended positional embeddings) would directly test the method's design. Without this, the paper's claims about the necessity or benefit of its specific design choices are unsupported.
 
-3. **No ablation studies isolating the three design choices.** The method introduces three modifications to temporal modules: (a) extended positional embeddings with cyclic initialization, (b) an additional identity 3D convolution layer, and (c) fine-tuning temporal attention parameters. The paper provides no ablation to determine which components drive the extension capability, whether all are necessary, or what the gain of each is. A reader cannot assess whether the identity convolution alone (without attention tuning) would suffice, or whether the cyclic initialization matters. This undermines the scientific contribution and makes the design choices appear arbitrary.
-
-These three gaps are independent and jointly severe. Each individually weakens the paper; together they prevent verification of the method's effectiveness, superiority, or internal necessity.
+3. **Invalid comparison with other video synthesis models.** Section 4.4 compares ExVideo against "several existing video synthesis models" using a pipeline where Hunyuan DiT generates the first frame, which is then fed to the extended SVD (an image-to-video model). This is not a controlled comparison: ExVideo receives a high-quality text-to-image first frame as an anchor, whereas the other models are presumably generating from text alone. The asymmetry favors ExVideo, making any conclusion about "superior capability to generate videos with significant movements" uninterpretable. The comparison should either be controlled (same first frame given to all image-to-video models) or described as a demonstration rather than an evaluation.
 
 ### Minor
 
-1. **"Parameter-efficient" claim is not quantified.** The paper states the method is "parameter-efficient" and "exceptionally memory-efficient" but provides no concrete numbers: no trainable parameter count, no memory consumption compared to full fine-tuning or training from scratch, no inference-time FLOPs comparison. While the training setup (8 A100s, 1 week, batch size 1 per GPU) is reported, and only temporal blocks are trained, the relative efficiency gain is not substantiated. Adding a simple table (trainable params vs. total params, peak memory vs. an unoptimized baseline) would address this.
+1. **Limited efficiency and scalability analysis.** The paper reports a single training cost (1,500 GPU-hours) and claims "memory-efficient" and "parameter-efficient" performance, but provides no systematic data. Missing elements include: comparison of inference memory/time for 128 vs. 25 frames, study of how quality scales with training data size or steps, and measurement of the method's memory footprint relative to the original model. These are useful but not fatal omissions—the reported training cost and the listed engineering optimizations do provide partial support.
 
-2. **Cyclic initialization of positional embeddings is under-specified.** The paper states extended embeddings are "initialized in a cyclic pattern, drawing upon the configurations of the pre-existing embeddings" but does not define the procedure precisely. Is it simple repetition of the 25 original positions? Interpolation? A formula or pseudo-code would be needed for reproducibility.
-
-3. **Comparison with other models (Section 4.4) is insufficiently controlled.** Only two prompts are shown. The comparison pits the authors' pipeline (text-to-image model + extended SVD) against other text-to-video models without controlling for the first frame, guidance scales, or random seed. While the qualitative difference in motion dynamics is visually apparent, the uncontrolled setup limits what can be concluded.
-
-4. **No analysis of quality degradation over frame count.** A key question for any temporal extension method is whether quality degrades as the frame index increases (e.g., frame 100 vs. frame 5). The paper provides no plot or metric tracking quality across the 128 frames.
+2. **Unsupported claim about other models' motion dynamics.** Section 4.4 states that "most existing video synthesis models usually generate videos with minimal motion dynamics" without citing evidence or providing a controlled comparison to support this claim.
 
 ### Trivial
-- The kernel size of the added identity 3D convolution layer is not specified (the paper says "central unit ... initialized as an identity matrix" but does not state the kernel dimensions).
+
+- The Pexels URL in the footnote is truncated in the parsed version, though the primary dataset URL (OpenSoraPlan) is fully present and functional. (Parser artifact.)
 
 ## Nice-to-Haves
-- A small-scale human evaluation (e.g., preference between ExVideo outputs and a stitched-baseline at matched lengths) would strengthen the qualitative claims.
-- An analysis of failure cases beyond the brief mention of human portraits in the Limitations section (e.g., examples of truncation or artifact accumulation).
-- Inference wall-clock time comparison: how long does generating 128 frames take vs. generating 25 frames and upsampling?
+
+- A comparison against a simple frame-interpolation baseline (generate 25 frames with SVD, then interpolate to 128) would ground the claim that such approaches are inadequate (Section 1). The paper argues this in prose but never tests it.
+- An inference cost analysis (memory, generation time for 25 vs. 128 frames) would strengthen the "memory-efficient" claim.
+- Evaluation on a subset of a standard benchmark (e.g., UCF-101) with FVD would substantially strengthen the paper.
+- Reporting the number of trainable parameters and the exact kernel size/padding of the identity 3D convolution would improve reproducibility.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"The paper does not explain whether resolution adaptation was needed or how it was handled"** (from Harsh Critic, Section-by-Section Notes). The paper explicitly states: "Given the model's design to accommodate varying resolutions, we opt to conduct the training at this resolution." This is an explanation. The criticism is factually incorrect and is removed.
-
-- **"The statement that 3D convolution layers are 'retained in their original form' is unclear — are they frozen or trainable?"** (from Harsh Critic). The paper states "All parameters outside the temporal block are fixed while training" (Figure 1 caption) and "All parameters except the temporal blocks are frozen" (Section 3.3). Since 3D convolution layers are part of the temporal blocks (as shown in the architecture figure), they are within the trainable subset. "Retained in their original form" refers to architectural preservation, not frozen status. The paper is sufficiently clear on this point.
-
-- **"Superior motion dynamics compared to existing models"** (from Strength Finder). This claimed strength conflicts with a verified weakness: the comparison (Section 4.4) is uncontrolled (different pipelines, no shared first frame, no metrics, only two prompts), so the paper cannot substantiate this claim as a strength. Per rules, when a strength and verified weakness conflict, the weakness wins.
+- **Strength Finder's "Empirical demonstration of improved motion dynamics" (comparing with other models)**: This strength is based on the same comparison (Section 4.4) that is identified as invalid above. Since the verified weakness (invalid comparison setup) wins, this claimed strength is removed.
+- **Harsh Critic's complaint about "dataset URL is broken"**: This is a PDF parsing artifact; the primary OpenSoraPlan URL is complete and functional. Per rules, parser artifacts are not author errors.
+- **Harsh Critic's mention of "training hyperparameters are minimal"**: The paper provides learning rate, batch size, GPU count, training duration, loss function/scheduler consistency, and EMA usage. This is a reasonable level of detail for this paper type.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface no perspective that the paper itself does not already articulate or imply.
+The harsh critic correctly identifies the paper's central evaluation gap. However, there is a subtle tension not noted by either reviewer: the paper positions ExVideo as a *general* post-tuning method compatible with "the majority of existing video synthesis models," yet it validates it only on Stable Video Diffusion. The claim of generality rests on the architectural commonalities described in Section 3.1, but no demonstration is provided on a second architecture (e.g., AnimateDiff's temporal attention or a DiT-based model). This limits the evidence for the claimed generality, though it does not invalidate the contribution on SVD itself.
 
 ## Suggestions
 
-1. **Add quantitative evaluation before resubmission.** Report FVD on a standard benchmark (e.g., UCF-101, MSR-VTT, or a held-out set), CLIP score for text alignment, and a frame-consistency metric (e.g., warping error or LPIPS between consecutive frames). This is the single change that would most strengthen the paper.
+1. **Add quantitative evaluation as the highest priority.** Report FVD on a standard benchmark (UCF-101 or a subset of MSR-VTT for long videos). Even a small user study (20–50 participants rating coherence/quality) would be far better than the current qualitative-only evaluation.
+2. **Add an ablation study** with at least three conditions: full ExVideo, ExVideo without the identity 3D convolution, and ExVideo without extended positional embeddings (using naive extrapolation instead).
+3. **Replace the current model comparison** with a controlled setup: provide the same first frame to ExVideo and to the original SVD (generating up to 25 frames), or compare against other *image-to-video* models given the same input.
+4. **Report inference costs** (GPU memory, time per video) for both the original 25-frame and extended 128-frame models.
 
-2. **Add at least one concrete baseline comparison** against streaming (e.g., generating multiple 25-frame clips with the base SVD and conditioning each new clip on the last frame of the previous one) and frame interpolation (e.g., generating 25 frames and interpolating to 128 frames). This would contextualize the method's value relative to the alternatives the paper itself discusses.
-
-3. **Run a three-way ablation** that disables each component separately: (a) no identity convolution, (b) no temporal attention fine-tuning, (c) no positional embedding extension (use original positions and pad/truncate). Report a key metric (e.g., FVD) for each variant.
-
-4. **Quantify the "parameter-efficient" claim**: report the number of trainable parameters vs. total model parameters, peak GPU memory usage vs. an unoptimized full-fine-tuning baseline, and relative training cost.
-
-5. **Precisely specify the cyclic initialization** with a short formula or algorithm, and state the kernel dimensions of the added convolution.
-
-## Score and Decision
-
-The paper presents a plausible and practically motivated method for extending video diffusion models. The engineering optimizations are concretely described and represent a real practical contribution. However, the evaluation is critically insufficient: the complete absence of quantitative metrics, the lack of any comparison against the baselines the paper itself identifies, and the absence of ablation studies make it impossible to assess whether the method works, how well it works, or why it works. These are structural gaps, not presentation issues, and they prevent acceptance in the current form.
-
-The contribution is potentially valuable, and the method is well-described. With substantial additions to the evaluation (metrics, baselines, ablations), the paper could meet the bar for publication. In its current form, however, the evidence does not support the claims.
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

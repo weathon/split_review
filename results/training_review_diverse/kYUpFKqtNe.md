@@ -1,18 +1,16 @@
-Here is the consolidated final review.
-
----
+Now I have a thorough understanding of the paper and the reviews. Let me synthesize the consolidated review.
 
 ## Summary
 
-This paper proposes a fine-tuning framework for Multi-Source Unsupervised Domain Adaptation (MUDA) that integrates learnable category-specific prompts (shared across domains to capture domain-invariant features) with domain-specific multimodal Low-Rank Adaptation (LoRA) adapters applied to CLIP. The prompts are trained in a first stage, after which LoRA adapters (with a cross-modal shared projection layer) are trained per source domain and combined via an unspecified coefficient-based amalgamation for target inference. Experiments on Office-31, Office-Home, and DomainNet show improvements over prior MUDA methods including the CLIP-based MPA baseline.
+This paper proposes a fine-tuning framework for Multi-Source Unsupervised Domain Adaptation (MUDA) that combines class-specific learnable prompts (shared across domains) with multimodal Low-Rank Adaptation (LoRA) modules (per source domain), connected via a shared projection layer for cross-modal interaction. Experiments on Office-31, Office-Home, and DomainNet achieve state-of-the-art results compared to prior MUDA methods including the CLIP-based MPA baseline.
 
 ## Strengths
 
-- **Novel and well-motivated integration of prompts and multimodal LoRA for MUDA.** The paper makes a principled design choice: shared class-specific prompts avoid the overfitting risk of domain-specific prompts (motivated by Li et al., 2023), while separate multimodal LoRA matrices capture domain-specific features. This two-component architecture is a clean decomposition of domain-invariant vs. domain-specific knowledge. The approach yields consistent improvements over prior MUDA methods on all three benchmarks (Office-31: 85.7%, Office-Home: 77.7% (+2.3% over MPA), DomainNet: 54.8%).
+1. **Novel combination of shared class-specific prompts with multimodal LoRA for MUDA.** The paper jointly addresses two challenges — reducing overfitting from per-domain prompt training (by sharing prompts across domains) and capturing domain-specific features (via per-domain multimodal LoRA with a shared projection layer for cross-modal alignment). This design is well-motivated and conceptually clean.
 
-- **Cross-modal interaction mechanism via a shared projection layer.** The multimodal LoRA design bridges visual and textual branches through a shared projection layer (Eqs. 13–17, Fig. 2), allowing gradient propagation between modalities during training. This is a concrete structural innovation over prior approaches that treat modalities independently. The paper reports (qualitatively in Section 4.3) that this configuration outperforms single-modality and independent multimodal LoRA.
+2. **State-of-the-art results on three standard MUDA benchmarks.** The method achieves 85.7% on Office-31, 77.7% on Office-Home (+2.3% over MPA), and 54.8% on DomainNet (+2.7% over MPA), with consistent gains across multiple tasks per dataset (Tables 1–3). While margins over the strongest CLIP-based baseline (MPA) are modest, the gains are consistent.
 
-- **Evaluation on challenging large-scale benchmarks.** The method is tested on DomainNet (~600k images, 345 categories, 6 domains), demonstrating scalability well beyond the small-scale datasets common in MUDA literature. The paper acknowledges the specific difficulties of this dataset (large category count, extreme shifts like Quickdraw vs. others), which adds credibility to the results.
+3. **Principled two-stage training strategy.** The paper separates training into (a) learning shared class-specific prompts with all data, then (b) freezing prompts and training domain-specific LoRA adapters. This staged approach prevents interference between parameters serving different roles (shared vs. domain-specific) and is a practical design choice with clear motivation.
 
 ## Weaknesses
 
@@ -21,58 +19,59 @@ None.
 
 ### Major
 
-1. **Ablation analysis presented without any numerical evidence (Section 4.3).** The paper discusses three critical design decisions — (i) manual vs. learnable prompts for pseudo-labeling, (ii) LoRA added to one vs. both modalities with vs. without the shared projection layer, and (iii) which transformer layers to insert LoRA — and states conclusions in every case (e.g., "manual prompts outperformed learnable prompts," "multimodal LoRA with a shared projection layer... yielded the best results," "higher layers... resulted in better performance"). Yet **not a single accuracy number, table, or figure** is provided to support these claims. The hyperparameter analysis (threshold τ_label in {0.4,0.5,0.6,0.7,0.8}; prompt length b in {8,12,16,20}) similarly states only the final choices without showing the corresponding accuracy curves or tables. Because these analyses are central to justifying why the method is designed the way it is, the paper's supporting evidence is incomplete. The reader cannot assess the magnitude of each design choice's effect or whether alternative settings would work equally well.
+1. **The inference-stage combination of LoRA modules across domains is underspecified.** Section 3.2.3 states that during inference the method "amalgamate[s] the multimodal LoRA matrix modules that were trained across different domains" and that the abstract mentions "a set of coefficients," but the paper never specifies how these coefficients are determined — whether they are learned, hand-tuned, computed via a weighting scheme (e.g., domain similarity), or simply a uniform average. This is not a minor omission: the combination of LoRA modules is a core part of the claimed contribution ("class-specific prompts + multimodal LoRA adapters"), and the procedure is not reproducible without this detail.
 
-2. **Domain-adapter integration mechanism is underspecified to the point of irreproducibility (Section 3.2.3 and Abstract).** The paper states it will "combine all source domain-specific LoRA modules into an integrated module using a set of coefficients and adapt this integrated module to learn on the target domain" (Abstract) and "amalgamate the multimodal LoRA matrix modules that were trained across different domains" at inference (Section 3.2.3). However, no detail is given on: (a) how these coefficients are initialized, optimized, or selected; (b) whether they are learned per target domain or fixed; (c) whether "adapt this integrated module to learn on the target domain" involves additional training or is simply a weighted combination at inference. No equation for the integration is provided. This is not a minor implementation detail — it is the core mechanism for how multi-source knowledge is transferred to the target domain. Without it, the method cannot be independently implemented or evaluated.
+2. **No quantitative ablation studies.** Section 4.3 discusses design choices (shared vs. domain-specific prompts, multimodal vs. unimodal LoRA, shared projection layer, layer placement) entirely qualitatively — no accuracy numbers are reported for any ablated configuration. Given that the overall gains over MPA are modest (2.3% on Office-Home, 2.7% on DomainNet), it is impossible to determine whether these gains come from the shared prompts, the multimodal LoRA, the shared projection layer, or simply from the pseudo-labeling procedure. Standard ablation tables are essential for a method built from multiple interacting components.
+
+3. **No variance or reliability reporting.** The paper does not report standard deviations, number of runs, or any measure of statistical significance. Given the modest margins over the next-best baseline, single-run results are insufficient to establish that the improvements are reproducible.
 
 ### Minor
 
-3. **Ambiguous two-stage training procedure (Section 3.2.3).** Step 1 trains prompts using "all data, including data from all source domains and the target domain" — but target data is unlabeled. The paper does not specify whether pseudo-labels are used in Step 1, and if so, what model generates them (zero-shot CLIP? some other initialization?). The pseudo-label loss (Eq. 20) and total loss (Eq. 21) are presented only after both steps are described, making it unclear whether the total loss applies to Step 1, Step 2, or both. This ambiguity undermines confidence that the training procedure is correctly described.
+1. **Overclaiming on cross-domain "invariant representation learning."** The paper frames the challenge as "learning of invariant representations across domains" and claims shared prompts address this, but there is no explicit domain alignment loss or regularization. Shared prompts are a weak form of invariance — they are simply the same learnable vectors reused across domains. The paper would benefit from either adding a domain alignment component or toning down the invariance language.
 
-4. **Baseline comparison fairness is not discussed.** The paper compares against DAN, D-CORAL, DCTN, MDDA, MFSAN, and MPA. Only MPA is known to use CLIP; the older methods typically use different backbones (e.g., ResNet). The paper does not state whether these baselines were re-run under the same CLIP backbone or whether numbers are taken from original papers with different architectures. If the latter, the comparison may conflate method quality with backbone choice. This should at minimum be acknowledged.
+2. **Pseudo-labeling procedure is explained in the wrong place.** Section 3.2.3 describes generating pseudo-labels for the target domain during training but does not specify which prompts produce the initial probabilities. Section 4.3 later clarifies that manually designed prompts (zero-shot CLIP) are used, not the learnable ones. The information is present but split across sections, making the pipeline unnecessarily hard to follow. Moving this clarification into the Method section would substantially improve clarity.
 
-5. **No variance/confidence reporting.** Results are reported as single accuracy numbers without standard deviations or multiple-seed runs. Office-31 and Office-Home are small enough that random seed variation could affect rankings. Modern VLM fine-tuning papers routinely report at least 3 runs.
-
-6. **Connection between stated challenges and method components is asserted rather than demonstrated (Section 1).** The introduction lists three challenges (overfitting from prompt tuning, cross-domain invariance, cross-modal misalignment) and claims the method addresses all three, but no analysis or ablation is provided to isolate which component addresses which challenge. For example, how exactly does the multimodal LoRA shared projection solve cross-modal misalignment beyond providing additional trainable parameters? The paper would benefit from a mapping between challenges, design choices, and evidence.
-
-7. **DomainNet improvement is not quantified in text.** The paper states the method achieved "an average accuracy of 54.8%, which represents an improvement over previous methods" without saying by how much. While Table 3 presumably contains this information, the text should state the margin.
-
-8. **No limitations discussion.** The paper does not discuss limitations such as sensitivity to the number of source domains, failure cases when classes are not well separable, the assumption that all domains share the same label set, or scenarios where pseudo-labels are unreliable.
+3. **No feature-space analysis.** Claims about learning invariant or aligned representations would be strengthened by t-SNE plots, domain discrepancy metrics (e.g., MMD, A-distance), or nearest-neighbor visualization showing reduced domain shift in the shared prompt space.
 
 ### Trivial
-- The CLIP review (Section 3.1) is standard and could be condensed, though this does not affect the paper's contribution.
-- The paper uses "L" to denote both the layer where LoRA is inserted and the transformer layer index, which causes minor confusion in Section 3.2.2.
+- Tables are rendered as images and hard to verify; numerical values should be provided in text or accessible format.
+- Some notation inconsistencies (e.g., $N_s$ vs. $\Nu_s$ on line 195).
 
 ## Nice-to-Haves
-- An efficiency analysis (training time, parameter counts, memory usage) comparing prompt+LoRA to full fine-tuning and to MPA would strengthen the practical motivation.
-- An analysis of pseudo-label quality (accuracy of generated labels, fraction of target samples retained at the chosen threshold) would help readers understand how much unlabeled data is leveraged.
-- An ablation over LoRA rank (e.g., r ∈ {1, 2, 4, 8}) to justify the choice of r=2.
+- A simple baseline where LoRA modules are combined with equal weights vs. the claimed coefficient-based approach, to isolate the effect of the combination strategy.
+- Reporting the number of trainable parameters and inference-time overhead from combining LoRA modules.
+- A figure or table showing accuracy vs. pseudo-label threshold $\tau_{label}$ and prompt length $b$ (currently described only in text).
+- Comparison against other CLIP-based UDA methods (e.g., CoOp with target-domain fine-tuning, PromptStyler) to ensure the gains are not simply from using CLIP as a backbone.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were raised in reviews but are removed or downgraded after cross-checking against the paper:
 
-- *"The CLIP review is too long; it could be condensed."* — This is a presentation-style preference, not a substantive weakness. The section provides necessary background for the method.
-- *"The paper does not report whether these baselines were re-run under the same backbone (CLIP) or taken from existing papers."* — This is partially retained above as a Minor weakness (fair comparison). The removed component is the speculation that "older methods likely use different backbones" without evidence; however, the core concern (unclear whether numbers are comparable) is valid and kept.
-- *Criticism about garbled tables in extraction.* — Parser artifact, not an author error. The relevant concern (no variance reported) is retained as a Minor weakness.
-- *The Strength Finder's claim that "The ablation study (Section 4.3) shows that multimodal LoRA with the shared projection outperforms..."* — This conflicts with the verified weakness that Section 4.3 provides **no numerical evidence**. The strength about the mechanism being a genuine design contribution is retained, but the inflated evidential claim is dropped.
+1. **"Training procedure ambiguously conflicts with Section 4.3 analysis"** — The reviewer claimed a direct contradiction between Step 1 (training prompts with pseudo-labels) and Section 4.3 (manual prompts better for pseudo-labeling). However, these are consistent: Section 4.3 clarifies that manually designed prompts (zero-shot CLIP) are used to generate pseudo-labels, and the learnable prompts are trained *on* those pseudo-labels. The information is in the paper; the issue is placement, not contradiction. Demoted from "direct conflict" to a minor clarity issue.
+
+2. **"The method does not actually address cross-domain invariance"** — While the reviewer is right that shared prompts are a relatively weak form of invariance (no explicit alignment loss), the paper's framing is *shared characteristics* not a formal invariance guarantee. The criticism is valid as an overclaiming concern but not as a structural flaw that invalidates the approach. Kept as Minor.
+
+3. **"Missing CLIP-based baselines like PromptStyler"** — The paper includes MPA as the primary CLIP-based MUDA baseline, which is the most directly comparable method. PromptStyler is a general VLM fine-tuning method, not an MUDA method. This is scope creep. Removed.
+
+4. **"Shared projection layer motivation is generic"** — The paper does provide a motivation ("allows gradients to propagate between them, thus better aligning different modality features"). The criticism amounts to a disagreement on taste rather than a factual gap. Removed.
+
+5. **Strength Finder's claim of "comprehensive ablation and hyperparameter analysis that empirically validates design choices"** — The ablation in Section 4.3 is entirely qualitative with no accuracy numbers. This claim overstates what the paper provides and conflicts with the verified weakness about missing numerical ablations. Removed as a strength.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The reviews do not surface any novel perspective not already present in the paper's framing.
 
 ## Suggestions
 
-1. **Add a complete ablation table** to Section 4.3 reporting accuracy numbers for each design choice: prompt type (manual vs. learnable) with resulting pseudo-labeled sample count; LoRA configuration (visual-only, text-only, both independent, both with shared projection); layer insertion point; rank r ∈ {1,2,4,8}; threshold τ_label vs. accuracy; prompt length b vs. accuracy.
-2. **Specify the domain-adapter integration mechanism in full.** Provide the equation for combining LoRA updates (e.g., ΔW_combined = Σ_i β_i ΔW_i) and describe how β_i are obtained — are they learned via a separate optimization on target data, or fixed (e.g., uniform)? If learned, describe the loss and procedure. If fixed, state that and show an ablation.
-3. **Clarify the two-stage training procedure.** Separate the loss for Step 1 and Step 2 explicitly. State whether pseudo-labels are used in Step 1 and, if so, how they are obtained. If Step 1 uses only source labels, state that clearly.
-4. **Report standard deviations** from at least 3 runs with different seeds.
-5. **Clarify baseline numbers.** State whether baselines were re-implemented with the same CLIP backbone or taken from prior papers with different backbones, and discuss how this affects comparability.
-6. **Add a limitations paragraph** acknowledging the method's assumptions and potential failure modes.
+1. **Add a complete algorithm description** including (a) how pseudo-labels for the target domain are generated at each stage and which model/prompts produce them, and (b) how the LoRA combination coefficients for inference are computed. A pseudocode algorithm listing would resolve both ambiguities at once.
+
+2. **Run and report a quantitative ablation study** on at least one dataset (e.g., Office-Home) with these conditions: (i) shared prompts only (no LoRA), (ii) domain-specific prompts only, (iii) shared prompts + single-modality LoRA (text only), (iv) shared prompts + unimodal LoRA (vision only), (v) shared prompts + multimodal LoRA without the shared projection layer, (vi) full model. Report accuracy for each. This would directly validate the claimed contributions.
+
+3. **Report results from at least 3 random seeds** with means and standard deviations for the main experimental results.
 
 ## Score and Decision
 
-This paper proposes a plausible and well-motivated integration of two PEFT techniques (prompt tuning and multimodal LoRA) for the MUDA setting with VLMs, and reports strong results on standard benchmarks. However, the paper has two structural weaknesses that prevent acceptance in its current form: (1) the ablation analysis central to justifying the method's design is presented without any numerical support, and (2) the domain-adapter integration mechanism — the core mechanism for transferring multi-source knowledge to the target — is underspecified to the point of irreproducibility. These are not minor presentation issues; they directly affect the paper's credibility and reproducibility. The training procedure is also ambiguously described. The ideas have genuine potential, but the evidence and specification are insufficient as-is.
+The paper tackles a relevant problem (MUDA with VLMs) with a well-motivated design combining shared class-specific prompts and multimodal LoRA adapters. The experimental results show consistent improvements over prior methods on standard benchmarks. However, the paper has two significant weaknesses that prevent full evaluation: the inference-stage combination of LoRA modules is underspecified, and the ablation studies are entirely qualitative (no accuracy numbers), making it impossible to verify which components drive the gains. These are fixable in revision but materially weaken the current submission. I recommend rejection in the current form, with the understanding that the core idea may be publishable after substantial revision addressing the major weaknesses.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

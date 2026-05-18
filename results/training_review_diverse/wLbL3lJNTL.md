@@ -1,20 +1,20 @@
-Now I have verified all the claims against the paper. Let me synthesize the final review.
+Now I have all the information I need. Let me compile the final consolidated review.
+
+---
 
 ## Summary
 
-The paper proposes learning joint representations from multiple sensors (images and proprioception) in RL by combining reconstruction-based losses for low-dimensional proprioception with contrastive losses for high-dimensional images within Recurrent State Space Models (RSSMs). It systematically evaluates this approach against the common practice of concatenating image-only representations with proprioception across a wide range of tasks including DMC variants with video backgrounds and occlusions, a new locomotion suite, and a mobile manipulation task.
+This paper studies representation learning for reinforcement learning from multiple sensors (images and proprioception). Building on Recurrent State Space Models (RSSMs), the authors propose combining contrastive losses for high-dimensional image observations with reconstruction losses for low-dimensional proprioception, and evaluate this design across both variational and contrastive predictive coding paradigms. The core empirical contributions are a large-scale evaluation across four task suites (Standard DMC, Video Background, Occlusions, and a new Locomotion suite) plus a realistic mobile manipulation task, systematically comparing joint representations against concatenation baselines and several SOTA image-only methods.
 
 ## Strengths
 
-1. **Clear empirical superiority of joint representations over concatenation across diverse domains.** The paper's central claim — that learning a joint representation within an RSSM outperforms the standard practice of concatenating image representations with proprioception for the policy — is convincingly supported. On the Occlusion suite (Fig. 3), joint approaches more than double the score of any concatenation baseline; on the Locomotion suite (Fig. 4), Joint(CPC+R) significantly outperforms all Concat variants; on OpenCabinetDrawer (Fig. 5), joint methods maintain performance under changing backgrounds while concatenation baselines degrade.
+- **Joint representations with mixed objectives consistently outperform concatenation baselines across multiple challenging domains.** In the Occlusion suite (Fig. 3), Locomotion suite (Fig. 4), and OpenCabinetDrawer (Fig. 5), Joint(CPC+R) and Joint(CV+R) significantly outperform all Concat baselines. This comparison is clean because both joint and Concat methods use the same image-level loss (contrastive or reconstruction) and thus the same data processing. The results are reported with IQM and 95% CIs (Agarwal et al., 2021).
 
-2. **Well-motivated per-modality loss assignment that is empirically validated.** The paper's key insight — using reconstruction for clean low-dimensional proprioception and contrastive losses for noisy high-dimensional images — is tested systematically. The comparisons Joint(CV+R) vs. Joint(CV+CV) and Joint(CPC+R) vs. Joint(CPC+CPC) in Figs. 2-3 directly show that the mixed-loss assignment outperforms fully contrastive variants, especially for model-based RL where the gap is dramatic (e.g., Joint(CPC+R) more than doubles Joint(CPC+CPC) on Occlusions).
+- **Joint representations improve model-based RL when contrastive image objectives are required, substantially closing the gap between model-free and model-based performance.** In Video Background (Fig. 2) and Occlusion (Fig. 3), model-based Joint(CV+R) improves dramatically over fully-contrastive counterparts and nearly matches model-free performance. The paper explicitly demonstrates that joint representations enable learning of stable long-term dynamics that contrastive image-only representations struggle with (Section 4 Discussion).
 
-3. **Comprehensive evaluation across challenging new benchmarks.** The paper contributes a DMC Occlusion suite and a Locomotion suite with obstacles, neither of which can be solved by image-only methods. These tasks probe precisely the scenario where fusing vision and proprioception is necessary. The inclusion of a realistic mobile manipulation task (OpenCabinetDrawer) with both color and depth images further strengthens the generality of the findings.
+- **Large-scale evaluation across diverse task suites with multiple difficulty levels, including two visual modalities (RGB and depth) on a realistic manipulation task.** This breadth goes well beyond prior work on RSSM-based representations, which typically focuses on one or two domains. The OpenCabinetDrawer experiments with both constant and changing backgrounds using both color and depth images provide realistic validation.
 
-4. **Demonstrated mitigation of a known limitation in contrastive model-based RL.** The paper shows that joint representations almost close the performance gap between model-free and model-based agents for contrastive image objectives (Figs. 2-3), directly addressing a weakness noted by Ma et al. (2020). This is a practically significant finding.
-
-5. **Qualitative analysis corroborates quantitative results.** The saliency maps (Fig. 6, left) show Joint(CV+R) focusing on the task-relevant cheetah while Img-Only(CV) is distracted by the video background. The occlusion-free ground-truth reconstruction analysis (Fig. 6, right) shows that Joint(CPC+R) captures both cart position and pole angle from the latent state while Img-Only(CPC) fails, providing mechanistic support for the quantitative improvements.
+- **The qualitative analysis (saliency maps and occlusion-free reconstruction, Fig. 6) supports the claim that joint representations focus on task-relevant aspects.** Joint(CV+R) saliency maps concentrate on the agent rather than video backgrounds, and Joint(CPC+R) captures both cart position and pole angle in occlusion tasks where image-only approaches fail.
 
 ## Weaknesses
 
@@ -22,54 +22,50 @@ The paper proposes learning joint representations from multiple sensors (images 
 None.
 
 ### Major
-None.
+
+- **The comparison between mixed-loss methods (Joint(CV+R), Joint(CPC+R)) and the pure-reconstruction baseline (Joint(R+R)) is confounded by image augmentation.** The paper states (line 104): "Following prior work (Srivastava et al., 2021; Deng et al., 2022), we include cropping-based image augmentation *for contrastive approaches*." Joint(R+R) does not receive this augmentation. Because it uses reconstruction for images (which typically struggles with cropped reconstruction targets), the design choice is grounded in prior work, but it nevertheless means that every comparison between Joint(CV+R)/Joint(CPC+R) and Joint(R+R) conflates the loss choice with the presence or absence of augmentation. This is most consequential for the Locomotion suite (Fig. 4), where the paper specifically highlights that Joint(CPC+R) "outperforms image reconstruction (Joint(R+R)), which is noteworthy as the Locomotion suite tasks do not explicitly contain distracting elements." Without an augmentation-controlled ablation, the reader cannot determine whether the benefit on Locomotion comes from the mixed-loss design or simply from a data augmentation trick that the baseline lacks. The paper's core claim (ii) — "Combining contrastive approaches for images with reconstruction for low-dimensional signals can significantly improve performance" — is partially supported by clean comparisons (mixed-loss vs. pure-contrastive Joint(CV+CV)/Joint(CPC+CPC) where augmentation is matched), but the specific claim that mixed-loss outperforms pure-reconstruction rests on confounded evidence.
 
 ### Minor
 
-1. **Potential parameter-capacity confound between Joint and Concat baselines.** In the Joint approach, both image encodings and proprioception are concatenated and fed to the RSSM, giving it a larger input dimension (and thus more parameters in the first recurrent layer). In the Concat approach, only image encodings enter the RSSM, and proprioception is appended later for the policy. The paper does not discuss whether observed gains could partly reflect different parameter counts rather than the fusion mechanism itself. While this does not invalidate the main claims (the Concat approach could in principle have more total parameters overall due to separate components), a discussion or controlled comparison (e.g., scaling the image-only RSSM) would strengthen the analysis.
+- **The novelty framing modestly over-claims relative to the technical contribution.** The paper presents a "general framework" and "novel combination," but what is implemented is a straightforward per-modality choice between existing variational objectives (Eq. 3) and existing CPC objectives (Eq. 4), both previously proposed for RSSMs. The core value lies in the *empirical demonstration* that per-modality loss selection matters and in the systematic evaluation — this is a genuine and useful contribution, but framing it as a fundamentally new method is overstated. The paper would be stronger by more clearly positioning itself as a systematic empirical study with design lessons.
 
-2. **Cropping augmentation applied only to contrastive methods.** The paper states (line 104): "Following prior work... we include cropping-based image augmentation for contrastive approaches." This introduces an asymmetry: contrastive methods receive an additional augmentation that reconstruction methods do not. The paper does not discuss whether this could affect the comparison. If reconstruction methods were also given augmentation (or the paper explained why it cannot be applied), the comparisons would be cleaner. This is a minor confound that does not threaten the main conclusions — the key Joint vs. Concat comparisons hold within the same loss family — but deserves acknowledgment.
+- **The Concat baselines are underspecified.** The paper says it "concatenates proprioception to image representations" (line 110) but does not clarify whether the RSSM receives both modalities during training (with proprioception added again at the policy head) or whether the RSSM only processes images. These two designs have different representational capacity — if the RSSM never sees proprioception, it cannot model temporal dependencies that require proprioceptive feedback, which could explain the gap between Concat and Joint. A brief architectural description would resolve this.
 
-3. **Framing of Dreamer-v3 comparisons.** The paper states that its approach "outperforms several SOTA baselines" (abstract) and compares Joint approaches to Dreamer-v3. Since Dreamer-v3 is image-only and does not use proprioception at all, outperforming it with methods that do use proprioception is expected and says little about the fusion mechanism. The controlled comparisons (Joint vs. Concat, Joint vs. Joint with different loss assignments) are the paper's real strength, and the framing should more clearly separate these. The paper's conclusion appropriately focuses on the takeaways about joint representations, so this is a presentation issue in the abstract and introduction rather than a methodological flaw.
-
-4. **Number of random seeds not stated in the main text.** The paper reports IQM with 95% stratified bootstrapped CIs (following Agarwal et al., 2021), which implies multiple runs, but the exact number of seeds is not given in the main body. Adding "averaged over N seeds" would improve transparency.
+- **The β-KL weight for CPC methods is mentioned (Eq. 4, line 79) but its value is not reported** nor its sensitivity discussed. Given prior work's finding that this term is critical for preventing collapse in CPC-style objectives (Srivastava et al., 2021), the omission is relevant for reproducibility. (This detail may appear in the appendix, which is stripped by the parser.)
 
 ### Trivial
 
-1. The phrasing "novel combination of reconstruction-based and contrastive losses" (abstract, introduction) is slightly inflated — each individual loss is standard, and the novelty lies in the per-modality assignment within the RSSM framework. The conclusion's more measured framing better reflects the contribution.
+- **The split of DMC state dimensions into "proprioceptive" vs. "non-proprioceptive" entries is explained with one example (Ball-in-Cup Catch) but not fully specified for all seven tasks.** A table in the appendix or main text would aid reproducibility.
 
 ## Nice-to-Haves
 
-- **Quantitative probing of what the joint latent state encodes.** The saliency maps and reconstruction analysis (Fig. 6) are suggestive but qualitative. A linear probe to measure how well the joint representation predicts ground-truth non-proprioceptive state variables (e.g., ball position, pole angle) compared to image-only or Concat representations would sharpen the mechanistic argument.
-- **Ablation of the augmentation asymmetry.** Testing whether applying cropping to reconstruction-based methods (or removing it from contrastive methods) changes the ranking would cleanly address the potential confound.
+- **Analysis of *why* joint representations close the model-free vs. model-based gap for contrastive methods.** The paper's current explanation ("joint representations allow learning of stable long-term dynamics") is somewhat superficial. Measuring model prediction error, latent dynamics quality, or mutual information between latent states and true states under each method would strengthen the result.
+- **An ablation that augments Joint(R+R) with cropping** (or justifies rigorously why cropping cannot be applied to reconstruction) would resolve the central confound. If the augmentation cannot be applied, a comparison on Standard Images (where reconstruction works well) with both methods unaugmented would partially address the concern.
+- **Training a joint RSSM with reconstruction for all sensors *with* image augmentation** would test whether the per-modality loss choice matters beyond the effect of the joint architecture itself.
 
 ## Removed Points
 
-The following points from the reviewer inputs are removed with justification:
-
-- **Architectural confound labeled as "Critical Issue" (harsh critic Item 1):** Downgraded from critical to minor. The Joint and Concat approaches are architecturally different by design — fusing modalities within the dynamics model is the intervention being tested. A parameter-count confound would only matter if the paper claimed that *how* the modalities are combined (not just that they are combined) drives gains, and even then the parameter difference is inherent to the architectural choice. The point is kept as a minor request for discussion, not a structural flaw.
-- **Dreamer-v3 comparison labeled as "Critical Issue" (harsh critic Item 2):** Downgraded from critical to minor. The harsh critic's own analysis acknowledges that "this does not invalidate the many other controlled comparisons." The paper's main claims rest on the Joint vs. Concat comparisons, not on Dreamer-v3. The framing issue is real but minor.
-- **"Novel combination" wording (section notes):** Removed to Trivial. This is a semantic preference, not a substantive weakness.
-- **CPC derivation / mechanism analysis request:** Removed. The paper's claim about improved dynamics learning is sufficiently supported by the performance results; demanding direct analysis of the mechanism is a nice-to-have, not a weakness.
-- **Occlusion details not in main text:** Removed. The harsh critic acknowledges these are likely in the appendix (which is present but stripped by the parser). This is a parser artifact, not an author error.
-- **Hyperparameter details not in main text:** Removed. The paper references code availability and follows prior work; these details are standard to defer. Not a genuine weakness.
-- **"Missing parts and places to improve" — seeds count:** Kept as minor (Item 4).
-- **"Missing parts" — augmentation asymmetry:** Kept as minor (Item 2).
+- The claim that the paper should "compare to an approach that fuses modalities into a single latent with reconstruction for all sensors while using augmentation for the image encoder." This is a specific version of the augmentation-controlled ablation that is already covered in Nice-to-Haves. The underlying concern is addressed by the Major weakness above.
+- The suggestion to analyze the model-free vs. model-based gap more deeply. This is a reasonable request for deeper insight but not a flaw in what the paper already demonstrates. Moved to Nice-to-Haves.
+- The criticism that the model-free vs. model-based comparison is "incomplete." The paper does provide a clear empirical finding and a plausible explanation; asking for deeper mechanism analysis is a future-work suggestion, not a weakness of the presented results.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface two useful observations. First, the structural asymmetry between Joint and Concat architectures (Joint feeds both modalities into the RSSM, Concat only feeds images) means the comparison tests a bundled intervention — more capacity early in the dynamics model plus cross-modal fusion — rather than fusion alone. Second, the cropping-augmentation asymmetry (contrastive methods only) is a subtle but real confound that prior work in this line (Srivastava et al., 2021; Deng et al., 2022) also inherits without discussion. Neither undermines the paper's conclusions, but both identify clean-up opportunities for future work in this area.
+None beyond the paper's own contributions. The reviews surface a genuine experimental confound (augmentation asymmetry) that the paper's own narrative does not flag, but this is a methodological concern rather than a novel insight about the problem.
 
 ## Suggestions
 
-1. Add a brief discussion of parameter counts between Joint and Concat variants, or include a control experiment that scales the image-only RSSM to match the Joint RSSM's input-layer parameters.
-2. Add a sentence in the experimental setup clarifying the number of seeds/runs used for each approach.
-3. Add a brief note discussing the cropping-augmentation asymmetry (why it is used, whether it could affect results, and whether reconstruction methods were considered with augmentation).
-4. In the abstract and introduction, temper claims about "outperforming SOTA baselines" to clarify that the strongest evidence comes from the controlled Joint vs. Concat comparisons, not from comparisons to image-only SOTA methods.
+1. **Run Joint(R+R) with cropping augmentation** (or a controlled proxy) to deconfound the comparison between mixed-loss and pure-reconstruction approaches. This is the single highest-impact improvement.
+2. **Clarify the Concat RSSM training architecture** — does the RSSM receive both modalities during training, or only images? Report this in a sentence.
+3. **Report the β value** for CPC methods (and ideally its sensitivity) in the main text or a table.
+4. **Provide the full proprioception split** for all DMC tasks in a table, in the main text or appendix.
+5. **Tone down novelty claims** and reframe the paper as a systematic empirical study demonstrating when and why per-modality loss selection matters for multi-sensor RL — this is actually a *stronger* pitch than claiming a new framework.
 
 ## Score and Decision
 
-This is a solid, well-executed empirical paper. The core claim — that learning joint representations within an RSSM with per-modality loss assignment outperforms concatenation — is convincingly demonstrated across multiple challenging task domains. The identified weaknesses are minor presentation and framing issues, none of which threaten the central contribution. The paper introduces useful new benchmarks (Occlusion suite, Locomotion suite) and provides a systematic evaluation that the community will find actionable.
+The paper makes a solid empirical contribution — joint representations consistently outperform concatenation across diverse and challenging domains, the evaluation is thorough, and the finding that per-modality loss choice matters is practically valuable for the RL community. However, the central comparison between mixed losses and pure reconstruction is confounded by asymmetric augmentation, which limits the strength of the paper's core claim (ii). This is addressable with additional experiments, and the paper's other contributions (joint > concat, mixed > pure-contrastive) rest on cleaner evidence.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+I recommend a borderline accept with major revision to address the augmentation confound and the underspecified baselines.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,92 +1,80 @@
-Now I have all the information I need. Let me synthesize the final review.
+I have all the information needed. Let me now produce the final consolidated review.
+
+---
 
 ## Summary
 
-The paper proposes Spectral Contrastive Regression, a method for improving generalization in regression tasks through two auxiliary losses: (1) \(L_{std}\), which minimizes the standard deviation of the feature-label proportional distance to create smoother embeddings, and (2) \(L_{svd}\), which aligns the spectral norms of feature matrices from real and C-Mixup augmented distributions to bound domain discrepancy. Experiments on eight benchmark datasets (both ID and OOD) show the method achieving strong results against several baselines.
+The paper introduces Spectral Contrastive Regression, a method for improving generalization in regression tasks through two novel losses: (1) L_std, which models the feature-label distance proportion as a variable mapping function (rather than a constant as in prior work) and minimizes its standard deviation, and (2) L_svd, which aligns the largest singular value of feature representations across real and C-Mixup-synthesized domains to reduce distribution discrepancy. The method is evaluated on eight regression benchmarks across both in-distribution and out-of-distribution settings.
 
 ## Strengths
 
-- **Novel approach to regression generalization.** The paper identifies a genuine limitation in prior work (RML's assumption of a constant feature-label proportion) and proposes modeling it as a variable mapping function. The \(L_{std}\) loss that minimizes variance of the proportional distance is a clean, well-motivated idea that differs from existing approaches like RML (scale-only) and RankSim (order-only).
+1. **Novel formulation of the feature-label proportion as a variable mapping.** Prior work (RML) treats the proportion between feature distance and label distance as a constant. The paper argues this should be a variable mapping function and proposes L_std to reduce its variance. This is a conceptually interesting departure from existing approaches and is supported by t-SNE visualizations showing more discriminative embedding patterns (Figure 1).
 
-- **Consistent empirical performance across diverse benchmarks.** On ID datasets (Table 1), the method achieves the lowest RMSE/MAPE on all three datasets. On OOD datasets (Table 2), it achieves best or second-best average/worst-domain results in 10 out of 12 reported metrics across Crimes, SkillCraft, DTI, and RCF-MNIST. On MPI3D (Tables 3&4), the full method achieves best MSE/MAE in 5 out of 6 transfer tasks, and the spectral norm alignment is shown to outperform Frobenius and nuclear norm alternatives.
+2. **Spectral norm alignment for OOD regression is an underexplored idea.** The insight that aligning only the top singular value (rather than the full Frobenius or nuclear norm) may be more effective for domain alignment in regression is well-motivated. On the MPI3D benchmark (Tables 3–4), where no fine-tuning confound exists, spectral norm alignment consistently outperforms alignment with nuclear and Frobenius norms across three domain shifts, providing clean empirical evidence for this component.
 
-- **Well-designed ablation on MPI3D comparing norm choices.** The comparison of spectral norm against Frobenius and nuclear norm for domain alignment (Tables 3&4) provides concrete empirical evidence for the design decision, and the result (spectral norm performs best) is consistent with the theoretical argument that it provides the tightest upper bound.
+3. **Evaluation across eight diverse regression benchmarks covering tabular, time-series, and image data.** The method is tested on 3 in-distribution and 5 out-of-distribution datasets. The MPI3D experiments (3 domain shifts × 2 metrics × comparison against multiple norm choices) are a reasonably thorough evaluation of the spectral alignment approach.
 
-- **t-SNE visualizations offer qualitative support.** Figure 1 shows that \(L_{std}\) produces more discriminative and less dispersed embeddings compared to baselines including RML and RankSim, providing visual evidence that variance reduction improves feature structure.
+4. **Ablation of the two components on MPI3D (no fine-tuning confound).** On MPI3D, the paper compares L_std alone, L_svd with various norms, and the full method — all without the FT strategy. These results provide evidence that both losses contribute beyond the baseline (C-Mixup) and beyond each other.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Experimental comparisons are not fully controlled for the fine-tuning protocol.** The paper's method benefits from a specialized fine-tuning strategy (freeze top layers of a C-Mixup pretrained network, fine-tune bottom layers). For ID experiments, the paper states it provides "the result of RML combined with our fine-tuning method" (line 218), but it is unclear whether RankSim, FDS, and other baselines received the same pretreatment. Tables 1 and 2 mark results with † (reported by Yao et al., 2022) and * (reproduced based on Yao et al.'s code), but it is not specified whether the reproduced baselines used the same freeze-and-fine-tune protocol. If the proposed method alone benefits from this engineering choice, the reported improvements may be partially due to the FT strategy rather than the proposed losses. An "FT only (MSE)" baseline under the same protocol is needed to isolate each loss's contribution.
+1. **Theorem 1 assumes an invertible weight matrix without justification (theoretical flaw).** The derivation of the upper bound for the proportional distance d_r uses W_p*^{-1}. In standard regression, the optimal weight W_p* has shape (output_dim × feature_dim). When output_dim < feature_dim (e.g., scalar regression with high-dimensional features), W_p* is non-square and has no inverse. Even when output_dim = feature_dim, invertibility is a strong assumption not justified in the paper. Consequently, the mathematical grounding for the boundedness of d_r, the link to Remarks 1 and 2, and the motivation for L_std as a consequence of Theorem 1 are built on an unsupported premise. The authors should reframe the proportional distance as a heuristic or provide a corrected derivation (e.g., using pseudoinverses under additional rank assumptions).
 
-- **No standard deviations or confidence intervals.** All results are averaged over three runs with no variance reported (lines 218, 240). Three seeds is too few to assess reliability, especially given that reported differences are sometimes small. Without error bars, the reader cannot determine whether observed improvements are statistically meaningful.
+2. **Confounded experimental comparisons in the main results (Tables 1 and 2).** The proposed method uses a freeze-fine-tuning strategy (FT: freezing top layers except the last block) that is not applied to the baseline methods. In Table 1, the baselines (C-Mixup*, RML†, RankSim†) do not appear to use FT, while "Ours(FT+L_std)" and "Ours(FT+L_std+L_svd)" do. The improvements attributed to L_std and L_svd could plausibly come partly or entirely from the changed training procedure (FT itself). The paper states "we also provide the result of RML combined with our fine-tuning method" (line 218) but RML† is marked as results from Yao et al. (2022) — this inconsistency is unexplained. Without a controlled comparison (e.g., running all baselines with the same FT strategy, or at minimum adding an "FT only" column), the core empirical claims are not cleanly supported for Tables 1 and 2. **Mitigation**: On MPI3D (Tables 3,4), the paper explicitly states no FT is used (line 247), and these comparisons are clean. The MPI3D results provide partial support for the method, but the main claims rest substantially on Tables 1 and 2.
 
-- **The Lipschitz continuity claim is stated without support.** The paper asserts (line 135): "Clearly, \(L_{std}\) constrains the predictor \(p\) as a Lipschitz continuous function satisfying Remarks 1 and 2." No proof or argument is given connecting the variance of a batch-level ratio to the Lipschitz constant of the predictor. While the heuristic motivation is reasonable, this is presented as a formal property without justification.
-
-- **Incomplete ablation on OOD datasets.** On MPI3D, both \(L_{std}\) and \(L_{svd}\) are evaluated, including ablations of each individually. But on the main OOD datasets (Table 2), the combination \(L_{std}+L_{svd}\) is compared against FT+\(L_{std}\) and other baselines, while FT+\(L_{svd}\) alone is not shown. This makes it difficult to attribute gains to each component in the OOD setting.
+3. **The connection between Theorem 2 and the L_svd loss is theoretically coarse.** Even though Theorem 2 itself is mathematically valid (see Removed Points), the bound involves ||Y^h||_F (Frobenius norm of the output), while L_svd minimizes |||F_real||_2 - ||F_syn||_2| (difference of spectral norms of features). The link is via the inequality ||Y^h||_F ≤ ||F||_2||W||_2 + |b| (line 170), which is a loose bound that introduces dependence on the regression weights W and bias b. Minimizing the difference in feature spectral norms does not directly minimize the claimed bound on distribution discrepancy — it only loosely constrains an upper bound on an upper bound. This gap should be acknowledged explicitly rather than presented as a tight theoretical motivation.
 
 ### Minor
 
-- **The proof of Theorem 2 contains a notational error that undermines readability.** The proof (lines 156-168) writes \(|\mathcal{L}(h'',0) - \mathcal{L}(h'',0)|\) where the intended quantities are \(\mathcal{L}_P(h'',0)\) and \(\mathcal{L}_Q(h'',0)\) — the distribution subscripts are dropped. While the intended meaning is clear from context and the theorem itself is correct (the bound follows from the definition of discrepancy distance), the sloppiness weakens the paper's theoretical presentation. This is a presentation flaw, not a fatal error.
+1. **Missing standard deviations/confidence intervals.** All results are reported as averages over 3 seeds without variance. For a paper making SOTA claims, readers cannot assess the reliability of the improvements.
 
-- **The connection between Theorem 1 and the \(L_{std}\) loss is heuristic, not deductive.** Theorem 1 gives an upper bound on \(\|f_i - f_j\|_p\) in terms of \(\|y_i - y_j\|_p\) under the optimal linear predictor. The paper then proposes minimizing the standard deviation of \(d_r\) to "acquire a flatter proportion map" (line 129). The theorem shows the ratio is bounded but does not imply that minimizing its variance is the correct objective. This is a reasonable heuristic motivation but is presented as a tighter logical consequence than it is.
+2. **L_svd aligns only the largest singular value, which is a necessary but far-from-sufficient condition for distribution alignment.** Two feature matrices can share the same largest singular value while differing arbitrarily in other spectral dimensions or singular subspaces. This is a known limitation of spectral norm alignment; the paper does not discuss it. The MPI3D empirical results partially mitigate this concern, but the theoretical gap remains.
 
-- **The t-SNE visualization (Figure 1) is presented in the ID Generalization section (Section 4.2) but uses the DTI dataset**, which is an OOD dataset described in Section 4.3. This presentational inconsistency is confusing.
+3. **Hyperparameters α, β not reported per dataset.** The sensitivity analysis (Figure 2) shows L_std is quite sensitive to α, yet the chosen values for each benchmark are not stated. This harms reproducibility.
 
-- **MPI3D baseline fairness is not fully documented.** The paper states that the fine-tuning strategy is not used on MPI3D (line 247), but comparisons against IRM, CORAL, etc. do not detail whether all methods share the same backbone, optimizer, and training schedule. The absence of this detail makes the MPI3D comparisons harder to interpret.
+4. **Inconsistency about RML+FT results.** The paper claims to provide RML+FT results (line 218), but the table description (line 221) lists RML† as from Yao et al. (2022), not re-run with FT. This discrepancy needs resolution.
+
+5. **t-SNE visualization (Figure 1) is purely qualitative.** It supports the narrative but does not quantify what "clearer pattern" means. Not a fatal issue, but it limits the evidentiary weight of this figure.
 
 ### Trivial
 
-- In the proof of Theorem 2, the transition from \(\mathcal{L}(h',h) = \mathcal{L}(h-h',0)\) to the final inequality skips intermediate steps that would clarify the bound. Adding these steps would improve readability.
+- None beyond what is listed in Removed Points.
 
 ## Nice-to-Haves
 
-- An "FT only (MSE)" baseline under the same freeze-and-fine-tune protocol would cleanly isolate the effect of each proposed loss.
-- A comparison of full fine-tuning vs. freeze-and-fine-tune (with and without the proposed losses) would validate the claimed ID-OOD trade-off mitigation.
-- A brief discussion of failure cases or conditions where the method underperforms would improve the paper's honesty and utility.
+- Adding an "FT only" baseline column to Tables 1 and 2 would immediately clarify the confound concern.
+- Reporting α and β values per dataset in a small table would improve reproducibility.
+- A discussion of the computational cost of computing SVD per batch for L_svd would be useful.
+- Running baselines (C-Mixup, RML, RankSim) with the same FT procedure and reporting the results would fully resolve the controlled-comparison issue.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **Criticism that Theorem 2's proof is invalid/fatal.** The harsh critic claims the proof writes two identical terms yielding a zero bound, "invalidating the stated theorem." In fact, the missing distribution subscripts on \(\mathcal{L}\) are a notational oversight — the intended quantities are \(\mathcal{L}_P\) and \(\mathcal{L}_Q\), and the theorem's bound follows correctly from the definition of discrepancy distance. The proof is sloppy but not incorrect. Moved to Minor.
-
-- **Criticism that "the leap from Theorem 1 to minimizing \(L_{std}\) is unsubstantiated."** The critic treats this as a structural flaw, but the paper's framing is explicitly heuristic: "Hence, we minimize the standard deviation of \(d_r\) to acquire a flatter proportion map" (line 129). This is reasonable motivation, not a rigorous derivation. Kept in Minor with softened framing.
-
-- **Criticism about "narrative misrepresents RML."** The critic claims the paper "slightly misrepresents" RML. This is a subjective interpretive disagreement, not a verifiable weakness. Removed.
-
-- **Criticism that RankSim/Lipschitz claim is "unsupported speculation."** The paper explicitly uses tentative language ("This characteristic might contribute...", "which supports this hypothesis" — line 225). It is not presented as proven fact. Removed.
-
-- **Criticism about "missing ablation on fine-tuning strategy."** This is moved to Nice-to-Haves as it is a desirable addition that would strengthen but not invalidate the contribution.
+- **Theorem 2 bound is invalid (from Harsh Critic).** *Removed as factually wrong.* The proof is mathematically correct: for MSE loss, L(h',h) = L(h-h',0). Since H is a subspace, h'' = h-h' ranges over all of H. Thus max_{h,h'} |L_P(h',h) - L_Q(h',h)| = max_{h''∈H} |L_P(h'',0) - L_Q(h'',0)| = (1/N) max_{h''} |||Y_P^{h''}||_F^2 - ||Y_Q^{h''}||_F^2|. The bound is valid (the ≤ direction is trivially true as equality). The critic's reading that "setting h'=0 loses generality" overlooks that H being a subspace ensures the zero hypothesis is in H and h'' covers all pairs.
+- **C-Mixup comparison not controlling for augmentation (on MPI3D).** *Partially removed.* The reviewer claims the MPI3D baseline doesn't control for C-Mixup augmentation, but the MPI3D tables explicitly compare C-Mixup as a separate baseline, and L_std/L_svd are additive on top. The comparison of Ours vs C-Mixup on MPI3D tests whether adding L_std+L_svd improves over C-Mixup alone. This is a controlled comparison.
+- **Missing appendix / proofs / references.** *Removed per parser artifact rule.* These exist in the original submission.
+- **Pure formatting nitpicks.** *Removed per rules.*
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the gap between the paper's confidently stated theoretical framing ("Clearly, \(L_{std}\) constrains the predictor \(p\) as a Lipschitz continuous function") and what is actually established (heuristic motivation plus empirical results). This suggests the paper would be stronger if it presented itself as an empirically motivated method with heuristic justification, rather than claiming rigorous theoretical grounding that does not fully hold. The most actionable insight from the reviews is that the experimental evaluation, while extensive, would benefit from tighter controls on the fine-tuning protocol across baselines and standard measures of variability.
+None beyond the paper's own contributions. The reviewer analyses largely trace known methodological concerns (controlled comparisons, theoretical rigor) rather than producing novel observations about the work.
 
 ## Suggestions
 
-1. Provide error bars / standard deviations for all metrics (three seeds is sufficient if variance is reported).
-2. Add an "FT only (MSE)" baseline under the same freeze-and-fine-tune protocol to isolate each loss's contribution.
-3. Clarify in the experimental setup which baselines received the same FT pretreatment and which were taken from published results without retraining.
-4. Show FT+\(L_{svd}\) alone on OOD tables to enable component-level attribution.
-5. Either provide a rigorous argument for the Lipschitz continuity claim or soften the language to "encourages" or "tends to produce" rather than "constrains."
-6. Fix the missing distribution subscripts in the proof of Theorem 2 and add intermediate steps to make the derivation clear.
-7. Move the t-SNE visualization discussion to the OOD section since it uses the DTI dataset, or add a note explaining why it appears under ID generalization.
+1. **Resolve Theorem 1.** Either justify invertibility (e.g., by assuming output_dim = feature_dim and full rank of W_p*), replace the inverse with a pseudoinverse and an additional rank assumption, or reframe the proportional distance as a heuristic without claiming a theorem-grounded upper bound.
+
+2. **Add controlled baselines.** Rerun C-Mixup, RML, and RankSim under the same FT strategy (freeze top, unfreeze last block) and report alongside the current numbers. Add an "FT only" column (freeze strategy with only MSE loss). If FT is the same across all methods, the improvement from L_std and L_svd becomes interpretable.
+
+3. **Clarify the theoretical link for L_svd.** Acknowledge that the connection between Theorem 2 and L_svd is inductive rather than tight: the spectral norm of features loosely upper-bounds the output norm, which in turn bounds the discrepancy. Frame L_svd as a heuristic regularizer motivated by this intuition, not as a direct corollary of Theorem 2.
+
+4. **Report variance and hyperparameter values.** Add standard deviations or confidence intervals for all tables. Report chosen α, β values per dataset.
+
+5. **Clarify the RML+FT status.** Either show the RML+FT column in Table 1 or remove the claim that it is provided.
 
 ## Score and Decision
 
-The paper tackles an under-explored problem (regression generalization) with a well-motivated combination of losses and shows promising results across multiple benchmarks. However, the experimental confounds regarding the fine-tuning protocol prevent clean attribution of the reported gains, the lack of variance reporting makes it difficult to assess significance, and the theoretical framing is overstated relative to what is established. These are addressable issues but non-trivial.
+The paper tackles an important underexplored problem (generalization in regression) with interesting ideas. However, the two major issues — a flawed theoretical theorem (invertibility assumption in Theorem 1) and confounded experimental comparisons in the main tables — substantially weaken the submission. The theoretical grounding for L_std needs correction, and without controlled baselines the empirical contributions for Tables 1 and 2 are uninterpretable. The MPI3D results are clean and provide partial support, but they alone do not fully substantiate the paper's SOTA claims across eight benchmarks. The paper requires major revisions before its contributions can be assessed.
 
-**Originality**: Good — the approach of modeling the proportion as a variable and using spectral norm alignment for regression OOD is novel.
-**Importance of research question**: High — regression generalization is relatively underexplored.
-**Claims well-supported**: Partially — the empirical evidence is suggestive but confounded by unequal baselines and missing variance.
-**Soundness of experiments**: Moderate — good breadth (8 datasets) but insufficient controls and missing ablations.
-**Clarity of writing**: Adequate — the method is described clearly, but the theoretical sections are sloppy.
-**Value to community**: Moderate — the losses are simple and could be useful building blocks for regression tasks.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

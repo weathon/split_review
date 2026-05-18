@@ -1,18 +1,22 @@
-Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
+Now I have a thorough understanding of the paper and the review inputs. Let me write my final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes Diffusion Bridge Networks (DBN), a method to approximate Deep Ensemble predictions at reduced inference cost. DBN trains a diffusion Schrödinger bridge (based on I2SB) that transports a single model's logit distribution directly to the ensemble-averaged logit distribution, then distills the multi-step diffusion into a single sampling step. On CIFAR-10, CIFAR-100, and TinyImageNet, DBN approaches or matches DE-3 performance with modest FLOPs overhead (1.166×), outperforming Bridge Network and standard ensemble distillation baselines.
+This paper proposes Diffusion Bridge Network (DBN), a method to reduce the inference cost of deep ensembles by learning a conditional diffusion process that transports the logit distribution of a single ensemble member to the logit distribution of the full ensemble. The method uses a lightweight score network (inspired by MobileNetV2), temperature annealing of the source logit to create a stochastic source distribution, and progressive distillation to reduce sampling to a single step. Evaluated on CIFAR-10, CIFAR-100, and TinyImageNet, DBN achieves accuracy and uncertainty metrics close to a 3-member deep ensemble with ~1.17× the FLOPs of a single model.
 
 ## Strengths
 
-- **Novel formulation.** DBN replaces BN's pairwise low-loss subspace curves with a single stochastic transport from one member's logit distribution to the full ensemble's logit distribution, avoiding quadratic growth in bridges. This is a principled re-framing of ensemble approximation as a conditional diffusion bridge problem (Section 3.2).
+- **Novel formulation of ensemble distillation as a conditional diffusion bridge.** The paper reframes ensemble distillation from a one-step prediction problem (as in Bridge Network) into a stochastic transport problem in logit space. This is a principled departure from prior approaches, which either predict ensemble outputs directly (losing diversity) or require quadratic numbers of pairwise bridges.
 
-- **Empirically strong efficiency vs. quality trade-off.** DBN with a single bridge achieves near-DE-3 accuracy and NLL at 1.166× relative FLOPs, whereas BN at higher cost (1.411×) struggles to reach DE-2 (Table 1, Fig. 3). On TinyImageNet, DBN even surpasses DE-3 at less than half the computation.
+- **Temperature-annealing trick to avoid trivial solutions.** The paper identifies that a deterministic source logit would allow the bridge to collapse to a copying solution. By randomly annealing the source logit via temperature sampling (Section 3.2, Eq. 5), the source becomes stochastic, forcing the diffusion process to learn a nontrivial path. This design choice is specific, well-motivated, and empirically justified.
 
-- **Effective single-step distillation.** The paper adapts progressive distillation (Salimans & Ho) to reduce the multi-step diffusion bridge to a single function evaluation, making inference cost essentially one forward pass of the source model plus one lightweight score network evaluation (Section 3.3). This directly addresses the paper's core goal.
+- **Empirical superiority over Bridge Network and distillation baselines.** On CIFAR-10, CIFAR-100, and TinyImageNet, DBN achieves accuracy and DEE close to a 3-member deep ensemble with lower FLOPs than Bridge Network, while Bridge Network saturates at DE-2 performance (Table 1, Section 4.1). On TinyImageNet, DBN even outperforms DE-3 at less than half the computation.
 
-- **Thorough multi-metric evaluation.** Beyond accuracy, the paper reports NLL, Brier Score, ECE, and DEE, giving a more complete picture of uncertainty quality than many prior works in this area.
+- **Lightweight score network and single-step inference.** The score network uses depthwise separable convolutions (MobileNetV2-style), keeping parameter count and FLOPs low (1.166× relative FLOPs vs. 1.411× for Bridge Network). Progressive distillation reduces the multi-step diffusion to a single step, making inference practically cheap.
+
+- **Scalable multi-DBN construction.** Multiple DBNs can share a single source model, so adding more bridges to handle larger ensembles incurs only the cost of the lightweight score networks (Section 3.4). The capacity study (Figure 2) shows a single DBN can effectively distill up to 3 ensemble members.
 
 ## Weaknesses
 
@@ -20,57 +24,55 @@ This paper proposes Diffusion Bridge Networks (DBN), a method to approximate Dee
 None.
 
 ### Major
-None.
+
+- **The training loss does not clearly follow from the claimed I2SB (Schrödinger bridge) framework.** The paper derives the I2SB conditional distribution in Eq. 94 as \(q(\mathbf{Z}_t \mid \mathbf{Z}_0,\mathbf{Z}_1) = \mathcal{N}(\mu_t, \Sigma_t)\) with \(\mu_t\) depending on **both** \(\mathbf{Z}_0\) and \(\mathbf{Z}_1\). However, the training loss (Eq. 15) uses \(\|\varepsilon_\phi(\mathbf{h}_1, \mathbf{Z}_t, t) - (\mathbf{Z}_t - \mathbf{Z}_0)/\sigma_t\|^2\) as the target, which depends only on \(\mathbf{Z}_0\) and not on \(\mathbf{Z}_1\). The score of the I2SB conditional distribution is \(-\!(\mathbf{Z}_t - \mu_t)/\Sigma_t\), which involves \(\mathbf{Z}_1\) through \(\mu_t\); this is **not** proportional to \((\mathbf{Z}_t - \mathbf{Z}_0)/\sigma_t\) in general. The loss target \((\mathbf{Z}_t - \mathbf{Z}_0)/\sigma_t\) would be appropriate for a simple Brownian motion forward process \(\mathbf{Z}_t \mid \mathbf{Z}_0 \sim \mathcal{N}(\mathbf{Z}_0, \sigma_t^2 \mathbf{I})\), but the paper states that \(\mathbf{Z}_t\) is sampled from the bridge distribution \(q(\mathbf{Z}_t \mid \mathbf{Z}_0,\mathbf{Z}_1)\) (Eq. 94). This inconsistency between the claimed forward process and the actual training objective is not explained. The reverse SDE in Eq. 10 is correctly derived for a Brownian motion forward process, but the paper's theoretical framing as a Schrödinger bridge (which requires coupling both endpoints) is not supported by the loss as written. **Why this matters:** This undermines the paper's central theoretical justification. The method may still work empirically, but the claim of building a diffusion Schrödinger bridge between the source and target logit distributions is not substantiated by the presented derivation. The authors should clarify the reparameterization (if one exists) or acknowledge the discrepancy.
+
+- **No error bars or statistical significance reported for any experiment.** All tables and figures present point estimates without standard deviations, confidence intervals, or multiple-seed runs. Given that the pipeline involves training ensemble members, a score network, and distillation — all with stochastic elements (random seeds, temperature sampling, diffusion noise) — the reported improvements over baselines cannot be assessed for statistical reliability. **Why this matters:** Without error bars, the reader cannot determine whether the improvements are meaningful or within the noise of a single run. This is a basic expectation for empirical comparisons.
 
 ### Minor
 
-- **Constrained BN comparison in the main table.** The paper states "we assume the situation where both BN and DBN can utilize only a single source model to make the problem difficult" (Section 4.1). This constrains BN to a configuration it was not designed for (BN typically connects pairs of models via pairwise subspaces), giving DBN a structural advantage in this comparison. The paper is transparent about the constraint, and the trade-off analysis (Fig. 3) provides a fairer multi-bridge comparison where DBN still wins — so the claim is not invalidated. However, because the abstract and introduction draw on the main table results, the headline comparison is stronger than what a fully neutral setup would show. The authors should explicitly acknowledge this asymmetry when citing the main table results, or present a version of the main table where BN uses its natural multi-bridge configuration alongside the constrained one.
+- **Poor Expected Calibration Error (ECE) is acknowledged but not analyzed.** The paper notes (Section 4.1) that "interestingly DBN also shows poor ECE scores even with high performance in the other uncertainty metrics." Since a key motivation for deep ensembles is improved calibration, this is a significant limitation. The paper offers no analysis of why the diffusion bridge produces miscalibrated outputs, whether post-hoc temperature scaling could fix it, or whether this is inherent to the method. This deserves at least a discussion or an attempted remedy.
 
-- **Missing distillation ablation.** The paper distills the 5-step diffusion bridge down to 1 step but provides no comparison with the non-distilled version (e.g., 5-step DBN). Without this ablation, the reader cannot assess how much approximation quality is sacrificed for speed, nor whether the diffusion process itself contributes meaningfully beyond the distillation trick (Section 3.3). A simple table or curve showing accuracy/NLL/ECE for non-distilled vs. distilled DBN would resolve this.
+- **No validation of distillation quality.** The paper trains the diffusion bridge with 5 steps but reports only the distilled single-step results. There is no ablation comparing the 5-step (pre-distillation) performance against the 1-step (post-distillation) performance on any metric. **Why this matters:** Without this comparison, the reader cannot assess how much performance the distillation step sacrifices relative to the full multi-step process. The claim that distillation "retains" performance is not quantitatively supported.
 
-- **Poor ECE noted but not analyzed.** The paper reports that "interestingly DBN also shows poor ECE scores even with high performance in the other uncertainty metrics" (Section 4.1). For a method that claims to preserve ensemble uncertainty benefits, systematically poor calibration is a significant limitation. The paper offers no analysis (overconfidence vs. underconfidence, reliability diagrams, or even post-hoc temperature scaling experiments) to explain or mitigate this. This gap weakens the uncertainty quantification claims.
+- **Temperature distribution \(p_{\text{temp}}\) is underspecified.** The paper defines \(\mathbf{Z}_1 = \mathbf{z}_1/T\) with \(T \sim p_{\text{temp}}\) (Section 3.2) and states this distribution is crucial for avoiding trivial solutions, but does not specify its form (uniform, log-uniform, Gaussian? what hyperparameters?) in the main text. Details are relegated to the appendix, which is stripped from the review version. **Why this matters:** The sensitivity of results to this distributional choice is unknown, and reproducibility requires this information front and center.
 
-- **Unspecified $p_\text{temp}$ distribution.** The temperature-sampling distribution $p_\text{temp}$ is introduced as a critical design choice that makes the source stochastic and avoids trivial solutions (Section 3.2, Eq. 5). However, its exact form (e.g., uniform over which interval?) is never specified in the main text. This harms reproducibility and the paper would benefit from stating the distribution and showing sensitivity.
-
-- **Underspecified "more refined version of END2."** The paper states it uses "a more refined version of END2" but provides no citation or description distinguishing this version from the original END2 (Section 4.1, Baseline methods). This makes the baseline comparison unreproducible.
+- **No comparison of DBN's training cost.** The paper focuses heavily on inference FLOPs but does not report training GPU-hours or comparable cost for the diffusion bridge training relative to Bridge Network or ensemble distillation. The conclusion acknowledges that "multiple diffusion bridges leads to a proportional training time," but a quantitative comparison is missing. **Why this matters:** A practitioner choosing between DBN and BN needs to know the training cost tradeoff, not just inference.
 
 ### Trivial
-
-- The capacity analysis (Fig. 2, right) shows DEE saturates at ~2.5 for a single DBN, meaning it never perfectly replicates DE-3. The paper honestly reports this ("slightly less than three ensembles"), but this honest limitation should also appear in the conclusion abstract discussion, not just the capacity section.
+None.
 
 ## Nice-to-Haves
 
-- A comparison of total training overhead (GPU-hours or FLOPs) for DBN vs. BN, since the paper focuses entirely on inference cost but DBN requires training a score network and distillation for each bridge.
-- Statistical significance measures (e.g., multiple random seeds with confidence intervals) for the main metrics, especially ECE and NLL where single-run results can be noisy.
-- A limitations section that explicitly discusses the poor ECE and the need to know the exact ensemble composition at train time (the bridge is trained for a specific set of members).
+- A table or plot showing how performance scales with the number of DBN bridges \(L = 1, 2, 3\) on the same dataset (accuracy, FLOPs, ECE) would strengthen practical guidance.
+- An ablation on the temperature distribution (e.g., fixed temperature vs. uniform vs. log-uniform) would validate the claim that temperature randomization is essential.
+- Explaining why ECE degrades relative to the ensemble — is it the temperature sampling, the single-step distillation, or the score network capacity? A diagnostic experiment would be informative.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-1. **"Insufficient justification of diffusion bridge formulation / I2SB assumptions not satisfied"** — REMOVED as factually incorrect. The reviewer claimed the I2SB Gaussian posterior (Eq. 4) might not hold for the paper's choice of boundary distributions. However, I2SB's tractability requires $p_0 = \delta_a$ (a Dirac delta), which holds in the paper because the target $Z_0$ is deterministic given the input and ensemble. The Gaussian posterior $q(Z_t|Z_0, Z_1)$ is a standard Brownian bridge property independent of the marginal distribution of $Z_1$ (which can be any distribution). The paper correctly explains why temperature sampling is needed to make $Z_1$ distributional (avoiding trivial solutions and satisfying the conditional distribution requirement).
-
-2. **"I2SB section is dense and assumes prior knowledge"** — REMOVED as a generic presentation nitpick. The section provides a self-contained derivation with equations; background knowledge commensurate with the venue is reasonable.
-
-3. **"Method never perfectly replicates DE-3"** — MOVED to Trivial. This is true but the paper is transparent about it. The reviewer even calls this "honesty."
-
-4. **Various formatting/style nitpicks** from the section-by-section notes — REMOVED per hard rules.
+- **Criticism that the loss never involves \(\mathbf{Z}_1\):** While the loss target \((\mathbf{Z}_t - \mathbf{Z}_0)/\sigma_t\) does not explicitly involve \(\mathbf{Z}_1\), the score network \(\varepsilon_\phi\) does take \(\mathbf{h}_1\) as input, which encodes logit-level information about the source model (and thus \(\mathbf{Z}_1\) indirectly). The concern is retained (in Major) but the framing is adjusted: the issue is the *mathematical inconsistency* between the claimed forward process and the loss target, not that \(\mathbf{Z}_1\) is "never used."
+- **"Bridge Network's training cost is not trivially lower":** This is a valid observation but belongs in Nice-to-Haves rather than a weakness — the paper's focus is inference cost.
+- **Figure/table references that are missing in the parsed version:** These are parser artifacts, not author errors.
+- **"The paper should also discuss low-loss subspace cost in more depth":** Scope-creep; the paper explicitly argues its approach avoids this cost.
+- **Missing algorithm reference:** The parsing stripped `\input{algorithm/dbn}`; this is a parser artifact.
 
 ## Novel Insights
 
-The harsh critic identifies a genuinely important structural point: the paper's central comparison in Table 1 constrains BN to a single-source-model configuration that BN was never designed for. This is a real presentation weakness — the paper's headline claim is based on a comparison that advantages DBN by design. However, the critic overstates the severity: the paper is transparent about the constraint, and the trade-off analysis (Fig. 3) allows BN its natural multi-bridge configuration and still shows DBN winning. The critic's specific demand — "run BN in its standard multi-bridge configuration for 3 ensembles" — would be a constructive addition but does not invalidate the paper's contribution, since the trade-off analysis already shows DBN's advantage holds under fair comparison. The critic's other major claim (the I2SB theoretical grounding is insufficient) is simply wrong about what I2SB's tractability requires. The strength finder correctly identifies the paper's core innovations but is too generous in treating the I2SB foundation as "principled" without noting the gap in specifying $p_\text{temp}$.
+None beyond the paper's own contributions. The reviews do not surface a truly novel perspective on the work that was not already present in the paper itself.
 
 ## Suggestions
 
-1. Add a distillation ablation table showing non-distilled (5-step) vs. distilled (1-step) DBN on at least one dataset.
-2. Specify $p_\text{temp}$ explicitly and include a sensitivity analysis.
-3. Add a brief analysis of the poor ECE: produce a reliability diagram, test post-hoc temperature scaling, and discuss whether the issue is inherent to the diffusion process or fixable.
-4. Either add a version of the main table with BN in its multi-bridge configuration or explicitly caveat the single-source comparison when citing these results in the abstract/intro.
-5. Provide a citation or description for the "more refined version of END2" used.
+1. **Clarify the loss derivation.** Provide a step-by-step derivation showing how \(\|\varepsilon_\phi - (\mathbf{Z}_t - \mathbf{Z}_0)/\sigma_t\|^2\) follows from the I2SB framework given the conditional distribution \(q(\mathbf{Z}_t \mid \mathbf{Z}_0, \mathbf{Z}_1)\) in Eq. 94. If a different reparameterization or approximation is used, state it explicitly. If the forward process is actually a simple Brownian motion (not the I2SB bridge), revise the Background section to match and temper the Schrödinger bridge claims accordingly.
+
+2. **Add error bars.** Report means and standard deviations over at least 3 independent runs of the full pipeline for all main metrics (ACC, NLL, BS, ECE, DEE) on at least one dataset.
+
+3. **Analyze the ECE gap.** Apply temperature scaling to DBN outputs and report the resulting ECE. If this does not fix the issue, provide a plausible explanation or acknowledge it as a limitation.
+
+4. **Report pre-distillation vs. post-distillation metrics.** Show a table comparing 5-step DBN (before distillation) vs. 1-step DBN (after distillation) on all metrics to validate that distillation does not significantly degrade performance.
+
+5. **Specify \(p_{\text{temp}}\) in the main paper.** At minimum, state whether it is uniform, log-uniform, or Gaussian, and provide its support or parameters.
 
 ## Score and Decision
 
-The paper proposes a genuinely novel application of diffusion bridges to ensemble approximation, with solid empirical results and efficient distillation. The core claims are supported. The main weaknesses — incomplete specification of $p_\text{temp}$, missing distillation ablation, unanalyzed poor ECE, and the constrained BN comparison — are all addressable in a revision and do not undermine the paper's overall contribution. Minor weaknesses outweigh the strengths only if one considers the constrained BN comparison fatal, which it is not (the paper is transparent, and the trade-off analysis validates the result under fairer conditions).
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

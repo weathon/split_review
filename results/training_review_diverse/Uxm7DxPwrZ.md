@@ -1,18 +1,20 @@
-Now I have all the information I need. Let me synthesize the final review.
+I now have a thorough understanding of the paper and the validity of each reviewer claim. Let me produce the consolidated review.
 
 ## Summary
 
-QPHIL proposes a hierarchical offline goal-conditioned RL method that learns a discrete, temporally consistent landmark space via VQ-VAE with a contrastive loss, generates landmark sequences with a transformer planner, and executes them with landmark-conditioned low-level policies. The core idea is that planning over discrete tokens (landmarks) rather than continuous subgoals improves the signal-to-noise ratio that degrades value-based hierarchical methods in long-horizon tasks.
+QPHIL introduces a hierarchical offline goal-conditioned RL method that discretizes the continuous state space into learned landmarks via a temporally-regularized VQ-VAE. The approach replaces continuous subgoal generation with discrete landmark token prediction using a transformer-based planner, followed by low-level IQL policies that navigate between landmarks to reach the final goal. The paper demonstrates strong empirical results on AntMaze benchmarks, particularly on the largest Ultra and newly introduced Extreme variants, and introduces a token-level trajectory stitching data augmentation technique.
 
 ## Strengths
 
-- **Strong empirical results on long-horizon navigation benchmarks.** QPHIL achieves 70% success on AntMaze-Ultra (beating HIQL's 60% by 10 points with lower std) and up to 50% on the newly introduced AntMaze-Extreme (more than double HIQL's ~22%). The performance gap grows with task horizon, which directly supports the paper's thesis that discrete planning mitigates signal-to-noise degradation in long-range tasks.
+- **State-of-the-art long-range navigation performance**: On AntMaze-Ultra (diverse), QPHIL with augmentation achieves 69.3% success rate, substantially outperforming HIQL (the prior SOTA, at 61.5% w/o repr. / 55.6% w/ repr.). On AntMaze-Extreme, QPHIL reaches 49.6% (diverse) vs. HIQL's 21.9% (Figure 6), more than doubling the prior best. These results directly validate the paper's central claim that discrete-space planning improves long-range navigation.
 
-- **Well-motivated and coherent method design.** The paper articulates a clear chain of reasoning: (1) continuous subgoal prediction suffers from noise in long-horizon settings, (2) discretizing the state space into landmarks raises the signal-to-noise ratio, (3) planning over discrete tokens enables explicit trajectory stitching through data augmentation, and (4) a contrastive loss ensures temporal consistency of the learned landmarks. Each component is grounded in a specific failure mode of prior work.
+- **Explicit token-level trajectory stitching**: The data augmentation technique (Section 4.3) cuts and recombines trajectories at shared landmark tokens, enabling the high-level planner to learn transitions not explicitly present in the original dataset. The ablation shows it improves performance by 6.8% on Ultra-Diverse and 5.5% on Extreme-Diverse (Table 1). This provides a concrete mechanism for stitching without relying on noisy value-function estimates.
 
-- **Token-level data augmentation for trajectory stitching is a practical contribution.** The observation that quantized trajectories sharing landmark subsequences can be mixed to augment sparse data is elegant and leverages the discrete representation in a way continuous methods cannot easily replicate.
+- **Temporally-regularized VQ-VAE for state quantization**: The contrastive loss regularizer (Section 4.2) incentivizes temporally close states to share tokens and distant states to receive different tokens. This produces tokenizations that align with environmental structure (e.g., walls, Figure 5) and yields smoother token distributions (Figure 7), improving on prior VQ-VAE uses in RL that lacked such temporal regularization.
 
-- **Robustness to diverse start/goal initializations.** On Random-AntMaze-Ultra and -Extreme, QPHIL outperforms HIQL by up to 20 percentage points (Table 2), demonstrating that the learned discrete representation generalizes across varied landmark-conditioning scenarios.
+- **Robust generalization under diverse initialization**: On Random-AntMaze variants (50 different start-goal pairs), QPHIL (w/ aug) achieves 64.0% on Ultra (diverse) vs. 44.0% for HIQL, and 49.6% on Extreme (diverse) vs. 30.4% for HIQL (Table 2). This demonstrates the method is not overfitted to fixed start-goal evaluation protocols.
+
+- **New challenging benchmark**: AntMaze-Extreme and the Random-AntMaze evaluation protocol provide more rigorous testbeds for long-distance navigation, and the paper releases code and pretrained models for reproducibility.
 
 ## Weaknesses
 
@@ -20,59 +22,44 @@ QPHIL proposes a hierarchical offline goal-conditioned RL method that learns a d
 None.
 
 ### Major
-
-- **Key design components (contrastive loss and data augmentation stitching) are not ablated on task success rate.** The contrastive loss is analyzed only through proxy metrics — token-distance histograms (Figure 7) — with the claim that it "increases the performance of our model" but no direct success-rate comparison with/without it. The data augmentation stitching is listed as "w/aug." vs. "w/o aug." in Table 1, but the paper does not discuss these results or confirm that augmentation consistently helps. Without success-rate ablations, it is difficult to attribute QPHIL's performance gains to its claimed contributions.
-
-- **Methodological details essential for reproducibility are omitted.** The paper does not report key hyperparameters: VQ-VAE codebook size $k$, latent dimension $d$, transformer depth/heads, IQL expectiles $\tau$ and $\beta$, or loss weights $\alpha_\text{recon}, \alpha_\text{commit}, \alpha_\text{contrastive}$. The representation of the landmark token $\omega$ fed to $\pi^\text{landmark}$ is not specified (codebook embedding vs. one-hot). The contrastive loss notation ($k' \sim \mathbb{Z} \setminus [-\delta, \delta]$) is ambiguous for boundary states. While code is promised, the paper should be self-contained for a reader to understand the method without executing it.
+- **Unverified assumption underlying trajectory stitching data augmentation (Section 4.3).** The augmentation assumes "it is easy for our low-level policy π^{landmark} to reach, from any state s ∈ S, any state s′ such that ϕ(s′) = ϕ(s)" — i.e., that the low-level policy achieves near-perfect reachability within each landmark zone. The paper provides no direct validation of this claim: no reachability analysis, no quantification of low-level policy success rates within zones, and no discussion of how landmark size or shape affects this assumption. If the assumption fails (e.g., for large or irregular landmarks in a stochastic environment), stitched trajectories could encode transitions that do not actually exist, potentially misleading the planner. This matters because the augmentation contributes meaningfully to performance (e.g., 46.2% → 70.0% on Ultra-Play). While the empirical w/ aug vs. w/o aug comparison demonstrates that the augmentation helps in practice, the paper should validate the underlying reachability assumption to ensure the method is robust, particularly for environments where landmarks may be large or irregularly shaped.
 
 ### Minor
+- **Contrastive loss ablation is performed on token statistics, not on task success.** Section 5.4 and Figure 7 show that the contrastive loss produces a "smoother repartition" of tokens via inter-token distance histograms. The paper describes the contrastive loss as "essential" and "of crucial importance," and claims it "increases the performance of our model," but never directly ablates it on the final success-rate metric. Without a quantitative comparison on the downstream navigation task (e.g., on Ultra or Extreme), it is unclear whether the smoother token distribution translates into measurably better goal-reaching, or whether the effect is mainly cosmetic.
 
-- **Limited baseline comparison on the new AntMaze-Extreme environment.** For AntMaze-Extreme (the paper's most challenging setting), only HIQL is compared. The claim "outperforming all tested benchmarks" rests on a single comparison. Since this is a novel environment introduced by the authors, the lack of data for other competitive methods (TT, TAP, G-ADT, PT) weakens the evidence that QPHIL's advantage generalizes to all long-horizon settings. (For AntMaze-Ultra, the paper text states that all baselines are evaluated on Medium/Large/Ultra — so the reviewer's claim of missing baselines on Ultra is contradicted by the paper's own description.)
+- **HIPS (Kujanpää et al., 2023) is discussed in related work but not included as a baseline.** The paper already includes 8 baselines across multiple categories (GCBC, HGCBC, GCIQL, GC-POR, HIQL, TT, TAP, G-ADT, PT), which is comprehensive. However, HIPS is mentioned as a related method that uses VQ-VAE for discrete subgoal generation, making it a natural reference point. The paper should either include it or explicitly state why it was omitted. *(Note: HIPS-ε is explicitly noted as requiring a discrete state space (Section 2, line 31), so its exclusion from the continuous AntMaze domain is justified.)*
 
-- **No statistical significance tests.** Standard deviations are reported for 8 seeds, but several are wide (e.g., HIQL on Ultra play: $48\pm19$), and the paper does not quantify whether performance gaps are statistically significant. This is especially relevant for the smaller margins on Medium/Large mazes.
+- **IQL hyperparameters for low-level policies not specified in main text.** The paper trains π^{landmark} and π^{goal} using IQL but does not report the IQL temperature or expectile values in the main text. These are likely in the stripped appendix, but including them in the main text or a reproducibility table would aid verification.
 
-- **The low-level policy boundary-conditioning issue is not discussed.** The $\text{next}(\tau, t)$ relabeling makes $\pi^\text{landmark}$ chase the first state whose token differs from the current token. Near landmark boundaries, this could cause oscillatory behavior ("flickering") as the agent repeatedly re-crosses boundaries. The paper does not discuss this potential instability or any mitigation.
+- **The planner is trained via behavioral cloning (teacher forcing), not an RL objective.** The paper acknowledges this and notes that RL fine-tuning could be a complement (Section 4.3). This is a design choice rather than a flaw, but calling the transformer a "high-level policy" while training it purely via imitation is somewhat imprecise — it is a sequence model trained to reproduce patterns in the data rather than to optimize value. Clarifying this framing would improve precision.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
-
-- A brief analysis of when the planner generates infeasible landmark sequences (e.g., sequences that the low-level policy cannot follow) would strengthen the claim that discrete planning is robust.
-- A comparison of training/inference compute cost vs. HIQL would help practitioners.
-- A small study with token-level replanning (the paper notes the open-loop version is used) could show whether closed-loop planning further improves robustness.
+- A direct ablation of the contrastive loss on final success rate (at least on one large maze, e.g., Ultra-Play or Extreme-Diverse) would cleanly separate whether the smoother token distribution actually matters for navigation performance.
+- A reachability analysis for the stitching assumption: sample pairs of states within each landmark region and measure how often π^{landmark} succeeds. If success is high (>95%), the assumption is validated.
+- Providing a concise summary of tokenizer hyperparameters (number of tokens k, latent dimension d, contrastive loss window δ, loss weights) in a main-text table rather than solely in the appendix.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution.
-
-- **"Missing baselines on AntMaze-Ultra" (Harsh Critic's Issue 1, part 1):** The reviewer claims TT, TAP, G-ADT, PT are only on Medium/Large and not on Ultra. The paper text explicitly states: "We first analyze the performance in success rate of the different baselines on the state-based AntMaze-{Medium, Large, Ultra} settings" and claims QPHIL "outperforms all other methods on the larger maps." While the table image cannot be read, the text directly contradicts this criticism. The Extreme criticism is retained (as Minor) since only HIQL is explicitly cited there.
-
-- **"Strawman about the discussion of stitching not being compared to other explicit stitching methods" (Section-by-Section Notes):** The paper's contribution is its own stitching mechanism; demanding comparison to all possible other stitching methods is scope creep.
-
-- **"Missing appendix/proofs/references" complaint:** The parser strips these from all papers; they exist in the original submission.
-
-- **"Table formatting is degraded by the parser" complaint:** This is a parser artifact, not an author error.
-
-- **Strength Finder overclaim on contrastive loss ("critical for producing spatially coherent landmarks that improve downstream performance"):** The evidence links the contrastive loss only to smoother token distributions (Figure 7), not directly to downstream success rate. This is not a pure strength — it's a claimed contribution with incomplete evidence, which is already captured as a weakness above.
-
-- **"Reproducibility statement says code provided, which is good" (from Strength Finder):** The existence of a code release is standard practice and does not excuse missing hyperparameters in the paper itself.
+- **Criticism about HIPS-ε and G-ADT not being in baselines.** This is factually incorrect. The paper explicitly lists G-ADT as a baseline (Section 5.1, line 169). HIPS-ε is described as "only usable with a discrete state space" (Section 2, line 31), which AntMaze is not — its exclusion is therefore justified and the reviewer's concern reflects a misreading.
+- **Concern that G-ADT results "may not appear in the main table."** The table is an image (not machine-readable from the text), so there is no basis for this speculation. The paper states G-ADT is among the 8 baseline methods, and the table caption describes results for all baselines.
+- **Weakness about missing appendix content, missing proofs, missing references.** The parser strips appendix sections; these exist in the original submission.
+- **Formatting/typographical nitpicks.** These are parser artifacts, not author errors.
+- **"The paper should also cover Y / domain Z" style scope-creep demands.** The paper is focused on offline GCRL for navigation and does not claim generality beyond that scope.
 
 ## Novel Insights
-
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The reviews do not surface a perspective on QPHIL's approach that the paper itself does not already articulate.
 
 ## Suggestions
-
-1. **Add success-rate ablations** for both the contrastive loss and the data augmentation stitching on AntMaze-Large and Ultra. This is the single most impactful change — it directly validates the claimed contributions.
-2. **Add a hyperparameter table** covering codebook size $k$, latent dimension $d$, transformer architecture, IQL expectiles, and loss weights. Even with code release, the paper should be self-contained.
-3. **Run TT, TAP, G-ADT, and PT on AntMaze-Extreme** (or clearly scope the Extreme results as preliminary, noting that only HIQL was re-run on this new environment).
-4. **Clarify how the landmark token $\omega$ conditions $\pi^\text{landmark}$** (codebook embedding or one-hot) and clean up the contrastive loss notation.
-5. **Discuss the potential flickering issue** near landmark boundaries and any mitigation used (or explain why it empirically does not occur).
+1. **Validate the stitching assumption directly.** Run an experiment: within each landmark zone, sample pairs of states and measure π^{landmark} success rates. If high across all zones, include the result to support the assumption. If not, either modify the augmentation (e.g., add a state-level proximity constraint at the concatenation point) or remove the claim about "accurate trajectory stitching."
+2. **Ablate the contrastive loss on final success rate.** Run QPHIL w/ and w/o contrastive loss on at least one large maze and report the success rates. This directly tests whether the loss matters for navigation or only for token distribution quality.
+3. **Add a note explaining why HIPS is not in the baseline comparison** (or include it if feasible, given shared experimental settings).
+4. **Add a reproducibility table** in the main text listing the key hyperparameters for each component (VQ-VAE: k, d, δ, α coefficients; IQL: τ, β; transformer: layers, heads).
 
 ## Score and Decision
 
-The paper proposes a well-motivated method with strong results on long-horizon navigation tasks. However, the central contributions (contrastive loss and data augmentation stitching) lack direct success-rate ablation, key implementation details are omitted, and the strongest claim ("outperforming all tested benchmarks") on the new Extreme environment rests on a single baseline comparison. These are significant but addressable gaps. The paper represents a solid contribution that would benefit from one round of strengthening.
+This paper introduces a well-motivated approach with strong empirical results on challenging benchmarks. The core idea — discretizing the state space into learned landmarks with temporal regularization and planning token sequences via a transformer — is novel and clearly beneficial for long-range navigation. The main weaknesses are (a) an unverified assumption underlying the stitching augmentation, and (b) a missing quantitative ablation for the contrastive loss. Both are addressable and do not invalidate the paper's core contribution. The method is well-grounded in existing literature, the experiments are thorough (including the new AntMaze-Extreme benchmark and Random-AntMaze protocol), and the results are substantively better than prior work on the largest environments.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

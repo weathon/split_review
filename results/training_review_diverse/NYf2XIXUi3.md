@@ -1,126 +1,81 @@
-Now I have all the information I need. Let me compose my final review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ## Summary
-2-3 sentence summary of the paper's contribution.
+
+This paper introduces TLXML, a method that extends influence functions to meta-learning by measuring how each meta-training task affects meta-parameters, adapted weights, and inference loss. The key contributions are: (1) a formal derivation of influence functions for the bi-level meta-learning setting, (2) a Gauss-Newton approximation reducing Hessian computation costs, and (3) a pseudo-inverse treatment for non-invertible Hessians. The experiments validate TLXML on task distinction and task distribution distinction using MAML and Prototypical Networks on MiniImagenet.
 
 ## Strengths
-- strength 1 with evidence
-- strength 2 with evidence
+
+- **Novel theoretical extension of influence functions to meta-learning**: The paper provides the first formal derivation (Equations 4–7) extending influence functions from standard supervised learning (Koh & Liang, 2017) to the bi-level optimization structure of meta-learning, where training tasks influence both meta-parameters and adapted weights. This is a genuine gap in the XAI literature, and the derivation is sound.
+
+- **Gauss-Newton approximation adapted for meta-learning complexity**: The paper identifies that exact Hessian computation in meta-learning costs *O(p q²)* and derives an approximation using the Gauss-Newton matrix (Equations 10–11) reducing this to *O(p q)*, making the approach more scalable. The adaptation of this approximation to meta-parameters (rather than model weights) is non-trivial and correctly reasoned.
+
+- **Pseudo-inverse handling of flat Hessian directions**: Section 4.3 extends influence functions to handle the common case of singular Hessians in over-parameterized networks, using a projection onto non-flat directions via the pseudo-inverse (Equation 12). The proposed computation approach using orthogonalization of *VᵀV* is practical.
+
+- **Empirical demonstration of distribution-level distinction**: Table 2 (as described in the text) shows that TLXML can statistically significantly distinguish regular from noise training tasks under various generalization conditions, with reported binomial test p-values, supporting the claim that the method captures meaningful distribution-level information.
 
 ## Weaknesses
 
 ### Fatal
-### Major
-### Minor
-### Trivial
-
-## Nice-to-Haves
-
-## Removed Points
-
-## Novel Insights
-
-## Suggestions
-
-## Score and Decision
-
-Let me now write the consolidated review.
-
-**Re: Claim about "no qualitative analysis" (Harsh Critic point 5):** The paper DOES have qualitative analysis on lines 222-223 and 239-240 (Figure 6 and text). So the claim that there is "no qualitative analysis" is inaccurate. However, the lack of a user study or any formal interpretability evaluation is a valid concern. I'll downgrade this.
-
-**Re: Rule about "missing appendix":** The reviewer mentions derivations being "sketched" - this is about presentation quality, not about missing content. Keep as minor issue.
-
-**Re: Claim about "does not release code":** The paper doesn't cite a code repository, and the rule says to remove criticisms about availability of cited entities. This is about noticing absence. I'll move this to a Nice-to-Have, as the method paper would benefit from code release but it's not a weakness of scientific content per se.
-
-**Re: "no discussion of the sign of influence scores":** The paper uses sign implicitly in Section 5.2 (proper vs. opposite order) but never explicitly discusses what a negative influence means. This is a valid minor point.
-
-Let me finalize the score. Given: 
-- Novel theoretical contribution (influence functions for meta-learning) ✓
-- Clear derivations ✓
-- Significant experimental gaps (1 meta-learner instead of 2, no baselines, approximation not validated, limited scope)
-- Overclaiming in abstract/conclusion
-
-I'd say score 5.0 - borderline. The core idea is solid but the evidence is substantially weaker than claimed.
-
-Wait, let me think about this more carefully. The paper claims to demonstrate with "MAML and Prototypical Network" but only uses MAML. This is a clear overclaim. The paper claims TLXML "effectively serves as a similarity measure" but has no baselines to compare against. The paper proposes a Gauss-Newton approximation but doesn't validate it.
-
-These are significant gaps. In many conferences, this would be a weak reject (score ~4-5). But the theoretical contribution is genuinely novel and well-derived. The experiments, while limited, do show some validation.
-
-I'll go with 5.0 - borderline, with the note that the paper could be strengthened significantly.## Summary
-
-This paper proposes TLXML (Task-Level eXplanation of Meta-Learning), a method that extends influence functions to meta-learning to quantify how each training task influences meta-parameters, adapted weights, and inference outcomes of a meta-trained model. The authors derive task-level influence formulas (Eq. 4-7), propose a Gauss-Newton approximation to reduce Hessian computational costs from O(p q²) to O(p q), and handle non-invertible Hessians via pseudo-inverse projection. Experiments on MiniImagenet with MAML validate the approach in task-distinction and task-distribution-distinction settings.
-
-## Strengths
-
-- **Novel formal extension of influence functions to meta-learning's bi-level structure.** The paper derives task-level influence functions (Eq. 4–7) that respect the outer/inner loop separation, going beyond point-wise or meta-feature explanations. This is a principled adaptation of influence functions (Koh & Liang, 2017) to the meta-learning setting, which has been unexplored (Section 4.1).
-
-- **Computational feasibility via Gauss-Newton approximation.** The paper identifies that exact Hessian computation costs O(p q²) and proposes a Gauss-Newton matrix approximation that reduces this to O(p q), making the method potentially scalable to larger models (Section 4.2).
-
-- **Handling non-invertible Hessian with pseudo-inverse projection.** The paper addresses the practical reality that Hessians in overparameterized networks have flat directions by using the pseudo-inverse H⁺ to project influence onto the non-flat subspace. The need for this is empirically demonstrated by the observation that 92 of 1285 Hessian eigenvalues are negative (Section 5.1).
-
-- **Empirical validation of task-distribution distinction with statistical significance.** In Section 5.2, TLXML distinguishes regular MiniImagenet tasks from noise tasks with p-values < 0.01 under task augmentation and weight decay. The alignment of influence scores with generalization behavior (proper order under augmentation, opposite order under overfitting) provides a meaningful signal that the method captures distribution-level information (Table 2).
-
-- **Task-group extension for improved abstraction.** The paper generalizes influence to groups of tasks (Eq. 9), enabling explanations at coarser granularity (e.g., groups from task augmentation). This is a practical enhancement for user-facing explanations (Section 4.1).
-
-- **Qualitative interpretability demonstration.** Figure 6 shows semantically meaningful alignment between highly-influential training tasks and the test task, with accompanying text analysis (Section 6, lines 239-240).
-
-## Weaknesses
+None.
 
 ### Major
 
-- **Abstract and conclusion overclaim the experimental scope: only MAML is tested, not Prototypical Network.** The abstract states the method is demonstrated "with MAML and Prototypical Network," and the discussion (line 222) claims "experiments with a small network and two meta-learners." However, the experimental setup (line 193) clearly states "We use MAML as a meta-learning algorithm." Prototypical Network is described in the preliminaries but never appears in any experiment. This is a direct mismatch between the paper's advertised scope and its evidence, and a reader cannot assess whether the approach generalizes to other meta-learners.
+**1. No baseline comparisons against simpler alternatives.**
+The experiments test whether TLXML satisfies certain assumed properties of influence measures (e.g., similar tasks yield high influence), but no alternative measure is compared — not even simple baselines like cosine similarity between task gradients, average gradient similarity, or random scoring. Without this, the reader cannot tell whether TLXML's behavior (e.g., distinguishing regular from noise tasks) is meaningful or could arise from trivial confounds (e.g., number of images per class, gradient magnitude differences). The self-rank experiment (Property 1) reports only two example plots with no quantitative summary (mean/median rank, comparison to random baseline), making it impossible to assess reliability. This limits the paper's ability to demonstrate that TLXML adds value beyond what simpler approaches could provide.
 
-- **No baseline comparisons.** The experiments test whether TLXML influence scores correlate with expected properties but compare against no competing explanation method (random ranking, cosine similarity of gradients, or any alternative). Without baselines, the paper cannot support the claim that TLXML provides *useful* or *better* explanations — only that its scores are not random. Section 5.1 and 5.2 both lack even trivial competitors.
+**2. Computational efficiency claim is unsubstantiated by any measurements.**
+The paper asserts that the Gauss-Newton approximation reduces complexity from *O(p q²)* to *O(p q)* but provides zero runtime or memory measurements — not even for the small 1285-parameter network where exact computation is tractable. The pseudo-inverse computation procedure described (Section 4.3) involves diagonalizing *VᵀV* of size up to *p × cnM*, and the claim that "the number of independent columns is expected to be small" is not empirically verified (e.g., by reporting the rank of *H* or *VVᵀ*). For a claimed "computation optimization" as a core contribution, the evidence is entirely theoretical.
 
-- **Gauss-Newton approximation is not empirically validated.** The approximation (Eq. 11) is used in all CNN experiments (Section 5.2), but the paper provides no comparison of approximated vs. exact influence scores (even on the small two-layer network where the exact Hessian is tractable). There are no runtime measurements, no rank-correlation comparison, and the key conditions (existence of P̄(X|ω*), closeness of ω̂ to ω*) are stated but never checked. The experimental results in Section 5.2 therefore rest on an unvalidated numerical method.
+**3. Exact optimality assumption vs. SGD training gap not examined.**
+Equations 4, 6, 7, and 9 are derived under the assumption that ẑ minimizes the meta-training loss, but training uses SGD which does not guarantee convergence to a minimum. The paper acknowledges this limitation in Section 6, yet offers no sensitivity analysis — e.g., comparing influence scores at different training checkpoints, or examining how early stopping affects reliability. The mixed results for Property 1 (self-rank not always first) and the ambiguity around Table 2 (see below) suggest this gap may matter in practice.
 
 ### Minor
 
-- **The task-distinction experiment (Section 5.1) is a limited sanity check.** It uses a two-layer fully-connected network with Bag-of-Visual-Words features (1285 parameters) — far from modern meta-learning practice. Test tasks are identical to training tasks (an easy self-similarity check). More concerningly, Figure 3b shows that the self-rank is not always 1; the paper attributes this to non-convexity and negative Hessian eigenvalues (92 out of 1285) but does not investigate whether this instability correlates with test loss or model confidence.
+**4. Table 2 textual interpretation may be inconsistent with its data.**
+The text in Section 5.2 states: "when the model fits well to the training tasks, the scores of regular and noise tasks are in the opposite of proper order" and "as we enhance the model's generalization…the scores align in the proper order." The specific counts in Table 2 are embedded in an image and cannot be independently verified from the parsed text. The paper's narrative is internally coherent, but this central quantitative result would benefit from clarification — particularly whether the basic (no regularization) setting indeed shows few tests in proper order (as the text claims) or many (as the reviewer asserts). The authors should ensure the text and table tell the same story.
 
-- **The interpretability/evaluate claim is asserted but not rigorously tested.** The paper emphasizes that TLXML provides "concise, task-based explanations that align with users' abstraction levels" and are "more intuitive than local explanations," but there is no user study and no formal comparison against local explanation methods on interpretability criteria. The qualitative analysis in Figure 6 is present but shallow.
+**5. Self-rank experiment lacks quantitative rigor.**
+Section 5.1 (Property 1) reports that the identical training task is "not ranked first" in some cases but "generally rank[s] high" — supported only by two example plots (Figure 3). No mean/median self-rank, no distribution statistics, no comparison to random baselines. For a property the paper calls "fundamental," this is insufficient quantification.
 
-- **No discussion of the sign of influence scores.** Section 5.2 implicitly uses the sign of influence (proper order vs. opposite order), but the paper never defines what a negative influence on performance means or how to interpret it.
-
-- **No runtime or memory measurements.** The paper claims O(p q) cost after optimization but never reports actual compute times or memory usage, leaving the computational contribution entirely theoretical.
+**6. The p vs. q relationship is unclear.**
+The paper states the exact cost as *O(p q²)* without clarifying that for MAML and Prototypical Networks, meta-parameters *ω* are the model weights, so *p* = *q*, and the cost is actually *O(p³)*. The paper would be more transparent by stating when *q* < *p* can occur (e.g., when only part of the network is meta-learned) and providing concrete examples where the reduction is significant.
 
 ### Trivial
-
-- The conditions for the Gauss-Newton approximation (line 162: "if there exists a distribution P̄(X|ω*) that is well approximated by the training taskset, and ω̂ is close to ω*") are stated without ever being checked or discussed again.
-
-- Section 5.2 interprets "proper order" vs. "opposite order" as overfitting vs. generalization, but does not independently verify model behavior (e.g., by reporting train/test accuracy or task-level losses) to confirm this interpretation.
+None.
 
 ## Nice-to-Haves
 
-- **Prototypical Network experiment**: Adding even a small-scale experiment with Prototypical Network would satisfy the advertised claim and give confidence in generalizability.
-- **Code release**: Publishing the implementation would aid reproducibility.
-- **Sensitivity analysis**: A brief analysis of sensitivity to hyperparameters (MAML learning rate α, meta-batch size, number of training tasks) would indicate robustness.
-- **Ablation: exact vs. approximated influence**: A small-network comparison of exact and approximated influence scores (rank correlation, not just trend) would directly validate the central computational claim.
+- **Ablation of Hessian approximation**: For the 1285-parameter network, computing the exact Hessian is feasible. Comparing exact TLXML influence scores to the Gauss-Newton approximation would directly validate the approximation quality.
+- **Sensitivity analysis across training checkpoints**: Comparing influence scores at different stages of meta-training would show how robust the method is to the optimality assumption.
+- **Comparison to Woźnica & Biecek (2021)**: Even a conceptual comparison of what task-level explanations reveal vs. meta-feature importance would strengthen the motivation.
+- **Reporting of Hessian rank**: Reporting the number of non-flat directions (rank of *H* or *VVᵀ*) in each experiment would ground the pseudo-inverse claim.
 
 ## Removed Points
 
-These points are flagged to be removed from the main review; treat them with caution.
+These reviewer points were removed because they could not be verified from the paper text or were determined to be inaccurate/misleading:
 
-- **"No qualitative analysis"** (Harsh Critic point 5, part): The paper does contain qualitative analysis in Section 6 (Figure 6 and accompanying text, lines 222-223, 239-240). The claim that there is "no qualitative analysis" is factually wrong. The legitimate concern about lacking a user study is preserved in Minor weaknesses above.
-- **"The paper does not release code"**: The paper does not cite a code repository, so this criticism is about absence rather than doubting a cited entity. Moved to Nice-to-Haves as a practical suggestion.
-- **"The conditions for the Gauss-Newton approximation are hand-wavy"**: This is preserved above as a Trivial point (the conditions are stated but not checked), but stripped of the "hand-wavy" characterization which is a style judgment.
-- **Section-by-section minor presentation criticisms** about "sketched derivations" and "disjointed logic" that do not affect the core contribution are either absorbed into existing weakness tiers or removed as non-substantive.
+- **Table 2 specific counts (127/128, 113/128)**: The critic claimed specific numerical values from Table 2 (embedded as an image) that contradict the paper's narrative. Since the table is an image and the specific numbers do not appear in the parsed text, these claims cannot be verified against the paper. The general concern about text-table consistency is retained as Minor Weakness #4 above.
+- **"Contradiction undermines core experimental result" framing**: The reviewer frames this as a fatal contradiction. Since the specific numbers cannot be verified from the extracted text, and the paper's textual narrative is internally coherent, the fatal framing is not justified. The issue is one of clarity/verification, not a confirmed error.
+- **Claim that Property 1 "self-rank" gives "no average rank or proportion"**: This is partially true (no quantitative summary), retained as Minor Weakness #5. The reviewer's claim that "there is no baseline to calibrate" is valid and folded into Major Weakness #1.
+- **"The derivation relies on existence of P(X|ω) well-approximated by training taskset"**: The paper discusses this condition in Section 4.2, making this a repetition rather than a new point. The underlying concern about approximation validity is captured in Major Weakness #3.
+- **"Group-influence extension is not independently validated"**: Group influence is used in the task augmentation experiments (Section 5.2), so it is indirectly validated. This is a minor scope concern at most.
+- **General formatting/style nitpicks and presentation issues**: These are parser artifacts, not author errors.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the paper's main contributions (novel influence functions for meta-learning, Gauss-Newton approximation, pseudo-inverse handling) and its main gaps (overclaimed experimental scope, missing baselines, unvalidated approximation) but do not provide genuinely novel observations beyond what is already evident from the paper and its weaknesses.
+The most interesting finding is the paper's observation (Section 5.2) that overfitting and generalization produce opposite influence patterns: when the model overfits, regular training tasks appear detrimental while noise tasks appear beneficial, but under generalization the expected ordering emerges. If verified, this phenomenon — influence polarity flipping with generalization — is a genuinely interesting property of meta-learned representations that could inform both interpretability and training diagnostics. The paper does not fully exploit this observation, but it points to a potentially useful direction for understanding when meta-learning has successfully encoded task distribution information.
 
 ## Suggestions
 
-1. **Align claims with evidence**: Remove or qualify the claimed demonstration with Prototypical Network in the abstract/conclusion, or add a corresponding experiment.
-2. **Add trivial baselines**: Compare TLXML influence scores against cosine similarity of task gradients and random ranking in both experiments. This is low-cost and would substantially strengthen the claim that TLXML provides useful information.
-3. **Validate the Gauss-Newton approximation**: On the small two-layer network (Section 5.1 setup), compute both exact and approximated influence scores and report rank correlation (Spearman/Kendall). Also report wall-clock time for the exact vs. approximate computation.
-4. **Investigate the self-rank failures**: Analyze why the self-rank is not always 1 for certain tasks in Section 5.1 — does it correlate with task difficulty, loss value, or degree of non-convexity?
-5. **Define and discuss the sign of influence scores**: Add a paragraph explaining what positive vs. negative influence on test loss means for interpretability.
+1. **Add at least one simple baseline**: Compare TLXML's influence scores against gradient cosine similarity or random scoring for the task distribution distinction experiment. Report the mean/median self-rank and its distribution for Property 1 with a random baseline comparison.
+2. **Measure runtime for exact vs. approximated influence**: On the small 1285-parameter network, run both exact and approximated TLXML and report wall-clock time and memory usage.
+3. **Resolve the Table 2 ambiguity**: Ensure the text and table consistently tell the same story, or clarify the interpretation if the basic setting shows proper order despite overfitting.
+4. **Report the rank of the Gauss-Newton matrix** for the CNN experiment to substantiate the claim that "the number of independent columns is expected to be small."
 
 ## Score and Decision
 
-The paper presents a genuinely novel theoretical contribution — extending influence functions to task-level explanations in meta-learning — with clean derivations and a practical computational optimization. However, the experimental validation is significantly weaker than what the paper claims: the abstract promises demonstration with two meta-learners (only MAML is tested), no baselines are included against any alternative method, the central approximation (Gauss-Newton) is used without empirical validation, and the interpretability motivation is asserted but not tested. These are not fatal flaws — the theoretical work stands on its own — but they materially weaken the evidence for the paper's claims. The paper would benefit from a major experimental strengthening before it meets the bar for publication.
+The paper addresses a genuine gap — explaining meta-learning at the task level — and provides a theoretically sound extension of influence functions to this setting. The Gauss-Newton approximation and pseudo-inverse handling are practical contributions. However, the empirical validation is not yet at the level needed to fully support the claims: there are no baselines, no runtime measurements, and the central quantitative result (Table 2) cannot be fully verified from the extracted text. The paper would benefit from substantially stronger experiments before acceptance.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

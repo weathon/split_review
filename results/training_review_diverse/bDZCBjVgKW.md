@@ -1,76 +1,91 @@
-Now I have all the information I need. Let me compose the final review.
+Now I have a thorough understanding of the paper and the reviewer's claims. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper introduces a visibility prediction network (VPN) that learns to predict, for any 3D point, its visibility from each training camera of a NeRF. From this per-camera visibility field, the authors derive a per-point visibility score based on effective sample size, which quantifies rendering reliability. They demonstrate two post-training applications: (1) artifact removal by skipping low-visible near-range points during volumetric rendering, achieving a 0.6 dB PSNR improvement on a 62-scene benchmark without retraining; and (2) visibility-guided view selection for multi-session data acquisition, outperforming random selection on 6 scenes.
+This paper introduces a Visibility Prediction Network (VPN) that, for any 3D point, predicts its visibility from all training cameras. The VPN is trained concurrently with a NeRF at small overhead. From the visibility predictions, the paper derives a visibility score per point. Two downstream applications are demonstrated: (1) filtering low-visible near-range points during volumetric rendering to reduce floaters, yielding ~0.6 dB PSNR improvement across 62 scenes; (2) using the visibility score to select additional training views for retraining, improving results over random selection. The core idea—using visibility as a post-training analysis tool for NeRFs—is sensible and practically motivated.
 
 ## Strengths
 
-- **Large-scale demonstration of effective post-training artifact removal.** The paper shows that simply skipping points with low visibility scores during volumetric rendering yields measurable PSNR improvements (avg. 0.6 dB) across 58 of 62 object-centric scenes (Table 1, Fig. 3). The scale of evaluation (62 datasets spanning varied real-world challenges) is a genuine strength, and the result that the improvement holds across diverse capture conditions supports the method's robustness.
+- **Novel efficient visibility prediction for post-training analysis**: The VPN outputs a K-dimensional vector of visibility logits for any 3D point from any input camera. This avoids the prohibitive cost of computing transmittance from all training views (which would require volumetric rendering along rays from each camera) and enables fine-grained visibility analysis that prior work (Somraj & Soundararajan 2023; Tancik et al. 2022; Srinivasan et al. 2021) does not offer at this granularity (Sec. 3, Sec. 2).
 
-- **Novel, methodologically sound formulation of a per-point visibility score.** The derivation of $n_{\mathbf{p}}$ (effective number of views a point must explain) from the per-camera visibility field (Eq. 3) is clean and principled. Connecting this to the bias-correction multiplier $\tau(n)$ (Eq. 4) from statistics to obtain a bounded [0,1] score is an elegant touch, and the visualization in Fig. 1 confirms the intuitive alignment between low-scoring regions and known floater artifacts.
+- **Quantitative improvement in artifact removal without retraining**: Applying visibility-based filtering (skipping points with τ<0.9 and depth<1 during rendering) yields an average **0.6 dB PSNR improvement** across 62 real-world scenes, with 58/62 datasets improving and 12 improving by >1 dB (Table 1, Figure 3). This is achieved without changing base NeRF parameters, making it a lightweight post-training fix.
 
-- **Visibility-guided view selection shows clear advantage over random selection.** In the second application (Sec. 4.2), the visibility-based index $C_I$ for selecting additional training views consistently improves PSNR, SSIM, and LPIPS over random selection across all 6 evaluated scenes (Table 2). The design uses sensible diversity heuristics (Rules 1 and 2) on top of which the visibility term adds measurable value.
+- **Demonstrated utility for view selection**: Using the visibility score to select 10 additional training views yields better PSNR/SSIM/LPIPS than random selection across 6 datasets (Table 2), validating that the score captures meaningful information about which views would benefit retraining.
 
-- **Practical and lightweight architecture.** The VPN uses a multi-resolution hash grid (following InstantNGP) trained concurrently with the base NeRF via a simple binary cross-entropy loss with stopped gradients (Eq. 6). The design is described as "rudimentary, yet efficient and simple to implement," and the concurrent training paradigm means the VPN comes at marginal additional cost during the NeRF training loop.
+- **Clear qualitative correlation between low visibility and artifacts**: Figure 1 visualizes that low-visibility regions (cold colors in the visibility score map) spatially coincide with floaters and rendering artifacts, providing intuitive face-validity for the proposed measure.
+
+- **Large-scale real-world benchmark**: The ObjectScans High Quality subset (62 scenes from 6 environments, real-world challenges like motion blur and varied lighting) provides a solid evaluation platform beyond synthetic benchmarks.
 
 ## Weaknesses
 
 ### Fatal
-None. The paper's core claims — that visibility can be learned efficiently, that it correlates with rendering reliability, and that it enables useful post-training applications — are supported by the presented evidence. No weakness invalidates the central contribution.
+None.
 
 ### Major
 
-- **Narrow baseline comparisons weaken the evidence for claimed effectiveness.** The artifact-removal experiment (Sec. 4.1) compares only Nerfacto with and without VAF. No comparison is made against existing techniques that address the same floater artifacts, such as distortion loss (Barron et al. 2022), sparsity regularization (Yang et al. 2023), gradient scaling (Philip & Deschaintre 2023), or depth-prior based regularization (Roessle et al. 2022) — all of which the paper itself cites in Sec. 2. Since VAF operates at test time rather than during training, a direct performance comparison is not strictly required, but the absence of any comparison leaves the reader unable to assess whether VAF provides meaningful practical benefit over these established approaches. Similarly, the view-selection experiment (Sec. 4.2) compares only against random selection; other simple heuristics such as coverage maximization, pose-diversity-only, or uncertainty sampling (e.g., entropy-based) are not evaluated. The claim that "visibility is the useful signal" is plausible but insufficiently substantiated — the improvement over random could reflect the diversity rules (Rules 1 and 2) rather than the visibility index $C_I$ itself.
+- **No direct validation of the VPN's prediction accuracy.** The paper's core technical contribution is the VPN, yet it never reports how well VPN predictions match ground-truth visibility computed from the NeRF (e.g., correlation, MSE, or classification accuracy on held-out points). The only evidence is indirect: downstream improvements (0.6 dB PSNR gain in floater removal, better view selection than random). Without a direct accuracy measurement, it is unclear whether downstream gains come from the VPN's visibility signal or from other factors (e.g., the depth <1 heuristic alone, or the τ<0.9 threshold acting as a generic conservative mask). This gap undermines the ability to interpret the experimental results causally.
 
-- **The effect of the visibility score's specific functional form is not ablated.** The scoring function $\tau(n)$ (Eq. 4) is borrowed from bias correction for normal-variable standard deviation estimation (Gurland & Tripathi 1971). The paper does not explain why this particular functional form is appropriate for quantifying rendering reliability, and no sensitivity analysis is provided for the threshold $\tau < 0.9$ used throughout both applications. A simple ablation (e.g., using $n_{\mathbf{p}}$ directly, or a different monotonic mapping) would clarify whether the specific form of $\tau$ matters or whether any reasonable monotonic function would produce similar results. Since the core insight — that visibility correlates with rendering quality — is independent of the exact $\tau$, this gap does not invalidate the paper, but it weakens the methodological rigor.
+- **Missing ablation isolating the VPN's contribution from the depth heuristic alone.** The filtering criterion uses *both* τ(n_pred)<0.9 *and* depth<1. A natural ablation would compare: (a) Nerfacto baseline, (b) Nerfacto + depth-only filtering (depth<1), and (c) Nerfacto+VAF (both conditions). Without (b), the reader cannot tell whether the 0.6 dB gain requires the visibility score at all, or whether the same result could be achieved by simply thresholding near-range density or transmittance without training a separate VPN. This is a structural experimental gap for a paper whose central claim turns on the value of visibility prediction.
+
+- **Weak baselines for the view selection experiment (Sec. 4.2).** The only comparison is against random selection (even with Rules 1 and 2 applied). More informative baselines would include picking views with highest photometric error, views with farthest camera pose displacement, or views maximizing pose diversity. Since the experiment is run on only 6 datasets without error bars or multiple trials, the advantage over random is suggestive but not convincingly superior to other reasonable strategies.
 
 ### Minor
 
-- **The claim that MSE is a "biased estimator of the expected photometric error per 3D point" (Sec. 1) is stated without formal justification.** While the intuition is reasonable (points seen by fewer views have noisier error estimates), the paper presents this as a theoretical claim without proof or reference. This does not affect the method itself but weakens the theoretical framing.
+- **Threshold choices (τ<0.9, depth<1) are given without sensitivity analysis or principled justification.** The function τ(n) asymptotically approaches 1 (Figure 2), so different thresholds would produce substantially different filtering masks. The depth threshold appears as "1Ω^2" (parser artifact) with units undefined. A sensitivity study showing that results are robust to small threshold variations would strengthen confidence.
 
-- **Only 6 of 62 ObjectScans datasets are used in the view-selection experiment (Sec. 4.2), without explaining the selection criteria.** On such a small sample, statistical significance cannot be assessed, and per-scene results are not shown (Table 2 reports aggregated metrics). This limits confidence in the generalizability of the view-selection results.
+- **View selection experiment lacks error bars or multiple trials.** Table 2 reports results on 6 datasets without standard deviations or confidence intervals for either method, making it impossible to assess the statistical significance of the claimed advantage over random selection.
 
-- **No quantitative overhead measurement is reported for the VPN.** The paper describes the VPN as efficient and trained "at small overheads," but does not report training time, memory usage, or inference speed relative to the base NeRF. Since the method is positioned as a practical drop-in tool, these numbers are important for practitioners to evaluate its utility.
+- **VPN architecture details are under-specified.** The paper states a multi-resolution hash grid backbone is used, but does not specify MLP size, number of hash grid levels, feature dimension, training time overhead, or memory cost. These details matter for reproducibility and for assessing the "small overheads" claim.
 
-- **The choice of $\gamma=1$ in the view-selection index $C_I$ (Eq. 9) is stated but not motivated.** The paper notes that $\gamma=2$ corresponds to area weighting but does not explain why $\gamma=1$ was chosen or whether results are sensitive to this choice.
-
-- **The four datasets showing degradation in Sec. 4.1 are not analyzed.** Understanding why VAF hurts performance in those cases (e.g., transparent/reflective objects, extreme occlusion) would help define the method's scope and failure modes. The paper acknowledges they exist but provides no discussion.
-
-- **Training dynamics of the concurrent NeRF+VPN optimization are not discussed.** Since the VPN depends on the evolving NeRF density field, early-training instability could affect the learned visibility field. The paper acknowledges the VPN identifies occluded regions "as the predicted geometry of NeRF evolves" (Sec. 3.1) but does not analyze convergence behavior or sensitivity to when the VPN loss is activated.
+- **The FoV grid predictor (64³–128³×K) is an unconventional design choice.** While the grid speeds up per-point inference by precomputing camera-FoV membership, using it introduces approximation error from trilinear interpolation. An analytic FoV check (project point into each camera and test bounds) would be exact and not obviously more expensive for typical use. The paper does not ablate this choice or quantify the grid's approximation errors.
 
 ### Trivial
 
-- The notation "depth $(\mathbf{p})<1\mathit{\Omega}^{2}$" (Sec. 4.1) is ambiguous without closer reading of the contraction function defined earlier. This is a minor presentation issue.
+- The inpainting example (Figure 5, Section 5) is qualitative and presented as future work, which is fine but adds limited substance to the paper's evaluation.
+- The bias-correction formula τ(n) from Gurland & Tripathi (1971) is cited but the intuition for why it is the right correction for visibility scores is not explained.
 
 ## Nice-to-Haves
 
-- Evaluating on at least one established public NeRF benchmark (e.g., NeRF-Synthetic, Mip-NeRF 360) alongside ObjectScans, to help the community calibrate the magnitude of improvements relative to familiar scenes.
-- Comparing against a simpler baseline that uses the NeRF's own density field (without a separate VPN) to compute visibility, to isolate the value added by the learned VPN.
-- A limitations section explicitly discussing cases where visibility analysis may be less meaningful, such as glossy/reflective surfaces, transparent objects, or scenes with heavy occlusion.
+- Validating VPN accuracy against ground-truth visibility on a held-out point set (AUC, Pearson correlation, MAE) would directly confirm that the network works as claimed.
+- A simple ablation comparing VAF against near-range density/transmittance thresholding without any VPN would isolate the value of visibility prediction.
+- Adding a few non-random view-selection baselines (photometric error, farthest pose) would strengthen the view-selection experiment substantially.
+- A sensitivity analysis showing that results are stable across τ ∈ [0.85, 0.95] and depth ∈ [0.8, 1.2] would alleviate concerns about threshold tuning.
 
 ## Removed Points
 
-- **Dataset availability/reproducibility concern** (Harsh Critic's first point): The criticism that ObjectScans is "non-public" and that results "cannot be independently verified" is removed per guidelines — the paper cites the dataset as existing, and questioning its release status or availability is not a valid weakness. The community should evaluate the paper on its scientific contribution, not on speculation about future release plans.
-- **FoV grid memory overhead** (Harsh Critic's Sec. 3 note about $64^3 \times K$ tensor): The paper states the grid is "precomputed" and uses a coarse resolution found "sufficient for our purpose." This is a standard design choice; the reviewer's request for precise memory accounting borders on a nitpick given the method's stated efficiency goal.
-- **"No ablation of the threshold in Eq. 9"** (Harsh Critic's Strengthening suggestions): This is a redundant version of the sensitivity-analysis point already covered above.
+These points are flagged to be removed; treat them with caution.
+
+1. **"Concurrent training limits the 'drop-in' claim — one cannot apply the VPN to an already-trained NeRF without retraining both."** — Removed because it misreads the paper. The paper states the VPN is trained *concurrently* with the NeRF and describes it as a "drop-in tool" meaning it is easy to add to *the training process*, not that it works with already-trained NeRFs without modification. This is explicitly described in Sec. 3.
+
+2. **"ObjectScans benchmark... not publicly described in sufficient detail to be reproduced."** — Removed because the paper provides a clear description: 62 datasets, GoPro HERO 9, 6 environments, 50 training/250 test images per dataset (Sec. 4.1). Sufficient detail is given for a conference submission.
+
+3. **"Lack of comparison on standard public benchmarks (e.g., NeRF-Synthetic, Mip-NeRF360)."** — The paper's contribution is post-training analysis, and the custom benchmark (real-world challenges) is appropriate. Adding synthetic benchmarks would not change the evaluation.
+
+4. **"Missing comparisons against distortion loss, gradient scaling, sparsity enforcement, etc. for floater removal."** — These methods modify NeRF *training*, while the paper's approach is *post-training* (no parameter changes). Comparing against training-time methods is comparing different problem settings, not baselines for the same task. The relevant comparison is against the base model without filtering, which the paper provides.
+
+5. **"The FoV grid predictor adds 'no benefit'."** — Removed because the grid precomputation provides faster inference-time queries than per-point analytic projection into K cameras (O(1) lookup vs. O(K) matrix operations), which is a clear benefit. The criticism is restated in Minor as a design choice worth justifying, not a flaw.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a consistent concern about narrow baselines but do not reveal new structural flaws or opportunities the paper itself overlooks. The paper's core insight — that a learned visibility field from training views provides a useful post-training analysis signal — stands as its own novel contribution.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Broaden the baseline comparisons.** For the artifact-removal experiment, add comparisons against at least one training-time regularization method (e.g., distortion loss). For the view-selection experiment, add a "diversity rules only" baseline (without $C_I$) to isolate the visibility term's contribution. If the comparisons are computationally prohibitive, clearly state this and frame the paper's contribution more narrowly as a proof of concept.
-2. **Add a sensitivity analysis for $\tau(n)$ and the threshold 0.9.** Show that the PSNR improvements are stable within a reasonable range (e.g., threshold 0.7–0.95), or explain why 0.9 is principled. This is a low-cost, high-impact addition.
-3. **Analyze failure cases.** Explain briefly why 4 of 62 datasets showed degradation in Sec. 4.1. This would strengthen the paper's credibility and help practitioners understand when to apply the method.
-4. **Report VPN training overhead.** Provide wall-clock time, GPU memory, and inference speed relative to the base NeRF, so practitioners can assess the practical cost of the approach.
+1. **Validate the VPN directly**: Compute ground-truth visibility v^(k)(p) from the NeRF for a held-out set of points and compare to VPN predictions via correlation, MAE, and AUC/F1 at various thresholds. This single addition would address the most serious weakness.
+
+2. **Add a simple ablation for floater removal**: Compare Nerfacto baseline vs. Nerfacto + near-range density/transmittance threshold (no VPN) vs. Nerfacto+VAF. This isolates whether the VPN contributes beyond depth heuristics.
+
+3. **Run the view selection experiment with at least one non-random baseline** (e.g., highest photometric error on a held-out validation set) and report results with multiple random seeds or bootstrap confidence intervals.
+
+4. **Provide a sensitivity analysis** for the τ threshold (vary from 0.8 to 0.95) and depth threshold on a representative subset of scenes.
+
+5. **Report VPN training overhead** (training time increase %, memory, FLOPs) and architecture details (MLP size, hash grid specs) for reproducibility and to substantiate the "small overheads" claim.
 
 ## Score and Decision
 
-The paper presents a sensible and well-motivated tool for post-training visibility analysis of NeRFs. The core ideas — learning a per-camera visibility field and deriving a scoring function from it — are clean and novel. The artifact-removal results on 62 scenes are impressive in scale, and the view-selection results show clear promise. However, the evaluation is consistently limited to trivial baselines (no VAF vs. VAF; random vs. visibility-guided), which prevents the community from assessing the method's practical significance relative to existing approaches. The scoring function's specific form is not ablated or justified, and several design choices lack sensitivity analysis.
+The paper addresses a well-motivated problem (post-training visibility analysis for NeRFs) with a sensible approach. The experimental results on a large 62-scene benchmark are promising and suggest the method has practical value. However, the paper suffers from a structural gap: the core VPN is never directly validated, and the downstream experiments lack ablations that isolate its contribution from simpler heuristics. The view-selection evaluation is weak (only random baseline, no error bars). These gaps prevent the paper from convincingly establishing its central claims.
 
-These weaknesses are real but addressable through targeted additional experiments and analysis. They do not invalidate the core contribution. The paper would benefit from a major revision that strengthens the baselines and adds ablations, but the contribution in its current form is publishable at a venue that values novel analysis tools and proof-of-concept demonstrations over exhaustive state-of-the-art comparison.
+The paper is a borderline case — the idea is sound and the preliminary evidence is encouraging, but the experimental validation is incomplete. With direct VPN validation and a key ablation, the paper could become a solid contribution.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

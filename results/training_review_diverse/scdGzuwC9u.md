@@ -1,22 +1,18 @@
-Now I have all the evidence I need. Let me synthesize the final consolidated review.
+Now I have a thorough understanding of the paper. Let me verify the key claims against the text and write my consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes VP-OR, a two-stage reoptimization framework for Mixed Integer Linear Programming (MILP) with dynamic parameters. The first stage trains a Graph Neural Network (GNN) on the base instance's branch-and-bound history to predict marginal probabilities for binary variables and feasible ranges (via logarithmic binary encoding) for integer/continuous variables. The second stage applies Thompson Sampling to iteratively select which variable predictions to fix, updating Beta distributions based on solution quality. Experiments on 9 reoptimization datasets from the MIP Workshop 2023 Competition show VP-OR finds feasible solutions within 10 seconds across all datasets and achieves smaller primal gaps than baselines including SCIP, Re Tuning (Patel, 2024), PS (Han et al., 2023), and ND (Nair et al., 2020).
+This paper proposes VP-OR, a two-stage reoptimization framework for MILPs under dynamic parameters. Stage 1 uses a GNN (incorporating leaf-node features from the base instance's branch-and-bound tree) to predict marginal probabilities for binary variables and feasible ranges for integer/continuous variables. Stage 2 applies a Thompson Sampling-inspired adaptive variable-fixing strategy to iteratively refine the solution. Experiments on 9 reoptimization datasets from the MIP Workshop 2023 competition compare against SCIP, Re Tuning, PS (Han et al.), and ND (Nair et al.).
 
 ## Strengths
 
-1. **Novel two-stage architecture combining GNN prediction with bandit-style refinement for reoptimization.** VP-OR is, to my knowledge, the first framework to connect GNN-based variable prediction (for both binary and integer/continuous variables) with Thompson Sampling for iterative variable selection in the MILP reoptimization setting. The pipeline is well-motivated: prediction narrows the variable space, and the online refinement compensates for prediction errors.
+- **Novel use of historical leaf-node information for prediction.** The paper leverages the final leaf node's feasible basic variables and dual solutions from the base instance's branch-and-bound tree as GNN features. This goes beyond standard end-to-end methods that only use the optimal solution, and is a reasonable way to capture sensitivity to parameter changes (Section 3.1).
 
-2. **Explicit handling of integer and continuous variables beyond binary-only predictions.** Most prior ML-for-MILP methods (Han et al., 2023; Khalil et al., 2022) focus exclusively on binary variables. The paper identifies that in real-world datasets like "vary matrix rhs bounds" only 400 out of 27,710 variables are binary (Sec. 3.2), making this extension practically important. The logarithmic binary encoding with confidence thresholds is a reasonable heuristic approach to this problem.
+- **Practical relaxation mechanism for infeasibility.** When faulty predictions cause infeasibility, the method divides fixed variables into groups and relaxes them iteratively (Section 4.2). This pragmatic design directly addresses a real-world reoptimization challenge and is a genuine contribution over methods that simply fail when predictions are inaccurate.
 
-3. **Strong empirical results across 9 diverse reoptimization datasets.** VP-OR is the only method that finds feasible solutions for all 9 datasets within the 10-second time limit (Table 3). It achieves the smallest absolute and relative primal gaps on the majority of datasets (Table 4, bold entries), and convergence plots (Figure 2) show faster primal gap reduction in early stages. The comparison against Re Tuning (the competition-winning reoptimization method from MIP Workshop 2023) on its own benchmark datasets is a meaningful stress test.
-
-4. **Leverages leaf-node dual information from the base instance's branch-and-bound tree.** Beyond the typical use of the optimal solution, VP-OR extracts feasible basic variables and dual solutions from the leaf node that yielded the optimal solution (Sec. 3.1). This is grounded in LP sensitivity analysis and provides richer signal for predicting how the solution changes under perturbations.
-
-5. **Principled infeasibility handling.** When variable fixing produces infeasible subproblems, the algorithm divides fixed variables into 10 groups and relaxes one group at a time (Sec. 4.2). This practical mechanism is necessary for real-world deployment and is clearly described.
+- **Competitive empirical pattern across diverse datasets.** VP-OR finds feasible solutions on all 9 datasets under 10-second time limits (Table 3), while baselines fail on some datasets. The relative gap results (Table 4) show a consistent directional advantage, particularly on datasets with variable-bound changes. The convergence plots (Figure 2) also show faster early improvement.
 
 ## Weaknesses
 
@@ -25,67 +21,65 @@ None.
 
 ### Major
 
-1. **GNN training objective is not specified, impairing reproducibility.** The paper describes the GNN's input features and output format (marginal probabilities for binary variables, binary-bit probabilities for integer/continuous variables) but never states the loss function, training labels, or supervision signal. For binary variables: what is the loss — cross-entropy against the optimal solution of the modified instance? For integer/continuous variables: the paper says it predicts "the conditional probability of each bit" in a logarithmic binary encoding (Sec. 3.2), but never specifies what ground-truth labels are used for these bits, how a "bit-level" prediction is trained, or how the confidence-threshold post-processing connects to the training objective. The main text mentions only that the model was "optimized using Adam" (Sec. 5.1), which is not a training specification. This is not a criticism about missing appendix content; it is a gap in the main text's description of the core method, and it prevents an informed evaluation of whether the learning component is sound.
+1. **Handling of continuous variables via rounding lacks analysis and risks excluding optimal values.**  
+   The paper rounds continuous variables to the nearest integer, then applies a logarithmic binary encoding to predict a feasible range (line 103). The decoding produces ranges like $[2^{k_{lb}}-1,\;2^{k_{ub}}+1]$ — coarse powers-of-two intervals. **The rounding step means a continuous variable with true optimal value 2.73 is encoded via its rounded value 3 (log-magnitude 2), and the predicted range may become [3, 5], which excludes 2.73.** The paper provides no analysis of precision loss, no justification for why rounding is safe, and no ablation against alternative continuous-variable handling (e.g., direct regression of bounds). Given that many real-world MILPs contain continuous variables, this gap threatens the claimed generality of the framework. This is a major weakness because the authors stake a claim to handling all variable types but do not validate the most questionable part of their pipeline.
 
-2. **Small test set with no uncertainty quantification.** Each dataset has only 5 groups in the test set (Sec. 5.1: "25 groups, including 20 groups in the training set and 5 groups in the test set"). No error bars, confidence intervals, or statistical significance tests are reported for any of the central results (Tables 1–4, Figure 2). With 5 test observations per dataset, a single outlier can drive the reported averages, and the reader cannot assess whether the observed advantages of VP-OR are reliable. This is the most consequential weakness: it directly undermines the strength of the empirical claims.
+2. **Baseline adaptation for binary-only methods (PS, ND) is not described.**  
+   PS (Han et al., 2023) and ND (Nair et al., 2020) were designed for problems with only binary variables. The paper acknowledges this limitation (line 15) but does not explain in the main text how these baselines were adapted to handle integer and continuous variables (only a superscript reference to an appendix is given). Tables 3 and 4 show PS and ND often failing to find *any* feasible solution on several datasets — this could be due to improper handling of non-binary variables rather than algorithmic weakness of those methods. The comparison is therefore uninterpretable on datasets with significant non-binary variables. Even if the appendix contains adaptation details, the reader needs to know in the main text what was done.
+
+3. **Thompson Sampling adaptation is a heuristic with questionable update semantics.**  
+   The paper frames variable selection as a multi-armed bandit problem but adopts rules that deviate from standard Thompson Sampling without justification. The selection criterion (rank by $\min(\mu_i, 1-\mu_i)$, pick lowest $a\%$) selects the most uncertain variables — an active exploration strategy — but the stated motivation is "to choose more accurate variables" (line 131). The update rules conflate correlation with causation: for **unselected** binary variables, the Beta prior is updated based on the solver-determined value (line 168), even though the algorithm did not fix those variables. This does not reflect whether fixing would have been beneficial. Without ablation against simpler alternatives (random selection, fixing most confident variables, confidence thresholding), the added complexity of the Thompson Sampling machinery is unjustified.
+
+4. **GNN training details are underspecified; no loss function is stated.**  
+   The paper never states the loss function used to train the GNN (confirmed via grep — no match for "loss" in the entire text). For binary variables, this is presumably binary cross-entropy. For integer/continuous variables, the prediction targets are binary bits of a logarithmic encoding — a multi-label prediction problem — but no loss (per-bit BCE, structured loss, ranking loss) is specified. Architecture details (layers, hidden dimensions, message-passing scheme) are also absent. Without the loss function, the prediction stage is not reproducible.
+
+5. **Evaluation uses only 5 test instances per dataset with no statistical confidence measures.**  
+   50 instances per dataset → 25 pairs → 20 for training, 5 for testing (line 178). With 5 test instances, a single outlier can drive the reported win counts and gaps. No confidence intervals, standard deviations, or statistical tests are reported (confirmed via grep). While the consistency across 9 datasets partially mitigates this, the per-dataset sample is too small for the strong claim that VP-OR "outperforms the state-of-the-art methods."
 
 ### Minor
 
-3. **The Thompson Sampling factored approximation lacks justification.** The paper correctly frames variable selection as a combinatorial multi-armed bandit (the joint space of fixing subsets is combinatorial) but immediately resorts to a factored approximation treating each variable independently (Sec. 4.2, line 167: "simplifying assumption commonly used in prior work"). The Beta update rules for integer/continuous variables are described as heuristic ("no penalty given when the current solution performs worse," "no immediate conclusion about its benefit can be drawn"). No experiments compare the factored approximation against simple baselines (e.g., random selection, greedy top-probability selection, or a bandit that considers pairs of variables). Without empirical justification, the connection to Thompson Sampling is more rhetorical than substantive — the actual algorithm is closer to adaptive probability-weighted filtering.
+- **The number of online refinement iterations and total runtime breakdown are not reported.** The paper claims "when fixing a portion of the variables, the solution time of the problem can become very short" (Table 2), but does not report how many Thompson Sampling iterations are run within the time limit, nor the overhead of the relaxation mechanism (sequential solving of 10 groups). Without this, the reader cannot assess the total wall-clock cost of the method vs. baselines.
 
-4. **Only 3 of 9 datasets are shown in convergence plots (Figure 2).** The paper shows relative primal gap over time for bnd 1, mat 1, and rhs 1 only. The selection criterion is not explained, and the remaining 6 datasets are absent. Given that Table 4 shows variable performance across datasets (e.g., VP-OR is weaker on obj 1 and obj 2), convergence behavior on the omitted datasets is directly relevant to assessing the method's scope.
-
-5. **The "3–10× speedup" claim from fixing variables is not clearly substantiated.** The paper states (Sec. 4.1) that fixing variables yields 3–10× speedup, citing Table 2. However, Table 2 is an embedded image, and the textual discussion does not explain which specific entries in the table support this range or how it was computed. The claim is plausible but cannot be verified from the text alone.
-
-6. **Warm-started SCIP baseline is relegated to the appendix.** The paper mentions (Sec. 5.1) that it provides "results for SCIP using the base solution as a warm-start strategy" but places these in an appendix reference. This is a natural and important baseline for reoptimization — using the previous optimal solution as a warm start is the simplest reoptimization strategy — and should appear in the main tables alongside the other methods.
+- **Broken cross-references.** The text contains references like "5, we present the comparison results" (line 78) and superscript references to appendix sections that are not functional in the main text. These should have been caught before submission.
 
 ### Trivial
-
-7. The "Wins" metric definition in the Table 4 caption is slightly ambiguous: the paper text (line 182) clarifies it as "the number of datasets for which a method achieves the best solution," but the table caption says "the number of wins" without specifying the denominator.
+None worth enumerating beyond the broken references noted above.
 
 ## Nice-to-Haves
-
-- Sensitivity analysis on the single hyperparameter \(P=0.7\) (percentage of fixed variables) would strengthen the paper's claims. The paper acknowledges it has only one parameter but does not study its impact.
-- Reporting computational overhead of the Thompson Sampling loop (time spent per iteration, number of iterations, wall-clock breakdown) would help readers assess whether gains come from smarter fixing or from simply more compute.
-- Showing convergence plots (Figure 2) for all 9 datasets rather than a selected subset would give a more complete picture.
+- An ablation comparing the Thompson Sampling module against simpler alternatives (random selection, fixing most confident variables, fixed schedule).
+- An analysis of how much precision is lost by the rounding-based continuous variable encoding (e.g., what fraction of optimal values fall outside the predicted range on held-out instances).
+- A comparison of VP-OR against SCIP with warm-start from the base solution (this is mentioned with a broken reference and should be in the main tables).
+- 5-fold cross-validation or bootstrapped confidence intervals would substantially strengthen the empirical claims without requiring new data.
 
 ## Removed Points
+These are flags from the reviewer inputs that were removed or downgraded based on rules:
 
-These points are flagged to be removed; treat them with caution.
-
-- **"Table 1 shows zero mispredicted variables for some datasets; this is implausible."** I cannot verify the specific entries in Table 1 (it is an embedded image). The paper's own text (line 121) says "inaccuracies... are typically concentrated in a small subset" — implying errors do exist — so the reviewer may have misread the table. Removed as unverifiable and potentially inaccurate.
-
-- **"Baselines PS and ND are at a disadvantage because they don't receive historical information."** The paper's contribution is a reoptimization framework that *uses* historical information. Comparing against generic ML-for-MILP methods that solve from scratch is a valid way to isolate the value of reoptimization. The main comparison against Re Tuning (a reoptimization method) already controls for this. Removed because it evaluates VP-OR against the wrong expectation.
-
-- **"The leaf-node historical feature encoding is not specified; cross-reference to Table 5 (appendix) doesn't remedy this."** The paper references an appendix for these details. Per the meta-instructions, criticisms about content that exists in the parser-stripped appendix are removed.
-
-- **"Baseline implementation details not described."** The paper references an appendix for these. Removed for the same reason.
-
-- **"Table 2 is nearly unreadable due to formatting."** This is a parser artifact affecting the embedded image rendering, not an author error.
-
-- **Formatting/style nitpicks, grammar/typo complaints.** These are parser artifacts, not author errors.
+- **Criticism about continuous variable handling being "fundamentally unsound" → downgraded to Major.** The approach is a heuristic with genuine precision concerns, but "fundamentally unsound" overstates it. The paper's approach does not change the feasible region of the actual MILP — it predicts a range. The real issue is lack of analysis, not unsoundness.
+- **Criticism about broken Section 5/7 references as a major weakness → moved to Minor.** These are presentation issues and likely artifacts of the appendix being stripped.
+- **Strength about "Effective handling of integer and continuous variables" → removed.** This strength conflicts with the verified weakness about unanalyzed continuous variable handling. Per rules, weakness wins.
+- **Strength about "Comprehensive experimental evaluation" → removed.** Conflicts with the verified weakness about 5-instance test sets with no statistical measures.
+- **Demands for GNN architecture details (layers, hidden dimensions, message passing) → moved to Nice-to-Haves.** These are standard details that can be in the appendix; the absence in main text is not fatal. The loss function omission (kept as Major) is more fundamental.
 
 ## Novel Insights
-
-The most interesting observation to emerge from this review is the tension between the paper's two stages. The GNN achieves remarkably low prediction error rates (the paper's own claim in Sec. 4.1 is that "only a very small number of variable predictions are inaccurate"). If this is true, the Thompson Sampling refinement stage has very little work to do — it needs only to identify a handful of mispredicted variables from a potentially large pool. But the MAB-style update rules treat all variables symmetrically, updating Beta distributions even for correctly predicted variables, which could introduce noise. A more targeted approach — e.g., using prediction uncertainty estimates to focus Thompson Sampling only on variables with low-confidence predictions — might be more sample-efficient. This tension between "almost everything is correct" and "we need bandit exploration" is not addressed in the paper and could be a fruitful direction for future work.
+None beyond the paper's own contributions. The reviews surface that the paper's claimed Thompson Sampling framework is better understood as a custom adaptive heuristic, and that the continuous variable encoding via rounding needs empirical validation before the claim of "general MILP" applicability can be accepted.
 
 ## Suggestions
 
-1. **Specify the GNN training loss and labels explicitly in the main text.** This is the single most actionable fix. State whether binary variables are trained with cross-entropy against the optimal solution, and describe what ground-truth labels are used for the binary encoding bits of integer/continuous variables.
+1. **Address the continuous variable encoding.** Either provide empirical evidence that the rounding scheme does not systematically exclude optimal solutions on your benchmark datasets (e.g., check whether the true optimal value falls within the predicted range), or replace the rounding with a more principled approach such as direct regression of continuous bounds.
 
-2. **Add error bars or confidence intervals** to all main results (Tables 1, 3, 4). With only 5 test-set groups per dataset, bootstrapped confidence intervals or per-dataset standard deviations are essential for the reader to assess reliability.
+2. **Describe baseline adaptation in the main text.** State clearly how PS and ND were extended to handle integer/continuous variables. If they were applied only to binary subsets, state this and discuss the fairness implications.
 
-3. **Include warm-started SCIP in the main tables** and show convergence plots for all 9 datasets (or explain the selection criterion for the 3 shown).
+3. **Add statistical measures.** Report standard deviations or confidence intervals for the gap results, or use cross-validation. At minimum, show per-instance results to demonstrate the 5-test-instance variability.
 
-4. **Add an ablation comparing the Thompson Sampling strategy against simpler alternatives** (e.g., random variable selection, fixed top-probability selection). This would ground the claim that the MAB formulation adds value beyond the GNN predictions.
+4. **Clarify the Thompson Sampling component.** Distinguish more carefully between what is standard Thompson Sampling and what is a heuristic addition. Provide an ablation comparing the proposed selection/update rules against simpler baselines (random, confidence-based, etc.).
 
-5. **Clarify the "3–10× speedup" claim** by pointing to specific entries in Table 2 and explaining the calculation.
+5. **State the GNN loss function.** This is essential for reproducibility and should appear in the main text. Also specify how the per-bit predictions for integer/continuous variables are decoded into a consistent range (lower ≤ upper).
+
+6. **Report the number of online refinement iterations** and a wall-clock breakdown (GNN inference vs. subproblem solving vs. relaxation overhead).
 
 ## Score and Decision
 
-This paper addresses a practically important problem (MILP reoptimization under dynamic parameters) with a plausibly effective architecture. The two-stage design is well-motivated, and the empirical results — while limited by the small test set — suggest genuine promise. However, the paper has **two major weaknesses that must be resolved**: the GNN training objective is unspecified, rendering the core learning component non-reproducible; and the experimental evaluation lacks any uncertainty quantification, making it impossible to assess whether the reported advantages are reliable. These are not fatal — they can be fixed with careful writing and additional analysis — but they are too significant to overlook in the current form.
+The paper proposes a genuinely interesting combination of ideas (leaf-node features + adaptive variable selection) for a practically important problem (MILP reoptimization). The empirical results show a promising pattern. However, the paper has several significant issues that prevent acceptance in its current form: (a) the continuous variable handling via rounding is unvalidated and could silently exclude optimal solutions; (b) the comparison against binary-only baselines is uninterpretable without a stated adaptation; (c) the Thompson Sampling module has questionable update semantics that conflate correlation with causation; (d) the evaluation lacks statistical rigor with only 5 test instances per dataset and no confidence measures; and (e) the GNN training procedure is underspecified (no loss function). These issues collectively require substantial revision — particularly around the continuous variable handling and evaluation rigor — before the contribution is fully believable.
 
-The contribution is real but the presentation and experimental rigor fall short of what is needed to support the claimed state-of-the-art performance. I would recommend **revision and resubmission** rather than acceptance as-is.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

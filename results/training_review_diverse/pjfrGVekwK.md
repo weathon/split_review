@@ -1,18 +1,18 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and can verify each reviewer claim against the actual text. Let me write the final consolidated review.
+
+---
 
 ## Summary
 
-The paper proposes Variational Bayes Gaussian Splatting (VBGS), which frames Gaussian splat learning as variational inference over a generative mixture model with conjugate priors. By exploiting conjugacy between multivariate Normal likelihoods and Normal-Inverse-Wishart priors, the authors derive closed-form coordinate-ascent variational updates that naturally accumulate sufficient statistics across sequential observations, enabling continual learning without replay buffers. Experiments on Tiny ImageNet (2D), Blender objects (3D), and Habitat rooms evaluate both static reconstruction and continual learning performance against a gradient-based baseline.
+This paper proposes Variational Bayes Gaussian Splatting (VBGS), a method that frames Gaussian splatting as variational inference over the parameters of a generative mixture model. By leveraging conjugate priors (Normal-Inverse-Wishart for spatial parameters, Dirichlet for mixture weights), the authors derive closed-form coordinate-ascent variational updates that are order-invariant, enabling continual learning from streamed 2D and 3D data without replay buffers. The method is evaluated on Tiny ImageNet (2D images), Blender objects (3D), and Habitat rooms (3D), comparing against a gradient-based optimization baseline.
 
 ## Strengths
 
-- **Closed-form variational updates from conjugacy**: The core theoretical contribution is clearly derived (Eq. 11–12 and Section 3.3). The use of conjugate Normal-Inverse-Wishart priors yields analytic updates that aggregate sufficient statistics across observations, which is both elegant and practically useful. This is the central enabler of the paper's claims.
+1. **Principled variational formulation with closed-form updates** — The paper derives analytical update rules (Equations 7–8) by exploiting the conjugate relationship between NIW/Dirichlet priors and multivariate-Normal/categorical likelihoods. This is technically sound and genuinely enables parameter estimation in a single step per observation, unlike gradient-based methods that require many iterations.
 
-- **Theoretical guarantee of batch-sequential equivalence**: The paper proves (Section 3.3, line 233) that when assignments are computed using the initial variational parameters, the streaming update produces a posterior identical to batch processing. This is a strong theoretical property that Gradient descent cannot match, and the 2D image experiments (Figure 2a–b) verify it empirically — VBGS's final PSNR after sequential patch observation matches its static counterpart.
+2. **Demonstrated continual learning without replay buffers** — The 2D image experiments (Figure 2b) cleanly show that VBGS maintains consistent reconstruction quality across sequentially observed patches while gradient-based optimization catastrophically forgets. The theoretical justification (Section 3.3) correctly explains that the iterative update is order-invariant and equivalent to batch processing. This is the paper's strongest and most distinctive contribution.
 
-- **Competitive static 3D reconstruction**: Table 1 shows VBGS (Data Init) achieves the best PSNR on 5 of 8 Blender objects (drums 19.50, ficus 22.06, hotdog 23.62, lego 22.53, materials 20.55), matching or exceeding the Gradient baseline. This demonstrates that the variational formulation does not sacrifice static reconstruction quality.
-
-- **Clear 2D continual learning demonstration**: In the 2D continual setting (Figure 2a–b), VBGS maintains stable PSNR across sequential image patches while the Gradient baseline catastrophically forgets. Here the comparison is well-controlled (same input modality, same data), and the advantage is substantial and unambiguous.
+3. **Reasonable static performance when fairly compared** — Under data initialization, VBGS achieves PSNR values comparable to the gradient baseline (Table 1), despite using only a single variational update step. This demonstrates that the variational approach does not sacrifice reconstruction quality for the continual-learning benefit when both methods operate under similar conditions.
 
 ## Weaknesses
 
@@ -21,67 +21,53 @@ None.
 
 ### Major
 
-- **Confusing and potentially contradictory 3D continual learning results (Section 4.2, lines 332–334).** The paper reports average PSNR of "11.19 ± 3.53 dB for VBGS (Random Init) and 21.26 ± 1.76 dB for Gradient (Random Init)" in the 3D continual setting. This is directly at odds with the paper's narrative that VBGS is superior in continual learning — Gradient is reported as ~10 dB higher. The text says "the same properties from the 2D experiment hold" and claims Gradient "deteriorates" (Figure 6b), yet the reported numbers tell the opposite story. If these are averages over the training trajectory (rather than final validation performance), this needs to be clearly stated and justified. If they are final PSNR values, they contradict Figure 6b which allegedly shows VBGS rising to ~20 dB and Gradient dropping. This discrepancy undermines confidence in the 3D continual experiments and must be resolved. The paper's central claim that VBGS "enables continual learning" for 3D data cannot be fully assessed from the current reporting.
+1. **"State-of-the-art" claim is unsupported.** The abstract claims VBGS "matches state-of-the-art performance on static datasets." However, the only comparison is against a gradient baseline that is explicitly stripped down: no spherical harmonics beyond degree 0, no adaptive density control, no opacity learning. The gradient baseline itself achieves PSNR values in the 19–25 dB range on Blender (Table 1), whereas the actual 3DGS pipeline (Kerbl et al.) typically achieves >30 dB on the same dataset. Comparing against this simplified baseline and calling the result "state-of-the-art" is misleading. The paper's actual experiments fairly compare VBGS against a matched simplified gradient baseline, and the conclusions should be reframed to reflect this. (Section 4's "Gradient" description confirms the simplifications on lines 248–249.)
 
-- **Input modality asymmetry in 3D experiments not controlled.** As the paper explicitly states (line 294): "VBGS is trained on the 3D point cloud... In contrast, the gradient-based approach is optimized using multi-view image reconstruction." This means VBGS receives direct 3D coordinates while Gradient must infer 3D structure from 2D projections. While the paper acknowledges this as a limitation in the Discussion (lines 369–376), the acknowledgment does not resolve the confounding factor in the experiments. The static 3D comparison in Table 1 still favors VBGS in terms of information available, and the 3D continual comparison inherits the same confound. The 2D experiments do control for this, so the core continual learning claim is not invalidated, but the 3D-specific claims are weaker than they appear.
+2. **The 3D rendering pipeline is critically underspecified.** The paper states (line 158): "For 3D rendering, we use the renderer from [Kerbl et al.], where the spatial component is first projected onto the image plane using the camera parameters, and the estimated depth is used to deal with occlusion." The VBGS generative model (Figure 1) does not include an opacity parameter — a required input for the 3DGS renderer's alpha-blending pipeline. The paper does not specify how the VBGS posterior parameters (NIW over spatial parameters, Normal over color mean with fixed covariance) are mapped to the renderer's expected inputs (opacity, anisotropic covariance, color). Without this specification, the 3D reconstruction results (Table 1, Figures 4–6) are unverifiable. This gap must be resolved for the 3D experiments to be interpretable.
 
 ### Minor
 
-- **Number of CAVI iterations in the static setting is never stated.** The paper says VBGS uses "a single update per observation" in the continual setting (line 273), but it is unclear whether the static results use one CAVI pass or multiple iterations until convergence. Since standard variational GMM fitting requires multiple E/M-style iterations, this matters for both reproducibility and for interpreting the "single update" claim. If the static results also use a single pass, how does that compare to multiple CAVI iterations? If they use multiple iterations, the "single update" characterization is only about the continual setting and should be clarified.
+1. **Continual learning comparisons lack practical baselines.** The gradient baseline in the continual setting (100 gradient steps per frame, no replay buffer) demonstrates catastrophic forgetting, which is well-understood behavior. While this is an appropriate baseline for showing VBGS's order-invariance property, the paper positions the continual learning results as a practical advantage (abstract: "drastically improving performance in this setting"). Adding a gradient-based method with a replay buffer of reasonable size would provide a more informative comparison and strengthen the practical claims. The paper cites SplaTAM and related work that uses replay buffers (line 43) but does not compare against them.
 
-- **No ablation of the fixed color covariance.** The paper fixes \(\Sigma_{k,\vec{c}} = \varepsilon I\) with the justification that it "assures that the mixture components commit to a particular color" (line 138). No ablation is provided to quantify the impact of this design choice. A standard approach would be to compare against a learned color covariance (via NIW prior) or test sensitivity to the hyperparameter \(\varepsilon\).
+2. **No analysis of the component-reassignment heuristic.** Section 3.4 describes a heuristic that replaces unused components' means with data points sampled proportional to negative ELBO, using a 5% fraction parameter. This heuristic substantially improves Habitat room results (Figure 6b), but the paper provides no ablation: no sensitivity analysis on the fraction parameter, no comparison against simpler alternatives (e.g., k-means initialization or periodic reassignment), and no variant without reassignment on the Blender dataset. Given its apparent importance, this deserves more scrutiny.
 
-- **The reassignment heuristic (Section 3.4) is ad hoc and not validated against alternatives.** The component reassignment mechanism is a practical engineering fix, not grounded in the variational objective. While Figure 5(b) shows it helps, there is no comparison to simpler alternatives (e.g., random reassignment, periodic reset of unused components) to isolate whether the ELBO-weighted sampling is crucial.
+3. **Fixed-assignment design choice is not discussed.** Assignments are computed once against the initial posterior and never updated (line 203). This guarantees order-invariance but may limit final model quality. The paper does not compare against an alternative where assignments are recomputed periodically, which might improve quality while still largely avoiding forgetting. The trade-off is not discussed.
 
-- **The reported "p=0" for the wall-clock t-test** (line 271) is technically not correct for continuous data — it should be \(p < 10^{-something}\). Moreover, the time difference (0.03 vs 0.05 seconds) is small enough that it may not be practically meaningful, especially since the Gradient method was not optimized for per-update efficiency (it uses 100 fixed steps).
-
-- **The 3D continual experiment uses frames "randomly sampled from the environment"** rather than a trajectory (line 360). This is acknowledged but not discussed as a limitation. Sequential trajectories with spatial correlation (as in real SLAM) could produce different forgetting dynamics for both methods, potentially favoring or disfavoring either approach.
+4. **Limited expressiveness relative to full 3DGS is inadequately acknowledged.** The VBGS color model is a fixed-covariance isotropic Gaussian with no view-dependence and no opacity. The conclusion briefly mentions that 3DGS "dynamically adjusts the model size" (line 373) but does not discuss the opacity or view-dependence limitations. While the gradient baseline shares the same limitations (no spherical harmonics), the paper's title and framing position VBGS as an alternative to 3DGS, making this gap worth more explicit discussion.
 
 ### Trivial
-
-- The x-axis of Figure 1(a) is labeled "Number of components" but the specific component counts tested are not stated in the text or caption.
-- The spatial-color conditional independence assumption (Section 3.1) is noted but not discussed as a limitation that may require more components when color varies systematically with position within a region.
+- The continual 3D learning results (line 332) report an "average reconstruction error" of 11.19 dB for VBGS vs. 21.26 dB for Gradient. If these are PSNR values, the interpretation contradicts the text ("the same properties from the 2D experiment hold"). If they are MSE values in dB where lower is better, this should be clarified to avoid ambiguity.
 
 ## Nice-to-Haves
-
-- Including a Gradient baseline with a replay buffer (e.g., keep last N frames, retrain with few steps) would directly test whether VBGS's closed-form accumulation is meaningfully better than the simplest practical alternative. The paper's current claim is that VBGS "eliminates the need for replay buffers," but the baseline to substantiate this (Gradient + replay) is absent.
-- Ablating the fixed color covariance (e.g., allowing NIW on \(\Sigma_c\)) to isolate the effect on both reconstruction quality and forgetting.
+- **Uncertainty visualization**: The paper claims a variational posterior over parameters as an advantage but never visualizes or uses this uncertainty (e.g., confidence intervals on renders, active learning). A simple demonstration would strengthen the motivation.
+- **Per-component quality analysis**: The paper uses 100K components throughout — analyzing how many are actually active after training would help understand model efficiency.
 
 ## Removed Points
 
-These points are flagged to be removed by the reviewer instructions; treat them with caution.
+These points were raised by reviewers but removed or downgraded after verification against the paper:
 
-- **Criticism about "unfair comparison" as a fatal flaw**: The harsh critic frames the input modality asymmetry as a structural issue invalidating the paper's central claims. However, (1) the 2D continual experiments are well-controlled and already demonstrate the core claim, (2) the static 3D comparison (Table 1) is asymmetric but VBGS still performs competitively on most objects despite Gradient having less information to work with, and (3) the paper openly acknowledges this as a limitation. The asymmetry is a Major weakness, not Fatal.
-
-- **Criticism that "continual learning baseline is a strawman" because no replay buffer is used**: The Gradient baseline represents naive continual learning (SGD without memory), which is the standard reference point for demonstrating catastrophic forgetting. The paper's contribution is that VBGS does not *need* replay buffers — comparing against naive SGD is the appropriate first step. Including a replay baseline would strengthen the paper, but its absence does not make the comparison invalid or a "strawman." This is a Nice-to-Have, not a weakness.
-
-- **Criticism about missing related work**: Removed per instructions as I cannot verify related work coverage without external sources.
-
-- **Formatting/style nitpicks and complaints about missing appendix content**: Removed per instructions (parser artifacts).
-
-- **Criticism about code existence/release status**: Removed per instructions (do not question availability of cited artifacts).
-
-- **Criticism about the 2D experiment not specifying which component counts are used in Figure 1(a)**: Downgraded to Trivial (minor presentation gap).
-
-- **The harsh critic's claim that "the gradient method must infer 3D structure from 2D projections alone, whereas VBGS has direct 3D coordinates" makes the comparison invalid**: As noted above, this is a real asymmetry but does not invalidate the paper — the static results show VBGS is competitive despite (or because of) this, and the 2D continual results control for it entirely.
+- **"Time comparison conflates steps"** (removed): The reviewer claimed the wall-clock comparison (0.03s vs 0.05s) conflates steps, but the paper explicitly states it measures "the wall-clock time required for the Gradient approach to reach the performance level of VBGS after a single update step" (line 271). This is a time-to-target-quality comparison, not a per-step comparison, and is appropriately framed.
+- **"Straw-man continual baseline"** (downgraded to Minor): The gradient baseline without replay is the correct baseline to demonstrate VBGS's order-invariance property. The paper's claim is specifically about not *needing* replay buffers; comparing against gradient-without-replay is the appropriate experiment. However, the paper would be stronger with a replay-buffer comparison, hence this remains as Minor point #1.
+- **"Catastrophic forgetting is inevitable"** (removed): This is an editorial comment rather than a verifiable weakness about the paper.
+- **"Missing related works"** (removed per instructions): Not verifiable without external sources.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a clear tension between the paper's strong theoretical contribution and the messiness of its 3D experimental reporting, but do not generate insights outside what the authors themselves provide.
+The most interesting observation that emerges from the reviews is that VBGS's fixed-assignment design (computing assignments once against the initial posterior and never updating them) is simultaneously its greatest strength and most significant limitation. It guarantees order-invariance and enables the continual learning property, but it also means assignments cannot benefit from improved component estimates over time. The paper treats this as a design given without analyzing the trade-off. An interesting extension would be to compare periodic full-batch recomputation of assignments (which would still avoid forgetting since it uses all data) against the current fixed-assignment strategy. This could reveal whether the cost of order-invariance is meaningful in practice.
 
 ## Suggestions
 
-1. **Resolve the PSNR discrepancy in 3D continual results**: Clarify whether "average reconstruction error over all objects of 11.19 ± 3.53 dB" refers to final validation PSNR or an average over the training trajectory. If the latter, state this explicitly and also report final PSNR. If the former, explain why VBGS achieves 11.19 dB when Figure 6b suggests ~20 dB. Ensure the numbers and figures tell a consistent story.
+1. **Reframe the contribution honestly.** Replace "matches state-of-the-art" in the abstract and throughout with something like "achieves competitive performance against a matched gradient baseline" or focus the claims on the continual learning contribution. The paper's real strength is the variational framework for streaming updates, not static SOTA parity.
 
-2. **State the number of CAVI iterations used in the static setting explicitly** in Section 4.1. If it's a single pass, say so; if multiple, state how many.
+2. **Specify the rendering pipeline completely.** Describe exactly how VBGS posterior parameters are converted to the 3DGS renderer's expected inputs (opacity, covariance, color). If opacity is omitted or set to a constant value, state this explicitly. Without this, the 3D results are unverifiable.
 
-3. **Add a replay buffer baseline** for at least the 2D continual setting to substantiate the "without replay buffers" claim against a practical alternative.
+3. **Add a replay-buffer baseline** for the continual 3D experiments. Even a simple buffer of 10–20 recent frames with the gradient method would substantially strengthen the practical claims.
 
-4. **Add an ablation of the fixed color covariance** (e.g., allow \(\Sigma_c\) to be learned) to justify the design choice empirically, or at minimum state that this is a design choice and leave sensitivity analysis for future work.
+4. **Run an ablation of the reassignment heuristic.** Show performance with and without reassignment across all datasets, and analyze sensitivity to the fraction parameter and the "unused component" criterion.
 
 ## Score and Decision
 
-The paper presents a clean theoretical idea (variational Bayes for Gaussian splats with closed-form continual updates) and provides reasonable evidence for its 2D continual learning claims. However, the 3D continual learning results contain a confusing numerical discrepancy that directly contradicts the paper's narrative and prevents proper evaluation of the claimed 3D advantage. Combined with the input modality asymmetry in 3D comparisons and the absence of a replay buffer baseline, the experimental evidence for the 3D claims is not yet convincing. The paper's theoretical contribution is real, but its empirical validation — particularly for 3D continual learning — needs substantial cleanup before acceptance.
+The paper's core idea — variational inference with conjugate priors for Gaussian splatting with closed-form, order-invariant updates — is principled and addresses a real limitation of gradient-based methods. The 2D continual learning experiments are clean and compelling. However, the paper has two significant issues that must be addressed: (1) the unsupported "state-of-the-art" overclaim in the abstract, and (2) the critically underspecified 3D rendering pipeline (the opacity gap makes the 3D results unverifiable in their current form). The latter is the more serious problem because it affects the core 3D evaluation that constitutes a substantial portion of the experimental results.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

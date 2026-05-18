@@ -1,20 +1,20 @@
-Now I have a thorough understanding of the paper and all reviewer claims. Let me compose the final consolidated review.
+I now have a thorough understanding of the paper and all reviewer claims. Let me compile the final review.
 
 ## Summary
 
-This paper introduces PaPaGei, the first open foundation model for PPG (photoplethysmography) signals, pre-trained on 57,641 hours of public data. It proposes two SSL approaches: PaPaGei-P (subject-level positive pairs) and PaPaGei-S (morphology-aware positive pairs using sVRI with auxiliary IPA/SQI prediction heads). The models are evaluated on 20 tasks across 10 datasets, comparing against generic time-series foundation models (Chronos, MOMENT), a PPG-specific model (REGLE), and standard SSL methods. PaPaGei-S achieves the highest average AUROC (0.67) and lowest average MAE (10.12), using only 5.7M parameters.
+This paper introduces PaPaGei, the first open-source foundation model for photoplethysmography (PPG) signals, pre-trained on 57K hours of public data from VitalDB, MIMIC-III, and MESA. The core methodological contribution is a morphology-aware self-supervised learning framework (PaPaGei-S) that defines positive pairs via sVRI bins and jointly predicts IPA and SQI through mixture-of-expert heads. The model (5.7M parameters) is evaluated across 20 diverse health tasks spanning cardiovascular health, sleep disorders, pregnancy monitoring, and wellbeing, achieving the best average AUROC (0.67) and MAE (10.12) against generic time-series foundation models (Chronos, MOMENT), a PPG-specific model (REGLE), and standard SSL methods.
 
 ## Strengths
 
-1. **First open PPG foundation model with public release.** The paper correctly identifies a gap: prior PPG foundation models used proprietary data or were not released. PaPaGei is pre-trained entirely on public datasets (MIMIC-III, VitalDB, MESA) and the models are open-source. This is a concrete community resource.
+- **First open PPG foundation model trained exclusively on public datasets**: The paper curates 57,641 hours from three public datasets and releases the models, directly addressing the prior lack of reproducible, generalizable PPG pre-trained representations.
 
-2. **Novel morphology-aware SSL design.** PaPaGei-S's use of sVRI to define positive pairs across subjects, combined with auxiliary prediction of IPA and SQI via mixture-of-expert heads, is a principled adaptation of contrastive learning to PPG physiology. The component ablation (Figure 4) confirms the full model outperforms any subset of objectives.
+- **Novel morphology-aware self-supervised framework**: The PaPaGei-S objective leverages physiologically meaningful PPG metrics (sVRI, IPA, SQI) to define contrastive pairs and auxiliary prediction tasks. Ablation confirms the full model (0.67 AUROC) outperforms the participant-contrastive PaPaGei-P variant (0.63) and all individual components, with sVRI identified as the key driver.
 
-3. **Comprehensive and diverse evaluation.** 20 tasks from 10 datasets spanning cardiovascular health, sleep disorders, pregnancy, and wellbeing — with 7 datasets unseen during pre-training — is a thorough benchmark for a first-of-its-kind model.
+- **Comprehensive evaluation across 20 diverse health tasks**: The paper benchmarks against 7 baselines on tasks ranging from ICU admission and blood pressure to sleep apnea and emotion recognition. PaPaGei-S achieves the highest average AUROC (0.67 vs. next-best 0.63) and lowest average MAE (10.12 vs. next-best 10.43), and the PaPaGei family (choosing the better of P/S per task) outperforms both Chronos and MOMENT in at least 14 of 18 tabulated tasks.
 
-4. **Data and parameter efficiency.** PaPaGei-S (5.7M parameters) outperforms 70× larger models (Chronos 200M, MOMENT 385M) in average performance. The scaling analysis confirms that smaller models are better suited for PPG data, which has practical implications for on-device deployment.
+- **Data- and parameter-efficiency**: The 5.7M-parameter PaPaGei-S outperforms models 70× larger (Chronos 200M, MOMENT 385M) on average. Data-efficiency experiments show PaPaGei-S leads at 25% label availability and improves steadily with more data.
 
-5. **Thorough ablation studies.** Component ablation (sVRI/IPA/SQI combinations), data efficiency (25%–100% labeled data), scaling (5M/35M/139M), and pre-training data composition are all examined, providing solid empirical support for design choices.
+- **Pre-training data composition ablation**: Performance improves monotonically as additional public datasets are added, with the combination of all three yielding the best results — a useful finding for the community.
 
 ## Weaknesses
 
@@ -22,58 +22,80 @@ This paper introduces PaPaGei, the first open foundation model for PPG (photople
 None.
 
 ### Major
-
-1. **Multi-class classification results are missing.** The paper lists 20 tasks (Table 1) including T2 (Operation Type, 9-class) and T20 (Activity, 9-class), and states these use random forest with accuracy as the metric. However, the main results tables (Tables 1 and 2) report only binary classification AUROC and regression MAE — the multi-class accuracy results are never presented. This means 2 of the claimed 20 tasks have unreported results in the main paper, and the reader cannot verify whether these tasks support or undermine the paper's claims.
-
-2. **SSL baseline pre-training protocol is ambiguous.** The paper states that SimCLR, BYOL, and TF-C are "trained from scratch" (Section 4.3) but does not clarify whether this means: (a) pre-trained on the same upstream data as PaPaGei from randomly initialized weights, or (b) trained directly on each downstream task without upstream pre-training. If (b), the comparison is fundamentally unfair to these methods, which are designed to benefit from large-scale pre-training. The reported model sizes (SimCLR 5M, BYOL 12M, TF-C 9.7M) suggest some upstream training occurred, but the paper should state this explicitly and report the pre-training hyperparameters.
+None. No single weakness invalidates the paper's core claims or results.
 
 ### Minor
 
-1. **Overlapping confidence intervals weaken per-task superiority claims.** While the aggregate averages favor PaPaGei-S, the bootstrapped 95% CIs overlap between PaPaGei-S and the best baseline on most individual tasks (e.g., ICU Admission: PaPaGei-S [0.75–0.82] vs. Moment [0.70–0.80]; Mortality: PaPaGei-S [0.63–0.70] vs. Chronos [0.65–0.71]). The paper uses language like "outperforming other models" without paired significance tests. This is not fatal — overlapping CIs do not necessarily imply no significant difference — but the evidence for per-task superiority would be strengthened by paired bootstrap tests or effect-size reporting.
+- **Statistical support for average improvement claims could be strengthened.** The paper reports average gains of 6.3% (classification AUROC) and 2.9% (regression MAE), and individual 95% CIs are provided for each task. However, CIs overlap substantially across many tasks (e.g., Hypertension: PaPaGei-S [0.68–0.87] vs. Moment [0.64–0.85]; Arousal: PaPaGei-S [0.52–0.57] vs. Chronos [0.54–0.60]), and several baselines outperform PaPaGei-S on individual tasks (Gestation Age: Chronos 5.69 vs. PaPaGei-S 6.05; HR: Moment 8.82 vs. PaPaGei-S 11.53). The average improvement is driven by strong wins on a subset of tasks (e.g., SDB: +0.25, ICU: +0.07). A paired statistical test across tasks (e.g., Wilcoxon signed-rank comparing PaPaGei-S to each baseline on the 20 tasks) would directly sharpen the main claim. The paper's conclusion that PaPaGei-S "outperforms existing benchmarks" is reasonable as an average claim but would benefit from quantifying how many individual task differences are statistically reliable.
 
-2. **Morphology detection pipeline lacks reliability analysis.** PaPaGei-S depends on detecting systolic peaks and dicrotic notches to compute sVRI and IPA. The paper mentions SQI as a fallback "when IPA cannot be computed," but provides no analysis of: what fraction of segments had undetectable landmarks, how detection failures were distributed across datasets, or whether quality-based filtering introduces selection bias that inflates downstream performance.
+- **Marginal contribution of IPA and SQI beyond sVRI is not clearly demonstrated.** The ablation (Figures 5a–b) shows: sVRI alone (0.64, 10.36), sVRI + SQI (0.62, 10.81 — worse), sVRI + IPA (0.64, 10.73 — unchanged), and the full model (0.67, 10.12). The paper claims "IPA and SQI providing positive knowledge transfer," but neither individually adds value beyond sVRI alone; SQI actually degrades performance. The full model's improvement over sVRI alone (+0.03 AUROC) is modest and could arise from the multi-task interaction rather than meaningful contributions from IPA/SQI. The paper's own text notes "SQI contributing the least to overall performance" — a more precise characterization would acknowledge that the value of the full morphology-aware framework over a simpler sVRI-only contrastive objective is small and not isolated to the individual regression heads.
 
-3. **Skin tone analysis is underdeveloped.** The analysis splits Fitzpatrick skin types into a binary Light/Dark comparison without reporting numerical MAE values, per-skin-tone breakdowns, or statistical tests for model×skin-tone interactions. The paper claims to "establish a benchmark for bias evaluations," but the current analysis is too superficial to serve this purpose.
+- **Skin tone analysis is preliminary, and the "benchmark" claim is overstated.** The VV dataset contains only 231 subjects. The analysis does not report sample sizes per Fitzpatrick category, perform any statistical test of the model–skin-tone interaction, or provide CIs in Figure 9. The paper's language — "establishing a benchmark for bias evaluations of future models" (abstract) — substantially overstates what is presented. The analysis itself (examining BP estimation across skin tones) is a worthwhile effort that should be retained, but the claims need to be scaled back to "preliminary analysis" or "exploratory investigation."
 
-4. **Scaling experiment confounds architecture variation with parameter count.** Larger models were constructed by widening (32→64 starting filters), not by increasing depth. A depth-controlled scaling study would more cleanly isolate the effect of parameter count on PPG representation quality.
+- **The HR regression failure (T19) is not discussed.** On the largest supervised task (64,697 samples from PPG-DaLiA), MOMENT achieves MAE 8.82 while PaPaGei-S achieves 11.53 — nearly 31% worse. This is the highest-stakes real-world wearable task in the benchmark. The paper does not analyze why PaPaGei-S struggles here (motion artifacts? model capacity? linear probing limitation?), which would help bound the model's limitations and guide future work.
 
-5. **Missing optimizer and training details.** The paper specifies learning rate (10⁻⁴), training steps (15,000), and GPU count, but omits the optimizer type (Adam? SGD?), batch size, weight decay, and learning rate schedule. These are standard details needed for reproducibility.
+- **Reproducibility details for morphology metric computation are missing.** The sVRI, IPA, and SQI formulas (Equation 1) depend on detecting the systolic peak (sys) and dicrotic notch (n̂). The paper does not describe the peak/notch detection algorithm, which is essential for reproducing the pre-training pipeline.
+
+- **Linear probing may underestimate general time-series models.** Chronos and MOMENT are pre-trained for forecasting tasks, not discriminative health tasks. Evaluating all models via linear probing may systematically disadvantage these baselines. The paper briefly acknowledges this mismatch but does not discuss its potential impact on the comparison.
 
 ### Trivial
 
-- The origin of embeddings \(H\) (encoder output vs. projection head output) in Section 3.2 is slightly ambiguous. From context and Figure 2, \(H\) appears to be the encoder output before the projection head, but this is not explicitly stated.
+- The scaling analysis varies only filter width (32 → 64) while keeping depth constant, so the conclusion that "smaller models are better suited for PPG data" is actually an observation about width for a fixed architecture, not a general scaling law.
+
+- Pre-training compute is reported as "eight V100 GPUs for 15,000 steps" without wall-clock time or total GPU-hours, which would be useful for resource-constrained practitioners.
 
 ## Nice-to-Haves
 
-- A paired bootstrap or permutation test comparing PaPaGei-S against each baseline on each task would cleanly address the overlapping-CI concern.
-- Reporting the fraction of segments where morphological landmarks could not be detected (across each pre-training dataset) would strengthen the method's transparency.
-- A fairness analysis with per-Fitzpatrick-category breakdown and significance testing would make the skin tone evaluation more meaningful.
+- Add a cross-task paired significance test (e.g., Wilcoxon signed-rank) to quantify how many tasks have statistically reliable improvements.
+- Analyze the HR regression failure (T19) — is it motion artifacts, model capacity, or evaluation protocol?
+- Provide the peak/notch detection algorithm used for morphology computation.
+- Report CI bounds for the average ablation values in Figures 5a–b.
+- Extend scaling analysis along depth and embedding dimensions for a more complete picture.
+- For Chronos/MOMENT, consider reporting fine-tuned performance as a complementary analysis, even if linear probing is the primary protocol.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points were flagged by reviewers but are removed after verification against the paper:
 
-- **ECG/EEG-to-PPG transfer "challenging" without evidence** (Harsh Critic). This is an argument in Related Work motivating a PPG-specific model, not an empirical claim requiring experimental validation. Removing as misunderstanding of the paper's scope.
-- **Bandpass filter trade-off not noted.** The filter (0.5–12 Hz) follows established PPG preprocessing practices cited in the paper. Removing as a standard design choice, not a weakness.
-- **In-domain test set holdout not specified.** The task table caption explicitly states: "The rest are used for pre-training (held-out test-sets and labels)." The reviewer missed this. Removing as factually wrong.
-- **Combining PaPaGei-P and PaPaGei-S explanation insufficient.** The paper provides a concrete explanation: "constrain positive pairs on both sVRI and the number of participants, resulting in too many unique labels with limited samples per label." Removing as the paper already addresses this.
-- **Abstract claims unqualified.** The abstract reports average improvements ("6.3% and 2.9%"), which is standard practice. Removing as a formatting/style nitpick.
-- **Formatting and style nitpicks** (e.g., "the paper should stop referring to outperforming") — these are editorial preferences, not substantive weaknesses.
+1. **"Multi-class results missing from main tables"** — The paper describes evaluation on 20 tasks including T2 (Operation Type) and T20 (Activity), both multi-class. Results could appear in the appendix (which is stripped by the parser). Following the rule against penalizing absent appendix content, this criticism is removed.
+
+2. **"Missing related works"** — Not verifiable without external sources; removed per instructions.
+
+3. **"Typographical/formatting issues"** — All formatting artifacts are parser-induced, not author errors.
+
+4. **"Chronos/MOMENT comparison is unfair"** — While evaluating via linear probing is a valid methodological concern (kept in Minor), the Harsh Critic's framing as "unfair comparison" is inaccurate: all models receive the same evaluation protocol, and the paper is transparent about this choice.
+
+5. **Strength Finder's claim that skin tone analysis "establishes a bias evaluation benchmark"** — This strength conflicts with the verified weakness that the analysis is underpowered and the claims are overstated. Moved here with the weakness retaining dominance.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews raise reasonable methodological concerns but do not reveal fundamentally new insights about the work that the authors themselves have not considered.
+The most interesting observation emerging from the cross-review analysis is the tension between the paper's two main value propositions: **(1)** the morphology-aware framework is the core claimed contribution, yet the ablation data suggest most of the gain comes from the sVRI-based contrastive objective rather than the IPA/SQI regression heads; and **(2)** the paper's strongest empirical claim (average improvement over much larger models) is numerically clear but rests on an average that masks substantial task-level variability, including clear failures (HR estimation). This suggests the paper's real contribution is better framed as "the first open, data-efficient PPG foundation model that achieves competitive average performance across diverse tasks while being 40–70× smaller than generic time-series FMs," rather than "a model that outperforms existing benchmarks through its novel morphology-aware design." The practical value of a small, open-source PPG model that does well on average across many tasks is substantial on its own terms.
 
 ## Suggestions
 
-1. Add the missing multi-class results (T2, T20 accuracy) to the main paper or a clearly referenced appendix table. This is the most critical gap.
-2. Clarify the SSL baseline training protocol: explicitly state whether SimCLR, BYOL, and TF-C were pre-trained on the same upstream data, and if so, report the pre-training hyperparameters.
-3. Add a short paragraph analyzing morphology detection reliability: how many segments had undetectable landmarks, how failures were handled, and whether this biases the pre-training distribution.
-4. Include paired bootstrap significance tests (or at minimum note that overlapping CIs do not preclude significance) and temper "outperforming" language where CIs heavily overlap.
+1. **Add a Wilcoxon signed-rank test** comparing PaPaGei-S vs. each baseline across all tasks, and report the number of tasks where PaPaGei-S is statistically significantly better/worse.
+
+2. **Tone down the skin tone claims**: Replace "establishing a benchmark" with "providing a preliminary analysis" and add confidence intervals and per-category sample sizes to Figure 9.
+
+3. **Acknowledge the HR failure** explicitly and hypothesize about the cause (motion artifacts? domain shift from clinical pre-training data to wearable data?).
+
+4. **Characterize the ablation more precisely**: Acknowledge that IPA and SQI individually add little beyond sVRI, and that the full model's advantage comes from the multi-task interaction rather than independent contributions.
+
+5. **Release the peak/notch detection code** alongside the model weights to ensure full reproducibility.
 
 ## Score and Decision
 
-This paper makes a genuine contribution — the first open PPG foundation model with thoughtful SSL design and a diverse evaluation benchmark. The weaknesses are real but addressable: missing multi-class results, ambiguous baseline protocol, and several presentation gaps. None of these invalidate the core contribution, but they need to be fixed before publication. The paper is above the acceptance threshold for a venue like NeurIPS/ICML/ICLR given the strength of the contribution and the open release.
+**Originality**: 7/10 — First open PPG foundation model is a clear first; the morphology-aware SSL is novel but its marginal benefit over simpler alternatives is modest.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+**Importance**: 8/10 — PPG is the most widespread non-invasive biosignal in wearables and clinical settings; an open foundation model fills a genuine gap.
+
+**Claims support**: 6/10 — Average claims are numerically supported but individual task variability and the lack of cross-task significance testing weaken the case. Skin tone "benchmark" claim is overstated.
+
+**Soundness**: 7/10 — Evaluation is broad and generally well-executed. Major concern is the ablation not cleanly supporting the claimed benefit of the morphology-aware components.
+
+**Clarity**: 7/10 — Methods are clearly described; results tables are well-structured.
+
+**Value to community**: 8/10 — Open model release, public data pre-training, and broad evaluation make this a useful resource.
+
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

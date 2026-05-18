@@ -1,18 +1,18 @@
-Now I have all the information needed. Let me construct the final consolidated review.
+Now I have a thorough understanding of both the paper and the reviewer claims. Let me compile my final consolidated review.
 
 ## Summary
 
-SuperMark proposes a training-free image watermarking framework that repurposes a pretrained diffusion-based super-resolution (SR) model for both watermark embedding and extraction. Watermarks are injected into Gaussian noise via existing methods (Gaussian Shading or Tree-Ring), embedded through the SR denoising process, and recovered via DDIM inversion. The method achieves 99.46% bit accuracy under normal distortions and 89.29% under adaptive attacks on MS-COCO, outperforming nine baselines on robustness while maintaining reasonable fidelity (PSNR 32.49, SSIM 0.93), all without any model training.
+SuperMark proposes a training-free image watermarking framework that repurposes pretrained diffusion-based super-resolution (SR) models for watermark embedding and extraction. The key insight is to exploit the symmetry between watermark embedding/extraction and the denoising/noising processes in diffusion models: watermarks are injected into Gaussian noise using existing techniques (Gaussian Shading, Tree-Ring), the SR model denoises this to produce a watermarked image, and DDIM Inversion recovers the noise for extraction. The method requires no fine-tuning. Experiments on MS-COCO show 99.46% bit accuracy under normal distortions, 89.29% under adaptive attacks, with PSNR of 32.49 and SSIM of 0.93 — substantially outperforming nearly all trained baselines in robustness.
 
 ## Strengths
 
-- **Genuinely training-free framework.** SuperMark reuses a frozen pretrained diffusion SR model for both embedding and extraction, bypassing the expensive encoder–decoder training required by all deep-learning baselines. The paper explicitly states that "both the SR model M and the VAE operate with frozen parameters, meaning no additional training is required" (Sec. 3.2), and the full pipeline in Figure 2 runs without fine-tuning. This is a clean architectural contribution that directly contrasts with the traditional encoder–noise–decoder paradigm.
+- **Novel training-free paradigm with strong empirical results**: SuperMark is the first framework to use diffusion-based SR models for training-free watermarking. Table 1 demonstrates this works remarkably well: 99.46% bit accuracy under normal distortions (vs. next best ~94%) and 89.29% under adaptive attacks where most baselines fall below 60%, all while maintaining PSNR/SSIM competitive with trained methods (32.49/0.93). This combination of novelty and performance is compelling.
 
-- **Strong robustness against both normal distortions and adaptive attacks.** In Table 1, SuperMark achieves the highest average bit accuracy of 99.46% under normal distortions and 89.29% under adaptive attacks—substantially exceeding all nine baselines. Many baselines collapse to near-chance under adaptive attacks (e.g., DwtDctSvd at 51.22%, MBRS at 57.28%), while SuperMark maintains high accuracy. This is the paper's strongest empirical contribution.
+- **Elegant conceptual framing**: The paper clearly identifies and leverages the symmetry between (embedding/extraction → denoising/noising) and the reversibility of DDIM. The observation that this pipeline bypasses the traditional encoder–noise-layer–decoder trade-off (Figure 1) is well-motivated and leads to a clean, principled design.
 
-- **Good transferability across diverse settings.** SuperMark maintains consistent extraction accuracy across four additional datasets (DiffusionDB, WikiArt, CLIC, MetFACE; Table 2), two different SR models (SD-Upscaler vs. LDM-SR; Table 3), a different watermark injection method (Tree-Ring; Table 4), and different resolutions. This demonstrates practical flexibility beyond a one-off configuration.
+- **Demonstrated transferability across multiple dimensions**: Tables 2–4 show consistent performance across 5 datasets (MS-COCO, DiffusionDB, WikiArt, CLIC, MetFACE), two SR models (SD-Upscaler, LDM-SR), two watermark injection methods (Gaussian Shading, Tree-Ring), and varying resolutions. The Tree-Ring variant (Table 4) achieves 100% watermark detection rate under most conditions and superior robustness to rotation vs. ZoDiac.
 
-- **Elegant conceptual insight linking watermarking and diffusion processes.** The paper identifies and exploits the symmetry between watermark embedding/extraction and the denoising/noising processes in diffusion models. Leveraging DDIM inversion's inherent robustness to perturbations provides a principled theoretical foundation for why robustness emerges without adversarial training.
+- **High fidelity without sacrificing robustness**: Where many robust watermarking methods compromise visual quality (e.g., StegaStamp at 24.01 PSNR, ZoDiac at 21.88), SuperMark achieves 32.49 PSNR and 0.93 SSIM — comparable to the highest-fidelity baselines — while being the most robust.
 
 ## Weaknesses
 
@@ -20,55 +20,57 @@ SuperMark proposes a training-free image watermarking framework that repurposes 
 None.
 
 ### Major
-
-- **Uncontrolled watermark payload across baselines.** The paper embeds 32 bits for SuperMark (Sec. 4.1) but does not report the payload sizes of any baseline method. In digital watermarking, payload directly affects both robustness and fidelity—smaller payloads make the task easier. Without controlling for payload (either by equalizing it or by presenting accuracy-vs-payload curves), the robustness advantage claimed in Table 1 may partially reflect asymmetric task difficulty. This is a structural gap in the evaluation that needs to be addressed before the comparative claims can be fully trusted.
+None.
 
 ### Minor
 
-- **Fidelity claim is slightly overstated.** The abstract and introduction state that SuperMark offers "fidelity comparable to existing methods." Table 1 shows SuperMark at PSNR 32.49/SSIM 0.93, while top baselines reach 36–37 PSNR and 0.97 SSIM. The fidelity is reasonable and within the range of methods tested, but "comparable" glosses over a meaningful gap to the best-performing methods. The paper would be more credible if it explicitly acknowledged this trade-off and framed the contribution as "competitive fidelity in exchange for significantly superior robustness."
+- **Missing distortion hyperparameters hinders reproducibility**. The paper lists distortion types (JPEG compression, Gaussian blur, Gaussian noise, cropping, brightness) but provides no specific parameters (e.g., JPEG quality factor, noise variance, cropping ratio, blur kernel size). Given that SuperMark's headline result is robustness, these details are essential for reproducing and fairly comparing with the reported numbers. Table 1 results cannot be precisely replicated without them.
 
-- **ZoDiac comparison (Table 4) relies on numbers from the original paper without controlled conditions.** The paper transparently states "The corresponding results of ZoDiac are those presented in their paper," but this means experimental conditions (distortion parameters, dataset sampling, resolution pipeline) may differ. While citing published results is common practice, the claim that SuperMark "maintains better fidelity and exhibits significantly stronger robustness against rotation" relative to ZoDiac would be much stronger if ZoDiac were run under identical conditions. This is a standard limitation of cross-paper comparisons, not a fatal flaw.
+- **No analysis of the claimed robustness mechanism**. The paper repeatedly attributes robustness to "the inherent robustness of DDIM Inversion" (cited from Tree-Ring/Gaussian Shading), but provides no characterization of inversion reconstruction error in its own pipeline. The SR pipeline introduces steps (upscaling interpolation, VAE encoding/decoding, concatenation with distorted low-res inputs) not present in the T2I setting where DDIM inversion robustness was originally demonstrated. While the strong empirical results indirectly validate the approach, an analysis of how inversion error correlates with bit accuracy under each distortion would substantially strengthen the paper's scientific contribution.
 
-- **Distortion parameters are not specified.** The paper lists normal distortions (JPEG compression, random cropping, Gaussian blur, Gaussian noise, brightness adjustments) but does not give exact parameters (e.g., JPEG quality factor, cropping percentage, blur kernel size, noise variance). This hinders reproducibility and makes it difficult for readers to assess whether the distortion severity is comparable to that used by baselines.
+- **The robustness–fidelity trade-off analysis promised in Sec 4.4 is absent from the extracted text**. The paper explicitly states (Sec 3.3) that the choice of downscaling factor creates a trade-off between robustness and fidelity "which we will explore in detail in Sec. 4.4," but the extracted text jumps from Sec 4.3 directly to Sec 5. If this section exists in the full submission, it should be evaluated alongside other results; if genuinely absent, the paper's central design decision is left uncharacterized. (Note: this may be a PDF-parsing artifact.)
 
-- **No statistical significance reported.** With 500 images, standard deviations or confidence intervals on bit accuracy should be provided, especially for the adaptive attack results where performance varies more.
+- **No sensitivity analysis on the strength factor \(f_s\)**. The paper fixes \(f_s = 0.4\) (Eq. 2) without ablation, but this parameter directly controls the robustness–fidelity balance. Understanding how results vary with \(f_s\) would help practitioners apply the method.
 
-- **The claimed "critical insight" that the encoder–noise–decoder architecture creates a trade-off between robustness and fidelity is not novel.** This trade-off is well-understood in the watermarking literature. The paper's real insight is the specific idea of leveraging SR diffusion models for training-free watermarking, which should be emphasized instead.
+- **ZoDiac comparison (Table 4) relies on reported numbers from the ZoDiac paper rather than a controlled reproduction**. While common in the literature, this is worth noting since the gap in PSNR (21.88 vs. 32.20) is large, and differences in preprocessing or evaluation settings could affect it. A controlled comparison would be more definitive.
+
+- **Terminology "adaptive attack" is used loosely**. The paper groups VAE compression models (Bmshj18, Cheng20) and diffusion editing methods (Zhao23, InsP2P) under "adaptive attacks." These are standard learned distortions, not attacks that are adaptively optimized against the specific watermarking scheme. This does not affect the results but could mislead readers about the threat model considered.
 
 ### Trivial
-None.
+
+- Contribution 1 ("critical insight" that encoder–noise-layer–decoder creates a robustness–fidelity trade-off) is over-framed as a new discovery; this tension is well-recognized in the watermarking literature. The paper's true novelty is in how it bypasses this trade-off via diffusion inversion, not in identifying it.
 
 ## Nice-to-Haves
 
-- A systematic trade-off analysis varying the strength factor $f_s$ (currently fixed at 0.4) and plotting PSNR/SSIM vs. bit accuracy would let readers evaluate the Pareto frontier directly and strengthen confidence in the chosen operating point.
-- Adding perceptual metrics (LPIPS, or qualitative examples) would strengthen the fidelity argument, especially since the method uses a generative SR model whose outputs may look different from originals at the same PSNR.
-- Reporting baseline payload sizes and/or running a controlled payload-equalized experiment would fully resolve the major weakness above.
+- An analysis of DDIM inversion reconstruction error (LPIPS or pixel-wise difference between \(Z_{wm}^T\) and the inverted \(Z_{wm}^{\prime T}\)) under each tested distortion, showing its correlation with bit accuracy. This would validate the claimed mechanism.
+- An ablation varying the downscaling factor \(S_{low}\) and strength factor \(f_s\) to show the empirical Pareto frontier between PSNR/SSIM and bit accuracy.
+- Quantitative measurement of computational overhead (embedding + extraction time) compared to trained encoder–decoder methods like RoSteALS or StegaStamp.
 
 ## Removed Points
 
-These points are flagged to be removed per policy; treat them with caution:
+*The following points from the reviews were removed after verification against the paper:*
 
-- **Missing Section 4.4 (ablation study).** The reviewer criticized the absence of Section 4.4 referenced in the paper. This section was almost certainly present in the original submission and stripped by the PDF parsing/extraction pipeline. Per policy, parser-stripped content is not a valid weakness.
-- **"Fidelity is not comparable — the gap is substantial and the paper does not discuss it."** The paper explicitly discusses the robustness–fidelity trade-off in Sec. 3.3 (introducing the strength factor $f_s$ and the downscaling trade-off) and references Sec. 4.4 for detailed analysis. While the fidelity claim is mildly overstated (noted in Minor above), the characterization of a paper that "does not even discuss this discrepancy" is inaccurate.
-- **"The critical insight is not new; it is well understood."** While the trade-off itself is known, the specific insight about leveraging the denoising/noising symmetry in diffusion models for training-free watermarking is genuinely novel. The reviewer conflates a general observation with the paper's specific instantiation.
-- **Claims about missing perceptual metrics being necessary.** PSNR and SSIM are standard fidelity metrics in the watermarking literature. While LPIPS would be a welcome addition, its absence is not a weakness.
-- **Strength from Strength Finder about "competitive fidelity" and "unifying robustness and fidelity without the trade-off."** This conflicts with the verified weakness that fidelity is below top baselines, so it is moved here per policy (weakness wins over strength when they disagree).
+- **"Flexibility claim is narrower than stated"** (Harsh Critic #3): The paper tests two injection methods (Gaussian Shading, Tree-Ring) and two SR models (SD-Upscaler, LDM-SR), which is a reasonable demonstration for a conference paper. The LDM-SR transfer requires halving the bit count from 32 to 16 — a genuine constraint the paper transparently discloses. Claiming "effectively a single combination" ignores Tables 3 and 4, which show results for LDM-SR and Tree-Ring variants respectively. This is a valid test of flexibility, not a weakness.
+  
+- **"Critical insight overstatement"** (Harsh Critic, Other Observations): This is a matter of framing, not a factual error. The paper identifies the trade-off and then builds a method that bypasses it. The reviewer's disagreement with the presentation style does not constitute a weakness of the method or the paper.
 
 ## Novel Insights
 
-The reviews surface a tension that the paper itself does not fully engage with: the claimed "comparable fidelity" sits uncomfortably next to a 4–5 dB PSNR gap versus the best baselines. This is not fatal—the fidelity numbers are still within an acceptable range—but the paper would benefit from explicitly characterizing this as a deliberate trade-off (better robustness, acceptably lower-but-not-degraded fidelity) rather than claiming parity. The payload control issue is the one genuinely structural concern that, unaddressed, weakens the comparative claims. Neither reviewer identified any fatal flaw; the core idea is sound and the robustness results are impressive.
+None beyond the paper's own contributions. The reviews surface useful suggestions for additional analyses but do not identify conceptual gaps or novel connections the paper missed.
 
 ## Suggestions
 
-1. **Report and control for payload.** Add a supplementary table showing baseline payload sizes. Better yet, evaluate all methods at a common payload (e.g., 32 bits) to verify the robustness advantage holds under equal conditions.
-2. **Acknowledge the fidelity trade-off explicitly.** Replace "comparable" with language like "competitive fidelity given the substantial robustness gains" and consider a trade-off plot of PSNR vs. accuracy across different $f_s$ values.
-3. **Run ZoDiac under identical conditions or soften the comparison claims.** If running ZoDiac is infeasible, explicitly note the cross-paper limitation.
-4. **Specify all distortion parameters** in the experimental setting for reproducibility.
-5. **Add confidence intervals or standard deviations** to the main results table.
+1. Add specific distortion parameters (JPEG quality factor, Gaussian noise σ, blur kernel size, cropping ratio, brightness Δ) to the experimental setting section.
+2. Include an ablation study varying the strength factor \(f_s\) (0.2–0.8) showing the fidelity–robustness trade-off.
+3. Add a brief analysis of DDIM inversion reconstruction error under key distortions as supporting evidence for the robustness mechanism.
+4. Clarify the terminology around "adaptive attacks" — rename to "learned distortions" or "learning-based attacks" unless the attacks are indeed adversarially optimized against the watermarking scheme.
+5. If Sec 4.4 exists in the full submission, ensure it includes a systematic sweep over the downscaling factor \(S_{low}\) or strength factor \(f_s\) showing the Pareto frontier.
 
 ## Score and Decision
 
-This paper presents a genuinely novel, training-free watermarking framework with strong robustness results across a thorough set of baselines and distortions. The core idea is elegant and clearly explained. The main concerns—uncontrolled payload, slightly overstated fidelity claims, and cross-paper ZoDiac comparison—are real but fixable and do not undermine the central contribution. The method's 89.29% adaptive-attack accuracy is particularly notable given that most baselines collapse under such conditions. With the evaluation gaps addressed, this would be a solid contribution to the watermarking community.
+**Originality**: High — repurposing diffusion SR models for training-free watermarking is genuinely novel. **Importance**: High — robust watermarking is a timely problem. **Claims supported**: Mostly yes, though the mechanism analysis is thin. **Soundness**: Good — the main experiment (Table 1) is comprehensive with 9 baselines. **Clarity**: Good, though missing parameters hurt reproducibility. **Value**: High — the method is simple, effective, and training-free.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+The paper's core idea is novel and its empirical results are strong enough to stand on their own. The missing Distortion parameters and the absent Sec 4.4 (likely a parser artifact) are fixable. The paper makes a genuine contribution without fatal flaws.
+
+MY FINAL SCORE: <pineapple>8.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,22 +1,18 @@
-Now I have read and verified the full paper. Let me produce the consolidated review.
-
----
+Now I have a thorough understanding of the paper and can verify all claims. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper studies how pretraining label granularity affects transfer learning in image classification. It provides a theoretical analysis using a simplified two-layer ReLU network with orthonormal features, proving that coarse-grained pretraining cannot learn fine-grained (rare) features while fine-grained pretraining can. Empirically, it shows that leaf-level pretraining on ImageNet21k yields a ~10% improvement over coarse-level pretraining on ImageNet1k, and systematically investigates conditions (meaningful hierarchy, label alignment) for effective fine-grained pretraining using iNaturalist 2021, revealing a U-shaped error curve.
+This paper studies how pretraining label granularity affects transfer learning in image classification. Theoretically, it proves (using a two-layer ReLU network trained with SGD on a hierarchical data model) that fine-grained pretraining enables learning of rare features while coarse-grained training only learns common features, explaining why fine-grained pretraining boosts accuracy on hard test samples. Empirically, it shows leaf-level labels on ImageNet21k outperform coarser levels for transfer to ImageNet1k, and on iNaturalist reveals a U-shaped effect where both too-coarse and too-fine labels hurt, along with the importance of label hierarchy quality and source-target alignment.
 
 ## Strengths
 
-1. **Formal theoretical analysis of why fine-grained pretraining helps.** Theorems 1 and 2 prove, under a defined feature hierarchy, that coarse-labeled SGD cannot learn fine-grained features even with polynomially many steps, whereas fine-grained pretraining does learn them and achieves near-perfect accuracy on both easy and hard test samples. This formalizes the intuitive correspondence between label granularity and feature learnability using a multi-view data model and cross-entropy loss — advancing beyond prior NTK-based or hinge-loss analyses (Section 4).
+- **Novel theoretical result linking label granularity to feature learnability**: Theorems 1 and 2 prove that under a hierarchical data distribution with orthonormal features, coarse-label training cannot learn fine-grained features even after polynomially many SGD steps, while fine-grained training learns both common and rare features. This provides a formal mechanism—grounded in cross-entropy loss and a two-layer ReLU network—that goes beyond prior theory using NTK or hinge loss. The proof traces how gradient dynamics respond to feature frequency in the training data, which is the paper's most distinctive contribution.
 
-2. **Clear empirical validation on ImageNet21k→ImageNet1k with ViT-B/16.** Table 1 shows a monotonic improvement in finetuning accuracy from 72.75% (granularity level 9, 38 classes) to 82.51% (leaf level, 21,843 classes). This directly supports the core claim and the common practice of using leaf-level labels, with a practically significant ~10% gain over the coarsest level.
+- **Discovery of the U-shaped effect of pretraining granularity**: The iNaturalist experiment (Figure 2) reveals that transfer error first decreases then increases as granularity grows, with manual labels showing a clear U-curve. This is a novel empirical finding that challenges any simplistic "finer is always better" narrative and highlights the existence of a sweet spot.
 
-3. **Systematic dissection of conditions for effective fine-grained pretraining using iNaturalist 2021.** Figure 2 reveals a U-shaped error curve for manual hierarchies and contrasts it with random labels, per-superclass clustering, and whole-dataset clustering. This goes beyond a simple "finer is better" story, showing that both label alignment and meaningful hierarchy matter — random labels perform worst, and extreme granularity (unique labels per sample) degrades performance.
+- **Systematic ablation of label hierarchy quality and alignment**: The paper controls for hierarchy meaningfulness (manual vs. random vs. kMeans) and alignment (kMeans per superclass vs. whole dataset) on iNaturalist (Figure 2). This provides practical guidelines: a meaningful hierarchy that aligns well with the target is necessary for fine-grained pretraining to succeed.
 
-4. **Identification of label function alignment as a key factor.** The comparison between kMeans per superclass (forced alignment, lower error) versus kMeans on the whole dataset (no alignment, higher error) isolates the importance of source and target label functions sharing discriminative features. This is a novel practical finding not present in prior work on label granularity.
-
-5. **Novel theoretical framework connecting feature rarity with solution complexity.** The data model (Definitions 1–4), where features are orthonormal, easy samples contain both common and fine-grained features, and hard samples lack common features, formalizes the hierarchy present in natural images. The proof techniques tracking hidden neuron dynamics under cross-entropy loss extend beyond prior analyses.
+- **Clean ImageNet21k→ImageNet1k benchmark results**: Table 1 shows monotonic improvement as granularity increases, with leaf-level (21,843 classes) achieving 82.51% accuracy. This validates the common practice in the community and provides a clear reference for future work.
 
 ## Weaknesses
 
@@ -25,49 +21,50 @@ None.
 
 ### Major
 
-1. **Theory-experiment gap: the proposed mechanism is not empirically validated.** The theory (Theorems 1 and 2) predicts that fine-grained pretraining helps specifically because it learns rare features that improve accuracy on *hard* test samples (where common features are absent or weak). However, the experiments report only overall validation accuracy — they do not split test samples into easy/hard categories, nor do they analyze whether fine-grained pretraining indeed produces stronger feature representations for rare features. The paper does not claim the experiments *validate* the theory's mechanism (they are presented as separate contributions), but the claimed explanation remains untested by the data. This disconnect weakens the narrative arc: the reader is left wondering whether the theoretical mechanism actually operates in the experimental settings. The paper has the machinery to operationalize a hard-sample split (e.g., samples misclassified by a coarse-pretrained model) and test whether fine-grained pretraining differentially improves them, but does not do so.
+- **The core theoretical mechanism is not directly tested empirically**: The theory predicts that fine-grained pretraining specifically improves accuracy on *hard* test samples (where common features are missing/weak), while coarse training already handles easy samples. However, the experiments only report aggregate accuracy on the full test set. The paper does not partition test samples into easy vs. hard groups—using, e.g., prediction confidence under a coarse-trained model or the WordNet hierarchy to define hard samples—to verify that gains concentrate on the hard subset. Without this analysis, the proposed mechanism remains unvalidated; the aggregate gains are consistent with alternative explanations (better optimization dynamics, higher model capacity from more output heads, etc.). This is the single most important gap between the paper's explanatory claim and its evidence.
+
+- **Gap between theoretical setting and experimental protocol**: The theory assumes (a) source and target inputs are drawn from the *same distribution* (Section "Target data distribution assumptions"), and (b) classifier weights are frozen ($a_{c,r}=1$) throughout training. In contrast, the ImageNet21k→ImageNet1k experiment involves *different datasets* with distribution shift, and all experiments use *full finetuning* of the network. The theory most directly supports the in-dataset iNaturalist experiments, but the introduction (lines 43–46) positions the theory as explaining the ImageNet21k→ImageNet1k observation in Figure 1, which is somewhat misleading. The distribution-shift limitation is acknowledged only in the conclusion ("future work"), and the frozen-classifier assumption means the theory does not analyze how finetuning would reweight features. The footnote that finetuning "can further boost" the feature extractor does not constitute analysis.
 
 ### Minor
 
-1. **Figure 2 caption is imprecise about the operating range.** The caption states "The manual hierarchy outperforms the baseline and every other hierarchy," while the body text (Section 5.2) explains this holds *"as long as the pretraining label granularity is beyond the order of 10^2"* and notes that the U-shaped curve rises at extreme granularities. The caption should qualify the range or explicitly note that the manual hierarchy's advantage holds within the plotted granularity regime but degrades at extremes. This is a presentation issue that could mislead a casual reader.
+- **Per-class sample count varies inversely with granularity in ImageNet21k experiment**: With ~14M fixed images, leaf-level has ~640 images/class while level 9 has ~368,000 images/class. This confound is not discussed. (The observed trend—finer is better despite fewer images per class—actually goes *against* what a sample-starvation hypothesis would predict, so it does not threaten the conclusion. But it should still be addressed for completeness.)
 
-2. **Theoretical model is quite stylized, limiting direct applicability.** The analysis assumes: orthonormal features, frozen second-layer weights, training on *only* easy samples, a single hierarchy level, and no distribution shift between source and target. The paper acknowledges some of these limitations (Section 4, paragraph after Theorem 2) but in a single paragraph. The assumptions are reasonable for a theoretical proof-of-concept, but the gap between this setting and practical deep-network training deserves more prominent discussion — ideally a dedicated "Limitations of the Theoretical Analysis" paragraph — to manage reader expectations and prevent over-interpretation.
+- **Theoretical bounds on fine-grained classes are restrictive**: The requirement $k_+, k_- \in [\text{polylog}(d), d^{0.4}]$ (Note 2) means the theory only applies when the number of subclasses falls in a specific polynomial window. Real hierarchies often have widely varying numbers of subclasses per superclass, making it unclear how broadly the theory applies.
 
-3. **iNaturalist experiments use only the mini training set.** While justified as a way to "generate a greater gap between the performance of different hierarchies and to shorten training time" (Section 5.2), this limits confidence that the observed trends (U-shape, relative ordering of methods) would hold at full dataset scale. A brief note on whether preliminary experiments with the full set show consistent trends would strengthen the claims.
+- **Size of the "mini version" of iNaturalist is not specified**: The paper states it uses "a mini version of the training set" (line 256) without reporting the exact number of samples or the fraction of the full dataset. This hurts reproducibility and makes it harder to assess whether the U-shaped curve might shift with more data.
 
 ### Trivial
 
-1. The theorems are presented as "Summaries" rather than full formal statements. While this is common for space reasons, the exact dependence on parameters like \(d\) and \(f(\sigma_\zeta)\) is difficult to verify from the summary alone. Adding the full theorem statements to the appendix (which likely exists in the original submission but was stripped) would address this.
+- Theorem 1 notation: "$\mathcal{L}(F^{(T)}) \le o(1)$" uses $o(1)$ as an asymptotic statement where a concrete bound (e.g., $O(d^{-c})$) would be clearer.
+- Figure 1's x-axis ("Number of classes") spans 38 to 21,843; a log scale would improve readability. The paper should also clarify whether the single curve is from one run or averaged.
 
 ## Nice-to-Haves
 
-- A hard-sample analysis (e.g., splitting test samples by whether a coarse-pretrained model classifies them correctly) would directly bridge the theory-experiment gap and substantially strengthen the paper's central claim. This is the single highest-value addition the authors could make.
-- Reporting learning curves or convergence behavior during pretraining would add depth, given the theory's focus on training dynamics.
-- A brief discussion of sensitivity to the choice of embedding model for the kMeans clustering (CLIP ViT-L/14) would improve the iNaturalist analysis.
+- **Easy/hard sample breakdown in experiments**: As argued above, testing the theory's specific prediction about hard samples would be the highest-leverage addition.
+- **Control for per-class data size in ImageNet21k**: Subsampling coarser levels to match leaf-level per-class counts, or training for more epochs at coarser levels, would eliminate the confound.
+- **Discussion of how finetuning interacts with learned features**: Even a brief heuristic argument about how finetuning preserves or amplifies the feature-learning advantage of fine-grained pretraining would bridge the theory-experiment gap.
+- **Synthetic fine-grained labels with known alignment properties**: This would strengthen the alignment claims beyond the current cluster-based baselines.
 
 ## Removed Points
 
-These points were raised by reviewers but are removed after verification against the paper; they are listed here for completeness but should be treated with caution.
-
-- *"No discussion of the limitations of the theoretical model in the main text (only a footnote)"* — **Factually incorrect.** The paper devotes a full paragraph (lines 194–195, Section 4.4) to discussing the "easy samples only" limitation, explicitly calling it an "exaggerated" presentation of the feature-learning bias. The paper also footnotes the perturbed-results extension. The limitations are discussed substantively in the main text.
-- *"The experiments do not support the core claim"* — The paper separates theoretical and empirical contributions. The empirical experiments validate the trend (finer granularity → better accuracy) and identify practical conditions. They do not claim to validate the theory's mechanistic prediction about hard samples, so this is not a contradiction — it is a gap (which is kept as a Major weakness above).
-- *"The paper overstates the explanatory power of the theory"* — The abstract uses "explain" and the introduction uses "theoretical explanation." Given the simplified setting, these word choices are appropriate for a theoretical paper. The claims are not inflated relative to the analysis presented.
-- *"Missing learning curves / convergence behavior"* — This is a wishlist item, not a weakness. The paper's claims do not depend on it. Moved to Nice-to-Haves.
-- *"The kMeans using CLIP embeddings is an unfair advantage"* — CLIP is used only to generate alternative label hierarchies for controlled comparison, not as a pretrained backbone for the main experiment. This is a legitimate experimental design choice, not a weakness.
+- *"The paper does not explain the right-side rise of the U-shape"*: **Removed** because the paper does explain this (lines 267–268), attributing it to learning "frivolous details" when granularity is too fine.
+- *"The green curve (kMeans per superclass) is a weak baseline that nearly guarantees alignment with the target"*: **Removed** because the paper explicitly acknowledges this design choice (lines 260–261: "its label function is forced to align better") and uses it as a controlled comparison, not as a claimed strong baseline.
+- *"The paper's central claim is not supported by the theory"* (in the strongest sense): **Downgraded**. The theory does support the claim about feature learning in the idealized setting. The gap is between idealized theory and practical experiments, not absence of support.
+- *"Missing appendix" / "missing proofs in appendix"*: Not present in the reviewer's text, so no action needed.
+- *"Cumulative" and generic formatting/style nitpicks*: Removed per instructions.
 
 ## Novel Insights
 
-The reviews surface one genuinely novel observation that goes beyond the paper's own contributions: the U-shaped curve for manual hierarchies in iNaturalist is particularly striking because it simultaneously vindicates the "finer is better" intuition (over most of the range) and reveals a failure regime at extreme granularities. No prior work has systematically mapped this operating regime for fine-grained pretraining while controlling for the data and network architecture. The contrast between per-superclass and whole-dataset kMeans clustering isolates label alignment as an independent factor — this is a clean experimental design insight that future work can build on directly.
+The reviewer's most incisive observation is that the paper's central explanatory claim (the hard-sample mechanism) is not directly tested, creating a disconnect between the theoretical contribution and the empirical validation. This is not merely a missing ablation—it means the paper's signature claim about *why* fine-grained pretraining helps (as opposed to *that* it helps) remains a theoretical possibility rather than an established finding. The reviewer's suggestion to define hard samples operationally (e.g., via coarse-model confidence) is a concrete path to close this gap that the authors should prioritize.
 
 ## Suggestions
 
-1. **Bridge the theory-experiment gap.** Define "hard" test samples operationally (e.g., those misclassified by a coarse-pretrained model or those with low prediction confidence from a coarse model) and show that fine-grained pretraining differentially improves accuracy on these samples. This single addition would substantially strengthen the paper's central contribution.
-2. **Correct the Figure 2 caption** to qualify the performance claim with the granularity range, or align it precisely with the text's description.
-3. **Add a "Limitations" paragraph** that explicitly itemizes what the theoretical analysis does and does not account for, rather than burying the discussion after the theorems.
+1. **Directly test the hard-sample mechanism**: Partition the ImageNet1k test set into easy vs. hard samples (using coarse-trained model confidence or WordNet hierarchy position), and show that the accuracy gain from leaf-level pretraining is concentrated on the hard subset. This single addition would substantially validate the theoretical mechanism.
+2. **Add a discussion of the per-class sample count confound** in the ImageNet21k experiment, explaining why the trend's direction rules out simple sample-starvation explanations, or run a controlled subsampling experiment.
+3. **Clarify the scope of the theory** in the introduction: explicitly state that the theory applies to the same-distribution setting (iNaturalist-like experiments) and that cross-dataset transfer involves additional considerations, rather than presenting the theory as explaining the ImageNet21k→ImageNet1k results.
+4. **Report the size of the "mini" iNaturalist dataset** used in experiments.
 
 ## Score and Decision
 
-The paper makes meaningful progress on an important and under-explored question. The theoretical framework is novel, the empirical findings (U-shaped curve, label alignment) are practically useful, and the ImageNet21k→ImageNet1k results confirm a widely used but poorly understood practice. The primary weakness is the disconnect between the theory's mechanistic prediction (hard-sample improvement) and the experimental evaluation (overall accuracy only) — this is a real gap but not a fatal one, and it is addressable. The presentation issues are minor. I assess the paper as solid and deserving of acceptance, with the expectation that the authors address the theory-experiment gap in a revision.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

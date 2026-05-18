@@ -1,70 +1,84 @@
-Now I have a thorough understanding of the paper. Let me produce the consolidated final review.
+Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper proposes a Bayesian preference elicitation framework for personalizing algorithmic recourse. The key idea is to learn an individual's cost function from pairwise comparison queries, using a Wishart prior over the cost matrix. The framework has three components: (1) analytical mutual-information-based question selection derived in the asymptotic (κ→∞) regime, (2) a posterior update that constrains beliefs to the Wishart family via KL divergence minimization with a response-alignment term, and (3) graph-based sequential recourse recommendation that minimizes expected cost under the posterior.
+This paper proposes a framework (Bayesian PR) for personalizing algorithmic recourse via preference elicitation. It uses pairwise comparison queries to learn an individual's Mahalanobis cost weighting matrix $\tilde{A}$, modeled with a Wishart prior. The framework has three components: (1) analytical mutual information maximization for question selection (Theorem 3.2 provides a closed-form expression using hypergeometric functions), (2) a projected gradient descent posterior update after each response, and (3) a graph-based recourse recommendation minimizing expected cost under the posterior, formulated as a binary linear program. Experiments on synthetic and three real-world datasets compare against FACE, Wachter, and DiCE.
 
 ## Strengths
 
-- **Novel problem formulation — personalizing recourse through preference elicitation.** The paper addresses a genuine limitation of existing recourse methods (fixed, one-size-fits-all cost functions) by learning individual cost preferences from pairwise comparisons. This is a well-motivated and timely contribution (Abstract, Section 2).
+- **Analytical mutual information for efficient question selection**: Proposition 3.1 derives the asymptotic ($\kappa \to \infty$) mutual information as a binary entropy, and Theorem 3.2 provides a closed-form expression for $\mathbb{P}(\Delta_{ij}(\tilde{A}) \leq 0)$ using hypergeometric functions. The paper shows this reduces complexity from $O(L d^2)$ (sampling-based) to $O(d^2)$ (analytical), which is a genuine computational contribution.
 
-- **Analytical mutual information for question selection.** The authors derive a closed-form expression for the asymptotic mutual information between the response and the cost matrix (Proposition 3.1, Theorem 3.2), which avoids expensive sampling. The paper shows the analytical computation is O(d²) compared to O(L d²) for sampling-based estimation (Section 3.1).
+- **Projected gradient descent posterior update with convergence guarantees**: The posterior update problem (3) is reduced to optimizing over $\Sigma$ for fixed integer $m$, compactified (Proposition 4.3), and shown to be strongly convex with Lipschitz gradient (Lemma 4.5), yielding linear convergence of Algorithm 1. This provides a principled, tractable method for refining the posterior after each response.
 
-- **Provably convergent posterior update.** The posterior update is formulated as a tractable optimization problem, compactified (Proposition 4.3), and solved via projected gradient descent with proven strong convexity and Lipschitz smoothness, guaranteeing linear convergence (Lemma 4.5, Section 4.2).
+- **Graph-based recourse as a binary linear program**: The recourse problem (7a) minimizes expected cost under the Wishart posterior. Using $\mathbb{E}[A] = m_T \Sigma_T$, the problem simplifies to a deterministic binary linear program (7b) solvable with off-the-shelf solvers — a clean and practical formulation.
 
-- **Graph-based sequential recourse with expected cost minimization.** The framework extends the FACE graph approach to use the posterior distribution, formulating recourse as a binary linear program that minimizes expected cost (Section 5, Equations 7a-7b). This is clean and solvable with off-the-shelf optimizers.
-
-- **Empirical evidence of cost reduction.** On four datasets (synthetic, German, Bank, Student), Bayesian PR achieves lower Mahalanobis cost than FACE when the cost function is correctly specified (Table 1), and performs comparably or better even under ℓ₁ misspecification (Table 2). The mean rank metric improves with more questions (Figure 2), confirming that the posterior converges toward the true cost matrix.
+- **Empirical results across multiple datasets show the pipeline works as a whole**: Tables 1–2 and Figure 2 demonstrate that Bayesian PR achieves lower or competitive path costs across synthetic, German, Bank, and Student datasets under both correct (Mahalanobis) and misspecified ($\ell_1$) cost structures. The mean rank trend in Figure 2 shows the posterior mean approaching the ground truth as $T$ increases.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Uncontrolled linear approximation in the posterior update.** The posterior update (Equation 3) replaces the logistic link function Φ(v) with a linear function v→v (lines 148-152). This approximation is uncontrolled: Φ(v) saturates at 0 and 1, while a linear function grows without bound. When κ|Δ_ij| is moderate or large, the approximation error can be arbitrarily large. The resulting objective does not correspond to a principled Bayesian posterior update — it is an ad hoc regularized loss. The paper provides no theoretical or empirical justification for when this approximation is reasonable. Since the entire recourse recommendation depends on the posterior mean m_T Σ_T, this weakens the theoretical foundation of the inference engine. **This is the paper's most significant weakness.**
+- **The linear approximation $\Phi(v) \approx v$ in the posterior update is crude and poorly justified.** In Section 4.1, the response likelihood $\int \Phi(\kappa R \Delta(S)) f_P(S)\,dS$ is approximated by $\kappa \mathbb{E}_P[R \langle M, \tilde{A} \rangle]$ via $\Phi(v) \approx v$. The logistic function $\Phi(v) = 1/(1+e^{-v})$ is bounded in $[0,1]$ and equals 0.5 at $v=0$, while the linear approximation is unbounded and maps $0 \to 0$. For large $|\kappa \Delta|$ — which can occur when $\kappa$ is moderately large or cost differences are substantial — the approximation is quantitatively and even qualitatively wrong (sign and scale both off). No error bound, variational justification, or empirical validation of this approximation is provided. Because this step is the basis for the entire posterior update, the resulting procedure is not a proper Bayesian update of the BTL model. **This does not make the resulting optimization meaningless** — the objective $\min \mathrm{KL}(\mathbb{P}\|\mathbb{P}_{t-1}) + \tau\kappa \mathbb{E}_P[R\langle M,\tilde{A}\rangle]$ can be viewed as a regularized learning objective — but the paper's framing as a Bayesian posterior derived from the BTL likelihood is misleading, and the gap between the approximation and the true likelihood is unexamined.
+
+- **The experiments lack key statistical and methodological details, making the empirical claims difficult to verify.** Tables 1 and 2 report cost and validity without any measure of variability (no standard deviations, confidence intervals, or number of independent runs). Figure 2 shows mean rank trends over $T$ without error bars. The paper does not specify: (a) how many subjects/users $x_0$ were evaluated per dataset, (b) what value of $\kappa$ was used to simulate user responses under the BTL model (only the product $\tau\kappa = 1$ is reported, leaving both $\tau$ and $\kappa$ individually unspecified), and (c) whether results are averaged over multiple random seeds for ground truth $A_0$ generation. Without these details, it is impossible to determine whether the reported differences between methods are systematic or within noise.
+
+- **The question selection strategy is not ablated.** The paper selects questions by maximizing asymptotic ($\kappa \to \infty$) mutual information but never compares against baselines such as random pair selection or exact MI via sampling. Since this is presented as a core contribution, the lack of an ablation makes it impossible to attribute any observed improvement to the query selection mechanism specifically — the posterior update and recourse formulation alone may be responsible.
 
 ### Minor
 
-2. **Graph construction is underspecified.** Section 5 describes creating a directed graph where edges represent "feasible transitions," but never specifies how feasibility is determined (k-NN? ε-neighborhood? density-based criterion?). Since the graph structure directly affects recourse paths and costs, and since the comparison method FACE uses a specific construction, this omission harms reproducibility.
+- **Graph construction is underspecified.** Section 5 describes the graph only as "inspired by FACE" and states that edges represent "feasible transitions." The edge connectivity criterion (e.g., $k$-NN with what $k$? distance threshold? density-based?), handling of low-density regions, and any graph regularization are not specified. This is a reproducibility concern for a paper whose recourse recommendation is graph-based.
 
-3. **Asymptotic MI not validated for finite κ.** The question selection uses the asymptotic (κ→∞) mutual information, but the paper provides no analysis of how well this approximates the finite-κ MI for realistic κ values. The experiments fix τκ=1 but do not report κ itself, so readers cannot assess the approximation quality. If the selected questions are suboptimal at finite κ, the elicitation may be less efficient than claimed.
+- **The comparison to non-graph-based methods (Wachter, DiCE) is mentioned but not contextualized.** Line 266 states these methods are compared, but Tables 1–2 only show Bayesian PR vs. FACE (the tables are embedded as images, but the captions name only FACE and Bayesian PR). If Wachter/DiCE results are reported, their single-step counterfactual nature vs. the paper's sequential graph-based recourse makes the comparison apples-to-oranges; if they are not actually in the tables, the paper overstates its evaluation.
 
-4. **Experimental results lack uncertainty quantification.** Tables 1 and 2 report cost and validity without error bars, standard deviations, or confidence intervals. Without these, it is impossible to assess whether observed cost differences (e.g., 10.97 vs. 18.17) are statistically significant.
-
-5. **Mean rank plots lack a baseline.** Figure 2 shows mean rank decreasing with more questions, but there is no comparison against random question selection or a fixed ordering. The improvement cannot be attributed to MI-based selection without such a baseline.
-
-6. **Missing experimental details.** The paper does not report: initial prior hyperparameters m₀ and Σ₀, degrees of freedom ranges searched, number of projected gradient iterations K, learning rate t, or dataset dimensions d and sizes N, M after encoding. These are needed for reproducibility.
+- **The strong parametric assumption (Mahalanobis cost + Wishart prior) is acknowledged but not studied.** The conclusion mentions this limitation, but the paper does not analyze how misspecification of the cost function form affects the elicitation (beyond the $\ell_1$ experiment in Table 2, which tests only the recourse outcome, not the elicitation quality).
 
 ### Trivial
-- The paper mentions comparisons with Wachter and DiCE in the experimental overview (Section 6, line 266) but only presents FACE results in the main tables. The claim "our method outperforms the non-graph-based approach" (Section 6.2) is not directly supported by presented tables. If these results were in a (parser-stripped) appendix, the main text should reference them explicitly.
+
+None worth enumerating.
 
 ## Nice-to-Haves
-- Direct Frobenius-norm reconstruction error between the estimated mean m_T Σ_T and the ground truth A₀ would be a more direct validation of the elicitation than the indirect mean rank metric.
-- An ablation study varying κ would help assess the sensitivity to the linear approximation and the asymptotic MI assumption.
-- Runtime and scalability analysis for the posterior update (O(d³) per iteration due to eigendecomposition and matrix inversion) would clarify practical limits.
+
+- A comparison between the linearized posterior update and a sampling-based approach (e.g., importance sampling with the exact BTL likelihood) would address concerns about the approximation's validity.
+- Reporting results over multiple random seeds (≥10) with standard deviations would substantially strengthen the empirical claims.
+- An ablation comparing MI-based question selection to random selection would directly validate the contribution of Section 3.
+- Specifying the graph construction parameters (edge criterion, $k$, thresholds) would improve reproducibility.
+- Reporting the individual values of $\kappa$ and $\tau$ (not just their product) used in experiments.
 
 ## Removed Points
-- **"O(d²) complexity claim is misleading"** (Harsh Critic Item 4 notes): The O(d²) claim in Section 3.1 is specifically about the analytical MI expression (per pair), not the posterior update. Computing ₂F₁ for scalar arguments is O(1) with library implementations. The critic's conflation of question-selection complexity with posterior-update complexity is a misreading.
-- **"Projection requires O(d³) — claimed low complexity not realized"**: The paper never claims O(d²) for the posterior update step. The O(d²) claim is exclusively for the question-selection MI computation. Removed as factually incorrect.
-- **"Strong convexity constant is very small / convergence may be slow"**: This is a standard theoretical bound that is often loose in practice; the paper correctly proves linear convergence. Not a genuine weakness.
-- Generic strengths from Strength Finder that are unsupported or conflict with weaknesses (e.g., "strong empirical performance" is weakened by the lack of error bars and missing baselines — kept but qualified).
-- All formatting, typo, and parser-artifact complaints.
-- Missing related work comments (cannot verify).
+
+These points from the reviews were removed or downgraded:
+
+1. **"The paper cannot be reproduced because models/data are unreleased"** — Removed. All cited models, datasets, and baselines (FACE, Wachter, DiCE) are published works; the paper uses standard benchmark datasets. This is a reviewer knowledge gap.
+
+2. **"Missing related work on X"** — Removed per instructions: I cannot independently verify the existence of missing references.
+
+3. **"Formatting/style nitpicks"** — Removed per instructions.
+
+4. **"Reproducibility concerns about undisclosed hyperparameters beyond reasonable expectations"** — Some of the critic's reproducibility concerns about graph construction details are legitimate and kept; demands for complete training logs or exhaustive parameter sweeps are removed.
+
+5. **"The posterior update searches over integer $m$ values, which is computationally expensive"** — This is noted in minor as a fair observation but not a significant weakness; the number of $m$ values is bounded by $d \leq m \leq m_{t-1}$ and $m_{t-1}$ decreases over rounds.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews did not surface any insight the paper itself does not articulate.
+
+None beyond the paper's own contributions: the analytical MI formula (Theorem 3.2) and the binary LP recourse formulation (7b) are the paper's original technical contributions, and the review surface does not reveal deeper patterns or connections beyond what the authors already articulate.
 
 ## Suggestions
-1. **Address the posterior update approximation.** Either (a) derive a principled variational bound that respects the logistic likelihood, or (b) provide an empirical study showing that the linear approximation yields posteriors that still converge to the true A₀ across a range of κ values. This is the single most important improvement.
-2. **Validate the asymptotic MI empirically.** Compare questions selected by the asymptotic MI against finite-κ MI estimated via sampling for a few representative settings.
-3. **Specify the graph construction** (k-NN parameters, distance metric, or the exact FACE procedure used).
-4. **Add error bars / confidence intervals** to all experimental tables.
-5. **Add a random-question baseline** to the mean rank plots (Figure 2).
-6. **Report all experimental hyperparameters** and dataset characteristics.
+
+1. **Revisit the posterior update derivation.** Either (a) provide an error bound or variational justification for the linear approximation, (b) replace it with a more principled approximation (e.g., Laplace approximation, variational lower bound), or (c) reframe the update as a regularized optimization (KL + expected cost alignment) and drop the pretense of being a proper Bayesian posterior from the BTL model. Option (c) is the most practical.
+
+2. **Add error bars and experimental methodology details.** Report results over at least 10 random seeds with standard deviations. Specify the number of subjects evaluated, the $\kappa$ value used in the BTL response simulation, and how ground truth $A_0$ varies across subjects/seeds.
+
+3. **Ablate the question selection.** Add a random-selection baseline (uniform random pairs from $\mathcal{D}_1$) to demonstrate that MI-based selection provides a measurable benefit.
+
+4. **Specify graph construction parameters** (edge connectivity metric, $k$ for $k$-NN or equivalent, treatment of low-density regions) for reproducibility.
+
+5. **Clarify the role of Wachter/DiCE in the evaluation.** Either include them in the main tables with proper contextualization, or remove the claim of comparison if they are not actually benchmarked.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

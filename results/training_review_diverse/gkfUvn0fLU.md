@@ -1,22 +1,26 @@
-Now I have a thorough understanding of the paper and can verify the reviewer's claims. Let me write the consolidated review.
+Now I have thoroughly verified the paper content against all reviewer claims. Let me compile the final review.
+
+---
 
 ## Summary
 
-This paper studies reward model overoptimization in the context of composite reward functions (combinations of multiple RMs). The authors first analyze how correlation between component RMs shifts the "proxy points" (values beyond which further optimization degrades ground-truth performance). They then propose reformulating RLHF as a constrained MDP, using these proxy points as thresholds with Lagrange multipliers as learned dynamic weights, preventing overoptimization. They introduce several constrained variants (μ-PPO, ξ-PPO, All-PPO) and a practical single-run variant (NM-PPO) using Nelder-Mead optimization to identify thresholds during training. Results on DailyDialog with GPT-2 show that the constrained methods (particularly ξ-PPO) achieve better and more stable evaluation performance than standard PPO with fixed weights.
+This paper studies reward model overoptimization in *composite* reward functions (e.g., METEOR + intent score), where the interaction between component RMs shifts the points at which each ceases to be a useful proxy. It proposes identifying these "proxy points" and then using constrained RL (CMDPs with Lagrangian relaxation) to keep each component RM at or below its proxy point, with dynamic weights emerging naturally from Lagrange multipliers. A derivative-free variant (NM-PPO) allows threshold identification within a single training run. Experiments on DailyDialog with GPT-2 and two component RMs show that the constrained methods (μ-PPO, ξ-PPO) outperform fixed-weight PPO baselines and are more robust to extended training.
+
+---
 
 ## Strengths
 
-1. **Novel formulation of composite RM overoptimization as a constrained RL problem.** The paper identifies a real problem—weighting and overoptimization in composite RMs—and recasts it as a CMDP with proxy points as thresholds and Lagrange multipliers as learned weights. This is a well-motivated and principled approach that goes beyond fixed-weight linear combinations.
+- **First systematic analysis of overoptimization in composite RMs.** The paper explicitly studies how correlation between component RMs (METEOR and intent) shifts the joint proxy point relative to independent optimization (Figure 3/Fig:correlated). This is a genuine contribution — prior work focused on single-RM overoptimization (Gao et al., 2022).
 
-2. **Clear empirical evidence that constrained methods outperform standard PPO.** Figure 3 shows that μ-PPO and ξ-PPO achieve substantially higher evaluation scores than standard PPO with optimized fixed weights, and that ξ-PPO remains stable when training is extended 3× while PPO degrades. These results are supported by 5 seeds and demonstrate the practical benefit of the approach.
+- **Principled constrained RL formulation with dynamic weights.** Using CMDPs and Lagrangian relaxation elegantly avoids manual hyperparameter tuning of fixed component weights. The Lagrange multipliers automatically adjust the influence of each RM during training. The paper shows that μ-PPO and ξ-PPO achieve higher evaluation scores than PPO with optimally tuned fixed weights (Figure 4/Fig:eval_all, left), and that robustness to longer training is improved (Figure 4, right).
 
-3. **NM-PPO reduces computational cost.** The Nelder-Mead variant identifies proxy points during a single run, saving the multiple runs needed by competing methods. The simplex trajectories converge to local maxima of the evaluation surface (Figure 6), validating the gradient-free approach. This is a practical contribution for scaling to larger models.
+- **Empirical verification of constraint satisfaction.** Figure 5 (Fig:constraint_satisfaction) separately validates that μ-PPO reaches/exceeds thresholds, All-PPO stays below them, and ξ-PPO hits them approximately — confirming the algorithms enforce the intended constraints, not just that evaluation scores improve.
 
-4. **Proxy-point thresholds are validated.** The paper shows (Figure 5) that using the estimated proxy points as thresholds outperforms both 10%-higher and 10%-lower thresholds, and that accounting for RM correlation when setting thresholds outperforms using independently estimated proxy points. This strengthens the core claim that the identified thresholds are meaningful.
+- **NM-PPO for single-run threshold search.** The Nelder-Mead variant dynamically updates proxy point candidates during a single run, reducing compute compared to the multi-run surface-fitting approach. Figure 7 (Fig:nm) shows NM-PPO achieves strong evaluation performance, and the simplex trajectories converge to a local maximum of the evaluation surface.
 
-5. **Constraint satisfaction is empirically verified.** Figure 4 confirms that μ-PPO meets or exceeds thresholds, All-PPO stays below them, and ξ-PPO approximately hits them—the constrained algorithms behave as designed.
+- **Practical modifications with clear rationale.** The sigmoid bounding of Lagrange multipliers (keeping them in [0,1]), low-momentum SGD updates, and using return-to-go instead of early value estimates are motivated by specific instability issues. These are transparent engineering choices that address known problems in primal-dual RL.
 
-6. **Practical engineering contributions.** The description of specific modifications (sigmoid/tanh bounding of Lagrange multipliers, low-momentum updates, replacing value estimates with Monte-Carlo returns for constraint violation) provides useful guidance for making primal-dual RL work in practice.
+---
 
 ## Weaknesses
 
@@ -25,64 +29,69 @@ None.
 
 ### Major
 
-1. **Framing oversells connection to human preferences.** The paper evaluates using the held-out automated metric (METEOR + intent classifier) as ground truth, which is itself a proxy—not human judgments. The abstract and introduction frame the problem in terms of "human preferences" and "human evaluation" (e.g., "reward models fitted to human feedback," "worse human ratings"). However, the experiments demonstrate proxy-to-proxy overoptimization, not necessarily overoptimization with respect to actual humans. The paper acknowledges this (line 71: "in line with prior work that uses held out metrics as the ground truth for convenience of iteration") and discusses it in Section 6, but the central claims in the abstract and introduction do not carry this caveat. This disconnect between framing and evidence weakens the external validity of the claimed contributions. The authors should either (a) include a small-scale human evaluation or (b) substantially temper the language to make clear that this is a study of proxy-to-proxy overoptimization.
+1. **Proxy point identification procedure is insufficiently specified for the multi-run approach.** The paper's main experiments (Figure 4) use proxy points identified by "fitting a surface" to data from multiple runs and taking its maximum. However, the paper never specifies: (a) what type of surface was fitted (quadratic? spline? local regression?), (b) how many data points were used, (c) any measure of fit quality, or (d) how the maximum of the fitted surface is algorithmically located. These are not minor implementation details — the entire constrained method uses these thresholds as constraints. Without a clear, repeatable procedure, the results from the multi-run approach cannot be reproduced, and the method cannot be confidently applied to new domains. The NM-PPO variant avoids this issue, but the central experimental results (Figure 4) depend on the underspecified surface fitting.
 
-2. **Joint proxy point identification is underspecified (reproducibility gap).** The paper states (line 79) that "the maximizing point (θ_intent^★, θ_meteor^★) indeed differs from the proxy points found by only considering one RM at a time" and that this point comes from "a fitted surface." However, the paper never explains: (a) what data were collected to fit this surface (which combinations of reward weights, how many runs), (b) what fitting method was used, or (c) how the maximum is extracted. This is critical because these joint proxy points are used as the thresholds in the main constrained RL experiments (μ-PPO, ξ-PPO, etc.). Without this description, the main results cannot be replicated, and it is unclear whether the thresholds are reliable. The paper should provide a clear description of the procedure, including number of runs, range of weightings, fitting algorithm, and any validation.
+2. **No empirical comparison against early stopping as a baseline for overoptimization avoidance.** The paper mentions early stopping (Section 1, "Worse, early stopping to avoid overoptimization in composite RMs is problematic") but never compares against it experimentally. Early stopping, monitored via the ground-truth evaluation metric, is the most straightforward baseline for avoiding overoptimization. The paper's constrained methods claim to be "more robust to longer training time" (Figure 4, right), but early stopping is by definition robust to training duration because it stops. Without this comparison, it is difficult to assess whether the constrained approach offers a practical advantage over simply monitoring the gold standard and stopping at the right point — especially since both approaches require periodic access to ground-truth evaluation.
 
 ### Minor
 
-1. **Correlation claim is weakly supported.** The paper claims that "correlation between component RMs has a significant effect on the locations of these points" (abstract). This is supported by a single comparison (Figure 1): the joint maximum differs from the independent maxima. However, the degree of correlation between METEOR and intent on DailyDialog is not reported, nor are there any controlled experiments varying correlation. This claim is plausible but the evidence is thin. The authors should either report the correlation coefficient or soften the claim.
+1. **NM-PPO computational savings are not fully substantiated.** The paper allows NM-PPO "twice as many training steps for a single run" (256,000) compared to baselines, and each threshold update triggers a new ξ-PPO run from scratch. Meanwhile, ξ-PPO itself required 10 runs to find proxy points via surface fitting. The total environment interactions for NM-PPO versus the full pipeline (10 runs of PPO + ξ-PPO runs) are not clearly accounted for. The caveat that the feasible region for thresholds is "relatively small" (Section 5.1) also tempers how much the result generalizes.
 
-2. **Missing hyperparameter details.** The paper mentions optimizers and momentum (line 147) but does not provide a comprehensive table of hyperparameters for PPO, the constrained methods, or the Nelder-Mead search. This is needed for reproducibility. (The pseudocode referenced as Algorithm 1 was in the appendix, which was stripped by the parser—this should be ensured in the main text or supplement.)
+2. **Practical modifications are not ablated.** The paper describes sigmoid-bounded multipliers, low-momentum SGD updates, and return-to-go value estimates as important for stability, even calling them "hacks" (Section 4). However, no ablation study disambiguates which modifications are essential. This makes it unclear whether the "vanilla" constrained formulation would work without these additions, weakening the claim of a clean theoretical framing.
 
-3. **Constraint satisfaction is reported only qualitatively.** For ξ-PPO, the paper only shows visual plots of constraint values (Figure 4) without reporting numerical constraint satisfaction (e.g., average absolute deviation |v_i − θ_i| at convergence). Quantitative reporting would strengthen the claim that equality constraints are accurately enforced.
-
-4. **No statistical significance for main comparisons.** The main performance comparisons (Figure 3) lack confidence intervals or significance tests. While 5 seeds with standard error are shown, adding bootstrap tests or confidence intervals would strengthen the reliability of the comparisons.
-
-5. **The gradient statement for inequality constraints could be clearer.** The paper states (line 98-101) that the negative gradient with respect to μ is θ_i − v_i^π, which holds for inequality constraints (≥). The equality constraint case (ξ-PPO) uses the same formula but with an unconstrained multiplier (tanh-bounded). A brief explicit distinction would improve clarity.
+3. **The Lagrange multiplier bounds assume optimal weighting is a convex combination.** Constraining Lagrange multipliers to [0,1] via sigmoid (Section 4) implicitly assumes the optimal weighting of task vs. constraint rewards lies in [0,1] — i.e., the optimal Lagrange multipliers form a convex combination. The paper does not discuss whether this assumption could be violated or what would happen if the optimal multipliers fell outside this range.
 
 ### Trivial
-None.
+
+- The paper uses "proxy point" for both the value at which a single RM peaks (Figure 1) and the joint maximum of the fitted surface (Figure 2). These are related but distinct quantities; a terminological distinction (e.g., "independent proxy point" vs. "joint proxy point") would improve clarity.
+
+---
 
 ## Nice-to-Haves
 
-- **Ablate task reward choice.** The paper uses negative KL as the task reward. It would be informative to compare with a variant that uses the composite reward as task reward with equality constraints (like All-PPO but with ξ-formulation). This would isolate whether the benefit comes from the constraint structure or from the KL-centric objective.
-- **Small-scale human evaluation** to validate the main results on a subset of generated responses would substantially strengthen the claims about alignment with human preferences.
-- **Higher-dimensional extension** (more than 2 component RMs) would test the scalability of the approach.
+- An ablation study isolating the effects of sigmoid bounding, low momentum, and return-to-go would help practitioners understand which modifications are essential.
+- A finer-grained sensitivity analysis around proxy point thresholds (e.g., ±5%) beyond the ±10% test in Figure 5 would strengthen claims about the method's robustness to threshold misspecification.
+
+---
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were removed from the harsh critic's review for the reasons below:
 
-- **"First study" claim is unverifiable / risks being disproven.** The paper's abstract says "to our knowledge, the first study" — this is appropriately qualified. The critic's concern is reasonable but the paper already uses cautious language.
-- **wrafig placement / figure labeling issues.** These are formatting artifacts (PDF/parser issues), not author errors.
-- **NM-PPO caveat about initial simplex only in caption.** The paper explicitly states this caveat in the main text (line 191: "One caveat with respect to this result is..."). The critic misread this.
-- **Missing pseudocode (Algorithm 1).** The paper references Algorithm 1 — this was in the appendix, which is stripped by the parser. The original submission contains it.
-- **Demand for human evaluation as a strict requirement.** While a human evaluation would strengthen the paper, demanding it as a condition for acceptance would apply a standard not required of prior work (Gao et al. 2022 also used synthetic gold rewards). The critic's framing of this as a "structural" issue rather than a limitation is overstated. The point has been incorporated into Major weakness #1 above as a framing issue rather than a fatal methodological flaw.
+- **"Missing adaptive KL control baseline"** — REMOVED (factually wrong). The paper's PPO baseline already uses adaptive KL control (Section 2, line 63: "The coefficient α_t^KL effectively acts as a Lagrange multiplier, increasing if the KL exceeds some threshold and decreasing otherwise"). This is the standard adaptive KL baseline from the RLHF literature.
+- **"Proxy points found without KL may not transfer to constrained training regime"** — DOWNGRADED to Nice-to-Have. The paper explicitly tests this concern in Figure 5 (right) by comparing correlated (from the surface fit, which accounts for interaction effects) vs. independent proxy points, showing correlated ones work better. The main experiments use the correlated points, so this is partially addressed.
+- **"Theoretical guarantees section notes only averaged iterates converge, raising questions about neural policies"** — DOWNGRADED. The paper is honest about this limitation in Section 4 ("Formal Guarantees") and describes what existing theory provides. This is a known property of primal-dual policy optimization; holding it against the paper as a weakness would be penalizing it for a limitation it transparently acknowledges. The paper is primarily empirical.
+- **"Surface-fitting approach only used to produce thresholds but details are absent"** — Already captured in Major Weakness #1 above (merged for conciseness).
+- **"The paper does not ablate these modifications"** — Already captured in Minor Weakness #2 above.
+- **"Paper's practical improvements presented as hacks suggests fragility"** — The paper uses the word "hack" once informally (line 147). This is transparent reporting, not a confession of fragility. The concern about missing ablation is already captured in Minor Weakness #2.
+
+---
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one genuinely useful observation: the tension between the paper's motivational framing (human preferences, alignment) and its experimental setup (automated metrics as ground truth) is not just a minor presentation issue—it reflects a broader question about what constitutes "overoptimization" in RLHF research. If both the proxy RMs and the ground truth are automated metrics, the phenomenon being studied is proxy-to-proxy overoptimization, which may differ substantively from proxy-to-human overoptimization. This is a subtle but important distinction that the paper's own acknowledgment (line 71) does not fully resolve, and it deserves more careful treatment in the framing.
+The reviews collectively surface an important tension: the paper's core conceptual contribution (using proxy points as CMDP constraints with learned Lagrange multipliers) is elegant and well-motivated, but the empirical instantiation relies on a proxy point identification step whose details remain opaque. The harsh critic rightly identifies this as the method's linchpin, but undercounts how the NM-PPO variant side-steps the issue by finding thresholds online. The more subtle insight from cross-referencing the two reviews is that the paper actually offers *two* contributions — (1) the constrained RLHF formulation and (2) a method for finding thresholds — and the strength of evidence for each is asymmetric: (1) is well-supported experimentally, while (2) is well-described only for NM-PPO but not for the multi-run surface fitting it replaces. A revised version that either specifies the surface fitting or relies entirely on the NM-PPO approach would be significantly stronger.
+
+---
 
 ## Suggestions
 
-1. **Describe the joint proxy point pipeline clearly.** Add a dedicated subsection explaining: (a) what data were collected to fit the surface in Figure 1 (range of reward weightings, number of runs), (b) the fitting algorithm used, (c) how the maximum is extracted, and (d) any validation of the fitted surface. This is essential for reproducibility.
+1. **Specify the surface fitting procedure in full.** Provide the model class (e.g., quadratic, RBF, local regression), the loss function, the number of data points, the number of runs used, and any cross-validation. Alternatively, if the surface fitting is not central to the contribution, consider pivoting the main experiments to use NM-PPO thresholds, which are described in detail.
+2. **Add an early stopping baseline.** For each fixed-weight PPO run, identify the evaluation peak and report both the peak value and the steps required. Compare against the constrained methods' performance and training length.
+3. **Add an ablation study** of the sigmoid bounding, low momentum, and return-to-go modifications to clarify which are essential.
+4. **Introduce distinct terminology** for independent vs. joint proxy points to avoid confusion.
 
-2. **Revise the framing.** Replace "human preferences" / "human evaluation" with "ground-truth evaluation metric" or "gold reward" in claims about experimental results. Keep the human-preference motivation in the introduction but make clear that the experiments evaluate proxy-to-proxy overoptimization, consistent with prior work (Gao et al. 2022).
-
-3. **Add a hyperparameter table** covering PPO, the constrained methods, and Nelder-Mead search (learning rates, batch sizes, KL coefficient schedule, multiplier update frequency, etc.).
-
-4. **Report numerical constraint satisfaction** for ξ-PPO (e.g., mean absolute deviation from thresholds at convergence).
-
-5. **Report the empirical correlation** between METEOR and intent scores on DailyDialog to substantiate the correlation claim.
-
-6. **Add confidence intervals or bootstrap tests** for the main evaluation comparisons (Figure 3).
+---
 
 ## Score and Decision
 
-The paper addresses an important problem (overoptimization in composite RMs) with a well-motivated method (constrained RL with proxy-point thresholds). The empirical results are promising and the practical improvements (NM-PPO, stability hacks) are useful contributions. However, two significant issues—(1) the framing-experiment disconnect regarding human evaluation and (2) the underspecified joint proxy point identification procedure—need to be resolved. These are fixable in revision and do not invalidate the core contribution.
+**Originality:** Good — this is the first study of overoptimization in composite RMs and the constrained RLHF formulation is novel.  
+**Importance of question:** High — composite RMs are increasingly standard in LLM alignment.  
+**Claims supported:** Partially. The constrained methods outperform fixed-weight PPO, but the proxy point identification procedure is underspecified, weakening reproducibility.  
+**Soundness of experiments:** Adequate within the single domain tested, but missing an early stopping baseline.  
+**Clarity of writing:** Clear, well-structured, with a helpful table summarizing methods.  
+**Value to community:** Real. The conceptual framework (proxy points + CMDP constraints) is likely to influence future work on multi-faceted alignment.
 
-The paper is original, the research question is important, the experiments are generally sound, and the writing is clear. With the suggested revisions, this would make a solid contribution to the RLHF literature.
+The paper has a real and timely contribution, and its main experimental results are plausible and well-presented. However, the insufficiently specified proxy point identification procedure is a genuine reproducibility gap for the multi-run approach that underpins the central results. With the surface fitting details clarified or the main experiments pivoted to NM-PPO, and with an early stopping baseline added, the paper would be significantly stronger.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

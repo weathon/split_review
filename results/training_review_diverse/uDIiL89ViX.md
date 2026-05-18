@@ -1,22 +1,20 @@
-Now I have all the information I need. Let me compose my final consolidated review.
+Now I have a thorough understanding of the paper and have verified each critic claim against the actual text. Let me construct the final consolidated review.
 
 ## Summary
 
-The paper investigates whether dictionary learning can extract biologically-meaningful concepts from unsupervised microscopy foundation models (masked autoencoders trained on cell images). The authors propose a new algorithm, Iterative Codebook Feature Learning (ICFL), and combine it with PCA whitening on a control dataset. They show that sparse dictionary features correlate with cell types, genetic perturbations, and functional gene groups; that ICFL achieves higher feature selectivity and fewer dead features than standard TopK sparse autoencoders; and that the extracted features qualitatively match handcrafted CellProfiler features.
+This paper explores whether dictionary learning can extract biologically meaningful concepts from unsupervised microscopy foundation models (MAEs). The authors propose a new dictionary learning algorithm, Iterative Codebook Feature Learning (ICFL), and combine it with PCA whitening on a control dataset. They demonstrate that sparse features from MAE intermediate layers correlate with cell types, genetic perturbations, and functional gene groups, achieving selectivity scores comparable to handcrafted CellProfiler features. ICFL eliminates dead features without additional regularization, and PCA whitening improves both selectivity and linear probing performance compared to TopK SAEs.
 
 ## Strengths
 
-1. **Demonstration that DL extracts biologically-meaningful concepts from microscopy foundation models**: Figure 1 shows three learned features that correspond to distinct cellular morphologies (spindle-shaped cells, dense packing, small compact bright cells). This is the paper's core contribution—showing that unsupervised dictionary learning can recover interpretable biological patterns from a domain where little prior knowledge exists—and it is convincingly supported.
+- **First demonstration of dictionary learning extracting meaningful biological concepts from unsupervised microscopy foundation models.** The paper shows that sparse features from MAE intermediate layers are correlated with cell types, genetic perturbations (siRNA, CRISPR), and functional gene groups (Table 3, Figures 2d–2f), opening a path to scientific discovery via mechanistic interpretability in a domain lacking strong prior knowledge of high-level concepts.
 
-2. **ICFL+PCAWhitening improves selectivity and avoids dead features**: Figures 2d–2f show that ICFL features consistently achieve higher average and max selectivity scores than TopK SAE features across all five classification tasks. Table 1 reports ICFL+PCA yields 0 dead features (out of 8192) versus 243 for TopK+PCA. This directly supports the paper's central claim about ICFL's advantage.
+- **ICFL eliminates dead features without extra regularization.** Table 1 reports that ICFL produces zero dead features compared to TopK SAEs, while maintaining comparable or better reconstruction quality and selectivity (§4, Figure 2c). This is a clean algorithmic improvement over standard SAE training.
 
-3. **PCA whitening on a control dataset is shown to be crucial**: Figure 2a demonstrates that linear probing accuracy on reconstructions drops markedly without PCA whitening (e.g., ≈0.2 lower for Task 5), while with PCA whitening both methods nearly match the original representation's performance. This provides clear evidence for the pre-processing contribution.
+- **PCA whitening on a control dataset provides a principled weakly-supervised preprocessing step.** Figure 2a shows a clear drop in balanced test accuracy for Tasks 3 and 5 when PCA whitening is omitted. The approach of downweighting dominant directions from control (unperturbed) samples is well-motivated and effective.
 
-4. **ICFL achieves higher reconstruction quality at matched sparsity**: Figure 2c shows ICFL consistently outperforms TopK at every sparsity level (e.g., ≈0.80 vs ≈0.75 cosine similarity at sparsity 100), supporting the algorithmic advantage described in Section 4.
+- **ICFL features achieve selectivity scores comparable to handcrafted CellProfiler features.** Figure 3e shows that ICFL's highest average selectivity scores nearly match those of expert-designed CP features, with a Pearson correlation of 0.71 between their scores across labels (Figure 3g). This provides a strong quantitative benchmark against established domain-engineered features.
 
-5. **Unsupervised features quantitatively match expert-designed CellProfiler features**: Figures 3e–3g show near-identical maximum selectivity scores and a per-label Pearson correlation of r=0.71 between ICFL and 964 handcrafted CellProfiler features, validating that DL-extracted features capture patterns similar to those designed by domain experts.
-
-6. **Qualitative analysis demonstrates biological interpretability at token level**: Section 7 provides compelling case studies (adherens junctions pathway, ALG-3 ER/Golgi localization, TSC-2 membrane signal) showing that feature heatmaps align with known biology and channel-specific stains.
+- **Qualitative analysis reveals interpretable, biologically validated feature patterns.** Section 7 provides detailed channel-specific correlations (e.g., OPA-1 with mitochondria, ALG-3 with ER, TSC-2 with plasma membrane) with token-level heatmaps that align with known perturbation phenotypes (Figures 4 and 5), demonstrating that learned features capture non-trivial morphological changes.
 
 ## Weaknesses
 
@@ -24,64 +22,59 @@ The paper investigates whether dictionary learning can extract biologically-mean
 None.
 
 ### Major
-
-1. **The TopK SAE baseline comparison is not fully specified, leaving fairness unclear.** The paper claims ICFL avoids dead features and achieves higher selectivity than TopK SAEs, but does not state whether the TopK implementation included standard dead-feature mitigations (ghost gradients, as in the original Gao et al. (2024) TopK paper). Table 1 reports that TopK+PCA has 243 dead features (vs. 0 for ICFL+PCA), but if the TopK baseline was run without these known mitigations, the gap is inflated. The paper references Gao et al. (2024) for hyperparameter details ("similar to Gao et al. (2024), we observed that changing the learning rate has a limited impact"), which hints that their TopK implementation follows that work—where ghost gradients are standard—but this is never stated explicitly. This ambiguity weakens the central comparative claim. The authors should either confirm ghost gradients were used, rerun with them, or acknowledge the gap may shrink under optimal TopK tuning.
+None.
 
 ### Minor
 
-2. **Selectivity scores lack statistical calibration.** With 8192 features and moderately unbalanced label sets (e.g., 1138 siRNA perturbations), some features will appear selective purely by chance. The paper reports only point estimates—no confidence intervals, permutation baselines, or significance thresholds are provided. While the relative comparison between ICFL and TopK is still meaningful (both use the same metric on the same data), the absolute interpretation of selectivity values (e.g., "moderate selectivity score of more than 0.1") is not grounded against a null distribution. A simple permutation-based null would calibrate the reader's expectations.
+- **Limited baseline comparisons.** The paper only compares ICFL against TopK SAEs. While TopK is a standard baseline in the mechanistic interpretability literature, the paper's claim that "the choice of dictionary learning algorithm matters" would be strengthened by including at least one additional dictionary learning baseline (e.g., an L1-regularized SAE or K-SVD). The observed improvements over TopK could partially reflect known limitations of TopK (e.g., dead features) rather than advantages of ICFL specifically. Adding one baseline would substantially increase confidence in the method-specific claims.
 
-3. **Layer selection is partially circular for Task 5.** The paper states: "We selected this layer by finding the layer which maximized linear probing performance on the functional group task (described below) from the original embeddings." Task 5 (functional gene groups) is then used as one of the five evaluation tasks. While this does not affect the comparison between ICFL and TopK (both use the same layer), and the layer was selected on original (non-dictionary) embeddings rather than on reconstructions, it introduces optimism specifically for Task 5 results. The other four tasks are uncontaminated. Reporting results for an independently chosen layer (e.g., by maximum variance explained or using a held-out task) would strengthen robustness.
+- **No error bars or measures of variability.** Every figure in Section 6 reports point estimates without confidence intervals, standard deviations, or results across random seeds. Training SAEs involves stochasticity (random initialization, batch sampling, random resets). While single-run evaluation is common in the SAE literature at this scale (40M tokens, 300k iterations), the reported differences—particularly the modest selectivity gaps in Figures 2d–2f and 3e—would be more convincing with even basic standard errors.
 
-4. **PCA whitening details are underspecified.** The paper says "learn a PCA-and-centerscale transform on this control dataset" but does not state how many PCA components are retained or whether this is a full whitening or a dimensionality reduction. Since the comparison "with PCA" vs "without PCA" in Figure 2 varies something unspecified, reproducing these results requires additional clarity.
+- **Ambiguity in the selectivity computation pipeline.** (a) The selectivity analysis uses center crops (§6.1: "extract from every image a feature vector using the center crop") while the linear probing analysis uses well-level aggregated representations (§5: "mean over tokens from all 36 non-edge crops"). This discrepancy is never explained or justified, making it difficult to connect the selectivity results to the information-preservation results. (b) The definition of "active" for ICFL features is not stated. The selectivity score is defined as "% of times that the feature is active" — for TopK SAEs, the top-K values are non-zero by construction, but for ICFL features (which are also sparse codes), it is unclear whether "active" means > 0 or some other threshold.
 
-5. **The ICFL inner-loop feature learning step is vague.** The description says "learn the features z^(1) that best reconstruct x≈W_dec z^(1) using only these columns" but does not specify whether this is a least-squares solve (as in standard OMP) or a gradient-based inner loop. The paper references Algorithm 1 (presumably in the appendix), but the main text should at least clarify the optimization method for reproducibility.
+- **CellProfiler comparison methodology has limitations.** CP features are binarized by thresholding at quantiles, which discards magnitude information. The paper is transparent about this (§6.2), but the comparison would be fairer if both methods used the same type of activation criterion. The binarization step could compress or distort the selectivity comparison in ways that are hard to assess.
 
-6. **CellProfiler binarization is a rough approximation.** The binarization of continuous CellProfiler features by thresholding at quantiles α and 1−α to match ICFL's sparsity level conflates the sparsity level with the activation threshold. Since CP features are continuous and not designed to be sparse, the selectivity comparison under arbitrary binarization may not fully reflect CP's true discriminative power. The paper acknowledges this implicitly but could be more careful in interpreting these results.
-
-7. **No variance or multi-seed reporting.** All quantitative results are reported as point estimates. While single-run evaluation is common in large-scale dictionary learning (training for 300k iterations on 40M tokens is expensive), the absence of error bars means the stability of the comparisons (especially for dead-feature counts and selectivity) is unknown.
+- **PCA whitening vs. ICFL contributions partially confounded.** Figure 2a shows all four combinations (ICFL ± PCA, TopK ± PCA), but the paper's selectivity-focused figures (2d–2f, 3e–3g) primarily show the full method (ICFL + PCA) vs. TopK. It is unclear how much of the selectivity gain is attributable to PCA whitening alone versus the ICFL algorithm itself — a PCA + TopK condition in the selectivity plots would disentangle this.
 
 ### Trivial
 
-8. **Qualitative feature selection is explicitly post-hoc.** The paper states "a feature we chose because it demonstrated a clear biological relationship" (Section 7.1). This is transparent but worth noting: the case studies are selected to be illustrative and do not prove most features are equally interpretable. The paper could add a sentence acknowledging this.
+- Table 1 caption states results are shown "for both TopK and ICFL with and without PCA whitening" (implying four conditions), but the table (rendered as an image) may only show two labeled rows. The row labels should explicitly indicate the PCA condition for each method.
+
+- The paper does not ablate the inner parameters of ICFL (J = number of residual iterations, k = atoms per iteration). These are fixed to match a max sparsity of 100, but their individual impact on selectivity and reconstruction quality is not explored.
 
 ## Nice-to-Haves
 
-- A computational cost comparison (training time, inference overhead) between ICFL and TopK SAE would help readers judge the practical trade-off.
-- A direct test for batch effects (e.g., checking whether features selective for a perturbation remain selective in different experimental batches) would strengthen biological validity beyond the explicit batch-effect prediction task already included.
-- Extending the ablation to compare ICFL vs TopK on selectivity and reconstruction *without* PCA (Table 1 appears to have this, but it is not discussed in the text) would further clarify the independent contribution of each component.
+- A quantitative audit of the qualitative features: e.g., how many of the top-100 most selective features produce token heatmaps that a domain expert would rate as biologically plausible. This would raise the qualitative analysis from anecdote to evidence.
+- An ablation showing whether the linear probing drop on Tasks 3 and 5 (many perturbations, functional groups) is due to information loss or linear unintelligibility of the underlying representations.
+- A table comparing the number of dead features for all four conditions (TopK ± PCA, ICFL ± PCA) explicitly labeled.
 
 ## Removed Points
 
-The following points from the harsh review are removed with justification:
+These points are flagged to be removed; treat them with caution.
 
-- **"The algorithm is said to be in Algorithm 1, but that algorithm is not present in the main text—this reliance on an appendix that is stripped from the review copy makes it impossible to evaluate completeness."** — Removed per the rule that criticisms about missing appendix content (stripped by the parser) should be removed. The full algorithm exists in the original submission's appendix.
-
-- **Introduction motivation criticism ("aspirational but not specific")** — This is a stylistic/presentation preference, not a substantive weakness. The paper's motivation is clearly scoped: DL for scientific discovery in domains where text supervision is unavailable.
-
-- **"The paper should also cover Y / domain Z / additional tasks"** style demands — The paper's scope is clearly defined (microscopy foundation models, five specific classification tasks). Requests to expand to other domains would turn the paper into a different contribution.
-
-- **Criticism that the paper does not report "whether ICFL vs TopK in the absence of PCA for the selectivity and dead-feature metrics"** — Table 1 does include this comparison (TopK alone vs TopK+PCA vs ICFL+PCA). The paper references it.
+- **"Missing citations to the dictionary learning literature (Mairal, Elad, Aharon, etc.)"** — Removed per policy: missing related works should not be flagged as a weakness. The paper does cite Mallat & Zhang (1993) for OMP, and is positioned within the SAE/mechanistic interpretability literature, not the classical sparse coding literature.
+- **"Qualitative analysis is anecdotal / cherry-picked"** — Removed because the paper's title ("Towards scientific discovery") and framing (§8: "these sparse features are clearly incomplete") explicitly acknowledge this is a proof-of-concept. The qualitative examples are illustrative, not claimed as systematic validation.
+- **"Figure 2a does not disentangle PCA and ICFL"** — The caption states the figure shows "ICFL and TopK SAEs in combination with PCA whitening and with out," which implies all four conditions are present. The underlying concern (would PCA+TopK match ICFL+PCA?) is partially addressed by the data already shown; the remaining ambiguity about selectivity-specific plots is retained in Minor.
 
 ## Novel Insights
 
-The most interesting insight from the reviews is the observation that the layer selection protocol (optimizing for Task 5 linear probing on original embeddings) is a form of data-dependent pipeline design that, while not invalidating the ICFL-vs-TopK comparison, makes it harder to disentangle how much of the reported Task 5 selectivity arises from the method versus from the layer choice. A practical takeaway is that future work in this area should separate the layer selection task from the evaluation tasks, or use a general-purpose principle (e.g., maximum variance explained) to avoid any appearance of circularity. Beyond this, the reviews do not surface a genuinely novel perspective beyond the paper's own contributions.
+The collation of reviews surfaces one observation not emphasized in the paper: the PCA whitening step is doing substantial work, potentially more than the ICFL algorithm itself. The harsh critic notes that Figure 2a shows a clear performance drop without PCA for both methods, and the paper confirms this in text. This raises the substantive question of whether a simpler approach — PCA whitening + a standard dictionary learning baseline — could approach the full method's performance. The paper would benefit from directly addressing this question rather than leaving it implicit. Additionally, the disconnect between the center-crop selectivity pipeline and the well-aggregated linear probing pipeline suggests the paper is effectively evaluating two different model behaviors, which weakens the narrative that selectivity and information preservation are coherently linked.
 
 ## Suggestions
 
-1. **Clarify the TopK implementation.** Explicitly state whether ghost gradients, feature resampling, or auxiliary reconstruction loss were used for the TopK baseline. If they were (as the Gao et al. reference suggests), say so. If not, rerun with these mitigations and report whether the dead-feature gap persists.
-
-2. **Add a permutation-based null for selectivity.** Shuffle labels and recompute selectivity for all features; plot the null distribution alongside the real scores in Figures 2d–2f. This is a lightweight addition that would substantially increase confidence in the selectivity results.
-
-3. **Specify the PCA whitening parameters.** State the number of components retained and whether dimensionality reduction occurs, so the preprocessing is fully reproducible.
-
-4. **Clarify the ICFL inner-loop optimization.** Explicitly state whether z is obtained via least-squares (OMP-style) or gradient descent.
-
-5. **Consider reporting multi-seed results** for at least the key comparison (Table 1 dead-feature counts, selectivity curves) to establish stability.
+1. Add at least one additional dictionary learning baseline (e.g., L1-regularized SAE) to the selectivity and linear probing comparisons.
+2. Report standard deviations from multiple random seeds for the three core experiments (linear probing accuracy, reconstruction cosine similarity, average selectivity).
+3. Explicitly define the activation threshold for ICFL features in the selectivity computation, and reconcile the center-crop vs. well-level aggregation discrepancy.
+4. Include PCA + TopK conditions in all selectivity figures (at minimum Figures 2d–2f) to disentangle the contributions of PCA whitening vs. ICFL.
+5. Clarify Table 1 row labels to explicitly show the PCA condition for each method.
 
 ## Score and Decision
 
-This paper makes a solid contribution: it demonstrates that dictionary learning can extract biologically-meaningful concepts from microscopy foundation models, proposes a new algorithm (ICFL) with a clear motivation (avoiding dead features via iterative residual pursuit), and shows that PCA whitening on a control dataset improves feature quality. The qualitative analysis is genuinely compelling. The weaknesses are real but addressable: the TopK comparison needs more transparency, and the selectivity scores need calibration. None of these issues invalidate the core claims—they mainly affect the precision with which those claims can be stated.
+The paper makes a genuine contribution by demonstrating that dictionary learning can extract biologically meaningful concepts from microscopy foundation models — a novel and timely application. ICFL is a clean algorithmic contribution that solves the dead-feature problem, and the PCA whitening preprocessing is well-motivated. The quantitative comparison to CellProfiler features is a strong benchmark. However, the experimental rigor is uneven: limited baselines, no error bars, and some ambiguity in the selectivity pipeline prevent the method-centric claims from being fully convincing. These issues are addressable in revision and do not undermine the paper's core contributions. The paper is a solid cross-disciplinary demonstration that opens a promising direction.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+**Score:** 6.5
+
+**Decision:** Accept
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,18 +1,16 @@
-Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes SKPS-Net for few-shot anomalous action recognition. The method introduces three components: (1) a spatial adaptive key patch selection module that uses feature-map-level spatial information (rather than pooled feature vectors) to select discriminative local patches without extra trainable parameters, (2) a lightweight long-short spatio-temporal relation module that fuses long-range temporal information and short-range motion via 2D convolutions and frame differencing, and (3) a spatio-temporal refined loss combining multi-head cross-attention on global/local subspaces with bidirectional Hausdorff temporal alignment. Evaluations on HMDB51, Kinetics, and UCF-Crime v2 show consistent but modest improvements over TRX and other few-shot baselines.
+The paper proposes SKPS-Net (Spatio-Temporal Key Patch Selection Network) for few-shot anomalous action recognition. The method introduces three components: (1) a spatial adaptive key patch selection module that uses feature map spatial information to select discriminative local patches without extra learned weights, (2) a lightweight long-short spatio-temporal relation module combining long-range temporal and short-range motion cues via 2D convolutions, and (3) a spatio-temporal refined loss with multi-head cross-transformer attention and flexible temporal matching. Experiments on HMDB51, Kinetics, and UCF-Crime v2 show consistent improvements over baselines, with absolute gains of 0.6% (5-shot) and 1.2% (10-shot) on the anomalous action dataset.
 
 ## Strengths
 
-- **Feature-map-based adaptive key patch selection without extra parameters**: Unlike prior work that pools spatial information into a feature vector before selecting patches (Wang et al., 2021a; 2022b), this module directly operates on the 2D feature map to retain spatial structure. It requires no additional trainable weights and supports end-to-end gradient back-propagation. (Section 2.3, lines 86–112)
-
-- **Lightweight spatio-temporal relation module using efficient 2D convolutions**: The module decomposes spatio-temporal modeling into a temporal submodule (reshaping time-as-channels + 1×1 2D conv to fuse all frames, followed by 3D conv) and a motion submodule (frame differencing at the feature map level). This avoids the cost of 3D CNNs or optical flow networks while enriching feature maps with both long-range and short-range temporal context. (Section 2.2, lines 46–83; qualitative evidence in Figure 6)
-
-- **Comprehensive ablation studies isolating each component**: Tables 3 and 4 (described in text) systematically validate each module's contribution and show that adaptive selection outperforms center-patch or random-patch alternatives (e.g., on Kinetics 5-shot: 82.5% adaptive vs. 81.3% center patch). This provides reasonable evidence that the design choices are meaningful.
-
-- **Consistent improvements across multiple datasets and settings**: The method improves over TRX on all three datasets (HMDB51, Kinetics, UCF-Crime v2) across 1-shot, 5-shot, and 10-shot settings, with margins from 0.4% to 2.3%. While modest, the pattern is consistent.
+- **State-of-the-art on anomalous action recognition**: SKPS-Net achieves absolute improvements of 0.6% (5-shot) and 1.2% (10-shot) on UCF-Crime v2 over the most competitive methods (Table 2), directly supporting the claim that key-patch selection benefits anomaly modeling where discriminative objects are small and localized.
+- **Plug-and-play key patch selection without extra parameters**: The spatial adaptive key patch selection module (Section 2.3) selects informative patches using the feature map's spatial information without requiring learned weights, position annotations, or a separate detection network. Ablations (Table 4) show it significantly outperforms naive center/random cropping, and Table 3 shows consistent gains when added to the baseline.
+- **Lightweight spatio-temporal modeling**: The long-short feature map relation module (Section 2.2) combines long-range temporal aggregation (2D convolution treating time as a pseudo-channel) and short-range motion (feature-map-level frame differencing) using only efficient 2D convolutions, avoiding costly 3D CNNs or optical flow networks. Visualizations in Figure 6 confirm it suppresses static background and focuses on action regions.
+- **Comprehensive evaluation with fair baselines**: The paper re-implements most prior methods under identical conditions (Tables 1-2) and tests on three datasets spanning both normal and anomalous actions, providing reasonable evidence of generalizability.
+- **Ablation of major components**: Table 3 systematically quantifies the contribution of each of the three proposed modules across all shot settings, showing monotonic improvement. Table 4 validates the spatial selection strategy against naive baselines.
 
 ## Weaknesses
 
@@ -20,64 +18,63 @@ This paper proposes SKPS-Net for few-shot anomalous action recognition. The meth
 None.
 
 ### Major
-
-- **The UCF-Crime v2 evaluation protocol is underspecified, undermining the paper's core claim about anomalous action recognition.** The paper states the model is "trained on Kinetics and evaluated on UCF-Crime v2" (line 166), and that 5-way tasks are used. However, it does not specify: (a) how many classes UCF-Crime v2 contains, (b) which specific classes are used for the 5-way evaluation, (c) how tasks are sampled from these classes, or (d) how many videos per class are available. The paper claims "state-of-the-art" on anomalous action recognition and reports improvements of 0.6% (5-shot) and 1.2% (10-shot) on this dataset, but the reader cannot verify or reproduce these results. While the paper states baselines are "reimplemented... under the same condition" (line 179), the condition itself is not defined. This is not a minor presentation issue — it affects the believability of the paper's central contribution. (Section 3, lines 166–193; Table 2)
+None.
 
 ### Minor
 
-- **The computation of weights $u_i$ in the key patch selection module is not specified.** The module samples $N\times M$ points from the feature map and defines shift vectors $\dot{l}_i$ with associated weights $u_i$, then computes $\dot{A} = \sum u_i \dot{l}_i$. The paper states "$u_i$ is defined as the weight of the shift vector" (line 94) and that points are "fused according to the information distributed in the feature map" — but it never explains how $u_i$ is numerically obtained from the feature map activations. Is it the feature value at that spatial location? A softmax over spatial locations? Something else? Since the module claims "no extra weight" (no trainable parameters), the reader needs to know the exact function. This does not invalidate the method but hurts reproducibility. (Section 2.3, lines 94–98)
+- **The u_i weight computation in the key patch selection module is underspecified.** The paper states that N×M points are taken uniformly from the available area, that each point "corresponds spatially to the element of the feature map," and that these points are "fused according to the information distributed in the feature map" (Section 2.3, lines 94-98). The weight u_i in Equation (4) is named but not given an explicit formula. A reader can infer the intended mechanism (u_i = feature map activation at position i, serving as attention weight for the corresponding shift vector — consistent with the claim of "no extra weight"), but the paper should state this directly. This does not invalidate the contribution but hurts reproducibility and clarity.
 
-- **Modest improvements without reported variance.** Absolute gains over TRX range from 0.4% to 2.3% across all settings. No standard deviations or confidence intervals are reported (the paper averages over 10,000 test episodes, which provides some stability, but multiple random seeds are the norm in few-shot learning). Without variance estimates, it is unclear whether the margins are statistically significant, especially the smaller ones (e.g., ~0.4% on some settings). (Section 3, line 172; Table 1, Table 2)
+- **Ablation granularity is insufficient to isolate sub-components.** The long-short spatio-temporal relation module has two submodules (temporal and motion) that are not ablated separately — Table 3 adds them as a single unit. Similarly, the spatio-temporal refined loss has two components (spatial refinement via multi-head cross-transformer, temporal refinement via Hausdorff matching) that are not ablated separately. This makes it impossible to tell whether both submodules are needed or if one dominates.
 
-- **"State-of-the-art" claim is overstated.** Given the modest margins, the absence of variance estimates, and the underspecified UCF-Crime v2 protocol, claiming "state-of-the-art performance in few-shot action recognition" (abstract, line 4) is too strong. The paper shows improvements over a specific set of baselines on a subset of benchmarks, which is valuable but not conclusively SOTA.
+- **Plug-and-play claim is only demonstrated on one backbone.** The paper claims the key patch selection module is "plug-and-play" and can "benefit most of the baselines" (Section 2.3, line 112), but only tests it with TRX as the base architecture. Testing on at least one additional backbone would substantiate this claim.
 
-- **No computational cost analysis to substantiate "lightweight" claims.** The paper repeatedly describes the proposed modules as "lightweight" and "plug-and-play" (lines 14, 19, 49, 74, 112) but never reports FLOPs, parameter counts, or inference time for the added components relative to the baseline. This makes the efficiency claims unverifiable.
+- **The anomaly recognition framing vs. standard few-shot classification could be sharper.** The paper is motivated by anomalous action recognition but operationalizes it as standard few-shot classification on datasets where some classes happen to be anomalous. The method does not incorporate any anomaly-specific machinery (e.g., OOD detection, normal-vs-anomalous distributions). The evaluation on HMDB51 and Kinetics is standard few-shot action recognition, and the anomaly framing rests primarily on the UCF-Crime v2 results. A clearer delineation of what makes the problem an *anomaly recognition* problem distinct from general few-shot classification of rare actions would help.
 
-- **No ablation on key hyperparameters.** The patch size is fixed to 128×128 and the number of sampling points $N\times M$ is not specified, let alone ablated. These hyperparameters likely affect the trade-off between localization precision and computational cost. (Section 3, line 172)
+- **No discussion of limitations or failure cases.** The paper would be stronger if it acknowledged when key patch selection might fail (e.g., when the discriminative object is larger than the 128×128 patch, or when the feature map lacks sufficient spatial resolution). Including a qualitative failure example would be informative.
 
 ### Trivial
-
-- **The "whole-range temporal relation" claim for the $1\times1$ 2D convolution (Section 2.2.1)** is technically correct — after reshaping time-as-channels, a 1×1 conv does produce each output as a weighted combination of all input time steps. However, the framing could mislead readers into expecting more complex non-linear dependencies. A brief clarification would help.
-
-- The paper does not discuss limitations or failure cases (e.g., when the anomalous object is not small, or motion is too fast for frame differencing), which would strengthen the paper's honesty.
+- The paper does not report standard deviations or confidence intervals, which would help assess whether the modest gains (0.6–1.2%) are statistically robust.
+- The patch size (128×128) is fixed without justification or ablation.
 
 ## Nice-to-Haves
 
-- **A comparison with attention-based spatial selection methods** (e.g., spatial transformer networks, non-local blocks) as additional baselines, though the paper's focus on few-shot methods is defensible.
-- **Quantitative analysis of patch quality** (e.g., overlap with ground-truth object regions) to go beyond anecdotal visualizations.
-- **Ablation on patch size ($128\times128$ vs. alternatives)** and sampling grid density ($N\times M$).
+- Report standard deviations across multiple runs to assess stability of the improvements.
+- Ablate the patch size parameter and justify the chosen value.
+- Provide quantitative evaluation of patch selection quality (e.g., overlap with ground-truth action regions if available).
+- Separately ablate the temporal vs. motion submodules of the relation module, and the spatial vs. temporal components of the refined loss.
+- Include a brief comparison or discussion of how this differs from video anomaly detection approaches (reconstruction/prediction-based methods), clarifying why few-shot classification is the appropriate framing.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed — treat them with caution:
 
-- **"Overstates limitation of existing methods by claiming they only consider global features without acknowledging attention/multi-scale works"** — Removed as a strawman. The paper makes a specific claim within few-shot action recognition, supported by citations (Wang et al., 2021b; Perrett et al., 2021; Nguyen et al., 2022). The reviewer's generic counter-claim about "many recent works" is not specific enough to engage with the paper's actual subfield.
-- **"Motion relation module does not handle occlusion or large motion well"** — Removed as a generic, non-actionable criticism that could apply to any frame-differencing approach. Not specific to this paper's contribution.
-- **"Does K1 with kernel 1×1 really establish whole-range temporal relation?"** — The technical claim is correct: after reshaping time-as-channels, a 1×1 2D convolution fuses all time steps (each output is a linear combination of all input channels/timesteps). The criticism is factually incorrect about what the operation does. The presentation nuance about linear vs. non-linear is addressed as a Trivial point above.
+1. **"Averaging across all channels before temporal processing discards information"** (from Harsh Critic: Critical Issue 3): This criticism misunderstands the design. The channel-averaged features are used only to generate a single-channel attention mask, which is then applied back to the *full* input feature map via element-wise multiplication (lines 55-67, Section 2.2.1). The original multi-channel information is fully preserved. This is a standard and well-motivated attention mechanism, not an information-destructive operation. **Removed as factually wrong.**
+
+2. **"No comparison against video anomaly detection methods"** (from Harsh Critic: Critical Issue 2): The paper defines its task as few-shot *action recognition* of anomalous actions, not *video anomaly detection* (which is a different task about detecting whether an anomaly occurs). The comparison against other few-shot action recognition methods is appropriate for the paper's framing. **Removed as evaluating against wrong task class.**
+
+3. **"Reimplementation details not provided"** (from Harsh Critic: Other Observations): The paper provides typical implementation details (backbone, optimizer, learning rate, training episodes, hardware, preprocessing) consistent with the field's standards. Further details (e.g., full hyperparameter sweeps) are beyond normal expectations for a conference submission. **Removed as nitpick on reproducibility.**
+
+4. **"The paper should compare against simple RGB differences for motion"** (from Harsh Critic: Critical Issue 3): Requesting comparison against an overly simplistic baseline that is not a published method. The paper already compares against published few-shot action recognition methods that incorporate various motion modeling approaches. **Removed as impractical/not standard.**
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews raise standard concerns about evaluation rigor and specification clarity but do not surface a fundamentally new perspective on the method or problem.
+None beyond the paper's own contributions. The harsh critic identifies a legitimate clarity gap in the u_i specification, and the strength finder correctly surfaces the empirical results on UCF-Crime v2 as the strongest evidence. Together, they paint a picture of a paper with a clear, well-motivated pipeline whose core mechanism needs sharper specification but whose experimental trends are believable and consistent.
 
 ## Suggestions
 
-1. **Specify the UCF-Crime v2 evaluation protocol in full**: number of classes, which classes are used, how 5-way tasks are sampled, number of videos per class, and the exact training/evaluation pipeline for all baselines. This is the single most important fix.
+1. **Explicitly state how u_i is computed.** Add a single sentence or formula clarifying that u_i is the feature map activation at the corresponding spatial position (or a function thereof). Since the module claims "no extra weight," u_i must come from the feature map — make this explicit.
 
-2. **Clarify how $u_i$ is computed** in the key patch selection module. Even a one-sentence description (e.g., "$u_i$ is the feature map activation at the corresponding spatial location, normalized across all $N\times M$ points") would resolve the ambiguity.
+2. **Add finer-grained ablations.** At minimum, separately ablate the temporal vs. motion submodules of the relation module and the spatial vs. temporal components of the refined loss. This would strengthen the claim for each design choice.
 
-3. **Report standard deviations** over multiple random seeds (e.g., 5 runs) for the main results, or at minimum acknowledge that margins are modest and discuss their significance.
+3. **Demonstrate plug-and-play on at least one more backbone.** Attaching the key patch selection module to another base architecture (e.g., STRM, OTAM) would substantially strengthen the generalizability claim.
 
-4. **Add computational cost analysis** (FLOPs and/or parameter counts) for each module to substantiate the "lightweight" and "plug-and-play" claims.
+4. **Clarify the anomaly recognition setting with a short paragraph** distinguishing it from standard few-shot classification and/or video anomaly detection, explaining why few-shot classification is the appropriate formalism for this task.
 
-5. **Tone down the "state-of-the-art" claim** or qualify it with the specific comparison setting and margin.
-
-6. **Add an ablation on the key patch size and the number of sampling points** to show robustness to these hyperparameters.
+5. **Add a limitations paragraph** discussing when the key patch selection might fail, and include a failure case in the qualitative visualizations.
 
 ## Score and Decision
 
-This paper addresses a worthwhile problem (few-shot anomalous action recognition) and proposes a coherent three-component pipeline with a plausible motivation. The strengths — particularly the feature-map-based patch selection and the lightweight spatio-temporal relation module — are genuine contributions. The ablation studies provide reasonable evidence that each component contributes.
+The paper proposes a coherent pipeline for few-shot action recognition with a novel, lightweight key patch selection mechanism, and provides experimental evidence of consistent improvement across three datasets. The main weaknesses — underspecification of the u_i weight computation, insufficient ablation granularity, and single-backbone evaluation — are addressable and do not undermine the core contribution. The paper makes a clear empirical contribution (SOTA on UCF-Crime v2 for few-shot anomalous action recognition) with a well-motivated architectural design.
 
-However, the paper has a significant evaluative gap: the UCF-Crime v2 protocol — on which the central claim about anomalous action recognition rests — is underspecified to the point where the results cannot be verified or reproduced. Combined with modest margins, no variance estimates, an overclaimed "state-of-the-art" label, and an underspecified algorithmic detail (the $u_i$ weights), the paper in its current form does not meet the bar for acceptance. These issues are fixable in revision.
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

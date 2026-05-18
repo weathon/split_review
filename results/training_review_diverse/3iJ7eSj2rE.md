@@ -1,86 +1,67 @@
-Now I have all the information I need. Let me compose the consolidated review.
-
----
+I have all the information needed. Let me now write the consolidated review.
 
 ## Summary
 
-The paper proposes COWEST, a framework that pairs a specialized weak model (fine-tuned on domain data) with a general strong model (e.g., GPT-4), and further aligns the weak model to the strong model's preferences via DPO using collaboratively generated preference triplets. Experiments on three datasets (IfQA, MedMCQA, Prosocial-Dialog) show that this collaboration consistently outperforms either model alone and surpasses RAG baselines SKR and FLARE.
+This paper proposes COWEST, a framework for weak-strong model collaboration where a small, fine-tuned "weak" model generates initial outputs that a large "strong" model refines. The key innovation is a feedback loop: preference triplets are constructed by comparing strong-model-only outputs against collaborative outputs using an LLM evaluator, and the weak model is fine-tuned via DPO to align with the strong model's preferences. The method is evaluated on three datasets (IfQA, MedMCQA, Prosocial-Dialog) with consistent improvements over individual models and RAG baselines.
 
 ## Strengths
 
-- **Novel feedback loop through preference alignment.** The core idea of constructing preference triplets from collaborative outcomes and then fine-tuning the weak model via DPO to better cooperate with the strong model is well-motivated and goes beyond static interaction schemes in prior weak-to-strong work. The ablation comparing Standard Refinement Interaction vs. Preference Enhancement Interaction (Figure 2) confirms the value of this feedback loop.
+- **Novel application of preference optimization to weak-strong collaboration**: The core idea — using DPO to align the weak model's outputs with what leads to better collaborative outcomes when refined by the strong model — is well-motivated and cleanly addresses a limitation of prior static interaction schemes (Section 4.3, Algorithm 1). This is the paper's primary contribution.
 
-- **Consistent empirical gains across diverse domains.** COWEST outperforms the best single model across three benchmarks spanning counterfactual reasoning, medical QA, and ethics classification. The framework also outperforms RAG baselines (SKR, FLARE), demonstrating that domain-adapted weak-model outputs provide more effective guidance than retrieved passages.
+- **Comprehensive ablation analysis**: The paper systematically examines three weak-model output formats (Direct Answer, Domain Knowledge, Chain-of-Thought), two interaction strategies (Standard Refinement vs. Preference Enhancement), and multiple model scales (weak: 1B–8B; strong: GPT-3.5, GPT-4, Llama2/3-70B). The finding that CoT with preference tuning works best, and that the strong model's ability to *understand and correct* the weak model's outputs (not just be larger) is critical, adds practical insight (Section 5.3, Figures 2–3).
 
-- **Systematic analysis of interaction strategies and model dependencies.** The paper investigates three weak-model output formats (Direct Answer, Domain Knowledge, CoT) and two interaction types across all datasets (Figure 2), and evaluates combinations of different weak and strong models (Figure 3). This yields actionable insights — e.g., CoT helps most for reasoning-intensive tasks, while knowledge-intensive tasks are less sensitive to format — that are useful for practitioners deploying such frameworks.
-
-- **Practicality with black-box strong models.** The method requires only API access to the strong model (for evaluation and refinement) and does not require access to its parameters, making it applicable to proprietary models like GPT-4.
+- **Consistent empirical gains**: Across all three benchmarks, the collaborative framework outperforms both individual models and standard RAG baselines, showing that the method generalizes across different task types (counterfactual QA, medical QA, ethics classification).
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Weak and potentially uninformative theoretical analysis (Section 4.5).** The "theoretical insight" assumes the strong model's evaluator scores are constant for all its own outputs given a query (E(z,x) = p(x)), which is unrealistic — the whole premise of using a strong model is that its outputs vary in quality. The derived result (that π*w assigns zero probability to outputs that do not improve upon this constant baseline) is essentially a restatement of the DPO optimization under disjoint support, not a novel insight. The corollary that relaxes this assumption adds no new understanding. This section does not support the paper's claims and could be removed without loss. While the paper's main contribution is empirical, presenting this as a "formal theoretical analysis" overstates its value.
+None.
 
 ### Minor
 
-- **Potential numerical discrepancy in headline abstract claims.** The abstract reports "an average F1 score improvement of 3.24% over the weak model alone and 12.17% over the strong model alone." Based on the numbers read from Table 1 (which is embedded as an image and cannot be independently verified from the text alone), neither figure aligns with obvious calculations (absolute or relative) from the reported data. For instance, the average absolute F1 gain over the weak model appears to be ~12.2 points, not 3.24%. This suggests either a miscalculation, a labeling error (values swapped across comparisons), or a non-standard definition of "improvement" that should be clarified. Because the abstract is the first and most visible claim, this needs correction.
+- **Abstract's quantitative claims vs. Table 1: possible inconsistency needs clarification.** The abstract states "an average F1 score improvement of 3.24% over the weak model alone and 12.17% over the strong model alone." While these numbers are presented with precision, the Table 1 data (embedded as an image) is not accessible for independent verification in this text extraction. A reviewer who accessed the table reports computing absolute F1 improvements whose averages do not straightforwardly match 3.24% and 12.17%. The authors should verify that the abstract numbers are computed correctly and clearly state whether these are relative percentages, absolute percentage-point improvements, or some other aggregation. This is a **presentation/verification issue** — it does not necessarily mean the results are wrong, but the paper must be self-consistent and unambiguous.
 
-- **No variance or uncertainty reporting.** The paper reports results from what appears to be a single run without standard deviations, error bars, or confidence intervals for any experiment. Given the inherent variability in LLM generation (especially with GPT-4 API calls subject to sampling and prompt sensitivity), the reliability of the reported gains cannot be assessed. A few repeated trials for at least one dataset would substantiate that the improvements are statistically meaningful.
+- **Theoretical analysis (Section 4.5) is too simplistic to provide genuine insight.** The analysis assumes the strong model's evaluator scores are constant across all queries ("E(z,x) = p(x) for all z"), which trivializes the problem. Under this assumption, the derived result — that the weak model assigns zero probability to outputs that fail to improve over the constant baseline — is essentially a restatement of how DPO works when positive and negative responses have disjoint support. The "proof idea" is informal, and the corollary adds nothing beyond the main result. This section does not advance the paper's contribution; a bounded regret analysis under relaxed assumptions, or an empirical analysis of preference distributions, would be more informative. The paper would be equally strong without this section.
 
-- **Credit assignment in preference data (Section 4.3.1) deserves explicit discussion.** Preference triplets are constructed by comparing the collaborative output (πs∘y) against the strong-model-alone output (z). This means a weak-model output that is inherently weak but easily corrected by the strong model could be labeled positive, while an output that is good but yields only marginal improvement over the strong model alone could be labeled negative. The weak model is thus optimized for "collaborative success" rather than standalone quality. This distinction is not discussed, and the paper would benefit from acknowledging it and potentially ablating whether directly scoring the weak model's outputs changes the results.
+- **Preference data construction and SFT share the same query set (D_SFT), with no explicit train/validation separation discussed.** Algorithm 1 (line 4) iterates over D_SFT to construct preference triplets from the same queries used for supervised fine-tuning. This creates a potential concern about whether the weak model is learning a generalizable collaboration policy or overfitting to patterns in the training queries. The paper reports results on held-out test sets (standard splits), which partially mitigates this concern, but a discussion of whether any validation monitoring was performed during DPO training, or an explicit analysis of train/val performance divergence, would strengthen the paper.
 
-- **Missing SKR/FLARE results for Prosocial-Dialog.** The RAG baselines (SKR, FLARE) are reported only for IfQA and MedMCQA, not for Prosocial-Dialog. A brief justification (e.g., "these methods are not applicable to classification tasks") would help. Without it, the comparison appears incomplete.
+- **LLM evaluator is the same model as the strong model.** The paper acknowledges this design choice ("using the same large language model as the strong model ensures consistency"), and the final evaluation metrics (EM, F1, Accuracy) are objective, so the evaluator is only used during preference construction, not for final results. Nevertheless, a brief discussion of potential evaluator bias (e.g., systematic preference for outputs that resemble the evaluator's own style) would be appropriate.
+
+- **No error bars or confidence intervals reported for main results (Table 1) or ablation analyses (Figure 3).** Several claims about relative model rankings (e.g., Llama3-8B vs. Llama2-7B on Counterfactuals) are based on small performance differences without statistical grounding. Adding standard deviations or significance tests would strengthen confidence in the conclusions.
 
 ### Trivial
 
-- **Inconsistent scaling parameter symbol.** Section 3.2 (Preliminary, DPO equation) uses α as the scaling parameter, but Section 4.3.2 (Equation 2) uses β in the equation while the text still refers to α ("where σ(·) is the logistic sigmoid function, and α is a scaling parameter"). This should be harmonized.
-
-- **Algorithm 1 output label.** Algorithm 1 states "Output: The trained weak model π*w" but the pseudocode only constructs preference triplets — the DPO training step is not included. The output should reflect what the algorithm actually produces (the preference dataset).
-
-- **No justification for preference triplet count.** The paper states it generates 2,000 triplets for IfQA and 5,000 for MedMCQA and Prosocial-Dialog without explaining whether this was determined by a saturation analysis.
+- The paper refers to "equation 1" for the SFT loss but the equations are not numbered in the extracted text, creating a minor reference issue.
 
 ## Nice-to-Haves
 
-- **Ablation on the evaluator model.** Using a different evaluator than the strong model (e.g., GPT-3.5 as evaluator when GPT-4 is the strong model) would test whether the method's success depends on the evaluator matching the strong model, or whether it generalizes across evaluators.
-- **Multiple seeds / repeated trials** for at least one dataset to establish statistical reliability of the reported gains.
+- A qualitative analysis (example outputs from the weak model before and after DPO tuning) would concretely illustrate what behavioral changes the preference alignment induces.
+- An ablation comparing DPO against supervised fine-tuning on only positive collaborative outputs would isolate the effect of the preference signal from merely being exposed to better data.
+- A baseline where the strong model refines its own outputs (self-refinement) would help establish that the benefit comes from the weak model's complementary contribution rather than iterative improvement per se.
 
 ## Removed Points
 
-These points were raised by reviewers but are removed or downgraded in the final review:
+These points are flagged to be removed; treat them with caution.
 
-1. **Criticism that the paper's numbers might be miscalculated in a way that invalidates core results** — The abstract numbers are flagged as a Minor issue above (not Fatal) because the overall trend of improvement is clearly supported by the paper's narrative and ablations, and the exact numbers could reflect a non-standard calculation or labeling that the authors can clarify. The critic's specific computation yielding discrepancies cannot be fully verified since Table 1 is embedded as a non-extractable image.
+- **"RAG comparison is not apples-to-apples"** (from Harsh Critic): The reviewer argues RAG baselines do not receive task-specific fine-tuning while the weak model does. This is an inherent property of the two approaches being compared, not an unfair constraint. RAG methods by design do not require fine-tuning; comparing a fine-tuning-based method to a retrieval-based method is a legitimate comparison of different paradigms for solving specialized tasks. **[Reason: Criticizes a comparison that is structurally asymmetric by design, not by unfair advantage.]**
 
-2. **"The paper should also cover Y / additional tasks"** — Removed as scope creep. The three datasets (counterfactual, medical, ethics) provide reasonable diversity for a methods paper.
-
-3. **Generic strengths from the Strength Finder** — The claim that the theoretical analysis "provides a principled justification" is dropped because the analysis is too weak to constitute a genuine strength.
-
-4. **Criticism about missing comparison with Xu et al., 2024 / Liu et al., 2024** — These are cited in related work but the paper's experimental setup already includes competitive baselines (SKR, FLARE, strong model alone, weak model alone). The comparison class is adequate.
-
-5. **Self-bias concern about evaluator matching strong model** — The paper acknowledges this choice and argues it ensures consistency (Section 4.3.1). This is a design choice, not an oversight, so it is moved here rather than kept as a weakness.
+- **"Theoretical guarantee that preference alignment filters unhelpful outputs" as a core strength** (from Strength Finder): The strength Finder claims the theory section provides a "theoretical guarantee." However, this section is verified to be highly simplified (constant baseline assumption, trivial conclusion). Listing it as a core strength overstates its value and conflicts with the verified weakness about its simplicity. **[Reason: Conflicts with verified weakness; does not merit "core strength" designation.]**
 
 ## Novel Insights
 
-The most interesting observation emerging from the reviews is the implicit tension in the credit assignment signal: the weak model is being trained on preference labels derived from whether the *collaborative outcome* beats the strong model alone, which could create a feedback loop where the weak model learns to produce outputs that are easy for the strong model to fix rather than outputs that are independently good. This is a subtle but important distinction that the paper does not discuss. Whether this is actually a problem or a feature of the method is worth exploring — it may be that "easy to fix" is precisely what one wants from a weak collaborator. Beyond this point, the reviews surface no genuinely novel insight beyond the paper's own contributions.
+None beyond the paper's own contributions. The reviews do not surface an insight about the paper that the paper itself does not already claim.
 
 ## Suggestions
 
-1. **Fix the abstract numbers** to match Table 1 exactly, with clear labeling of whether the reported percentages are absolute or relative improvements. This is the single highest-leverage fix for credibility.
-
-2. **Remove or substantially rewrite Section 4.5.** Either remove the theoretical analysis entirely (the paper does not need it), or replace it with a clear discussion of why preference alignment helps (e.g., outcome-based reward shaping) without claiming formal guarantees that rest on unrealistic assumptions.
-
-3. **Add a brief discussion of the credit-assignment distinction** in Section 4.3.1 or 4.3.2, acknowledging that the weak model is being optimized for collaborative success rather than standalone output quality.
-
-4. **Report standard deviations or conduct repeated trials** for at least one dataset to establish that the reported gains are statistically reliable.
-
-5. **Add a justification for the preference triplet counts** (2,000 vs. 5,000) or note that these were chosen based on training set size.
+1. **Verify and clarify the abstract numbers.** Ensure that "3.24%" and "12.17%" are computed correctly from Table 1 and state whether these are relative percentages or absolute percentage-point improvements. If the table data and abstract are already consistent, add a note explaining the calculation.
+2. **Either remove or substantially strengthen Section 4.5.** In its current form the theoretical analysis does not add value. Consider replacing it with a bounded-regret analysis under relaxed assumptions, or an empirical analysis of the preference distribution learned during DPO training.
+3. **Add a brief discussion of train/validation separation for preference construction** and report whether DPO training was monitored on a held-out validation set to address the overfitting concern.
+4. **Add standard deviations or confidence intervals** to Table 1 and Figure 3 where feasible (at minimum for the main results).
 
 ## Score and Decision
 
-The paper presents a well-motivated method with consistent empirical gains across diverse tasks and informative ablations. The main issues are a questionable theoretical section, an abstract with potentially misreported numbers, and the absence of variance reporting. None of these are fatal — the core method and experiments are solid — but the abstract issue in particular undermines reader trust and must be corrected. The paper would be acceptably strong after these revisions.
+The paper presents a well-motivated and cleanly executed idea (DPO-based alignment for weak-strong model collaboration) with solid empirical results across diverse benchmarks. The main weaknesses — a possible abstract/table number inconsistency that needs author clarification, an expendable theory section, and missing variance estimates — are addressable in revision. No issue is fatal to the core contribution. The paper would be strengthened by the revisions suggested but is acceptable in its current form if the abstract numbers are verified to be correct.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

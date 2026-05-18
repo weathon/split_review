@@ -1,82 +1,80 @@
-Now I have thoroughly verified all claims against the actual paper. Here is my consolidated review:
-
----
+Now I have a thorough understanding of the paper and can verify all claims. Let me produce the consolidated review.
 
 ## Summary
 
-This paper introduces DiMA, a latent Gaussian diffusion model that generates protein sequences by denoising continuous encodings from a pre-trained protein language model (ESM-2 or CHEAP). The approach operates in the learned latent space of a frozen pLM encoder, with a lightweight diffusion transformer (33M params) and a single linear decoder. The paper provides a thorough ablation study of architectural choices (noise schedule, self-conditioning, skip connections, encoder choice, length sampling) and evaluates DiMA on two datasets (SwissProt, AFDB) across multiple quality, diversity, and distribution-matching metrics, including conditional generation via family-specific fine-tuning and inpainting.
+This paper introduces DiMA, a continuous latent diffusion model that operates on representations from pretrained protein language models (primarily ESM-2) to generate amino acid sequences. The method feeds protein sequences through a frozen, pretrained pLM encoder, normalizes the resulting latents, trains a transformer-based diffusion model on those latents, and decodes back to sequences with a fine-tuned linear decoder. The paper provides a comprehensive ablation study of design choices (noise schedule, self-conditioning, encoder removal, skip connections, etc.), compares against autoregressive, discrete diffusion, GAN, and flow-based baselines trained from scratch at 33M parameters, and also compares against large pretrained models. Results show DiMA achieves strong quality-diversity tradeoffs and distribution matching on SwissProt and AFDBv4-90.
 
 ## Strengths
 
-- **Systematic ablation study (Table 1).** The paper isolates the contribution of each component — sd-10 noise schedule, self-conditioning, pLM encoder, length sampling, decoder fine-tuning, skip connections, and time conditioning — on a single controlled setup. The "w/o ESM-2" ablation (pLDDT drops from 71.3 to 29.1; FD-seq from 0.34 to 11.76) cleanly demonstrates that the pLM encoder is critical. The ablation of self-conditioning and padding reconstruction also shows large individual effects.
+- **Thorough ablation study validates each design choice.** Table 1 systematically ablates eight components (encoder removal, self-conditioning, noise schedule, padding masking, length sampling, decoder finetuning, skip connections, time conditioning, flow matching) and shows measurable degradations from removing each. The largest degradation comes from removing the ESM-2 encoder (pLDDT drops from 76.2→68.1; FD-seq rises from 0.61→0.91), quantitatively justifying the design. This ablation goes well beyond what most protein generation papers provide.
 
-- **Generalizable framework across different pLM encoders.** DiMA works with CHEAP (a compact encoder of sequence+structure information) without any architectural modification, achieving pLDDT 80.3 (matching dataset 80.7) and FD-seq 0.32 — outperforming all baselines. This demonstrates that the design choices generalize beyond ESM-2 and that the framework is not tied to a specific encoder.
+- **Consistent quality–diversity advantage over from-scratch baselines.** In Table 3, DiMA (with ESM-2 8M encoder) achieves pLDDT 76.2 (SwissProt) and 66.8 (AFDB) with low repetition (Rep 0.42, 0.26), whereas the best autoregressive baseline (nanoGPT) achieves lower pLDDT (72.3, 60.4) with higher Rep (0.57, 0.32), and DPLM (discrete diffusion) has high Rep (0.62), indicating mode collapse. This advantage holds across sequence-level and structure-level metrics.
 
-- **Comprehensive multi-metric evaluation.** The evaluation spans quality (pLDDT, TM-score, perplexity), diversity (Rep, CD₀.₅, CD₀.₉₅), distribution matching (FD, MMD, 1-Wasserstein on both ProtT5 and ProteinMPNN embeddings), novelty (distance to nearest neighbor), and biological relevance (InterProScan annotation). The paper is transparent about the limitations of individual metrics (e.g., perplexity favoring repetitive sequences, pLDDT misleading for intrinsically disordered proteins).
+- **Competitive with large pretrained models at much lower parameter count.** Section 4.5 (Table 8) shows DiMA (33M params at inference) matches or approaches the quality of billion-parameter models like ProGen2, EvoDiff, and Chroma. This supports the practical claim that latent diffusion on pLM embeddings is parameter-efficient.
 
-- **Conditional generation with quantitative success criteria.** The inpainting experiment (Section 4.6) uses a rigorous evaluation pipeline with ESMFold pLDDT thresholds, RMSD constraints on unmasked regions, and 10 attempts per protein to reduce randomness. DiMA achieves a success rate ~0.40 vs. DPLM ~0.33, with both methods showing >70% novelty in inpainted regions.
+- **Framework generalizes to different encoders without modification.** DiMA with CHEAP encoders (lines 160-163, Table 3) achieves pLDDT 80.3–81.4 (close to dataset reference 80.7) and FD-seq 0.32–0.36, matching the ESM-2 version. This demonstrates encoder-agnostic robustness and opens the door to multi-modal protein generation (sequence + structure via CHEAP).
+
+- **Biological relevance validated beyond automated metrics.** InterProScan functional annotation analysis (Section 4.6, Figure 10) shows DiMA-generated sequences have high annotation rates and accurate domain length distributions, in contrast to DPLM which produces anomalously long domains. This provides independent, biologically grounded validation.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The central comparison (Table 3) conflates architectural advantage with pre-trained encoder knowledge.** The paper states "For a fair comparison, we train each method from scratch with the same parameter count (33M) as DiMA on the same dataset(s)." However, DiMA's encoder (ESM-8M, 8M parameters) is a **frozen, pre-trained** model that has been trained on hundreds of millions of protein sequences. All baselines — RITA, nanoGPT, DPLM, EvoDiff, etc. — are trained from scratch on only SwissProt (0.47M) or AFDB (2.2M) sequences, with no pre-trained components. This asymmetry means DiMA's advantage in Table 3 cannot be cleanly attributed to the diffusion architecture; a substantial portion may come from the encoder's prior biological knowledge. The "w/o ESM-2" ablation in Table 1 shows sharp degradation, but this removes both the encoder architecture and the pre-training simultaneously — it does not isolate them. A controlled experiment (e.g., comparing different generative heads — diffusion, autoregressive, linear probe — on top of the same frozen ESM-2 encoder) would be needed to separate the contribution of the diffusion architecture from the benefit of using a pre-trained encoder. The claims in the abstract ("ten times fewer parameters") and conclusion ("a hundred times fewer parameters") are based on this asymmetric comparison and are consequently overclaimed.
+- **Unfair comparison in Table 3: DiMA benefits from a pretrained encoder while baselines are trained from scratch.** The paper frames Table 3 as a "fair comparison" (line 169) where all methods are "trained from scratch with the same parameter count (33M) on the same dataset(s)." However, DiMA uses a frozen, pretrained ESM-2 encoder (trained on millions of sequences from UniRef50) that is never trained on SwissProt (0.47M) or AFDBv4-90 (2.2M) from random initialization. This encoder brings massive prior knowledge from a far larger and more diverse corpus. The baselines (nanoGPT, DPLM, RITA, etc.) are trained de novo on only the target dataset. The performance gap attributed to DiMA's diffusion architecture may partially or largely stem from the pretrained encoder's representations. This is not a fatal flaw — the paper separately compares against pretrained models (Table 8) where DiMA holds its own — but it means Table 3 does not answer the question "is latent diffusion better than alternatives when all methods start from equal knowledge?" It answers the narrower question "is latent diffusion on pLM encodings effective?" which is still valuable but overclaimed.
+
+- **Incomplete disentanglement of encoder pretraining from encoder architecture.** Table 1 ablates the encoder by replacing it with "only its embedding matrix," which removes both the architectural capacity of the transformer encoder AND its pretrained weights. The critical question — how much of the benefit comes from pretraining vs. from having a deep encoder — is unanswered. A randomly initialized ESM-2 of the same architecture, trained from scratch on the target dataset, would distinguish these factors. The current ablation conflates them.
 
 ### Minor
 
-- **No statistical uncertainty reported for any metric.** All tables (1–3) present single point estimates. Generative models have stochastic output; metrics like FD, pLDDT, and perplexity have nontrivial variance across inference runs and training seeds. Without standard deviations or confidence intervals (e.g., over multiple generation seeds), the reader cannot assess whether observed differences (DiMA FD-seq 0.34 vs. DiMA[CHEAP] 0.32; DiMA pLDDT 71.3 vs. DPLM 70.2) are significant or within noise. For large-scale generative model benchmarks in this domain, single-run evaluation is common practice, so this is not a fatal flaw, but reporting variability would substantially strengthen the evidential value.
+- **Abstract's "ten times fewer parameters" claim is ambiguous.** The abstract states DiMA uses "ten times fewer parameters" than "leading autoregressive transformer-based and discrete diffusion models." The baselines in Table 3 are all 33M parameters — same as DiMA's diffusion model — so the "ten times" comparison must refer to the billion-parameter pretrained models (Table 8), but the sentence structure links it to the broader comparison. The conclusion (line 215) is clearer ("comparable protein generation quality with multibillion models while utilizing a hundred times fewer parameters"). The abstract should clarify which comparison "ten times" refers to.
 
-- **Decoder fine-tuning is under-specified.** The paper states that "additional finetuning of the decoder on a task of amino-acid reconstruction" is performed and the decoder is "a single linear layer," but does not specify: what dataset is used for fine-tuning? What is the loss function? How many steps? Is the encoder frozen or updated during fine-tuning? Since the decoder is the critical bottleneck between continuous latents and discrete amino acids, these details are necessary for reproducibility.
+- **Inpainting evaluation is under-baselined.** The inpainting experiment (Table 12) compares DiMA only against DPLM and random. While DPLM is a natural baseline because it can be straightforwardly adapted, the absence of a simple autoregressive baseline (e.g., fine-tuning nanoGPT for masked infilling) limits the strength of the conditional generation demonstration. This is minor because the inpainting is presented as a proof-of-concept rather than the paper's main claim.
 
-- **Novelty metric distance is not defined.** The paper states "we compute the distance between each generated sequence and its nearest neighbor in the training dataset" (Section 4.1) but never specifies what distance metric is used (Levenshtein edit distance? Hamming? BLOSUM-based?).
-
-- **Self-conditioning modification is described but not ablated against the original formulation.** The paper modifies the self-conditioning integration from concatenation to linear projection into each transformer block (Section 3), claiming it "enhance[s] the integration of information." However, Table 1 only ablates self-conditioning entirely (on/off); it does not compare the proposed linear-projection variant against the original concatenation method. The claimed benefit of the modification is therefore unsupported.
+- **No explicit statement about whether the encoder is frozen or fine-tuned.** The paper says "pre-trained single-sequence encoder" (line 38) but never states whether ESM-2's weights are frozen during diffusion training or fine-tuned alongside. While frozen usage is the standard convention for such setups, the paper should state this explicitly for reproducibility.
 
 ### Trivial
 
-- The description of the "w/o ESM-2" ablation ("Omitting the transformer encoder (ESM-2), retaining only its embedding matrix") is ambiguous — it removes both the pre-trained knowledge and the attention-based encoder architecture, not just "pretrained knowledge" as the text might imply.
-- The noise schedule discussion attributes sd-10 to Hoogeboom et al. (2023) — correctly cited, though worth noting this schedule was originally developed for images and is being re-purposed here (already evident from the citation).
+- The self-conditioning modification (applying a linear transformation instead of concatenation with $z_t$, injecting into each transformer block) is described but not analyzed. A brief rationale or reference to Figure 14 in the main text would help. Currently it just says "This modification is designed to enhance the integration of information" without explaining why the design was chosen over the original approach.
 
 ## Nice-to-Haves
 
-- A dedicated **Limitations** section discussing what DiMA cannot do (e.g., length distribution constraints, failure modes for very short/long sequences, composition biases).
-- A **code release statement** — for a methods paper in this field, code availability is increasingly expected.
-- A controlled experiment comparing DiMA's diffusion head against an autoregressive head or linear probe trained on top of the same frozen ESM-2 encoder, to isolate the contribution of the diffusion architecture from the benefit of the pre-trained encoder.
+- **Scaling the diffusion model alongside the encoder.** Table 2 shows a quality-diversity tradeoff when fixing the diffusion model at 8M parameters while scaling the encoder. The paper acknowledges this limitation ("we likely need to scale up the diffusion model accordingly"). A few data points where both encoder and diffusion model scale together would confirm whether the bottleneck is real.
+- **Analysis of latent space geometry.** The paper speculates that the linear/cosine noise schedules are suboptimal because the reconstruction loss is trivial at small noise scales (Figure 1). A quantitative analysis of latent variance, signal-to-noise ratio decay, or reconstruction loss at different timesteps would deepen this observation.
+- **Reporting training compute (GPU hours, wall time, memory).** This would help practitioners assess practical feasibility for reproduction.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were raised by reviewers but are not included as weaknesses in the main review, with justifications:
 
-1. **"Table 8 comparison to pretrained models is referenced but not shown"** — The critic faults the paper for referencing results in Table 8 that are not visible. This is a parser artifact: the appendix (containing Table 8) exists in the original submission but was stripped during extraction. Per hard rules, weaknesses about missing appendices or references stripped by the parser are removed.
+- **"Encoder study is underpowered"** — The paper explicitly acknowledges the diffusion model becomes a capacity bottleneck (line 151: "we likely need to scale up the diffusion model accordingly"). This is an honest limitation, not a weakness. Moved to Nice-to-Haves.
 
-2. **"Missing limitations section"** — The critic demands a dedicated limitations section. This is a reasonable suggestion but not a weakness in the paper's technical contribution. Moved to Nice-to-Haves.
+- **"Self-conditioning modification is under-explained"** — The modification is clearly described (lines 67-68) with the key difference from Chen et al. (2022) stated and a figure (Figure 14) referenced. The level of explanation is adequate for a methods paper. Moved to Trivial.
 
-3. **"Missing code release statement"** — Moved to Nice-to-Haves.
+- **"Missing hyperparameters / reproducibility"** — This is a request that is either addressed in the appendix (which was stripped by the parser) or is typical for the field. Not a genuine weakness.
 
-4. **Strength: "DiMA achieves SOTA unconditional generation with far fewer parameters"** — This strength directly conflicts with the verified Major weakness (the comparison with baselines is confounded by the pre-trained encoder). Per the rule that when a strength and weakness disagree, the weakness wins, this strength is dropped. DiMA's results are impressive, but the "SOTA" and "fewer parameters" framing is substantially weakened by the asymmetric comparison.
+- **Various formatting/style nitpicks** — Parser artifacts, not author errors.
 
 ## Novel Insights
 
-The reviews surface a clear gap between the paper's empirical contribution (a well-engineered latent diffusion system with thorough ablation) and its competitive claims. The pre-training confound in Table 3 is the single issue that, if the authors addressed it cleanly — for example by comparing DiMA's diffusion head against alternative heads atop the same frozen ESM-2 encoder — would substantially elevate the paper's value. The CHEAP encoder experiment is the closest the paper currently comes to this control (since CHEAP has far less pre-training than ESM-2), and its strong results are the most under-exploited evidence in the paper. Beyond this, no genuinely novel insight emerges from the reviews beyond the paper's own contributions.
+Beyond the paper's own contributions, the key insight emerging from the review process is that the paper's strongest contribution may not be the direct performance comparison in Table 3 (which is confounded by the pretrained encoder), but rather the careful design-space exploration in the ablation study (Table 1) and the demonstration that a decoupled encoder–diffusion–decoder pipeline for protein generation can be made to work with a principled noise schedule (sd-10) and self-conditioning. The encoder scaling analysis (Table 2) revealing a quality-diversity tradeoff that depends on diffusion model capacity is an underexplored finding that could inform future work. The most convincing evidence for the method's value may be the CHEAP encoder results, which show the framework generalizes to a completely different embedding space without architectural modification — this suggests the pipeline itself is a practical contribution worth publishing.
 
 ## Suggestions
 
-1. **Address the pre-training confound head-on.** Add a controlled experiment comparing DiMA's diffusion head against an autoregressive head or linear probe trained on the same frozen ESM-2 encoder on the same dataset. Alternatively, train DiMA's diffusion model *without* the pre-trained encoder (which the ablation already does) and compare against baselines. Either approach would cleanly separate architecture from pre-training.
+1. **Add a controlled experiment that isolates the encoder pretraining contribution.** The most informative baseline: train a small autoregressive model (e.g., nanoGPT) or discrete diffusion model on the same ESM-2 embeddings that DiMA uses, with the same linear decoder to map back to sequences. If DiMA still outperforms these, the advantage is genuinely architectural. If not, the encoder explains the results. This single experiment would address the main fairness concern.
 
-2. **Report standard deviations or confidence intervals** for the key metrics in Tables 1 and 3 over at least 3 independent generation runs (or multiple training seeds).
+2. **Clarify the parameter count claims in the abstract.** Specify that the "ten times fewer" comparison refers to pretrained billion-parameter models (Table 8), not the 33M from-scratch baselines.
 
-3. **Specify decoder fine-tuning details** (dataset, loss, steps, whether encoder is frozen) in a short paragraph in Section 3.
+3. **State explicitly whether the ESM-2 encoder is frozen or fine-tuned** during diffusion model training.
 
-4. **Define the novelty distance metric** explicitly in Section 4.1.
-
-5. **Tone down competitive claims** in the abstract and conclusion, or anchor them to the controlled experiments rather than the confounded Table 3 comparison.
+4. **Add at least one more inpainting baseline** (e.g., nanoGPT fine-tuned for infilling) to strengthen the conditional generation demonstration.
 
 ## Score and Decision
 
-The paper presents a well-engineered latent diffusion framework for protein sequence generation with thorough ablation, a generalizable encoder-agnostic design, and comprehensive evaluation across multiple metrics. The ablation study and CHEAP experiments are genuine contributions. However, the central comparison against baselines is substantially weakened by a pre-training confound that the paper does not adequately address, and the competitive claims ("ten times fewer parameters," "hundred times fewer parameters") are overclaimed relative to the evidence. The paper would benefit from additional controlled experiments to separate the contribution of the diffusion architecture from the benefit of the pre-trained encoder. On balance, the contribution is solid but the framing requires revision.
+This paper presents a well-engineered latent diffusion pipeline for protein sequence generation with an unusually thorough ablation study. The core methodological contribution — demonstrating that continuous latent diffusion on pLM encodings with an appropriately designed noise schedule and self-conditioning can produce high-quality, diverse protein sequences — is solid and supported by the experiments. The CHEAP encoder results are particularly compelling for showing generality.
+
+However, the central quantitative comparison (Table 3) is undermined by an asymmetric setup where DiMA benefits from a pretrained encoder while all baselines are trained from scratch. This does not invalidate the paper — the method is still interesting, the ablations are valuable, and the comparison against pretrained models (Table 8) is fairer — but it means the paper's strongest claimed result (superiority over autoregressive and discrete diffusion models) is overstated given the evidence presented. The paper would benefit from a targeted additional experiment to disentangle the encoder's contribution.
+
+The paper makes a real contribution to the protein generation literature, and the weaknesses are addressable with a revision. I recommend **weak accept** conditional on the authors addressing the encoder asymmetry concern (either by adding the suggested controlled experiment or by substantially toning down the claims of superiority over from-scratch baselines).
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Weak Accept</orange>
+MY FINAL DECISION: <orange>Accept</orange>

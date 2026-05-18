@@ -1,18 +1,18 @@
-Now I have verified all claims against the paper. Let me produce the consolidated meta-review.
+I have all the information needed. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper extends Off-policy Direct Advantage Estimation (DAE) from MDPs to POMDPs by replacing states with histories and conditioning on observed variables rather than latent states (Proposition 1). To address the increased computational cost of modeling transition probabilities, it proposes a discrete latent dynamics model operating in an embedding space using a Winner-Takes-All loss, avoiding high-dimensional observation reconstruction. It also identifies a confounding issue that arises when truncating trajectories for recurrent training. Experiments on 5 Atari games with 10 seeds show scaling benefits and ablations on backup length, recurrence vs. frame-stacking, and the confounding mitigation.
+This paper extends Off-policy Direct Advantage Estimation (DAE) from fully observable MDPs to partially observable environments (POMDPs). The key contributions are: (1) a theoretical extension of the return decomposition and DAE objective to POMDPs by replacing states with histories and conditioning the "luck" function B^π on observed reward and next observation rather than latent state; (2) a practical approximation of the B^π constraint using a discrete latent dynamics model (conditional VQ-VAE + WTA loss) in a low-dimensional embedding space to avoid expensive pixel-level reconstruction; (3) identification of a confounding bias that arises from naively truncating trajectories in recurrent RL, along with a simple mitigation strategy. Experiments on 5 Atari games show the method is sample-efficient and scalable, with ablations confirming the value of the off-policy correction, the LSTM-based POMDP modeling, and the confounding mitigation.
 
 ## Strengths
 
-- **Clean theoretical extension of Off-policy DAE to POMDPs (Proposition 1).** The paper rigorously derives the return decomposition for POMDPs, showing that states can be replaced by histories and transition probabilities by conditional densities of observed variables (rewards and next observations). The centering properties for both $A^\pi$ and $B^\pi$ are correctly established. Even though this is technically a corollary of viewing POMDPs as MDPs over information vectors, the paper is transparent about this and provides a self-contained treatment.
+1. **Principled theoretical extension of Off-policy DAE to POMDPs**: Proposition 1 correctly generalizes the return decomposition to partially observable domains. The derivation (Equations 6-8) is clear, and the intuition that the B function conditions on observed variables (r, o') rather than unobserved states is sound. The paper correctly identifies that the key change is in the centering constraint of B^π, which now integrates over (r, o') ∼ p(·|h, a) rather than s' ∼ p(·|s, a).
 
-- **Practical latent dynamics model using WTA loss.** Combining SPR-style self-predictive representations with a Winner-Takes-All loss avoids reconstructing high-dimensional observations while still modeling stochastic transitions. The connection to conditional VQ-VAE is clearly explained, and using shallow MLPs for the dynamics is a sensible design choice for computational efficiency. This is a genuine architectural contribution over the full-reconstruction CVAE used in Pan and Schölkopf (2024).
+2. **Novel and practical latent dynamics model for the B constraint**: The paper introduces a conditional VQ-VAE with a winner-takes-all loss to model stochastic transitions purely in the embedding space, avoiding the ∼7× runtime overhead of the original CVAE-based approach. This is a clever architectural contribution that combines self-predictive representations with multiple stochastic predictions and discrete latent variables. The method is shown to work well empirically (Table 1, Figure 3), with the off-policy correction consistently improving performance over the B≡0 ablation.
 
-- **Identification of a previously overlooked confounding problem.** Section 3.2 provides a clean causal analysis (with a toy example in Figure 2) showing that naively truncating trajectories during training creates confounding between the behavior policy's memory and the target policy's conditioning set. The proposed fix (aligning the behavior policy's memory capacity with the target policy's truncation length) is simple and principled. Table 2 shows consistent (though small) degradation across all 5 environments and 2 truncation lengths, demonstrating the effect is real.
+3. **Identification of confounding from trajectory truncation**: Section 3.2 provides a genuinely insightful causal analysis of a commonly overlooked issue in recurrent RL — that truncating trajectories creates a confounder (the truncated portion of the history) that biases value estimates. The toy example (Figure 2) clearly illustrates the problem, and the proposed mitigation (matching the memory capacity of the behavior policy to the truncation length) is simple, principled, and shown to yield consistent improvements across all 5 environments and 2 truncation lengths (Table 2).
 
-- **Solid empirical rigor within its chosen scope.** All experiments use 10 random seeds with standard error reported. The paper includes ablation studies on backup length (Figure 4), LSTM vs. frame-stacking (Figure 5), and latent space size $|\mathcal{Z}|$. The LSTM vs. frame-stacking comparison is particularly informative, showing the POMDP formulation outperforming the MDP approximation in 3/5 games.
+4. **Thorough and well-designed experimental methodology**: The paper uses 10 random seeds throughout, reports standard errors, and includes extensive ablations (backup length in Figure 4, LSTM vs. frame-stacking in Figure 5, latent space size, confounding in Table 2). The comparison of the LSTM-based POMDP agent against frame-stacking (Figure 5) cleanly isolates the benefit of explicitly modeling partial observability.
 
 ## Weaknesses
 
@@ -21,72 +21,55 @@ None.
 
 ### Major
 
-- **Computational cost savings are claimed but never quantified.** This is the paper's second main contribution, but there are zero runtime measurements, wall-clock timings, FLOP counts, or parameter counts for the dynamics model vs. the rest of the network. The paper states "negligible computational cost compared to other parts of the system" (line 136) and cites the ~7× slowdown from Pan and Schölkopf (2024), but never shows that the proposed method actually improves on that. Without this evidence, a central claim of the paper remains unsubstantiated.
+1. **The theoretical proof is incomplete.** The appendix proof (lines 296-299) consists of a single sentence stating that Proposition 1 follows from applying Off-policy DAE to the MDP reformulation over information vectors. The accompanying remark *acknowledges* that the original Off-policy DAE proof assumed deterministic rewards — an assumption violated when POMDPs are converted to MDPs (the reward in the history-based MDP is stochastic because it depends on the unobserved underlying state). The paper notes that a modified definition of B^π is needed (including r in the expectation), but does **not** provide a proof that the minimizer of (9) is (A^π, B^π, V^π) under this modified definition. While the modification is natural and the centering property is preserved by construction, the paper's central theoretical claim remains unsubstantiated at the level of rigor expected for publication. This is a genuine gap, not a trivial presentation issue.
 
-- **Missing key baselines that would isolate the contribution's value.** The paper compares against DreamerV2, DreamerV3 (both at 20M frames rather than their designed 200M frames), and Rainbow at 200M frames. However, there is no comparison to:
-  - (a) The original Off-policy DAE with full observation reconstruction, which would directly substantiate the claimed computational advantage of the latent dynamics model.
-  - (b) A standard DRQN (Deep Recurrent Q-Network), which is the natural baseline for recurrent Atari agents and would isolate the benefit of the DAE objective itself.
-  - (c) A frame-stacked DQN without the DAE objective (the paper does compare LSTM vs frame-stacking in Figure 5, but both use the DAE objective — what matters is whether DAE itself helps over standard Q-learning).
-
-  The absence of (b) is particularly notable given that DRQN is explicitly cited as using the confounded training approach the paper warns about (line 192).
+2. **The computational cost contribution is asserted but not measured.** The paper claims that the latent dynamics model has "negligible computational cost compared to other parts of the system" (line 136) and lists "addressing the increased computational cost" as a core contribution (bullet 2, line 17), but provides **zero timing measurements** — no wall-clock comparisons, no FLOP estimates, no comparison of training time per frame against the original CVAE-based approach or against a version without the dynamics model. The reader has no way to verify that the computational cost has actually been reduced. This does not invalidate the other contributions, but it means this specific claimed contribution is unsupported.
 
 ### Minor
 
-- **Confounding effect is small and statistical significance is not assessed.** The paper reports relative differences of -0.8% to -2.2% (Table 2) and honestly calls them "small, yet consistent." However, no statistical significance tests are provided beyond standard errors. Given the variance typical of Atari, a stratified bootstrap or interquartile-mean analysis (as recommended by Agarwal et al. 2021, which the paper cites) would strengthen the claim that the effect is real rather than noise. The consistency across 10 conditions is suggestive but not conclusive without proper testing.
+3. **The comparison with Dreamer baselines at 20M frames is under-explained.** While the paper states that DreamerV2 and DreamerV3 scores are "evaluated at 20 million training frames" (line 178), it does not clarify whether these are scores read from published learning curves or obtained from re-runs under matched conditions. This limits the strength of the claimed sample-efficiency comparison (though it is standard practice in RL to use published intermediate evaluations).
 
-- **The 5-game evaluation limits the generality claims.** The paper cites Aitchison et al. (2023)'s Atari-5 subset, but that work was designed for hyperparameter distillation, not as a replacement for full-scale benchmarking of new algorithms. The abstract's phrasing ("using the Arcade Learning Environments") suggests broader evaluation than what is actually performed. For a method whose title and abstract claim generality and scalability, 5 out of 57 games is a narrow basis.
+4. **Missing specification of the behavior policy in the experimental setup.** The paper formally defines the objective under behavior policy μ and target policy π, but never specifies what μ is during training (e.g., ε-greedy with respect to current Q? Running average of past policies?). Since the off-policy nature of the method hinges on the distinction between μ and π, this is important for reproducibility.
 
-- **Dreamer baselines compared at a fraction of their designed training budget.** DreamerV2 and DreamerV3 were designed for 200M frames but are reported at 20M frames. While the paper notes this (line 178), the "efficiency comparable to DreamerV3 in 3 out of 5 environments" framing is misleading — it compares the proposed method at its full training budget against DreamerV3 at 10% of its budget. This asymmetry favors the proposed method.
-
-- **Missing implementation and architectural details.** Several details needed for reproducibility are absent:
-  - The KL divergence loss term for learning the prior $p_\phi(z|h_t,a_t)$ is mentioned but never specified (line 134).
-  - The reward prediction loss is mentioned but not defined ("making multiple reward predictions and adding a reward reconstruction term," line 134).
-  - The claim that joint end-to-end training "further reduces computational complexity" (line 136) is not compared against separate training.
-  - No hyperparameter table is provided (learning rate, batch size, sequence length, burn-in length, $|\mathcal{Z}|$, etc.).
-
-- **Important limitation (deterministic rewards) buried in appendix.** The remark that the original Off-policy DAE proof assumes deterministic rewards — and that this matters for POMDPs where the reward function in the reformulated MDP may be stochastic — appears only in the appendix proof. This is a nontrivial caveat that should be in the main text.
-
-- **Latent space size analysis is mentioned but no data is shown.** The paper states "we also examine the effect of the latent space size $|\mathcal{Z}|$ on the performance, and find it to be relative[ly] robust above a certain level" (line 198), but no figure, table, or numerical result is provided.
+5. **Limited game suite.** The paper evaluates on only 5 Atari games. While the authors cite Aitchison et al. (2023) to justify this, the cited work is about overall *ranking* correlation, not about the reliability of sample-efficiency curves on individual games. Generalizability would be strengthened by including a few more diverse environments.
 
 ### Trivial
-- The abstract says "empirically evaluate the proposed method using the Arcade Learning Environments" — this could be read as implying evaluation on the full 57-game suite rather than a 5-game subset. The introduction (line 19) is more precise.
+None — the paper is generally well-written and the presentation is clean.
 
 ## Nice-to-Haves
-- A comparison to the original on-policy DAE adapted for POMDPs would help isolate the benefit of the off-policy extension.
-- An ablation comparing joint vs. separate training of the RL objective and dynamics model would clarify whether there is an actual computational or performance benefit to joint training.
-- A synthetic POMDP where the confounding effect is large and clearly visible would strengthen Section 3.2.
+
+- A short, self-contained proof in the appendix that explicitly handles stochastic rewards with the modified B definition would resolve the main theoretical concern.
+- A single table reporting training time per 1M frames (or similar) for the proposed method vs. the original CVAE-based approach would validate the computational cost claim.
+- Specifying the behavior policy (e.g., ε-greedy schedule) and the exact target V construction would improve reproducibility.
+- The backup length analysis (Figure 4) shows that increasing n beyond 8 hurts performance in 2/5 environments; a brief discussion of this trade-off would be helpful.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
 
-- **Criticism that the B≡0 ablation is a "strawman" because ALE with sticky actions is stochastic.** The paper explicitly acknowledges this limitation (line 178: "this is due to $B^\pi\equiv0$ for arbitrary $\pi$ if the environment is deterministic"). The ablation is a controlled experiment showing the importance of the $B̂$ correction, not a strawman. **Removed: misreads the paper's intent.**
-
-- **Criticism that the POMDP extension is "trivial" / "minor modification."** The paper itself is transparent about this being a direct consequence of viewing POMDPs as MDPs over histories (line 110). A contribution can be clean and straightforward without being trivial — the paper never overclaims the difficulty of the theoretical step. **Removed: not a valid weakness; the paper sets correct expectations.**
-
-- **Criticism that the paper does not compare against the original Off-policy DAE with full reconstruction.** This is a genuine gap, but the harsh critic's framing as "to show that the latent dynamics actually reduces cost" is the Major weakness I already include above. The removed version here refers to the specific framing regarding the CVAE comparison — kept, just in the correct tier. **(Not removed, moved to Major.)**
-
-- **Criticism that Figure 5 comparison is "modest" since LSTM is better in only 3/5 games.** 3 out of 5 with the remaining 2 being at least on par is a meaningful result, not a weakness. **Removed: overstates the negativity.**
+- **Criticism about Rainbow comparison (20M vs 200M frames)**: Per hard rules, removed because the asymmetry favors the baseline (Rainbow gets 10× more training), making the comparison harder for the proposed method. The paper's claim that "our method can achieve similar performance while using only 10% of the training frames" is a valid and properly caveated sample-efficiency statement.
+- **Criticism that Dreamer scores may not be from re-training runs**: Removed. The paper clearly states the scores are "evaluated at 20 million training frames" — this is standard practice in RL (reading intermediate evaluation points from published learning curves). The paper also transparently notes both methods were originally trained for 200M frames.
+- **Criticism about missing figures (latent space size ablation)**: Removed per hard rules — the parser strips figures; they exist in the original submission.
+- **Criticism that the confounding effects are "weak" or that the paper overclaims on confounding**: Removed. The paper itself describes the effects as "small, yet consistent" (line 192), which is an accurate and honest characterization. The reviewer misread the paper's own framing.
+- **Criticism about the transition model being a source of bias**: This is inherent in any approximate model-based approach and is not a specific weakness of this paper. The paper acknowledges the approximation (Section 6). The observation is correct but applies to most model-based RL methods equally.
 
 ## Novel Insights
-The most striking observation from the review process is that the confounding analysis (Section 3.2) — which the paper itself presents as a relatively minor point — may be the most novel and broadly applicable contribution. The toy example cleanly illustrates how behavior-policy state and target-policy conditioning set can become misaligned during truncated trajectory training, and the empirical demonstration that this affects real Atari environments (even with small effect sizes) suggests this is a genuinely overlooked issue in recurrent RL. Meanwhile, the paper's main claimed contribution (computational savings from latent dynamics) remains unverified, and the theoretical POMDP extension is mathematically sound but incremental relative to prior MDP results. This inversion — where the secondary observation may be more impactful than the primary contribution — is worth noting for future iterations.
+
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Quantify computational cost.** Report wall-clock time per gradient step and per 1M frames for the proposed method vs. the full-reconstruction variant of Off-policy DAE, along with parameter counts for the dynamics model vs. the rest of the network. This is essential to substantiate a core contribution.
+1. **Close the proof gap.** Add a short, self-contained proof (or proof sketch) in the appendix that shows the minimizer of (9) is (A^π, B^π, V^π) under the modified B definition with stochastic rewards. This need not be long — a few lines of algebra adapting the original proof would suffice — but it must be explicit, not just a reference to the original plus a remark.
 
-2. **Add a DRQN baseline.** Compare against Deep Recurrent Q-Network with n-step targets (the standard recurrent value-based method) to isolate the benefit of the DAE objective itself. This is the most important missing baseline.
+2. **Provide runtime measurements.** Report wall-clock training time per frame or per 1M environment steps for at least: (a) the proposed method with the latent dynamics model, (b) the B≡0 ablation (no dynamics model), and (c) if feasible, a version using the original CVAE-based approach. Even one row in a table would validate the computational cost claim.
 
-3. **Broaden the evaluation or adjust the claims.** Either evaluate on more games (10–15 minimum) or revise the abstract/title to indicate the method's scope more precisely.
-
-4. **Provide a complete hyperparameter table** and specify the KL loss term and reward prediction loss for reproducibility.
-
-5. **Perform statistical significance tests** for the confounding analysis (e.g., paired bootstrap or IQM with confidence intervals following Agarwal et al. 2021) to justify the claim that the effect is real.
-
-6. **Move the deterministic-rewards remark** from the appendix to the main text, as it is a nontrivial caveat about the scope of the theoretical result.
+3. **Clarify the behavior policy.** Specify what μ is during training (e.g., ε-greedy with ε schedule, or a running average of past policies) and how target policies are constructed for the DAE objective.
 
 ## Score and Decision
 
-The paper has a sound theoretical core, a practical architectural improvement (latent dynamics with WTA), and an interesting causal insight about trajectory truncation. However, a central claim — computational efficiency — is asserted without any quantitative evidence. Combined with limited evaluation breadth, missing key baselines (especially DRQN), and uneven comparisons against Dreamer methods, the empirical evidence does not yet convincingly support the paper's claims of being "scalable and sample-efficient." The ideas have merit, but the paper needs substantially more evidence before it can be accepted.
+The paper makes a genuine contribution: extending Off-policy DAE to POMDPs is a natural and worthwhile direction, the latent dynamics model is a practical innovation, and the confounding analysis is an insightful addition to the recurrent RL literature. The experiments are well-designed with 10 seeds and thorough ablations.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+The main weaknesses are (a) an incomplete proof that the paper acknowledges but does not resolve, and (b) a computational-cost claim made without supporting measurements. Neither is fatal — the theoretical gap is small (a few lines of algebra), and the missing timing data is straightforward to provide. The empirical evaluation otherwise supports the paper's core claims about sample efficiency and the value of the proposed corrections.
+
+The paper meets the bar for publication with revisions. The contributions are clear, the methodology is sound, and the weaknesses are addressable in a camera-ready version.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

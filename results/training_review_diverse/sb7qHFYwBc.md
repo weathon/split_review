@@ -1,74 +1,78 @@
-Now I have a thorough understanding of the paper and can verify the reviewer claims. Let me write the consolidated review.
+Now I have all the information I need. Let me compose the consolidated review.
 
 ## Summary
 
-This paper introduces VLCL, a multimodal continual learning benchmark with eight image-caption datasets spanning diverse domains, and proposes C-CLIP, a method combining LoRA-based parameter-efficient fine-tuning with a novel Contrastive Knowledge Consolidation (CKC) loss. C-CLIP aims to learn new domain-specific image-text retrieval tasks while preserving CLIP's original zero-shot classification ability. Experiments across three evaluation tracks (downstream retrieval, zero-shot retrieval on unseen domains, and zero-shot classification) show that C-CLIP outperforms existing continual learning methods on downstream tasks while maintaining far stronger zero-shot generalization than full fine-tuning.
+This paper introduces C-CLIP, a method for multimodal continual learning of vision-language models that combines LoRA-based parameter-efficient fine-tuning with a novel contrastive knowledge consolidation (CKC) loss. The paper also establishes a Vision-Language Continual Learning (VLCL) benchmark spanning three evaluation tracks (downstream retrieval, zero-shot retrieval, and zero-shot classification forgetting). The core technical claim is that CKC, by performing contrastive learning between old and new feature projections rather than simply aligning them, simultaneously reduces forgetting and improves new-task learning — overcoming the typical stability-plasticity trade-off. The strongest evidence is Tables 3 and 4: C-CLIP achieves the highest average I2T R@1 (70.62) across eight datasets while losing less than 1.3% ImageNet zero-shot accuracy (66.42% vs. 67.73% original CLIP).
 
 ## Strengths
 
-1. **CKC aligns the CLIP loss and regularization loss, breaking the traditional stability-plasticity trade-off.** Figure 3(c–d) shows that prior methods (EWC, ZSCL, Mod-X) create a loss conflict — regularization loss rises when CLIP loss falls and vice versa — whereas C-CLIP makes both losses decrease together. Figure 3(b) further shows that this alignment translates into dramatically better zero-shot preservation (~66% ImageNet accuracy after 8 tasks vs. ~25% for full fine-tuning). The ablation in Table 5 confirms that the LoRA+CKC combination is essential: either component alone underperforms the full method. This is a genuine architectural insight, not just a better hyperparameter trade-off.
+- **Novel VLCL benchmark with three-track evaluation**: The paper establishes a multimodal continual learning benchmark that goes beyond prior single-modal or single-metric evaluations. It jointly assesses downstream image-text retrieval, retrieval on unseen domains, and zero-shot classification forgetting (Section 3, Table 2). This fills a genuine gap: prior works like ZSCL and Mod-X do not evaluate forgetting of CLIP's original zero-shot performance.
 
-2. **Comprehensive multi-benchmark evaluation covering three distinct tracks.** The paper evaluates not only downstream retrieval (8 datasets × 2 metrics = 16 numbers in Table 3) but also zero-shot retrieval on an unseen domain (HAVG) and zero-shot classification on six datasets (ImageNet, CIFAR-100, StanfordCars, Flowers, DTD, Food101), reported per-stage in Table 4. This is substantially more thorough than prior CL evaluations on vision-language models, which typically focus on only one aspect (classification or retrieval alone).
+- **C-CLIP achieves both strong downstream performance and near-zero zero-shot forgetting**: The method outperforms full fine-tuning on several downstream datasets (I2T R@1 on Flickr30K and COCO in Table 3) while maintaining 66.42% ImageNet zero-shot accuracy after all eight tasks, compared to ~25% for full fine-tuning and ~60% for best prior methods (Table 4, Figure 1). This directly supports the paper's central claim of "learning more and forgetting less."
 
-3. **The LoRA integration strategy is practical and well-motivated.** Freezing old weights and training LoRA adapters, then merging them into the backbone after each stage (Eq. 2), is a simple and parameter-efficient way to limit forgetting without storing task-specific modules. The paper shows it outperforms full fine-tuning on zero-shot preservation and is competitive with more complex regularization methods, while using far fewer trainable parameters (Table 6). The merge-at-end design avoids the inference-time task-ID requirement that plagues many architecture-based CL methods.
+- **Contrastive knowledge consolidation resolves the stability-plasticity trade-off**: Unlike prior regularization methods (EWC, ZSCL) whose losses conflict with the CLIP loss, CKC aligns the loss trends (Figure 3(c)–(d)) and improves performance on both new and old tasks as training progresses (Figure 5). Ablation results (Table 5) show adding CKC on top of LoRA dramatically boosts average I2T R@1 from 50.40 to 70.62, confirming its unique effectiveness.
+
+- **Thorough evaluation across architectures and against prompt-based methods**: C-CLIP performs consistently on ViT-B/32, ViT-L/14, and ViT-L/14@336 (Table 7). The comparison with L2P and CPE-CLIP (Table 8) shows prompt-tuning forgets downstream tasks, while C-CLIP with LoRA+CKC retains both zero-shot and downstream performance.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **The "outperforms full fine-tuning" claim is imprecise and partially contradicted by the paper's own data.** The paper repeatedly states that C-CLIP "even outperforms full fine-tuning" (abstract, Figure 1, §4.2, §5.1). However, the "Full fine-tune" baseline in Table 3 is *sequential* fine-tuning on all eight tasks without any regularization — a setting where severe forgetting of early tasks is expected. C-CLIP beating that baseline on some tasks is not remarkable. Moreover, the claim appears selective: Table 3 shows that on several tasks C-CLIP is *worse* than full fine-tuning (e.g., the critic notes Pets I2T: Full fine-tune 59.94 vs. C-CLIP 58.15; T2I Pets: 54.43 vs. 52.70). The paper's text (§5.1) only highlights the winning tasks (Flickr30K, COCO). The authors need to (a) clearly distinguish between *sequential* full fine-tuning (the baseline used) and *isolated* per-task fine-tuning (the real upper bound), (b) report results against per-task fine-tuning where feasible, and (c) temper the blanket claim to something like "matches or exceeds sequential full fine-tuning on several tasks while preserving zero-shot ability."
-
-2. **Missing standard continual learning evaluation metrics.** The paper reports only final accuracy after all eight tasks (Table 3) and per-task trajectories (Figure 5). Standard CL metrics — average incremental accuracy (averaged across tasks after each step) and forgetting measure (peak minus final per task) — are not reported numerically. Without these, it is difficult to assess whether C-CLIP maintains stable performance throughout the sequence or benefits from a favorable task ordering. Figure 5 shows trajectories for a few tasks, but numerical averages across all tasks would provide a much clearer picture. This is a methodological gap that can be fixed with additional reporting from existing data.
-
-3. **No variance or statistical significance reported.** All results are point estimates from what appears to be a single run (§5 implementation details mention no seed or repetition). Given the small differences between methods in Table 3 (often 1–3 points), it is impossible to assess whether C-CLIP's improvements are statistically reliable. Multiple seeds (at least 3) with standard deviations are standard practice and necessary to build confidence in the comparisons.
+- **Quantitative zero-shot retrieval results on HAVG are reported only qualitatively, not in a dedicated comparison table.** The paper defines a three-track benchmark (Section 3, Table 2) including "Zero-shot retrieval" on the held-out HAVG dataset, with I2T R@1 as the specified metric. However, the main results tables (Tables 3 and 4) cover only the other two tracks. Figure 5 is described as showing trends on unseen datasets, including HAVG, but the accompanying text provides only qualitative observations ("training improves performance," "previous methods are unstable," "our method exhibits impressive performance") without a dedicated table reporting final numeric results with baseline comparisons. This is a significant evaluation gap: one of the three defined benchmark axes lacks the quantitative treatment the other two receive. While the paper's primary contribution (the C-CLIP method) is not invalidated, the benchmark loses some of its claimed comprehensiveness.
 
 ### Minor
 
-4. **The theoretical justification in §4.1 is not LoRA-specific.** The Lipschitz argument (Eq. 3→4) shows that constraining parameter norm change bounds feature change — which is true for *any* method with bounded parameter updates, not unique to LoRA. The paper essentially argues that LoRA's small parameter count keeps weight changes small, which is a practical observation, not a theoretical result. This section would be better framed as intuition for why parameter-efficient tuning helps CL, without claiming theoretical novelty.
+- **Task order is not explicitly stated, and no ordering robustness analysis is provided.** The paper uses eight datasets but never states which order they are trained in, beyond scattered clues (e.g., "after fine-tuning twice on Flickr30K and COCO" suggests these are first two tasks; "AI-generated datasets like Lexica in Task 4" places it fourth). Given that CL methods are known to be sensitive to task order, and the paper itself notes that fine-tuning on AI-generated datasets "causes the model to forget its performance in real-world domains," the absence of a clear task ordering or any ordering-robustness experiment (e.g., one alternative random order) is a gap that limits the generality claims. This is not fatal — many CL papers use a single fixed order — but the paper's claim that C-CLIP uniquely achieves both stability and plasticity would benefit from showing this is not order-dependent.
 
-5. **The projector \(h_\psi\) architecture in CKC is underspecified.** The paper introduces a projector \(h_\psi: \mathcal{Z} \to \mathcal{Z}\) (§4.2) used in Eq. 5 but does not describe whether it is a linear layer, an MLP, its hidden dimensions, or how it is optimized (end-to-end with CKC? separate training?). This hurts reproducibility. Similarly, the concatenated design of old+new features before contrastive learning (Eq. 5) is presented without justification — the paper should explain why this design is preferred over symmetric cross-modal distillation (distilling image-to-image and text-to-text separately).
+- **Zero-shot classification prompting protocol is underspecified.** The paper reports zero-shot accuracy on ImageNet, CIFAR-100, etc., but never states which text prompts are used. CLIP's zero-shot accuracy is known to vary by several points depending on prompt engineering. The paper uses "pre-trained CLIP" as a reference point (67.73% on ImageNet-1K) but does not clarify whether the same prompts are used during and after continual fine-tuning. This is easily fixable but impacts reproducibility.
 
-6. **The prompt-tuning comparison (Table 8) is incomplete.** Only two tasks (flickr30k and COCO) are reported for L2P and CPE-CLIP, while the main evaluation uses eight tasks. The paper should show results on the full set of datasets for these methods, or remove the comparison and note the limitation. As it stands, the reader cannot assess whether the advantage generalizes.
-
-7. **The full fine-tuning baseline may be undertuned.** The paper provides hyperparameters for C-CLIP (per-dataset learning rates, optimizer settings) but does not clarify whether the same hyperparameters were used for full fine-tuning. If full fine-tuning used the same learning rates (which are tuned for C-CLIP's LoRA-based optimization), it may underperform its potential. A small learning-rate sweep for the full fine-tuning baseline would address this concern.
+- **Ablation study (Table 5) covers only Tasks 0 and 1, not the full 8-task sequence.** The paper presents the ablation of LoRA and CKC on the first two tasks as demonstrating the method's effectiveness. However, the interaction between LoRA and CKC may change as more tasks accumulate — LoRA integration and CKC's use of old model features both evolve over the full sequence. A full ablation across all 8 tasks (or at least 4–5) would substantially strengthen the claim that the benefits persist.
 
 ### Trivial
-None.
+
+- **The "for the first time" claim (Section 1, contributions) is overstated.** The paper states "achieving the goal of learning more and forgetting less for the first time." Several recent CL methods (e.g., DER, BiC, Mod-X with rebalancing) also claim to improve new-task performance while preserving old knowledge. The authors should qualify this to their specific setting (multimodal VLMs with rehearsal-free constraint) or simply remove the phrase.
+
+- **The theoretical proof in Appendix A.1 (Lipschitz continuity of a feedforward network) is standard** and does not provide specific insight into why LoRA's particular parameterization is effective for CL. It shows that network outputs are Lipschitz in parameters, which is true for any bounded-weight network, but does not compare LoRA to regularization-based methods or explain LoRA's advantage. This could be shortened to a citation without loss.
+
+- **Two datasets (Simpsons, Kream) lack formal citations** in the main paper or appendix, making it harder to verify their provenance. The paper should cite these or note their sources.
 
 ## Nice-to-Haves
 
-- **Per-epoch training time (Table 9)** is reported but total training time and GPU memory usage would further strengthen the practical deployment claims in the appendix.
-- **Ablation replacing CKC with simple feature distillation (e.g., L2)** would isolate the benefit of the contrastive formulation more cleanly than the current Table 5, which compares only LoRA vs. LoRA+CKC vs. CKC alone.
-- **Hyperparameter sensitivity analysis** for LoRA rank \(r\), alpha, and temperature \(\tau\) on at least one dataset would demonstrate robustness.
+- Include a quantitative table reporting I2T R@1 on HAVG with full baseline comparisons.
+- Provide t-SNE visualizations of the feature space before and after CKC, comparing old model projections with new model projections, to directly support the claim that CKC "keeps the new and old feature spaces connected but not identical."
+- Ablate the CKC temperature and batch size sensitivity, as these can affect the consolidation vs. plasticity trade-off.
+- Add a replay-based upper bound (e.g., storing 100 samples per task) to calibrate how much performance is lost under the rehearsal-free constraint.
+- The concatenation of visual and text features in Eq. (5) (creating a 1024-dim vector) is a design choice that could be ablated against separate projectors for vision and text features.
 
 ## Removed Points
-- *"Table 1 characterization of CIL/MTIL is unfair because ZSCL evaluates zero-shot"* — The paper's Table 1 is about evaluating **zero-shot preservation** (preserving the original pre-trained zero-shot ability), not evaluating zero-shot on new tasks. The paper's text (§2.1) correctly notes that ZSCL evaluates "zero-shot performance of new tasks," which is different. The reviewer conflated these.
-- *"Zero-shot CLIP row in Table 3 is misleading"* — Including a frozen pre-trained baseline is standard practice; it establishes the lower bound for forgetting and is useful context for the reader.
-- *"Three datasets (Simpsons, Lexica, Kream) are non-standard and not publicly scrutinized"* — Per policy, questioning the existence or scrutiny of cited datasets is not a valid criticism. The paper describes their splits (e.g., Kream evenly divided). Asking about preprocessing is reasonable but belongs in nice-to-haves, not weaknesses.
-- *"Theoretical argument is not LoRA-specific"* — Rephrased and kept as Minor (not removed entirely) since it's a substantive point, but the critic's original framing that it "adds little insight" is too harsh — connecting PEFT to CL theory is still a contribution even if the argument is generic.
+
+These points are flagged to be removed; treat them with caution.
+
+- **The critic's claim that the zero-shot retrieval results are "never quantitatively reported" is partially softened**: Figure 5 is described as showing these results with trends, but the paper lacks a dedicated comparison table. The underlying concern (missing quantitative table) is real and kept in Major; the claim that there are "no numeric results at all" is slightly overstated since Figure 5 presumably contains values, but without access to the figure, the strength of the criticism is appropriate. Kept in Major as stated.
+
+- **The critic's point about the paper needing a "fairer comparison with replay-based methods"**: Removed. The paper scopes itself as rehearsal-free, and the harsh critic acknowledges this is a valid choice. Demanding a replay upper bound is a nice-to-have, not a weakness.
+
+- **The critic's request for separate ablation of CKC's batch size and temperature**: Moved to Nice-to-Haves. This is a standard sensitivity analysis but does not threaten any core claim.
+
+- **The critic's request for ablating the concatenation design (Eq. 5) vs. separate projectors**: Moved to Nice-to-Haves. Interesting design question but not central to the paper's validity.
 
 ## Novel Insights
 
-The reviews surface one insight that goes beyond the paper's own claims: C-CLIP's loss alignment (Figure 3c-d) suggests that the traditional CL trade-off between stability and plasticity is not a fundamental property of stochastic optimization but an artifact of how regularization losses interact with the task loss. Most CL methods constrain features to stay close to old representations (e.g., L2 or distillation), which directly opposes the CLIP objective's drive to learn discriminative new features. CKC instead uses the old features as positive anchors in a contrastive framework, turning the old model from a constraint into a source of additional training signal. This reframing — from "don't move too far" to "bring new representations closer to old ones for matching pairs" — is the conceptual contribution that explains why CKC avoids the loss conflict seen in prior work.
+The reviews surface an important tension not fully addressed in the paper: C-CLIP's CKC loss treats the old model's projected features as positives in a contrastive formulation. This is clever because it naturally scales the number of negative pairs (all other samples in the batch), unlike standard knowledge distillation that operates on individual sample alignment. The reviewer correctly notes this contrastive formulation inherits sensitivity to temperature and batch size — but this is actually a strength of the design, as it allows the consolidation strength to be modulated via a single scalar, unlike regularization-based methods that require per-layer coefficients. The paper could lean into this point more explicitly as a practical advantage.
 
 ## Suggestions
 
-1. **Qualify the "outperforms full fine-tuning" claim** to specify that the comparison is against *sequential* full fine-tuning (which suffers catastrophic forgetting), and report per-task fine-tuning as the true upper bound for the tasks where it is feasible.
-
-2. **Add average incremental retrieval accuracy and forgetting measures** across the 8-task sequence. These can be computed from the existing data in Figure 5 and would significantly strengthen the evaluation.
-
-3. **Run C-CLIP and at least 2–3 baselines over 3 seeds** with standard deviations reported for the main results (Tables 3 and 4).
-
-4. **Describe the projector \(h_\psi\) architecture** (linear/MLP, dimensions, training objective) and justify the concatenated feature design in Eq. 5.
-
-5. **Complete the prompt-tuning comparison** (Table 8) on all eight datasets, or remove it with an explicit note about computational cost.
+1. Add a dedicated table reporting I2T R@1 on the HAVG dataset for the zero-shot retrieval track, with all baseline methods compared.
+2. State the task order explicitly and include at least one alternative random order (reporting mean/std).
+3. Clarify which zero-shot classification prompts are used during and after continual fine-tuning.
+4. Extend the ablation of LoRA+CKC to cover at least 4–5 tasks (or all 8).
+5. Tone down or qualify the "for the first time" claim in Section 1.
+6. Provide citations for the Simpsons and Kream datasets.
+7. Consider shortening Appendix A.1 to a citation and adding a more targeted theoretical comment about why LoRA's rank-constrained parameterization is well-suited to the CL constraint in Eq. (4).
 
 ## Score and Decision
 
-This paper makes a solid contribution to multimodal continual learning with a well-motivated method (LoRA + CKC) and a comprehensive new benchmark. The core results — strong downstream retrieval while preserving zero-shot ability — are clearly demonstrated. The weaknesses are primarily in presentation (overclaimed "outperforms full fine-tuning"), evaluation rigor (missing CL metrics, no variance), and reproducibility (underspecified projector). None of these are fatal; all are addressable in a revision. The paper would benefit from toning down one claim and adding standard CL evaluation practices.
+**Overall assessment**: The paper makes a solid contribution to an underexplored area (continual learning for multimodal VLMs). The C-CLIP method is technically sound, well-motivated, and shows clear and consistent improvements over rehearsal-free baselines on the two fully reported tracks. The main evaluation gap (missing quantitative zero-shot retrieval table) is significant given the paper's benchmark framing but does not invalidate the method — the paper's core claims about downstream performance and zero-shot classification preservation are well-supported. The other issues (task order, prompt specification, limited ablation) are fixable in revision. This is a clear accept at the borderline-to-solid range: the work is original, the experiments are mostly thorough, and the method is effective.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

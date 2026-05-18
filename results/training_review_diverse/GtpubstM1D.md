@@ -1,84 +1,77 @@
-Now I have all the evidence I need. Let me produce the final consolidated review.
+I have now thoroughly verified all claims against the paper. Here is my consolidated review.
 
 ---
 
 ## Summary
 
-This paper investigates how to improve mathematical reasoning in LLMs by strategically using **problem-solving data** (questions + reasoning steps) during **continued pre-training (CPT)** rather than reserving it all for supervised fine-tuning (SFT). Through controlled experiments on Llama2-7B, it establishes three main findings: (1) problem-solving data in CPT significantly outperforms general math corpora of the same size; (2) among four data synthesis methods, Tutorship Amplification (simulating a teacher correcting a student's mistakes) is most effective; and (3) CPT develops stronger mathematical reasoning from the same problem-solving data than SFT, particularly on hard multi-step problems. These insights culminate in JiuZhang-8B, a math-specific model trained on ~100B math tokens that matches or exceeds models trained on 1T tokens.
+This paper investigates how to improve mathematical reasoning in LLMs by substituting general math corpora with problem-solving data during continued pre-training (CPT). Through controlled experiments answering three research questions on Llama-2, the authors find that (1) problem-solving data during CPT significantly outperforms general math corpora, (2) among synthesis methods, Tutorship Amplification is most effective, and (3) CPT learns mathematical reasoning from problem-solving data more effectively than SFT, particularly for hard multi-step problems. These insights are combined to train JiuZhang-8B on Llama-3, which matches or exceeds models like Qwen2.5-Math-7B and Qwen2-Math-72B using ~1/10 the math tokens, while maintaining general knowledge.
 
 ## Strengths
 
-- **Systematic, well-scoped empirical investigation of problem-solving data in CPT (RQ1, Section 3):** The comparison between Base1 (math corpus only) and Test1–3 (mixture of math corpus + problem-solving data) holds total math tokens fixed and convincingly shows that problem-solving data yields substantially higher accuracy. The paper tests multiple mixture ratios, and the results are consistent across checkpoints with converging validation loss. This is the cleanest experiment in the paper and its main empirical contribution.
+1. **Clean evidence that problem-solving data during CPT outperforms general math corpora (Section 3, Figure 1).** The experiment holds total math token count constant and varies only the composition (math corpus vs. problem-solving data). All three test groups (Test1–Test3) consistently outperform Base1, and Test3 (highest problem-solving ratio) dominates. This directly supports Result 1 and is the paper's most methodologically clean finding.
 
-- **Meaningful comparison and identification of the best data synthesis method (RQ2, Section 4):** The paper implements four synthesis methods (Response Diversification, Query Expansion, Retrospective Enhancement, Tutorship Amplification) and compares them under the same CPT training setup. Tutorship Amplification achieves the highest accuracy across all four evaluation sets (average 47.0 vs. Base2's 44.0), and the gap is large enough (especially on Gaokao: 11.1 vs. 7.4) to be practically meaningful despite variable token counts. This provides a useful result for practitioners.
+2. **Controlled comparison of data synthesis methods identifies Tutorship Amplification as best (Section 4, Table 1).** The four synthesis methods are compared against each other with similar token budgets (~30B each), making the inter-method ranking reliable. Tutor-Amp achieves the highest average accuracy (25.9) vs. the next best (Query-Exp at 24.5) and the control Base2 (23.3). The implementation details (teacher-model error correction) are clearly described.
 
-- **Detailed breakdown of CPT vs. SFT differences by data distribution and difficulty level (Section 5.2–5.3):** The paper goes beyond a single-number comparison, dissecting where CPT's advantage comes from. The finding that CPT's advantage over SFT is largest on hard multi-step problems (Table 3: Hard-CPT +4.47 on hard subset vs. Hard-SFT +1.99), and that both stages primarily improve easy-problem performance, gives actionable guidance for data preparation (prioritize challenging data for CPT).
+3. **Fine-grained analysis of why CPT outperforms SFT (Section 5, Tables 2–3).** The decomposition by data distribution (IND vs. OOD) and difficulty level (easy/medium/hard) provides concrete insights: the advantage of CPT over SFT is largest on hard multi-step problems, suggesting that CPT's superior learning of complex reasoning chains is the driver. This is a genuinely useful finding for practitioners.
 
-- **JiuZhang-8B validates the paradigm's practical value (Section 6):** The resulting model matches or exceeds Qwen2.5-Math-7B (trained on 10× more tokens), DeepSeek-Math-7B, and even 70B-parameter models on multiple benchmarks, while maintaining general knowledge (MMLU 0.622 vs. Llama3-8B's 0.621). This demonstrates that the proposed CPT-focused strategy is more token-efficient than scaling up generic math pre-training data.
+4. **JiuZhang-8B achieves strong results with exceptional token efficiency (Section 6, Table 4).** The final model matches Qwen2.5-Math-7B (37.6 vs. 37.8 average on GSM8K/MATH/Gaokao/Zhongkao) using ~100B math tokens vs. 1T, and surpasses DeepSeek-Math-7B-base and Qwen2-Math-7B. It also preserves general knowledge (MMLU 0.6222 vs. Llama-3-8B's 0.6211). The model is released to the community.
 
-- **Careful decontamination and dataset selection:** The paper uses MinHash deduplication, removes contaminated documents, and selects evaluation sets (GAOKAO, ZHONGKAO) released after the base model's training cutoff, strengthening the validity of the reported results.
+5. **Rigorous experimental hygiene.** The paper uses MinHash deduplication, decontamination against evaluation sets, and includes GAOKAO/ZHONGKAO (released after Llama-2) to minimize contamination risk. These design choices strengthen confidence in the results.
 
 ## Weaknesses
 
 ### Fatal
-
-None. The reviewer's central claim that the CPT vs. SFT comparison is confounded by data repetition (that "CPT exposes problem-solving data ~14× vs. SFT 3×") is **factually incorrect**. In the CPT setup, the model processes ~105B total tokens across a mixture where problem-solving data constitutes only ~11.4% of the 63B unique tokens (48.3B general + 7.5B math + 7.2B problem-solving), yielding ~1.66 epochs of problem-solving data. Meanwhile, SFT trains for 3 full epochs (21.6B tokens) of problem-solving data alone. **SFT actually sees more problem-solving data than CPT**, so if anything, the data-repetition asymmetry understates CPT's advantage, not overstates it. The critic's "14×" figure arises from dividing total processed tokens (105B) by problem-solving tokens (7.2B) while ignoring that problem-solving data is only one component of the training mixture.
+None. The paper's contributions are real and not invalidated by the issues below.
 
 ### Major
 
-None. The remaining issues are addressable and do not threaten the paper's core claims.
+1. **The CPT vs. SFT comparison (Section 5) is confounded by pre-training data composition.** The paper compares Base1-SFT (CPT on general math corpus → SFT on 7.2B problem-solving data) with Base2 (CPT where 7.2B of general math corpus is *replaced* by 7.2B problem-solving data). While total math token count is held constant, the pre-training data distribution differs: Base2 sees problem-solving data (questions + reasoning steps) during CPT, while Base1-SFT's base model sees only general math text. The observed advantage of CPT could therefore stem from *earlier exposure* to problem-solving format during pre-training rather than from the training stage (CPT vs. SFT) per se. This confound propagates to Results 4 and 5 (distributions and difficulty levels), which inherit the same comparison. A cleaner design would keep pre-training data fixed and vary only the stage at which problem-solving data is introduced — e.g., comparing a model that continues pre-training with problem-solving data *on top of* the math corpus vs. one that is SFT on the same data from the same base.
+
+2. **The synthesis method comparison (Section 4) lacks a data-quantity control when evaluating effectiveness against Base2.** The control (Base2) receives zero additional synthetic tokens, while each experimental group adds ~30B tokens. The claim that synthesis methods are "effective" (Result 2) is therefore confounded with data volume — the improvement could simply come from training on more tokens. However, this does *not* affect the inter-method ranking (Tutor-Amp > Query-Exp > Res-Div > Retro-Enh), which is controlled since all synthesis methods add similar token budgets. The paper's strongest claim about synthesis — that Tutorship Amplification is the *most efficient* — is better supported than the claim that synthetic data per se is effective.
 
 ### Minor
 
-- **Unusual evaluation metric hinders external comparability (Section 2):** The paper selects the higher of zero-shot and few-shot accuracy per dataset, then averages these per-dataset maxima. This is applied consistently within the paper's own controlled experiments, so internal comparisons are valid. However, comparisons with external models in Table 4 (Qwen2.5-Math-7B, DeepSeek-Math-7B, etc.) may be inflated if those models were evaluated under a single standard protocol. Table 4 should clarify which prompting mode was used for each baseline or report both zero-shot and few-shot separately.
+1. **Non-standard evaluation metric (max of zero-shot and few-shot).** The paper takes the maximum of zero-shot and few-shot accuracy per dataset and averages across datasets. While the authors provide a rationale (different models prefer different settings), this inflates absolute scores relative to a fixed protocol and makes comparisons with external work that uses a single setting less straightforward. Reporting both zero-shot and few-shot scores separately would increase transparency, though the *relative* comparisons within the paper are likely unaffected.
 
-- **CPT vs. SFT comparison uses different hyperparameters (Section 5.1 vs. Section 3):** CPT uses batch size 1024 and LR 1e-4→1e-5, while SFT uses batch size 256 and LR 1e-5→1e-6. These differences are inherent to the stages being compared (CPT typically uses higher LR/larger batch than SFT), and the finding that CPT yields ~60% larger capability gain is practically meaningful. But a cleaner control (e.g., a grid over SFT learning rates) would strengthen the claim that the training stage itself, rather than hyperparameter selection, drives the difference. The paper should at minimum discuss whether SFT hyperparameters were tuned or whether the chosen ones are standard.
+2. **Absence of confidence intervals or variance estimates.** All experiments appear to be single runs with a single checkpoint per condition. With only four evaluation sets and no error bars, some observed differences (e.g., Res-Div 23.0 vs. Base2 23.3) could be within noise. This is common practice for large-scale LLM training where multi-run experiments are expensive, but it should be noted.
 
-- **Synthetic data experiments lack a quantity-controlled baseline within the same method (Section 4):** The experimental groups add synthetic data on top of Base2, so each method group has more total tokens than the control. The comparison *across methods* (Tutor-Amp 30B vs. Retro-Enh 26B vs. Query-Exp 17B vs. Res-Div 10B) is informative, and Tutor-Amp's large advantage (47.0 avg. vs. Retro-Enh's 44.5 despite similar token counts) suggests genuine quality differences. However, adding an equivalent quantity of genuine (non-synthetic) problem-solving data as a control would make the "efficiency" claim about the synthesis method itself (vs. simply having more data) more robust.
-
-- **Difficulty-level analysis lacks statistical testing (Section 5.3):** Key claims (e.g., Hard-CPT's +4.47 on the hard subset vs. Hard-SFT's +1.99) are based on single-run accuracy differences without significance tests or confidence intervals. Given the number of experimental conditions, some form of uncertainty quantification (even bootstrap estimates from multiple checkpoints) would strengthen the evidence.
+3. **Difficulty classification by number of reasoning steps is acknowledged as coarse.** The paper notes this limitation (Section 5.3), which is acceptable for a first analysis. Still, this adds approximation error to Results 5.
 
 ### Trivial
-
-- The SFT data-volume analysis (Figure 6, described in line 121) is referenced but the figure itself is not visible in the provided text.
-- Some claims about "SFT is more susceptible to disturbances from data distribution" (Result 4) are presented as conclusions despite the paper itself acknowledging the conclusions are "less clear."
+None.
 
 ## Nice-to-Haves
 
-- **Quantity-controlled baseline for synthetic data:** Adding an equivalent amount of real problem-solving data (or a random augmentation) as a control would cleanly separate the benefit of the synthesis *method* from the benefit of additional *quantity*.
-- **Ablation over SFT hyperparameters:** A small grid over SFT learning rates and epochs would help rule out the possibility that SFT's underperformance is due to suboptimal tuning rather than the stage itself.
-- **General-domain evaluation for all controlled experiments:** MMLU is reported only for JiuZhang-8B; reporting it for Base1/Test groups would confirm that math gains don't come at the expense of general ability in the controlled setting.
+- **Scaling curves for synthesis methods.** A plot of accuracy vs. tokens for each synthesis method at multiple data volumes would substantially strengthen the claim that Tutorship Amplification is the *most efficient* (not just the best at high volume).
+- **Validation of RQ transferability to Llama-3.** The three RQs are investigated on Llama-2, but the final model uses Llama-3. A small-scale replication of one RQ (e.g., the Section 3 comparison) on Llama-3 would increase confidence that the findings transfer.
+- **Alternative experimental design for Section 5.** An experiment that adds problem-solving data during CPT *without reducing* the math corpus (vs. SFT on the same data from the same base), then normalizes for total tokens, would provide a cleaner test of the stage effect.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
+The following points from the reviewer inputs were removed per policy:
 
-1. **"CPT exposes problem-solving data ~14× vs. SFT's 3 epochs"** — REMOVED as factually wrong. The correct calculation: CPT processes ~105B total tokens across a mixture where problem-solving data (7.2B) is ~11.4% of the 63B unique tokens, yielding ~1.66 epochs. SFT trains for 3 full epochs (21.6B tokens of problem-solving data alone). SFT sees *more* problem-solving data, not less.
-
-2. **"Straw-man: existing work focuses only on memorizing math knowledge"** — REMOVED. The paper characterizes the *prevalent paradigm* as focusing on math corpora during pre-training and reasoning during post-training (line 16). This is a reasonable characterization of the dominant approach; the paper does not claim no prior work uses problem-solving data in pre-training.
-
-3. **"Missing limitations discussion"** — REMOVED. Section 7 explicitly acknowledges limitations: synthesis methods are "relatively naive" and alignment was not explored. The CPT/SFT confounding concern is addressed by the factual correction above.
-
-4. **"Hyperparameter searches for SFT"** — MOVED from Harsh Critic's framing ("critical") to Minor/Nice-to-Have. The observation that SFT might underperform due to suboptimal hyperparameters is speculative and the paper's hyperparameter choices are standard for each stage.
-
-5. **"Statistical significance or variance"** — DOWNGRADED to Minor. Single-run results are the norm for LLM training experiments at this scale due to cost, but the paper's multiple experimental conditions make the absence of any uncertainty quantification a genuine limitation.
-
-6. **"General knowledge retention for controlled experiments"** — MOVED to Nice-to-Have. The paper reports MMLU for the final model; requesting it for all controlled experiments is reasonable but not essential.
+- **Concern about code/model release status** ("No code or model weights are mentioned" / clarify reproducibility): Removed per hard rule — the paper explicitly states the model is being released, and cited references are assumed to exist.
+- **"Fatal" severity framing of Section 4 confound**: Downgraded to Major. The inter-method ranking is controlled; only the vs.-Base2 comparison is confounded. The critic's framing overstates the damage.
+- **Demand for adding more original data as a control in Section 4**: Removed as infeasible — the paper states limited availability of original problem-solving data, which is precisely the motivation for studying synthesis methods.
+- **Criticism that the paper should also cover token efficiency / data scaling analysis**: Moved to Nice-to-Haves. This would strengthen the paper but its absence does not undermine the existing contributions.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one genuinely novel synthesis: the data-repetition asymmetry between CPT and SFT actually *favors the null hypothesis* (SFT sees more problem-solving tokens), making CPT's advantage *more* striking, not less. This reverses the critic's claimed fatal flaw into an argument that strengthens the paper. Additionally, the observation that both CPT and SFT primarily improve performance on easy problems regardless of training data difficulty (Section 5.3) is an interesting finding that deserves more attention than the paper gives it — it suggests that different mechanisms may be needed to improve hard-problem performance beyond simply providing more data.
+Beyond the paper's own contributions, the most interesting synthetic observation from the reviews is the contrast between the paper's two confounds. The Section 3 experiment (problem-solving data vs. math corpus) is clean because the paper keeps token counts identical and varies only content — showing that data *quality* matters. The Section 5 experiment attempts the same logic (total math tokens equal) but inadvertently also varies *when* the model is exposed to problem-solving format. This suggests an inherent tension in designing controlled experiments for multi-stage training: holding token count constant requires borrowing from other data sources, which changes pre-training distribution. The paper's choice is understandable but limits causal identification, and future work should consider designs where the same base model branches into CPT and SFT branches with identical pre-training.
 
 ## Suggestions
 
-1. **Fix the evaluation metric for external comparisons:** Report both zero-shot and few-shot accuracy separately (or clarify which mode each baseline in Table 4 uses) so readers can make fair comparisons.
-2. **Add an ablation experiment for synthetic data quantity:** Include a control that adds the same number of tokens as the best synthetic method (Tutor-Amp) using randomly augmented or duplicated real problem-solving data.
-3. **Run a small grid over SFT learning rates** (e.g., 5e-6, 1e-5, 2e-5) to ensure the CPT vs. SFT comparison is not driven by suboptimal hyperparameters.
-4. **Provide confidence intervals or bootstrap estimates** for at least the main comparisons (CPT vs. SFT overall, difficulty-level breakdowns).
+1. **For the CPT vs. SFT comparison (Section 5):** Re-run the comparison using a single pre-trained model (e.g., Base1) split into two branches: one continues pre-training with additional problem-solving data (on top of the math corpus, increasing total math tokens), while the other is SFT on the same problem-solving data. If total token count is a concern, normalize by comparing improvement per token. At minimum, acknowledge the confound explicitly and discuss why it is unlikely to fully explain the large observed gap (~1.67×).
+
+2. **For the synthesis comparison (Section 4):** Add a control that matches the total token budget of the synthesis conditions by repeating or upsampling existing data. If the repeated-data control performs similarly to the synthesis methods, the "effectiveness" claim is weakened; if it performs worse, the claim is strengthened.
+
+3. **Report zero-shot and few-shot scores separately** alongside the max, to enable direct comparison with papers using a single evaluation protocol.
+
+4. **Consider adding confidence intervals** for at least the final model comparisons in Table 4, using multiple evaluation runs or bootstrap sampling.
 
 ## Score and Decision
 
-This is a solid empirical paper that conducts a systematic investigation of an important question. The three research questions are well-motivated, the experimental design (particularly RQ1 and the synthesis method comparison) is sound, and the practical validation via JiuZhang-8B is convincing. The main weaknesses — an unusual evaluation metric that complicates external comparisons, a lack of full hyperparameter control between CPT and SFT, and the absence of quantity-controlled baselines for synthetic data — are meaningful but do not invalidate the core claims. None of the verified weaknesses are fatal; the claimed "fatal" confound about data repetition is mathematically incorrect. The paper makes a genuine contribution to understanding how to allocate problem-solving data across training stages.
+The paper makes meaningful empirical contributions — it provides clear evidence that problem-solving data during CPT is more effective than general math corpora (Result 1, the cleanest experiment), identifies Tutorship Amplification as the best synthesis method among those compared, and produces JiuZhang-8B, a genuinely strong and token-efficient model released to the community. The fine-grained analysis of why CPT outperforms SFT (difficulty-level decomposition) is valuable guidance for practitioners. However, two of three main experimental results (Results 3–5 and the vs.-Base2 part of Result 2) have confounds that weaken the causal claims. These issues are recoverable with additional controls but reduce confidence in the strongest formulations of the conclusions.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

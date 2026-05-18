@@ -1,69 +1,80 @@
-Now I have a thorough understanding of the paper. Let me produce the consolidated review.
+Now I have a thorough understanding of the paper and can verify claims. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes MMFRL, a framework that (1) pretrains molecular graph encoders via a modified relational learning loss aligning graph embeddings with similarity distributions from auxiliary modalities (NMR, image, SMILES, fingerprint), and (2) fuses multiple pretrained encoders at early, intermediate, or late stages for downstream molecular property prediction. On 11 MoleculeNet benchmarks, MMFRL variants achieve the best results on 9 out of 11 tasks.
+MMFRL proposes a framework for molecular property prediction that combines (1) a Modified Relational Learning (MRL) objective for pre-training encoders across five modalities (SMILES, NMR_spectrum, NMR_peak, Image, Fingerprint) and (2) a systematic comparison of early, intermediate, and late fusion strategies. The paper reports state-of-the-art results on 7 of 11 MoleculeNet tasks, with intermediate fusion achieving the best overall performance on classification and regression benchmarks.
 
 ## Strengths
 
-- **Strong empirical performance across diverse MoleculeNet tasks.** MMFRL_intermediate achieves the best results on 7 of 11 benchmarks, and MMFRL_late wins on 2 more, together covering 9/11 tasks. Gains are substantial on several tasks: BACE (95.1±1.0 vs. next-best Uni-Mol 85.7±0.2), BBBP (95.4±0.7 vs. DMPNN 91.9±3.0), and ESOL (RMSE 0.730 vs. Uni-Mol 0.788). The consistent pattern across both classification and regression tasks adds credibility.
+- **Strong empirical results across MoleculeNet benchmarks.** MMFRL intermediate fusion achieves the best ROC-AUC on 7 of 8 classification tasks (e.g., BBBP 95.4±0.7, BACE 95.1±1.0) and the best RMSE on 2 of 3 regression tasks (ESOL 0.730±0.019, FreeSolv 1.465±0.096), outperforming published baselines including GEM, Uni-Mol, MolCLR, and GraphMVP (Tables 2 and 3).
 
-- **Systematic comparison of fusion stages with analysis.** The paper provides a principled comparison of early, intermediate, and late fusion for molecular property prediction — a design question largely unexplored in prior work. The post-hoc analysis (t-SNE solubility gradients for ESOL, learned weight distributions for Lipo) gives concrete insight into why intermediate fusion works well (complementary modality interactions during fine-tuning) and how late fusion automatically identifies dominant modalities.
+- **Systematic comparison of three fusion strategies across 11 tasks.** The paper evaluates early, intermediate, and late fusion and provides analysis of when each is most effective: intermediate fusion excels when modalities provide complementary information (e.g., ESOL solubility), while late fusion is better when individual modalities dominate (e.g., Lipo). This offers practical guidance for practitioners in molecular property prediction.
 
-- **Multimodal pretraining helps even when individual modalities underperform.** A compelling case is Clintox: no individual unimodality-pretrained model beats the no-pretraining baseline (90.6), yet MMFRL_intermediate reaches 93.4±1.1 — demonstrating that fusion genuinely compensates for weak individual signals rather than simply ensembling strong ones.
-
-- **Rich modality set.** Incorporating NMR_spectrum, NMR_peak, image, fingerprint, and SMILES (five modalities from four distinct families) is more comprehensive than prior multimodal molecular work.
+- **Novel continuous relational pre-training objective.** MRL replaces the binary positive/negative pair formulation of contrastive learning with a continuous target similarity distribution, which conceptually addresses the limitation that binary contrastive pairs oversimplify molecular relationships (e.g., enantiomers with identical topology but opposite bioactivity). The approach is grounded in the ReSSL framework and adapted for a multi-modal molecular setting.
 
 ## Weaknesses
 
 ### Major
 
-- **Suspiciously low baseline scores undermine the claimed superiority over existing methods.** The DMPNN backbone (no pretraining) achieves 91.9±3.0 on BBBP, yet several published methods report far lower scores in the paper's table: AttentiveFP (64.3±1.8), GraphCL (67.5±3.3), InfoGraph (69.2±0.8), MolCLR (73.3±1.0). The gap between DMPNN (same backbone as MMFRL) and AttentiveFP on BBBP is >27 points — too large to be explained by architectural differences alone. The paper does not describe how baselines were configured, whether the same scaffold splits were used, or whether hyperparameter tuning was attempted. This makes it impossible to determine whether MMFRL's advantages reflect genuine methodological improvement or merely better-tuned training.
+- **MRL is not directly compared against standard contrastive learning within the same architecture.** The paper's main methodological novelty is that MRL (continuous similarity) is superior to contrastive learning (binary similarity). However, Table 1 only compares MRL-pre-trained unimodality models against a "No Pre-training" DMPNN baseline — this shows pre-training helps, which is expected, but does not isolate MRL's benefit. A direct comparison (same encoder, same pre-training data, same modalities) between MRL and a standard contrastive objective such as SimCLR, InfoNCE, or the original ReSSL is absent. Since several baselines in Tables 2/3 (InfoGraph, GraphCL, MolCLR, GraphMVP) use contrastive objectives but with different architectures and training setups, the results in those tables conflate architectural differences, modality choice, and pre-training objective. Without within-architecture isolation, the paper's claim that MRL is superior to contrastive learning for molecular relational understanding is unsupported by the presented evidence.
+
+- **No comparison against simple multimodal baselines of comparable capacity.** All baselines in Tables 2 and 3 use a single encoder, while MMFRL intermediate fusion uses five separately pre-trained encoders whose features are concatenated. This asymmetry means aggregate improvements could stem from increased model capacity alone. The paper does not include any of the following controls: (a) an ensemble that averages predictions of the five unimodality models (trained with MRL), (b) feature concatenation without the fusion-specific MLP, (c) a single larger-capacity DMPNN with more parameters. The row labeled "Unimodality_avg" in Tables 2 and 3 is the average of the five individual unimodality results (verifiable from Table 1), not a model that actively combines modalities — so it does not serve as a proper multimodal baseline. This undermines whether the fusion design itself adds value beyond brute-force multi-encoder combination.
+
+- **Critical reproducibility details for modality embedding extraction are unspecified.** The MRL pre-training requires computing fixed target similarity distributions \(t_{i,j}^R\) for each modality \(R\) from embeddings \(z_i^R\). The paper lists five modalities (Fingerprint, SMILES, NMR_spectrum, NMR_peak, Image) but never specifies: (a) how each modality is encoded into a vector embedding \(z_i^R\) — what encoder architecture is used for an NMR spectrum, a peak list, or a 2D molecular image? (b) what similarity function \(\text{sim}(z_i^R, z_j^R)\) is used within each modality before softmax normalization? (c) whether the five encoders share weights or are separate. The paper states only that "molecular images and graphs are generated via RDkit" (line 163) and that the method uses "multiple replicas of molecular GNNs" (line 27), but it is unclear how non-graph modalities (NMR spectra, images) are converted to GNN-compatible inputs. This is a fundamental reproducibility gap.
 
 ### Minor
 
-- **Missing implementation details prevent reproducibility.** The paper does not specify: the DMPNN encoder architecture (number of layers, hidden dimensions, pooling method), how each modality's "fixed embedding" \(z_i^R\) is computed (e.g., Morgan fingerprint radius, SMILES tokenization/encoding scheme, NMR preprocessing), training hyperparameters (learning rate, batch size, number of epochs, optimizer), or the number of scaffold splits/seeds. These are standard reporting requirements and should be included.
+- **Theorem 1 is a trivial restatement of cross-entropy minimization.** The theorem shows that when cross-entropy between a target distribution \(t_{i,j}\) (which sums to 1) and a softmax output is minimized to zero, the softmax equals the target. This is an elementary property of cross-entropy, not a meaningful convergence guarantee — it says nothing about the loss landscape, gradient dynamics, or finite-sample behavior. The theorem does not strengthen the paper and should be either removed or replaced with a genuinely informative theoretical analysis.
 
-- **No ablation isolating the relational learning component.** The paper never directly compares MRL against the original relational learning loss or against a standard contrastive loss (e.g., InfoNCE) in the same pretraining setup. Since the MRL loss is cross-entropy between two softmax-normalized similarity distributions (essentially knowledge distillation from one embedding space to another), it is unclear whether the continuous metric is what drives gains, or simply having any multimodal alignment objective. Theorem 1 states the optimum condition for cross-entropy minimization, not a convergence guarantee — the "convergence" framing is overstated.
+- **Early fusion weights (all set to 0.2) are fixed without sensitivity analysis or learned weighting.** The paper acknowledges this limitation but does not study how varying these weights affects pre-training quality or downstream performance, nor does it explore learning the weights from data. Given that early fusion underperforms intermediate/late fusion on most tasks, it is unclear how much of this gap stems from the equal-weighting choice versus inherent limitations of early fusion.
 
-- **Comparison among fusion methods is confounded.** Early fusion uses fixed equal weights (0.2), intermediate fusion uses a learned MLP, and late fusion learns instance-specific weights. These differ in both fusion stage and model complexity. The paper acknowledges the limitation of early fusion's fixed weights ("for simplicity") but does not control for it — e.g., a learnable-weight early fusion or a fixed-weight late fusion would isolate the effect of fusion stage from capacity.
+- **The Clintox anomaly is mentioned but not explained.** All five unimodality MRL-pre-trained models underperform the "No Pre-training" DMPNN on Clintox (Table 1), yet intermediate fusion recovers performance (93.4±1.1 vs. 90.6±0.6). This is a notable phenomenon — pre-training hurts individual modalities but fusion fixes it — yet the paper merely states the fact (line 205) without analysis or hypothesis about why this occurs.
 
-- **Statistical significance is not established.** Standard deviations are large on several metrics (e.g., unimodality Clintox ±6.5, unimodality MUV ±5.2, MMFRL_early BBBP ±5.0, MMFRL_early Clintox ±6.8). While the MMFRL fusion variants have tighter variance on most tasks, the paper does not report confidence intervals or significance tests, making it unclear which comparisons are statistically reliable.
+- **No parameter count reporting.** Tables 2 and 3 compare methods with potentially very different parameter counts (5 encoders vs. 1 encoder). Without reporting parameter counts, readers cannot assess whether performance differences reflect methodological superiority or simply increased capacity.
 
 ### Trivial
 
-- The Thalidomide enantiomer example in the introduction is a good motivation for continuous similarity, but the paper never returns to demonstrate that MMFRL distinguishes such cases. This is a missed opportunity for a concrete case study but does not affect the paper's validity.
+None that survive the filtering rules.
 
 ## Nice-to-Haves
 
-- Direct comparison of MRL vs. the original RL loss and a contrastive loss (InfoNCE) under the same pretraining setup would cleanly demonstrate that the continuous metric matters.
-- Including a controlled fusion comparison (learnable early fusion weights, fixed late fusion weights) would strengthen the analysis of fusion stage versus model capacity.
-- Atom-level or substructure-level similarity (mentioned in the discussion as future work) would connect more directly to the enantiomer motivation.
+- Comparison of MRL against a contrastive objective (e.g., SimCLR, InfoNCE) within the same DMPNN architecture, same pre-training data (NMRShiftDB-2), and same modalities would resolve the paper's central methodological question.
+- A simple ensemble baseline (averaging predictions of the five independently fine-tuned unimodality models) would establish the benefit of the fusion-specific design.
+- Specification of encoder architectures for each modality, similarity functions used, and pre-training hyperparameters would make the method reproducible.
 
 ## Removed Points
 
-These points are flagged to be removed — treat them with caution.
+These points are flagged to be removed; treat them with caution:
 
-- **Critic's claim that "AttentiveFP achieves only 64.3% on BBBP, whereas the original paper reports ≈91.8% under the same scaffold split."** The specific value 91.8% cannot be verified from the paper's content, and the source of the critic's claim is external. However, the core concern — that baseline scores are implausibly low relative to the DMPNN backbone — is kept as a Major weakness above, independently of any specific published number.
-- **"No confidence intervals or significance tests" moved to Minor.** The critic frames this as a structural flaw, but it is a common gap in ML benchmark papers and does not invalidate results on its own.
-- **"Graph-level vs. node-level similarity" moved to Nice-to-Haves.** The paper explicitly discusses this as future work; demanding it as a current weakness is scope creep.
-- **"The paper never returns to Thalidomide example" is real but Trivial** — it is a motivation example, not an evaluated claim.
-- **Strength Finder's claim that "Theorem 1 proves convergence of this metric"** is inaccurate (the theorem only characterizes the optimum), so this strength is dropped from the main review.
+- **Subgraph explainability analysis claimed but absent.** The introduction (line 39) claims "we explore minimum positive subgraphs and maximum common subgraphs to gain insights for further drug molecule design," but this analysis does not appear in the visible paper body. This is removed because the analysis may exist in a parser-stripped appendix; if it does not, the authors should either add it or remove the claim from the introduction.
+
+- **"Unfair comparison" framed as a fatal flaw.** The critic's argument that comparing multi-encoder fusion against single-encoder baselines is structurally unfair is standard for multimodal papers — the whole premise of multimodal learning is that multiple modalities outperform single modalities. The real gap (missing simple multimodal baselines) is preserved in Major Weaknesses above.
+
+- **Claim that "no ablation on fusion-stage choices" exists.** The paper explicitly compares early, intermediate, and late fusion across 11 tasks (Section 5.2). The critic's sub-point about not controlling for parameter count is valid and is preserved in Minor Weaknesses.
+
+- **Formatting/style nitpicks** and **missing hyperparameter details** that are standard for academic submissions are removed per the filtering rules.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The reviews reveal an interesting tension: the paper's empirical success on MoleculeNet is striking (+7.3 AUC over Uni-Mol on ToxCast), but this success is attributed to a combination of multiple design choices (MRL pre-training, five-modality encoders, fusion design) that are not independently validated. The strongest interpretation consistent with the paper's own data is that *using multiple pre-trained modality-specific encoders with intermediate fusion yields strong performance* — but whether the MRL objective specifically drives this success (vs. standard contrastive learning) is unresolved. The Clintox result (all unimodality models worse than no pre-training, yet fusion recovers) is potentially the most interesting finding in the paper and deserves deeper analysis, as it hints at phenomena the paper itself does not explain.
 
 ## Suggestions
 
-- **Run all baselines using the same DMPNN backbone** with careful hyperparameter tuning (e.g., Chemprop's built-in optimization) and report those results alongside the paper's current numbers. At minimum, disclose which scaffold splits were used for each baseline and whether official implementations with recommended settings were used.
-- **Add an ablation comparing MRL against (a) no pretraining, (b) the original RL loss, (c) InfoNCE contrastive loss** with the same multimodal alignment setup. This is the cleanest test of whether the continuous metric adds value.
-- **Provide full implementation details** — encoder architecture, modality embedding procedures, hyperparameters, number of seeds — either in the main text or supplementary material.
-- **Include significance tests** (e.g., paired bootstrap) or at minimum note which comparisons are not statistically reliable given overlapping error bars.
+1. **Add a controlled MRL vs. contrastive learning ablation.** Pre-train unimodality DMPNN encoders with (a) MRL, (b) InfoNCE/SimCLR, and (c) the original ReSSL loss on NMRShiftDB-2, then fine-tune on the same downstream tasks. Report results in a new table alongside Table 1. This is the single most important experiment to validate the paper's core methodological claim.
+
+2. **Include at least one simple multimodal baseline.** The minimum useful baseline is an ensemble averaging the predictions of the five unimodality MRL-pre-trained models (separately fine-tuned). If MMFRL intermediate fusion outperforms this ensemble, the fusion design is validated. If not, the paper's contribution reduces to "pre-training with more modalities helps."
+
+3. **Specify the exact procedure for obtaining fixed embeddings \(z_i^R\) for each modality.** For each of the five modalities, state: the encoder architecture, the input representation, the similarity function \(\text{sim}(z_i^R, z_j^R)\), and any preprocessing. This is essential for reproducibility.
+
+4. **Remove or replace Theorem 1** with a nontrivial analysis (e.g., generalization bounds, the relationship to existing contrastive learning theory, or behavior under finite-sample approximations).
+
+5. **Report parameter counts** for all methods in the comparison tables so readers can separate capacity effects from methodological effects.
+
+6. **If the subgraph analysis exists** in a stripped appendix, move it to the main text or remove the claim from the introduction.
 
 ## Score and Decision
 
-The paper has a sensible motivation and its framework is reasonably constructed. The main empirical results are promising, and the systematic comparison of fusion stages adds practical value. However, the baseline tuning concern is a genuine weakness that prevents full confidence in the claimed superiority over existing methods. With proper baseline tuning and ablations, this could be a solid contribution. In its current form, I recommend rejection, but encourage resubmission after addressing the baseline concern.
+The paper makes a real contribution: it demonstrates that fusing five modality-specific pre-trained encoders yields strong results on MoleculeNet, and it provides a useful systematic comparison of fusion stages. However, the paper's central methodological novelty (MRL vs. contrastive learning) is not validated by the presented experiments, and the main results lack both a direct MRL/CL ablation and simple multimodal baselines that would isolate the fusion design's benefit. The reproducibility gap regarding modality encoding is also significant. These issues require major additions to the experimental section and cannot be resolved with clarifications alone.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

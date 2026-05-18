@@ -1,20 +1,20 @@
-Now I have all the information I need. Let me write the final consolidated review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-MathEval is a benchmark paper that aggregates 22 math datasets (including 5 newly introduced ones), standardizes prompt adaptation across model types, uses an LLM-based (GPT-4) answer extraction and comparison pipeline, and evaluates 52 models. The paper makes practical engineering contributions in unifying diverse evaluation practices, validating GPT-4's answer comparison against human judgments, and releasing a distilled comparison model. However, it suffers from a significant unfulfilled claim about contamination detection and critically underspecified descriptions of its newly contributed datasets.
+MathEval aggregates 22 mathematical reasoning datasets (English and Chinese, arithmetic through high-school level) into a unified evaluation benchmark for LLMs. It introduces (1) an LLM-based answer comparison pipeline using GPT-4 (plus a distilled DeepSeek-7B alternative), (2) a prompt adaptation infrastructure that tailors instructions per model type and dataset, (3) annually refreshed Gaokao 2023/2024 exam problems as a temporal freshness mechanism, and (4) an evaluation of 52 models across all datasets. The answer comparison pipeline is validated against human annotation (Fleiss' Kappa 0.8871).
 
 ## Strengths
 
-- **Large-scale, systematic evaluation of 52 models across diverse datasets**: The paper evaluates 52 models spanning open-source, closed-source, and math-domain-finetuned categories across 22 datasets in English and Chinese, providing one of the most extensive contemporary snapshots of LLM mathematical reasoning (Section 3, Figure 6). The analysis of parameter scaling, post-training effects, and problem-type differences yields practically useful observations.
+- **Broad, multi-dimensional coverage**: 22 datasets spanning Chinese and English, arithmetic and math word problems, and primary-through-high-school levels (Section 2.1, Figure 2). The inclusion of Chinese-language datasets (GAOKAO, TAL-SCQ5K) provides coverage absent from most English-centric math benchmarks. This is a genuine improvement over narrower evaluations.
 
-- **LLM-based answer extraction and comparison validated against human annotation**: The paper uses GPT-4 for answer extraction and comparison, achieving an absolute difference of 0–0.1 from human judgments on the four models tested. The human annotation effort (five annotators, Fleiss' Kappa 0.8871) is substantial and well-executed (Section 3.2, Figure 5). This is a meaningful improvement over fragile rule-based extraction.
+- **LLM-based answer comparison with human validation**: The GPT-4 pipeline for answer extraction and verification is validated against human annotation with high inter-annotator agreement (Fleiss' Kappa 0.8871, Section 3.2). Absolute disagreement with humans stays within 0–0.1 across four diverse models (Figure 5), which is a meaningful reliability result.
 
-- **Training and open-sourcing of a distilled comparison model**: The authors trained a DeepSeek-7B-based answer comparison model on 2.2M GPT-4 evaluation results and release it publicly, providing a practical alternative for users without GPT-4 access (Section 2.3, Section 3.2).
+- **Open-source distilled comparison model**: A DeepSeek-7B model fine-tuned on ~2.2M GPT-4 evaluations is open-sourced, providing a viable alternative for researchers without GPT-4 API access (Section 3.2). This addresses a practical accessibility barrier in evaluation infrastructure.
 
-- **Tailored prompt adaptation framework**: The paper implements model-specific and dataset-specific prompt templates (MSP, MUP, MBP, DQP, DAP, DOP) and evaluates zero-shot, few-shot, and "dataset-level higher" settings, showing that the latter produces smoother and more robust results (Section 2.2, Figure 7). This addresses a genuine gap in existing benchmarks.
-
-- **Analysis of zero-shot vs. few-shot behavior**: The demonstration that "dataset-level higher" selection consistently outperforms either fixed setting provides actionable guidance for evaluation design (Section 3.4, Figure 7).
+- **Large-scale multi-model evaluation**: 52 models (closed-source, open-source, and math-domain fine-tuned) are evaluated under consistent conditions, enabling cross-family comparisons and observations about scaling trends (Section 3.3–3.4, Figure 6).
 
 ## Weaknesses
 
@@ -23,56 +23,57 @@ None.
 
 ### Major
 
-- **Unfulfilled contamination detection claim**: The abstract announces "a method to identify potential data contamination within pre-training datasets" and describes a hypothesis about correlated improvements signaling contamination. However, this detection method is never implemented, tested, or evaluated anywhere in the paper. The actual contribution is a dynamically updated dataset (Gaokao 2023/2024), which is a standard test-set hygiene measure for *prevention*, not a detection/identification technique. The contributions list (line 26) correctly describes only prevention, creating a contradiction between the abstract and the body. This is a structural overclaim that undermines trust.
+1. **The abstract over-claims a contamination detection method that is never demonstrated.** The abstract states that MathEval "introduces a method to identify potential data contamination within pre-training datasets" via a heuristic where "enhancements in one mathematical dataset should be mirrored by advancements in correlated datasets." This specific correlation-based analysis is **never implemented or evaluated** anywhere in the paper. No experiment examines whether any model shows suspicious gain patterns, and no analysis uses the correlated-dataset heuristic. The Gaokao datasets are indeed included as temporally fresh data, but the advertised detection methodology is absent from the experiments. This is a significant gap between the paper's framing and its delivered content. The contributions list (line 26) correctly limits the claim to a "dynamically updated dataset," but the abstract — the most visible part of the paper — overstates what is demonstrated.
 
-- **New datasets are critically underspecified**: MathEval claims five new datasets (Arith3K, GAOKAO-2023, GAOKAO-2024, TAL-SCQ5K-EN, TAL-SCQ5K-CN) as a core contribution, yet the paper provides no information about them: no problem count, no source/collection methodology, no difficulty breakdown, no license, no access instructions. The only description is "each offering unique characteristics and challenges" (Section 2.1). For a benchmark paper, datasets *are* the primary contribution — without knowing their content, size, or provenance, a reader cannot assess the benchmark's quality, diversity, or reproducibility.
+2. **No per-dataset, per-model breakdown of evaluation results.** The paper reports only "overall average accuracy" across all 22 datasets plus a few categorical averages (Table 1). For a benchmark paper whose *raison d'être* is enabling fine-grained comparison, the absence of a results table showing each model's accuracy on each dataset (or even on each of the six scenario categories) is a critical omission. Readers cannot tell which datasets drive the rankings, whether certain datasets exhibit ceiling/floor effects, or how robust the conclusions are to dataset selection. The paper states results are "publicly accessible" (line 19), but without any summary in the paper — not even a supplementary-style table — the scholarly utility of the reported findings is severely limited.
 
 ### Minor
 
-- **Inconsistent dataset count (19 vs. 22)**: The abstract states "MathEval amalgamates 19 datasets," while the body consistently says 22 datasets. The body clarifies that 3 datasets are arithmetic-only and 19 are MWP datasets, so the abstract appears to have mistakenly used the MWP-only count as the total. This is a simple editorial error but a disconcerting one that signals incomplete proofreading.
+1. **The "first comprehensive mathematical evaluation benchmark" claim is not properly contextualized.** The paper acknowledges Lila (Mishra et al., 2023) but dismisses it with a brief characterization, without systematically comparing MathEval to Lila or other multi-dataset evaluations in terms of coverage, difficulty distribution, or evaluation methodology (Section 4). A clearer delineation of what MathEval adds beyond existing benchmarks (e.g., Chinese-language problems, temporal freshness, standardized answer comparison) would strengthen the paper without requiring the "first" framing.
 
-- **Pipeline validation is narrow**: The GPT-4 answer-comparison pipeline is validated against human judges on only 4 out of 52 models tested. The claim of "consistent performance across all models" (Section 3.2) is extrapolated from a small, selected subset (all from the DeepSeek family plus GPT-4 itself). The fine-tuned DeepSeek comparison model achieves human-level agreement on only 1 of those 4 models (DeepSeek-Math-7B-RL). The pipeline's reliability on the remaining 48 models is unverified.
+2. **Newly introduced datasets lack characterization.** The paper introduces Arith3K, GAOKAO-2023, GAOKAO-2024, TAL-SCQ5K-EN, and TAL-SCQ5K-CN (Section 2.1) but provides no analysis of their properties — answer type distribution, difficulty calibration, label noise, or potential biases. Benchmark papers should characterize the quality and composition of new datasets to help users interpret results.
 
-- **Training data for the distilled model is GPT-4-derived**: The DeepSeek comparison model is trained on 2.2M GPT-4 evaluation outputs (Section 2.3). While the training data was "partially verified by human annotators to fix potential errors" (Section 3.2), the model fundamentally inherits GPT-4's judgment patterns. Its validation against human annotations is limited to one model where it matches humans, making its general reliability uncertain.
+3. **Answer comparison validation lacks confidence intervals and sample-size details.** Figure 5 reports absolute differences between automated methods and human judgment, but no confidence intervals or statistical tests are reported. The human annotation process is described (five annotators, Fleiss' Kappa 0.8871), but the number of annotated samples per model/dataset and total annotation volume are not stated, making it difficult to assess the precision of the reported 0–0.1 discrepancy range (Section 3.2).
 
-- **Arithmetic mean as primary aggregation metric**: The paper ranks models using the unweighted arithmetic mean across 22 datasets (Section 3.3), without accounting for datasets' varying sizes, difficulty distributions, or answer formats. While common in the field, this choice can distort rankings if small or easy datasets disproportionately influence scores. The paper does not discuss alternative aggregation strategies or report per-dataset variance.
+4. **Prompt adaptation infrastructure is described in detail but only coarsely evaluated.** The paper devotes significant space to the template encapsulation scheme (MSP, MUP, MBP, DQP, DAP, etc., Section 2.2) but evaluates only zero-shot vs. few-shot vs. "dataset-level higher" (Figure 7). No ablation examines whether the specific prompt engineering choices (system prompts, CoT instructions, answer format instructions) actually matter for evaluation outcomes. The complexity of the described infrastructure is disproportionate to the evidence that it improves evaluation quality.
+
+5. **Inconsistent dataset count.** The abstract says "19 datasets" (line 4) while the rest of the paper consistently uses "22 datasets" (lines 19, 24, 40, 88, 137). This appears to be an editing error (the "19" may refer to MWP-only datasets mentioned in line 40), but it creates confusion about what the benchmark contains.
 
 ### Trivial
-
-- **Missing license/access statements**: No license is stated for the new datasets, and no download URL or hosting repository is provided. For a benchmark paper intending to be adopted by the community, this is an important omission.
-
-- **Few-shot example selection not specified**: The paper describes few-shot settings but does not specify how examples were selected (fixed, random, or hand-picked) or how many were used per dataset (Section 2.2).
+None beyond the dataset count inconsistency above.
 
 ## Nice-to-Haves
 
-- **Failure analysis by problem subtype**: The benchmark's fine-grained categorization (arithmetic vs. MWP, by educational level) could support a breakdown of which problem types each model excels at or fails on. Adding this analysis would substantially increase the paper's value.
-- **Cost and compute reporting**: Reporting total GPT-4 API cost and total compute used would help practitioners assess reproducibility.
-- **Per-dataset results as primary reporting**: Presenting per-dataset results prominently (rather than only the average) would allow readers to evaluate model strengths and weaknesses more precisely.
+- A leaderboard or public-facing website with interactive per-dataset, per-model breakdown would significantly increase the benchmark's practical value for the community.
+- An analysis of prompt sensitivity (e.g., varying CoT instructions, few-shot example ordering, system prompts) on a subset of models would help justify the prompt adaptation infrastructure's complexity.
+- Dataset-level difficulty proxies (e.g., model pass rates, answer-type distributions) for the newly introduced datasets would aid interpretation.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-1. **Missing related works (SVAMP, ASDIV, MAWPS)** — Hard rule: DO NOT mention missing related works, as I cannot independently verify their coverage.
-2. **"First comprehensive benchmark" claim is contestable** — While somewhat overstated, the paper does engage with Lila and distinguishes its contribution (Section 4). This is a common type of positioning claim and not a structural flaw.
-3. **Criticism that abstract claims "contamination detection" is contradicted by contributions list** — Already captured as a major weakness above (it's the same point). Kept.
-4. **Formatting/style nitpicks from the harsh critic** — Parser artifacts, not author errors.
+- **Typos/formatting artifacts** (e.g., garbled text in prompts section, line 42): Removed per hard rules — these are PDF parser artifacts, not author errors.
+- **Criticism about code/model "not yet released" or "cannot be independently verified"**: Removed per hard rules — the paper cites these entities as existing.
+- **Criticism about missing appendix content**: Removed per hard rules — the parser strips appendix sections from all papers; they exist in the original submission.
+- **Criticism that the paper should cover additional domains/tasks beyond its stated scope**: Removed per soft rules — this is a scope-creep demand.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a genuinely novel observation about the paper that the paper itself does not make. The harsh critic identifies gaps and overclaims but does not uncover an insight that reinterprets the paper's contributions.
+The reviewers identify an important structural tension in the paper that goes beyond its individual flaws: MathEval presents itself as a *definitive benchmark* but delivers only *aggregated results* and *aspirational methods*. A benchmark paper's primary scholarly contribution is the fine-grained data it enables the community to analyze — yet the paper withholds the very granularity that would make it a benchmark rather than a framework proposal. The contamination detection over-claim is symptomatic of this same pattern: the paper advertises analytical capabilities (correlation-based contamination flags) that would be the most novel part of the contribution, but does not actually build or validate them, leaving the benchmark's novelty resting on curation and infrastructure rather than on demonstrated analytical findings.
 
 ## Suggestions
 
-1. **Resolve the contamination detection thread**: Either implement and evaluate the correlation-based detection method described in the abstract, or revise the abstract and introduction to accurately reflect the actual contribution (dynamic dataset *prevention*, not detection).
-2. **Add a dedicated table describing each new dataset**: Include name, source, problem count, difficulty distribution, answer format, language, and license. This is essential for a benchmark paper.
-3. **Validate the evaluation pipeline on a broader set of model outputs**: Sample outputs from 10–15 diverse models (including non-DeepSeek families) and have human judges annotate a subset to verify that GPT-4's agreement does not degrade.
-4. **Report per-dataset accuracy** as the primary evaluation table, with averages as secondary, and include some form of variance estimate (e.g., across generation seeds) for at least a representative subset of models.
-5. **Fix the 19 vs. 22 dataset inconsistency** in the abstract.
+1. **Remove or substantially soften the contamination detection claim from the abstract** and reframe the Gaokao datasets as a "temporal freshness mechanism" rather than a detection method. Alternatively, if the correlated-dataset analysis exists in the appendix, summarize a concrete experiment in the main text.
+2. **Include a full results table** (at minimum the 6 category averages for all 52 models, ideally per-dataset scores for a representative subset of models) as a paper figure, table, or appendix-equivalent page. This is table stakes for a benchmark paper.
+3. **Add a comparison table** situating MathEval against existing multi-dataset math evaluations (Lila, etc.) along dimensions such as number of datasets, languages covered, difficulty range, and evaluation methodology, to substantiate the novelty claim.
+4. **Characterize the new datasets** (Arith3K, GAOKAO-2023/2024, TAL-SCQ5K) with basic statistics: problem count, answer type distribution, difficulty proxies.
 
 ## Score and Decision
 
-The paper makes a practical contribution — a large-scale unified evaluation framework for LLM mathematical reasoning, with a validated LLM-based answer comparison pipeline and useful empirical findings across 52 models. However, it has two structural problems that prevent acceptance in its current form: (1) a core claim about contamination detection that is announced but never delivered, and (2) newly introduced datasets — which are the primary contribution of a benchmark paper — that are barely described. These are fixable in revision, but in its present state the paper does not meet the standards for publication.
+**Originality**: Moderate — the contribution is primarily in aggregation and infrastructure rather than novel methodology or data.  
+**Importance of research question**: High — standardized evaluation of LLM mathematical reasoning is important to the community.  
+**Claims well supported**: Mixed — the core evaluation pipeline is well-validated, but the contamination detection claim is unsupported and fine-grained results are absent.  
+**Soundness of experiments**: Adequate — the human validation of answer comparison is solid, but overall results presentation is incomplete.  
+**Clarity of writing**: Moderate — the paper has some confusing inconsistencies and over-claims.  
+**Value to the research community**: Moderate — the benchmark framework and comparison model have potential value, but the lack of detailed results limits immediate impact.
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

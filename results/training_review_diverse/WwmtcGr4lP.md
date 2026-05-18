@@ -1,14 +1,18 @@
-Now I have all the information I need. Let me compose the final consolidated review.
+Here is my consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes GANDALF, a generative data augmentation framework that uses cell-line mutation profiles to generate "patient-like" genomic samples via domain-separated diffusion models with cross-attention, assigns pseudo-labels through multi-task learning, and trains a downstream drug response prediction (DRP) classifier. The problem—limited labeled patient data in precision oncology—is important, and the approach of generating patient-domain samples (rather than augmenting in a shared latent space) is novel within DRP.
+This paper proposes GANDALF, a generative data augmentation framework for cancer drug response prediction (DRP). The core idea is to generate "patient-like" genomic mutation samples from abundant cell line data, using a synthesis of denoising diffusion probabilistic models, variational autoencoders, transformers, and multi-task learning. GANDALF explicitly models the domain shift between cell lines and patients (different label spaces, different data distributions) — a gap prior methods either ignore or handle only in a shared latent space. The approach is evaluated on real patient datasets (TCGA, CBioPortal, Moores) against six state-of-the-art methods.
 
 ## Strengths
-- **First approach to directly augment patient mutation profiles with explicit label generation for DRP.** Section 2.2 confirms that no prior mutation augmentation method addresses cancer DRP, and prior transfer-learning methods augment only in a shared latent space (Section 2.1). This establishes clear novelty for the paper's core contribution.
-- **Strong predictive performance on benchmark patient drugs.** Table 1 shows GANDALF achieves the best AUROC on 4 of 5 drugs (5-Fluorouracil: 0.750, Gemcitabine: 0.856, Paclitaxel: 0.680, Temozolomide: 0.710) and best AUPRC on 3 of 5, outperforming six SOTA DRP methods.
-- **Ablation study validates architectural necessity.** Table 2 (ablation rows) shows that removing the MTL head, cross-attention loss, or the transformer encoder each degrades both AUROC and AUPRC, confirming that the full architecture is needed for the reported gains.
-- **Explicit modeling of domain differences between cell lines and patients.** The paper identifies that prior methods (e.g., WISER) ignore mismatches in both label distributions (continuous AUDRC vs. binary RECIST) and data distributions. GANDALF's architecture incorporates separate prediction heads with domain alignment losses (Section 3.2.3, Eq. 9).
+
+- **Novel approach to a genuine open problem.** The paper correctly identifies that prior DRP methods augment data only in a shared latent space, losing patient-specific characteristics. GANDALF'S proposal to generate labelled patient-like genomic samples *directly* from cell line data, while modeling the domain shift via separate prediction heads (AUDRC regression for cell lines, RECIST classification for patients) with CORAL alignment, is a well-motivated architectural contribution. This specific combination of DDPMs, VAEs, cross-attention, and multi-task learning for patient mutation augmentation is novel in the DRP literature.
+
+- **Comprehensive ablation study confirms each component contributes.** The ablation (Table 2) systematically removes the MTL network, cross-attention, and the pretrained transformer encoder, showing the full model outperforms all ablated variants in both AUROC and AUPRC. This provides evidence that the architecture's complexity is warranted and that the components interact constructively.
+
+- **Practical grounding in clinically realistic data.** The analysis is restricted to the 324 genes in the FoundationOne CDx clinical sequencing panel, ensuring the method is applicable to the genomic data actually available in clinical practice. The use of real patient cohorts (TCGA, CBioPortal, Moores) and multiple SOTA baselines (DruID, PREDICT-AI, drug2tme, PANCDR, CODE-AE, WISER) strengthens the practical relevance.
 
 ## Weaknesses
 
@@ -16,44 +20,61 @@ This paper proposes GANDALF, a generative data augmentation framework that uses 
 None.
 
 ### Major
-- **Unfair comparison: GENIE pretraining confound.** GANDALF uses a transformer encoder (`T_e`) pretrained on GENIE patient data (142 samples with progression-free survival labels) as a fixed feature extractor. None of the non-transformer baselines (DruID, drug2tme, PANCDR, CODE-AE, WISER) have access to this external supervisory signal. While 142 samples is modest, the pretraining provides additional drug-response-relevant supervision that these baselines lack. The "W/O transformer" ablation (Section 4.3) removes both the architecture and the pretraining jointly, so it does not isolate how much of the gain comes from the augmentation framework vs. from the extra GENIE pretraining. A fair evaluation would require either providing the same pretrained features to baselines or removing GENIE pretraining from GANDALF and showing augmentation still helps. *Note: PREDICT-AI (Jayagopal et al., 2024) is from the same research group that introduced `T_e` and may use similar pretraining, making that specific comparison more fair, but this is not clarified in the paper.*
 
-- **Narrow evaluation: only 5 of 56 patient drugs reported, no aggregate metric.** Results are shown for only 5 drugs (selected because they have samples in all 3 test folds). The patient datasets contain 56 drugs; an aggregate metric (e.g., mean AUROC across all drugs with ≥10 samples, or a paired test) is absent. Without this, the reader cannot assess whether GANDALF is broadly beneficial or effective only on a handful of drugs. This is a significant evidential gap.
+- **Evaluation is limited to 5 out of 56 available drugs, undermining the headline claim.** The paper states that GANDALF "outperforms state-of-the-art DRP models" and demonstrates "an improvement of up to 10.96% over SOTA," yet the experimental comparison is restricted to exactly five drugs (Cisplatin, Paclitaxel, 5-Fluorouracil, Gemcitabine, Temozolomide) from a patient dataset that includes 56 drugs with documented responses. The stated selection criterion — "samples available in all 3 test folds" — is not quantified: no per-drug sample counts, class balance statistics, or sample size thresholds are reported. The 10.96% figure appears to be driven primarily by Temozolomide (AUROC 0.994 vs. 0.894 for the next best), while margins on other drugs are narrow (e.g., Paclitaxel 0.810 vs. 0.809). This is the single most significant weakness: the central empirical claim rests on a small and potentially unrepresentative subset of drugs, and the reader cannot assess whether the results generalize.
 
-- **Core motivation—generating "patient-like" samples—is not directly validated.** The paper's central claim is that GANDALF captures patient-specific characteristics by generating samples directly in the patient domain. Yet the evaluation only measures downstream classification performance. There is no direct evidence that the generated samples actually resemble real patient profiles (e.g., distribution comparisons of mutation patterns, embedding-space similarity to real patient data, or biological plausibility checks). Section 5 mentions that the authors "examined the quality of the generated samples" but provides no results or figures. Without this validation, the claimed advantage over shared-space methods remains largely rhetorical.
+- **No statistical testing or variance reporting.** The paper reports only point estimates (AUROC, AUPRC) without standard deviations, confidence intervals, or any form of statistical test (e.g., paired tests across folds, bootstrap estimates). Given the small patient cohort (669 total: 541 TCGA + 44 Moores + 84 CBIO) and 3-fold cross-validation, the variance across folds is likely substantial. Without uncertainty quantification, it is impossible to determine whether the observed differences between GANDALF and competing methods are reliable or within the noise of the evaluation.
+
+- **No experiment testing generalization to drugs not seen in the patient training data.** A stated advantage of the MTL network is that it can handle drugs outside the patient drug set ($d_p$) by leveraging cell line data. Yet no experiment validates this capability. The paper tests only drugs that appear in both patient and cell line training data. Without evidence that the augmentation pipeline improves prediction for drugs $\notin d_p$, a key practical claim of the framework remains unsubstantiated.
+
+- **The core motivation — capturing "patient-specific characteristics" — is not empirically validated.** The paper argues that prior methods fail because they operate in a shared latent space that loses patient-specific factors, and that GANDALF addresses this by generating samples following $P(X_p)$. However, no analysis is provided showing that the generated samples actually differ from cell-line-derived samples in biologically meaningful ways, or that performance gains come from modeling patient-specific factors rather than from simple sample-size increase. The ablation removes cross-attention (which hurts performance), but this confounds sample quality with domain adherence. A direct comparison against training on an equal number of raw cell line samples (or a simple mix) would clarify the source of improvement.
+
+- **Unaddressed risk of data leakage between pretraining and test cohorts.** The transformer encoder $T_e$ is pretrained on 71 NSCLC and 71 CRC samples from GENIE, while the downstream evaluation uses TCGA, CBioPortal, and Moores. Though GENIE is a separate consortium, no overlap check is performed or reported. If any patients appear in both GENIE and the test cohorts, the frozen representations learned during pretraining would be contaminated. This is a straightforward sanity check whose absence is a notable oversight.
 
 ### Minor
-- **Key hyperparameters not disclosed.** Algorithm 1 requires confidence thresholds `t_u`, `t_l`, training epochs `e_p`, `e_s`, `e_d`, and the KL divergence weight `L_KLDA` are never specified numerically. The number of diffusion timesteps `T`, learning rates, batch sizes, and architecture sizes (layers, hidden dimensions) are absent. While code is promised, the paper itself lacks sufficient detail to understand or reproduce the selection process for confident pseudo-labeled samples.
-- **No error bars or confidence intervals on results.** Tables 1 and 2 report point estimates only. Given the small per-drug patient sample sizes (e.g., 44 Moores patients), several AUROC values could be within the noise. Bootstrap estimates or standard deviations across the 3 folds would substantially strengthen the evidence.
-- **Weak augmentation baselines for comparison.** The "W perturbation" baseline adds Gaussian noise to binary mutation vectors and assumes the label is unchanged—a weak and semantically questionable baseline. Section 2.2 argues that no label-invariant mutation augmentation methods exist for DRP, but a within-architecture comparison (e.g., replacing the diffusion+cross-attention pipeline with VAE-based generation or interpolation in latent space) would better isolate the benefit of the proposed generation module specifically.
-- **Dataset description could be more complete.** The paper reports 1197 CCLE, 541 TCGA, 44 Moores, and 84 CBIO patient *samples*, but the number of patient–drug pairs per dataset (which determines effective training set size) is not stated. The train/validation/test split strategy is also not described (random? per-patient? per-drug?).
+
+- **Pseudolabel selection thresholds $t_u$ and $t_l$ are not reported, nor is the number of retained confident samples $\mathbf{N}_s$.** The paper uses upper and lower thresholds to bin continuous pseudolabels into confident positive, confident negative, and abstained groups, but never states the threshold values or the procedure for setting them (beyond "validation set correlation"). Without this, the reader cannot assess how much the augmentation actually expands the training set or whether the threshold choice drives the observed performance. The ablation shows the full model is best, but this could reflect threshold tuning as much as architectural choices.
+
+- **Comparison with WISER and CODE-AE is incomplete and unexplained.** According to Table 1, these methods have missing entries for multiple drugs (e.g., CODE-AE no data for several drugs; WISER evaluated on only 2 of 5). The paper does not explain why these baselines could not be evaluated on all five drugs. If the reason is insufficient drug-specific samples, that limitation equally applies to GANDALF's drug-specific tuning, making the comparison asymmetric. This weakens the claim that GANDALF "outperforms" these specific baselines.
+
+- **No per-fold results reported.** The paper uses 3-fold cross-validation on a small patient cohort, but reports only aggregated metrics. Fold-wise AUROC/AUPRC should be provided to help readers assess stability.
 
 ### Trivial
-- Table 2 references "2. A low to moderate volume of high confidence samples is better than large volume of low confidence samples" as a stray sentence fragment (line 281) — formatting cleanup needed.
+
+- The naive Gaussian perturbation baseline ("W perturbation") is described only in prose rather than included in Table 2 alongside other methods, making side-by-side comparison harder than necessary.
+- Per-drug sample counts in the test folds for each of the five evaluated drugs are not provided, which would aid interpretability.
 
 ## Nice-to-Haves
-- Provide GENIE-pretrained features to PREDICT-AI and other baselines that can accept them, or run an ablation where GANDALF's transformer is trained without GENIE data.
-- Report aggregate performance (mean AUROC/AUPRC across all drugs with ≥N samples) with a statistical comparison (e.g., paired bootstrap test) to the best baseline per drug.
-- Add a figure or table showing the distribution of real patient latent codes vs. generated sample latent codes (e.g., t-SNE/UMAP overlay), and proportion of shared mutations between generated and real profiles.
-- Compare against a VAE-only generation baseline (no diffusion, no cross-attention) within the GANDALF pipeline to isolate the contribution of the DDPM component.
+
+- An experiment explicitly testing whether generated samples capture patient-specific characteristics: e.g., train a domain classifier to distinguish generated samples from cell line samples and measure domain confusion; compare drug-response distributions of generated vs. real patient profiles.
+- An experiment holding out one or two drugs from patient training data entirely, using the MTL network and cell line data to generate pseudolabels, and comparing against a model trained on cell line data alone.
+- A sensitivity analysis of the pseudolabel thresholds ($t_u$, $t_l$) showing how performance varies across reasonable ranges.
+- Reporting of computational cost (training time, GPU hours) given the large number of sub-modules.
+- Reporting fold-wise results for all experiments.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution:
-- **"The paper should compare against other generative approaches (VAEs, GANs)"** — moved from Major to Minor/Nice-to-Have. The paper explicitly scopes itself to address a problem with no existing label-invariant augmentation methods for DRP (Section 2.2). Comparing against VAE/GAN variants outside DRP is a reasonable extension but not a fatal omission for a first method in this space.
-- **"The cross-attention motivation is not clearly explained"** — removed. The paper does explain the intuition: `Z_Att` pays attention to cell-line representations to retain information from `X_c` while the DDPM decoder introduces patient-specific noise (Section 3.2.1, lines 187–197, and surrounding text). The explanation is adequate for a conference paper.
-- **"GENIE pretraining uses 156k pairs"** — partially inaccurate. The 156k train/17k validation/21k test pairs refer to CCLE cell-line drug pairs (the main dataset), not GENIE. GENIE contributed 142 patient samples for pretraining (lines 257–260). The criticism about unfair comparison still stands, but the magnitude of the extra data is modest.
-- **Pure formatting/style nitpicks** — removed per instructions.
+
+- **Criticism about typographical artifacts in Algorithm 1 (line garbling).** These are PDF extraction artifacts, not author errors. The underlying algorithmic logic is described in the main text (Sections 3.2.1–3.2.5).
+- **Criticism about the code link needing to be "permanent."** The paper provides an anonymous code link, which is standard for double-blind review; the existence of the code is not in question.
+- **Criticism that the paper's "first to tackle" claim may not hold because generative models appear in other bioinformatics contexts (single-cell data).** The paper's claim is specifically about *patient mutation data augmentation for cancer DRP*, which is distinct from transcriptomic augmentation or single-cell contexts. This is a framing disagreement, not a demonstrable error.
+- **Criticism about missing appendix/proofs.** These are parser-stripped sections that exist in the original submission.
 
 ## Novel Insights
-None beyond the paper's own contributions.
+
+None beyond the paper's own contributions. The reviews surface known tensions in this line of work: generative augmentation for sparse clinical data is a promising direction, but evaluating it convincingly requires either substantially more drugs or substantially more patients per drug than what current public cohorts provide. The 5-drug ceiling is not unique to this paper — it reflects a systemic data limitation in the field — but the paper does not adequately grapple with how this limits the strength of its claims.
 
 ## Suggestions
-1. **Conduct a fair comparison.** Either provide the GENIE-pretrained transformer features to PREDICT-AI (which already uses a similar architecture) and other baselines that can accept them, or remove GENIE pretraining from GANDALF and demonstrate that the augmentation framework alone (on cell-line + patient data only) still outperforms baselines.
-2. **Report aggregate results across all drugs.** Even a simple table showing mean/median AUROC across all drugs with ≥N patient samples would substantially strengthen the claim of broad effectiveness.
-3. **Validate the generated samples directly.** Add a figure comparing the distribution of latent representations (`Z_p` vs. `Z_c` vs. `Z_aug`), or compute the proportion of generated mutation profiles that are biologically plausible (e.g., co-occur in known pathways). This would directly support the paper's core motivation.
+
+1. **Expand the drug evaluation.** Either evaluate on all drugs with any test samples (reporting sample counts per drug and flagging drugs with too few samples for reliable estimation) or clearly state the sample-size floor and justify it. Include confidence intervals or bootstrap estimates.
+2. **Add statistical rigor.** Report standard deviations or confidence intervals for all metrics, ideally via bootstrap or per-fold reporting.
+3. **Run a held-out-drug experiment.** Hold out patient data for 1–2 drugs, generate pseudolabels via the MTL network, and compare against a cell-line-only classifier. This directly tests a claimed advantage of the framework.
+4. **Validate the patient-specificity claim.** Compare generated samples against both real patient profiles and cell line profiles using a domain classifier or distributional distance metric. Show that the improvement over baselines is not merely an artifact of increased sample size.
+5. **Report overlap check** between GENIE pretraining samples and all test cohorts.
+6. **Report pseudolabel thresholds and retained sample counts.** Ideally include a sensitivity analysis showing robustness to threshold choice.
 
 ## Score and Decision
-The paper addresses an important problem with a genuinely novel framework. The idea of domain-separated diffusion models with cross-attention for generating patient-like mutation profiles is creative, and the ablation study shows the architecture's components are well-motivated. However, the evaluation has significant gaps: the comparison is confounded by GENIE pretraining that baselines lack, results are reported for only 5 of 56 drugs with no aggregate metric, and the central claim about generating "patient-like" samples is not directly validated. These issues are addressable with additional experiments and analysis, but in the current form the evidence does not fully support the claimed advantages.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+The paper tackles a genuine problem with a well-motivated, novel architecture. The ablation study convincingly shows that the components work together. However, the empirical evaluation rests on only 5 of 56 available drugs, lacks any statistical uncertainty quantification, and fails to validate the paper's central conceptual claim (that patient-specific characteristics are being captured rather than just sample size being increased). The missing overlap check and unaddressed potential for data leakage add further uncertainty. These are not minor presentation issues — they are gaps in the evidence required to support the paper's core claims. While the architectural ideas have real potential and could form the basis of a significantly stronger submission, in its current form the evidence is insufficient.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

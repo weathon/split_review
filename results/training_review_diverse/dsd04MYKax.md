@@ -1,93 +1,83 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and all the claims. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes Sum-of-Parts (SOP) models, which produce grouped feature attributions that are faithful-by-construction through a modular architecture: a GroupGen module learns sparse masks over features via sparsemax attention, and a GroupSelect module assigns scores to each group's backbone output. The prediction is a weighted sum of group contributions, making the attribution directly tied to the model's computation. The paper also presents theoretical lower bounds suggesting exponential faithfulness error for standard (per-feature) attributions, evaluates SOP on ImageNet, and includes a cosmology case study.
+This paper introduces Sum-of-Parts (SOP), a model class that produces grouped feature attributions (assigning scores to groups of features rather than individual features) that are faithful by construction. The paper makes three main contributions: (1) theoretical lower bounds showing that standard feature attributions incur at least exponentially growing error on faithfulness tests even for simple functions like monomials and binomials; (2) the SOP architecture that generates grouped attributions via a GroupGen (sparsemax attention) module and a GroupSelect (score-assignment) module, compatible with any backbone; (3) empirical evaluation on ImageNet showing competitive accuracy and strong grouped insertion/deletion scores, plus a cosmology case study where SOP attributions reveal differential importance of voids vs. clusters for predicting cosmological parameters.
 
 ## Strengths
 
-- **Novel architecture for faithful grouped attributions**: SOP's two-module design (GroupGen + GroupSelect) is a clean, principled way to produce grouped attributions that are transparent by construction: the prediction y = Σ cᵢ yᵢ directly decomposes into contributions from each group Sᵢ, and the model is compatible with any backbone architecture (e.g., ViT, ConvNet) without task-specific adaptation. (Section 3, Algorithm 1)
+1. **Novel theoretical lower bounds for feature attribution faithfulness.** Theorems 1 and 2 prove that for monomials and binomials, any feature attribution incurs exponential total deletion/insertion error in the input dimension \(d\). This is a genuine formal result that provides a principled motivation for moving beyond per-feature attributions, and it is supported by fitted exponential curves (Figure 2) quantifying the growth.
 
-- **Competitive empirical results on ImageNet**: SOP achieves the best insertion AUC and grouped deletion among all baselines tested (LIME, SHAP, RISE, GradCAM, IntGrad, FRESH, Archipelago), and retains near-original accuracy (0.754 vs 0.768 for the original ViT). (Table 1, Section 4.2)
+2. **Well-designed architecture for faithful grouped attributions.** The SOP architecture (Section 3, Figure 3) cleanly separates group generation (GroupGen via sparsemax attention) from group scoring/aggregation (GroupSelect). Because the final prediction is an explicit weighted sum \(y = \sum_i c_i \, f(S_i \odot x)\), the grouped attribution \((S_i, c_i)\) is directly tied to the computation — a design that genuinely avoids the post-hoc faithfulness pitfalls identified in prior work.
 
-- **Principled generalization of evaluation to grouped metrics**: The paper introduces grouped insertion/deletion tests that naturally extend standard pixel-wise tests to grouped attributions, providing a more appropriate evaluation framework for this class of explanations. (Section 4.1)
+3. **Strong empirical results on grouped interpretability metrics.** On ImageNet (Table 1), SOP achieves the best insertion AUC among all methods and the best grouped deletion AUC, while remaining competitive on accuracy among built-in explanation methods. This provides concrete evidence that the grouped attribution paradigm works in practice on a large-scale benchmark.
 
-- **Sparsity-promoting design**: The use of sparsemax in both GroupGen and GroupSelect yields sparse groups and sparse scores, reducing cognitive load for human interpreters — a design choice that connects architectural transparency to practical interpretability. (Section 3)
-
-- **Real-domain case study**: The cosmology application demonstrates that SOP's groups correspond to physically meaningful structures (voids and clusters) and yields findings (voids being more predictive, clusters being more discriminative for σ₈ vs Ωₘ) that align with and extend prior work, involving domain expert collaboration. (Section 5)
+4. **Rigorous formalization of grouped evaluation.** The paper generalizes standard insertion/deletion tests to their grouped analogues (Section 4.1), creating evaluation metrics that match the semantics of grouped attributions — a methodological contribution that enables fair comparison between grouped and per-feature explanation methods.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-- **Overclaimed theoretical framing**: The paper states in the introduction that it "proves that feature attributions must incur at least exponentially large error" (lines 18, 23) and presents Theorem 1 and Theorem 2 as formal mathematical results. However, the theorems state "approximate lower bound[s]" with fitted constants (γ₁=0.664, etc.) for d ≤ 20, derived from numerical fitting rather than analytic proof — the figure caption itself says "Fitted function" and "Fitted function." The constants come from a computational exploration, not a theorem. Calling these "proofs" is misleading. This does not invalidate the paper's core contribution, but it overstates the theoretical foundation that motivates the method.
-
-- **Insufficiently specified experimental setup for baselines on grouped metrics**: The paper reports that SOP achieves the best grouped deletion and is second-best on grouped insertion. However, it does not specify how grouped insertion/deletion metrics are computed for baselines that produce only pixel-level attributions (LIME, SHAP, GradCAM, IntGrad, RISE). Do these methods' pixel attributions get aggregated into groups? If so, which grouping is used — k-means, the SOP groups, or something else? For Archipelago (a method for finding feature interactions, not a classifier), how is its "accuracy" column in Table 1 determined? The FRESH adaptation from language to vision is mentioned without any details of the adaptation. Without transparency on these points, the claimed empirical advantage cannot be fully trusted. (Section 4.1–4.2)
-
-- **The formal faithfulness definition does not cleanly map to the grouped attribution claim**: The paper defines faithfulness formally via deletion/insertion error (Defs. 1–2) for per-feature attributions. The grouped attribution is claimed to be "faithful-by-construction," but the paper never provides a formal definition of faithfulness for grouped attributions analogous to Defs. 1–2. In the architecture, removing group Sᵢ changes the prediction by cᵢyᵢ (the weighted backbone output for that group), not by cᵢ alone. The paper's statements (e.g., "each of which is weighted precisely by the scores cᵢ," line 139) conflate architectural transparency with the formal faithfulness metric. A clear mapping between the grouped attribution and the prediction change under a grouped deletion/insertion test is needed for the "faithful-by-construction" claim to be precise. (Section 2, Section 3)
+None.
 
 ### Minor
 
-- **Missing experimental details**: The paper does not specify the number of groups G used in the ImageNet experiments, nor how many groups remain active after sparsemax. No ablation studies isolate the contribution of GroupGen vs. GroupSelect (e.g., uniform weighting vs. learned weighting). No runtime or FLOPs comparison is reported, even though SOP runs the backbone G times per input — a significant computational cost compared to most baselines. These omissions make it harder to assess the method's practical trade-offs.
+1. **Faithfulness guarantee is narrower than the paper's strongest language suggests.** The paper claims SOP is "faithful-by-construction" (abstract, Section 3), but this faithfulness covers only the aggregation step \(y = \sum c_i f(S_i \odot x)\). The group generator (GroupGen) itself is a learned attention mechanism that can depend arbitrarily on the full input. A human inspecting the grouped attribution \((S_i, c_i)\) sees *which* groups were used and with what weight, but has no explanation for *why* those particular groups were formed. The paper should distinguish between aggregation faithfulness (which holds) and full-decision-process faithfulness (which does not, since group formation is unexplained). This does not invalidate the contribution, but the language should be more precise to avoid misleading readers.
 
-- **Disconnect between theoretical lower bounds and experimental metrics**: The total deletion/insertion errors in Definitions 1–2 sum over *all* subsets in the powerset of features — a computationally intractable metric. The experimental evaluation uses standard single-ordering insertion/deletion AUC tests (pixel-by-pixel). The theoretical lower bounds therefore apply to a metric different from what is measured, weakening the connection between the theory and the empirical results. (Section 2 vs. Section 4)
+2. **The claim that grouped attributions "overcome" the exponential barriers lacks a positive theoretical result.** Section 2.2 states that "grouped attributions are able to overcome exponentially growing insertion and deletion errors" (line 94), but no theorem, construction, or bound is provided to support this claim for the monomial/binomial examples from Section 2.1. The SOP architecture is presented in Section 3 as the practical embodiment, but the paper does not prove that any grouped attribution (or SOP specifically) achieves sub-exponential error on those examples. The theoretical section is thus entirely negative (feature attributions fail) without a positive counterpart (grouped attributions succeed). Adding a constructive example or bound would significantly strengthen the paper.
 
-- **Cosmology case study is suggestive but overclaimed**: The abstract states that SOP's explanations "help astrophysicists discover new knowledge about galaxy formation," but the evidence is preliminary. The finding that voids receive higher weights is explicitly noted as consistent with prior work (Matilla et al., 2020). The quantitative claim that clusters are weighted more for σ₈ (14.8%) than Ωₘ (8.8%) is reported without error bars, significance tests, or multiple-run variance. The attribution of these findings to cosmologists finding them "intriguing" is anecdotal. The paper also does not control for the fact that voids occupy substantially more pixels than clusters, a confounding factor it briefly mentions but does not address. (Section 5)
+3. **Details of the grouped insertion/deletion evaluation procedure are underspecified.** The paper introduces grouped insertion and deletion tests (Section 4.1) and reports results (Table 1), but does not specify: how groups are ordered for insertion/deletion, how features appearing in multiple groups are handled, or how groups of different sizes are compared. Without this, the grouped metric results cannot be independently reproduced or compared fairly with baselines (especially Archipelago, whose grouping mechanism differs substantially from SOP's learned masks).
 
-- **Learned groups are not analyzed for interpretability on ImageNet**: While the cosmology case study shows that SOP's groups correspond to physically meaningful structures, no analysis is given for ImageNet showing whether the learned groups (e.g., object parts, background, or something else) are interpretable to humans. The GroupGen module uses pairwise similarity in feature space via attention, which does not guarantee semantically meaningful grouping. (Section 3, Section 4)
+4. **Several design choices lack ablation or reporting.** The paper does not report the number of groups \(G\), the average number of active groups per prediction (despite claiming sparsemax yields sparse masks), the effect of the sparsemax threshold, or the initialization strategy for the value weight matrix \(C\). These would help readers assess the practical interpretability and computational cost of SOP (running the backbone \(G\) times per input could be expensive if \(G\) is large).
 
-- **No discussion of overlapping groups and double-counting**: The paper notes that "a single feature can show up in multiple groups with different scores" (line 92) but does not discuss how overlapping group masks affect the additive decomposition of the prediction or whether features are double-counted in the attribution sum. (Section 3)
+5. **The cosmology case study claims are somewhat stronger than the analysis supports.** The paper describes findings about void/cluster importance for \(\Omega_m\) and \(\sigma_8\) as "new," "surprising," and "previously not known." The analysis is descriptive (average weights for hand-defined categories based on thresholds) without statistical significance tests, validation against simulations, or ablation to verify that the attributions correspond to causally relevant structures. This is a valuable *illustrative* application but should be presented with more caution about the conclusiveness of the findings.
 
 ### Trivial
-
-None.
+- The notation in GroupGen's attention formula (line 119) has \(W_q, W_k \in \mathbb{R}^d\) but the numerator \((W_q X)(W_k X)^T\) suggests these are projection matrices, not vectors. Clarifying the dimensions would help reproducibility.
+- The paper lacks a limitations section; several of the minor issues above could be addressed by adding one.
 
 ## Nice-to-Haves
-
-- An ablation comparing sparsemax vs. softmax in GroupGen and GroupSelect, and comparing learned vs. uniform group weighting.
-- A sensitivity analysis of the number of groups G.
-- Reporting results with confidence intervals over multiple random seeds.
-- Runtime comparison (wall-clock time or FLOPs) relative to baselines.
-- For the cosmology case study, comparing attribution weights on synthetic data with known ground-truth importance, or providing uncertainty quantification.
+- A constructive example (or Theorem) showing that a grouped attribution achieves low or polynomial total error on the monomial/binomial examples would directly complete the theoretical narrative.
+- Reporting original ViT accuracy alongside SOP accuracy would contextualize the accuracy drop (though the table caption indicates post-hoc methods report the original model's accuracy).
+- A simple validation in the cosmology case study (e.g., removing the identified important groups via masking and measuring prediction drop) would strengthen the causal interpretation of the attributions.
 
 ## Removed Points
+These points were raised by reviewers but are removed or downgraded after verification against the paper:
 
-These points are flagged to be removed; treat them with caution:
+1. *"Theoretical results use a non-standard metric not used in practice."* — The paper is making a **theoretical** claim about total error over the powerset, which is a natural theoretical quantity for proving lower bounds. The metric does not need to match the empirical evaluation metric to be meaningful; the theoretical result shows a fundamental limitation, and the empirical evaluation uses standard AUC-based tests. The connection between the two is standard practice in ML theory papers.
 
-- *"The formula is garbled" (about GroupSelect equation)* — This is a parser/formatting artifact, not an author error.
-- *"No discussion of missing related works"* — The rules prohibit mentioning missing related works.
-- *"FRESH is adapted from language to vision without details"* — This was moved to Major (it's an experimental transparency concern, not removed). Actually, I kept it in Major.
-- *"Section 3. The description is confusing... the formula is garbled"* — Parser artifact. Removed.
-- *Various formatting/style nitpicks* — Removed per rules.
-- *"No ablation study"* — This is a genuine missing experiment, kept in Minor.
-- *"Not mentioning the computational cost"* — Kept in Minor.
-- *Various reviewer suggestions about adding Y or Z* — Scope creep items moved to Nice-to-Haves.
+2. *"The paper does not report the accuracy of the original ViT backbone."* — The Table 1 caption explicitly states: "For accuracy, post-hoc methods show the accuracy of the original model." The original accuracy is thus reported in the table through the post-hoc baselines.
+
+3. *"Deletion AUC for SOP is worse than several baselines, which is a genuine limitation."* — The paper acknowledges this directly (line 176) and explains that SOP does not promise comprehensiveness. This is a transparent trade-off rather than an unaddressed flaw.
+
+4. *"The cosmology case study is presented as discovery but is entirely qualitative."* — The paper does present quantitative values (55.4% vs 54.0% for voids, 14.8% vs 8.8% for clusters, histograms in Figure 5). While the analysis is not validated with significance tests, it is not "entirely qualitative" either. This is kept as Minor (item 5 above) rather than removed entirely.
+
+5. *"Missing related works"* — Per instructions, I cannot confirm this without external sources.
+
+6. *"Formatting/style nitpicks, typos"* — These are parser artifacts, not author errors.
 
 ## Novel Insights
-
-The most interesting insight from the reviews is that the paper's claimed theoretical "proofs" are better understood as compelling empirical demonstrations of exponential lower bounds. This distinction matters because it reframes the contribution: rather than a rigorous impossibility theorem, the paper offers a computational study showing that even simple polynomials force exponential error in standard faithfulness metrics — a finding that, while not a formal proof, is still genuinely motivating for grouped attributions. The reviews also surface a deeper conceptual tension: "faithful-by-construction" in an architectural sense (the prediction transparently decomposes into group contributions) is a different claim from "low deletion/insertion error" in the standard perturbation-based sense, and the paper would benefit from explicitly connecting these notions.
+Beyond the paper's own contributions, the review process reveals a structural tension: the paper's theoretical motivation (exponential error for per-feature attributions) and its practical solution (grouped attributions via SOP) occupy different formal regimes. The lower bounds are unconditional — they apply to *any* feature attribution for the target function. But the proposed solution works by changing the model (not just the explanation), which sidesteps the lower bound rather than disproving it. This is a legitimate and common strategy (akin to using a different model class to avoid a no-go theorem), but it means the paper's two halves — the negative theory and the constructive architecture — are not directly in dialogue. A grouped-attribution theorem for the *same* function class would bridge this gap.
 
 ## Suggestions
-
-1. Recast Theorems 1–2 as empirical lower bounds or computational studies rather than formal theorems. Remove "prove" from the introduction claims unless analytic derivations are provided. This would be honest and still motivating.
-
-2. Provide a formal definition of grouped faithfulness (analogous to Defs. 1–2 but for groups) and prove that SOP satisfies it by construction when groups are non-overlapping or when the decomposition is additive.
-
-3. Specify exactly how grouped insertion/deletion metrics are computed for every baseline, particularly for pixel-level methods (LIME, SHAP, GradCAM, IntGrad, RISE). Clarify Archipelago's accuracy column. Provide FRESH adaptation details.
-
-4. Report the number of groups G used, the number of active groups after sparsemax, and include at least one ablation study (e.g., varying G, uniform vs. learned weighting).
-
-5. Add a brief discussion of the computational cost (the backbone is run G times per input) compared to baselines.
-
-6. For the cosmology case study, tone down the "discovery of new knowledge" claim or add statistical validation (error bars, significance tests, comparison to synthetic baselines). Acknowledge the confounding factor of void area more directly.
+1. Add a short sub-section or remark after the theoretical results showing, by construction, that a grouped attribution can achieve low error on the monomial/binomial examples. This would complete the narrative arc from "feature attributions fail" to "grouped attributions succeed."
+2. Clarify the faithfulness language throughout: replace or qualify "faithful-by-construction" with "faithful-by-construction for the aggregation step" or "the grouped attribution is faithful to the prediction because the prediction is computed as a weighted sum of the group contributions." Acknowledge in a limitations paragraph that the group generator is not explained.
+3. Provide the full algorithm for grouped insertion/deletion tests (or cite and adapt a reference with clear handling of overlapping groups and group ordering).
+4. Report the number of groups \(G\) and the average number of active (non-zero-score) groups per prediction on ImageNet.
+5. Add a brief limitations section discussing: the scope of the faithfulness guarantee, the computational cost of evaluating the backbone \(G\) times per input, and the exploratory nature of the cosmology case study.
 
 ## Score and Decision
 
-This paper presents a genuinely novel architecture for grouped attributions with a clean design, competitive ImageNet results, and an interesting application. However, the theoretical framing overclaims significantly (empirical fitting presented as formal proof), the experimental setup lacks crucial transparency for baselines on grouped metrics, and the faithfulness claim is not precisely formalized for grouped attributions. The cosmology case study is promising but not as strong as the abstract suggests. The core idea is sound and the method has clear potential, but the paper's presentation overstates what has been established.
+**Originality:** 7/10 — The theoretical lower bounds and the SOP architecture are both novel.  
+**Importance:** 7/10 — Faithful explanations remain an important problem; grouped attributions are a promising under-explored direction.  
+**Claims well supported:** 6/10 — The core claims are supported, but the faithfulness claim is somewhat overbroad and the "overcoming barriers" claim lacks theoretical backing.  
+**Soundness:** 7/10 — The theory is sound, the architecture is well-motivated, and the empirical methodology is reasonable.  
+**Clarity:** 6/10 — The paper is generally well-written but underspecifies some evaluation details and uses imprecise language about faithfulness.  
+**Value to the community:** 7/10 — Contributes a new model class, theoretical grounding, and evaluation framework for grouped attributions.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+The paper makes a real contribution: it identifies a fundamental limitation of per-feature attributions, proposes a novel model class that addresses it through grouped attributions, and provides encouraging empirical results. The weaknesses are real but addressable — they concern scope of the faithfulness claim, missing details in the evaluation, and the lack of a positive theoretical counterpart. None of these are fatal, and they do not undermine the core contribution.
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

@@ -1,22 +1,20 @@
-Now I have a thorough understanding of the paper and can verify each claim. Here is my consolidated final review.
+Now I have all the evidence I need. Let me construct the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes Score Regularized Policy Optimization (SRPO), an offline RL method that extracts a deterministic inference policy by using a pretrained diffusion behavior model to compute score-function gradients for behavior regularization. The key innovation is regularizing at the *gradient* level rather than the *loss* level, which completely avoids the iterative diffusion sampling needed by prior diffusion-based RL methods during both training and evaluation. SRPO achieves competitive D4RL performance while delivering a 25–1000× action sampling speedup over diffusion-based baselines.
+This paper proposes Score Regularized Policy Optimization (SRPO), an offline RL method that leverages pretrained diffusion behavior models to regularize a deterministic policy at the *gradient* level — using the score function of the behavior distribution — thereby entirely avoiding iterative diffusion sampling during both training and evaluation. SRPO achieves 25–1000× faster action sampling than prior diffusion-based methods while maintaining competitive performance on D4RL locomotion benchmarks (87.1 average, within 1 point of Diffusion-QL's 88.0), and delivers competitive results on AntMaze tasks.
 
 ## Strengths
 
-- **25–1000× action sampling speedup and drastic FLOPS reduction (0.01%–0.25%)**: Section 5.2 and Figures 1, 6 report that SRPO's deterministic policy enables action sampling 25–1000× faster than methods like Diffusion-QL and IDQL, using only 0.01%–0.25% of their FLOPs. This directly validates the paper's central claim of circumventing iterative diffusion sampling.
+1. **Novel and clean idea with practical impact**: The insight that behavior regularization can be performed at the gradient level via the score function (Eq. eq:ideal_objective_gradient) is genuinely clever. It breaks the dependence on expensive diffusion sampling while still exploiting the expressive power of diffusion behavior models — a natural solution to a well-known pain point in the field.
 
-- **Competitive performance across locomotion and maze tasks with a simpler inference policy**: Table 1 shows SRPO achieves an average normalized score of 87.1 on locomotion tasks (vs. 88.0 for Diffusion-QL, 86.6 for QGPO) and outperforms all non-diffusion baselines by large margins, all while using only a deterministic Dirac policy at inference.
+2. **Dramatic computational gains with maintained performance**: SRPO achieves 25–1000× faster action sampling and uses 0.25–0.01% the FLOPS of competing diffusion-based methods (Figure 1, Figure 6), while matching or exceeding their scores on D4RL locomotion (87.1 vs. 88.0 for Diffusion-QL). On HalfCheetah-medium (60.4 vs. 54.1) and Walker2d-medium-expert (114.0), SRPO sets new best results (Table 1).
 
-- **Novel gradient-level regularization that avoids behavior sampling**: Equation (9) derives the gradient of the KL-regularized objective as ∇ₐQ_φ + (1/β)∇ₐlog μ(a|s). By replacing ∇ₐlog μ with a pretrained diffusion model's score estimate, SRPO regularizes at the gradient level rather than the loss level, removing the need to generate behavioral action samples during training — a structurally different approach from prior work (BEAR, BRAC, SBAC).
+3. **Clean experimental design relative to IDQL**: The paper deliberately shares the same critic and behavior model architecture with IDQL, making the comparison controlled and isolating the contribution of the policy extraction method. This is good scientific practice.
 
-- **Careful experimental design isolating the policy extraction contribution**: The paper deliberately shares the same critic and behavior model training pipeline with IDQL (Section 4.1), making IDQL a controlled baseline. SRPO's extracted Dirac policy often matches or exceeds IDQL's candidate-selection approach (e.g., HalfCheetah-medium: 60.4 vs. 51.0; Hopper-medium: 95.5 vs. 65.4).
-
-- **Empirically validated design choices transferred from DreamFusion**: Section 4.2 and Figure 7 systematically ablate the weighting function ω(t) and the noise baseline subtraction, showing clear performance benefits, especially in AntMaze tasks. This demonstrates a successful cross-domain transfer of score distillation ideas to offline RL.
+4. **Comprehensive ablation studies**: Section 6.3 systematically ablates the weighting function ω(t), the subtracted ε baseline, and the temperature β, providing empirical justification for default hyperparameters across two different task families.
 
 ## Weaknesses
 
@@ -26,50 +24,51 @@ None.
 
 ### Major
 
-None. The harsh critic's main criticism — that the surrogate gradient derivation from Eq. (9) to Eq. (10) is missing and constitutes a "critical theoretical gap" — is not supported by the paper's content. The paper states "Similarly to Section 3, we can optimize Eq. (9) by calculating its gradient," and Section 3 already provides the derivation for the base case (chain rule + reparameterization). The surrogate case follows the *same* logic: the gradient of KL[π_{t,θ}||μ_t] w.r.t. the deterministic policy's action reduces to the diffusion model's score estimate, with the (σ_t/α_t) factor cancelling the corresponding factor from the KL forward-diffusion scaling. The ε baseline has zero expectation (E[ε]=0) and serves as a variance-reduction technique. While the paper could be more explicit, this gap is mathematically trivial and does not threaten the method's validity.
+1. **The surrogate objective (Eq. eq:SRPO) is adopted without theoretical grounding for why the ensemble over diffusion times preserves the relevant optimization landscape.** The paper correctly derives the gradient of the exact reverse-KL objective (Eq. eq:ideal_objective_gradient), which only requires the score at t→0. It then replaces this with a surrogate that averages score estimates across diffusion times t ∈ (0.02, 0.98) with weighting ω(t) = σ_t². The paper openly acknowledges that this "biases the original training objective" (Section 6.3, ablation paragraph on ω(t)), but provides no argument — not even a bound or a sketch — for why the resulting policy should still approximate π*. The ablation shows AntMaze tasks are *sensitive* to ω(t), confirming the weighting choice is non-trivially impactful. This gap means the paper is stronger as an engineering contribution (here is a heuristic that works) than as a principled algorithmic proposal. This does not invalidate the empirical results, but it does limit the paper's depth.
 
 ### Minor
 
-- **Abstract slightly overstates performance**: The abstract claims "still maintaining state-of-the-art performance." Table 1 shows SRPO's locomotion average (87.1) is slightly below Diffusion-QL (88.0), and its AntMaze average (73.6) trails IDQL (79.1) and QGPO (78.3). The paper's own text in Section 6.1 more accurately says SRPO "comes close to matching the benchmarks set by other state-of-the-art diffusion-based methods." The abstract should be corrected.
+2. **The subtracted ε baseline is motivated only by analogy, not analysis.** The paper subtracts ε from the predicted noise ε_ψ in the gradient estimate (Eq. eq:final_policy_extraction_loss). It cites DreamFusion and calls this a "baseline" for variance reduction, but provides no variance or bias analysis. The ablation shows consistent slight improvement, so the choice is empirically harmless and mildly beneficial — but calling it "variance reduction" without measurement is an unsupported claim. This is minor because the technique is simple, empirically benign, and the paper is transparent about borrowing it from DreamFusion.
 
-- **Surrogate gradient derivation is presented too tersely**: While the math is straightforward (as confirmed above), the paper jumps from "we can optimize Eq. (9) by calculating its gradient" directly to the final expression in Eq. (10) without showing the intermediate calculus. A reader unfamiliar with Score Distillation Sampling (SDS) from DreamFusion will not see how the KL gradient produces the (ε_ψ − ε) form. This is a presentation gap, not a theoretical one, but it should be addressed.
-
-- **Missing hyperparameter and architecture details for reproducibility**: The paper says the diffusion model is "consistent with the one proposed by IDQL" and specifies ω(t)=σ_t², but does not provide a table of key hyperparameters: learning rates (λ_V, λ_Q, λ_μ, λ_π), network sizes, expectile τ, temperature β, diffusion noise schedule (α_t, σ_t), number of training steps, batch size, etc. This is a normal shortcoming of conference-length papers but worth noting.
-
-- **No limitations discussion**: The conclusion does not discuss limitations. Potential issues worth acknowledging: (1) the deterministic policy may be less effective for tasks requiring truly multimodal behavior (the AntMaze results may reflect this); (2) the surrogate gradient introduces an uncontrolled bias when ensembling over t∈(0,1); (3) the method still requires training a diffusion behavior model (though this is fast and done once).
+3. **Performance on AntMaze tasks falls behind IDQL and QGPO, and the "state-of-the-art" framing should be more precisely scoped.** SRPO averages 73.6 on AntMaze vs. 79.1 for IDQL and 78.3 for QGPO (Table 1). The abstract claims "state-of-the-art performance" — though this appears in a sentence that references locomotion tasks, the scope is ambiguous. Several AntMaze tasks also show high variance (standard deviations >10 on umaze-diverse, medium-play, medium-diverse, large-play), which is not discussed. The core locomotion results are genuinely strong, and the method is about efficiency, so this is far from fatal. But the claims should be tightened.
 
 ### Trivial
 
-- The wrapfigure containing Algorithm 1 is crowded and some of the figure captions (e.g., Figure 4) run into narrow formatting, making them hard to read.
+None.
 
 ## Nice-to-Haves
 
-- An ablation using a simpler behavior model (Gaussian or VAE) on D4RL tasks would directly test whether the expressivity of diffusion is essential to the score regularization, complementing the 2D toy example in Figure 3.
-- A short explicit derivation of the surrogate gradient in an appendix (even 3–4 lines) would fully address the clarity concern.
+- **Analysis of Q-gradient quality off-support**: The critic raises a concern about whether IQL's Q-function provides reliable gradients far from the data distribution. This is a generic concern in offline RL, and SRPO's score regularization is specifically designed to address it. A diagnostic experiment measuring, e.g., the cosine similarity between the Q-gradient and the true return gradient in a simple learned-Q setting would strengthen the paper, but its absence is not a weakness — the empirical results already demonstrate the method works.
+
+- **Guidance on ω(t) selection for new domains**: The ablation shows AntMaze is sensitive to ω(t), and the paper recommends ω(t)=σ_t² based on DreamFusion. A practical heuristic or robustness test (e.g., does any ω(t) that emphasizes small t work?) would help practitioners.
+
+- **Policy multimodality visualization**: The 2D bandit illustration uses a known quadratic Q-function. A visualization of the extracted deterministic policy on a state where the D4RL dataset is known to be multimodal would strengthen the claim that the deterministic policy does not collapse modes.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **Criticism that the paper lacks theoretical justification for the surrogate being an unbiased estimate of the original objective**: The harsh critic framed this as "the paper claims to solve the reverse-KL extraction problem, but actually optimises a different, uncharacterised objective" — this overstates the paper's claim. The paper transparently calls it a "surrogate objective" (Eq. eq:SRPO) and discusses the bias in the ablation. The core contribution (gradient-level score regularization) does not depend on the ensemble; the ensemble is a practical enhancement. The concern is preserved in a softened form in Major Weakness 1 above.
 
-- **"The connection to DreamFusion is mentioned but not formally adapted or justified"** — REMOVED because the paper does address this in Section 5 (Related Work), explaining both similarity and difference: "Similar to DreamFusion, SRPO also employs a diffusion model to guide the training of a subsequent network. However, our method emphasizes score regularization as opposed to score distillation. The behavior score is additionally incorporated to regularize the Q-gradient." This is adequate for a related work discussion.
-- **Complaints about missing appendix content or proofs** — REMOVED per instructions (parser strips appendices; they exist in the original submission).
-- **"Fairness of comparison" concerns that disadvantage baselines** — REMOVED per instructions; if any comparison asymmetry favors baselines rather than SRPO, it does not weaken the paper.
-- **Generic strengths from the Strength Finder** — Dropped "this paper addressed an important problem" (too generic); kept only evidence-grounded strengths.
+- **Criticism that "the paper compares SRPO only to diffusion‑based offline RL methods in the efficiency plots"**: Efficiency plots compare to diffusion methods for the obvious reason that non-diffusion methods already have fast inference — there is nothing to compare. The paper includes non-diffusion methods in the main performance table (Table 1). Removed as not a genuine weakness.
+
+- **Criticism that "the 2D bandit Q-function is a simple quadratic"**: The 2D bandit is an *illustration* of the core idea, not an experimental result. It serves its pedagogical purpose. Removed as it evaluates the paper against the wrong standard.
+
+- **Criticism that "no clear recommendation for ω(t) beyond 'ω(t)=σ_t² works well overall'"**: The paper does provide a recommendation — ω(t)=σ_t² — which is the same as DreamFusion. Removing as factually incorrect.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a genuinely novel observation about the method that the authors themselves did not identify.
+None beyond the paper's own contributions. The reviews largely agree on the paper's strengths (novelty, efficiency, clean experiments) and weaknesses (theoretical gap in the surrogate objective). The most interesting tension is between the harsh critic's framing of the surrogate objective as a "different, uncharacterised objective" and the reality that the paper is transparent about this limitation and the core idea (score regularization at gradient level) would still work without the ensemble. The reviews do not surface an insight the paper itself missed.
 
 ## Suggestions
 
-1. **Correct the abstract** to say "competitive with state-of-the-art performance" or "comparable performance" rather than "state-of-the-art performance."
-2. **Add 3–4 lines of derivation** showing how the gradient of KL[π_{t,θ}||μ_t] yields the score estimate, either in Section 4.2 or an appendix. This would preempt the clarity concern without taking much space.
-3. **Add a hyperparameter table** to the main text or supplement with learning rates, network sizes, β, τ, noise schedule details, and number of training steps.
-4. **Add a brief limitations paragraph** to the conclusion acknowledging the surrogate bias, the need for a pretrained diffusion model, and the deterministic policy's potential limitations for multimodal tasks.
+1. **Add a theoretical connection between the surrogate and the original objective**, even a loose one. For example, show that the surrogate gradient is the gradient of a lower bound on the reverse-KL, or characterize the policy suboptimality introduced by the ensemble weighting. This would significantly raise the paper's maturity level.
+
+2. **Scrutinize the "variance reduction" claim for the ε baseline**. Either measure the gradient variance with and without the subtraction, or rephrase the motivation as "a DreamFusion-inspired heuristic that empirically improves performance."
+
+3. **Scope the "state-of-the-art" claim precisely to locomotion** in both the abstract and conclusion, and briefly discuss the AntMaze gap and high-variance tasks.
+
+4. **Report the training cost of the diffusion behavior model** (architecture size and wall-clock time) alongside the inference speedups, so practitioners can assess the full-system tradeoff.
 
 ## Score and Decision
 
-**Score: 7.0 / 10.0** — Strong Accept. The paper makes a clear, well-validated contribution. The core idea (gradient-level score regularization to avoid diffusion sampling) is novel and practically valuable. The empirical evaluation is thorough, credibly demonstrates the claimed efficiency gains, and the controlled comparison with IDQL is particularly well-designed. The weaknesses are all minor (presentation, missing details, slightly overstated abstract) and fully addressable in a camera-ready revision. No structural or fatal flaws exist.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,86 +1,81 @@
-Below is my consolidated meta-review after cross-checking every claim against the paper text.
+Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
 
 ---
 
 ## Summary
 
-FedDFQ proposes a personalized federated learning method that uses a no-parameter Data Identity Extraction Module (DIEM) to generate metric proxies for quantifying data heterogeneity across clients. These proxies are intended to guide weighted global parameter aggregation and a gradient accumulation module (AGAM). The core idea—using simple pixel-level statistics to measure distributional similarity—is novel, but the method specification is critically incomplete, the theoretical justification is weaker than claimed, and the experimental evaluation lacks crucial details.
+This paper proposes FedDFQ, a personalized federated learning method that uses a parameter-free Data Identity Extraction Module (DIEM) to generate metric proxies quantifying data heterogeneity across clients. These proxies are intended to re-weight global parameter aggregation (FELPA) and to regularize personalized classifiers via an Automatic Gradient Accumulation Module (AGAM). The paper claims state-of-the-art performance on CIFAR-10 and FashionMNIST under non-IID settings with 50 and 100 clients.
 
 ## Strengths
 
-- **Parameter-free DIEM avoids learnable biases.** The DIEM operates via two simple averaging operations (channel-wise then spatial), deliberately avoiding the biases that learnable feature extractors introduce during initialization and training (Section 3.1, lines 56–58). This is a clean, principled design choice that directly addresses a real shortcoming in prior work.
+- **Parameter-free data heterogeneity quantification via DIEM.** Unlike existing methods that rely on learnable feature extractors (e.g., FedRep, FedPAC) which can introduce training-induced biases, DIEM uses a no-parameter algorithm of channel-wise and spatial averaging to generate data identifiers. This design avoids bias from model initialization and training while still capturing local data distribution characteristics (Section 3.1). This is the paper's most distinctive idea.
 
-- **Ablation confirms each module contributes.** Table 2 shows that adding DIEM to FedAvg improves accuracy by 3.13% on CIFAR-10 (from ~89.67% to ~92.80%), and the full model (All) outperforms all single-module configurations. This provides clear empirical evidence that the components are complementary rather than redundant.
+- **Scalability advantage with increasing client count.** Figure 3 shows that the accuracy gap between FedDFQ and local-only training grows as the number of clients increases from 50 to 100, suggesting the method leverages complementary information from a larger pool of heterogeneous clients.
 
-- **Scalability demonstrated with increasing client counts.** Figure 3 shows FedDFQ's accuracy advantage over local training growing consistently as the number of clients increases (50→75→100), supporting the claim of favorable scaling behavior.
-
-- **Robustness across multiple non-IID partitions.** Figure 4 evaluates FedDFQ under three distinct heterogeneous splits (Dirichlet, pathological, and class-imbalanced) and shows consistent superiority over compared methods, demonstrating generalization beyond a single data configuration.
+- **Robustness to diverse non-IID distribution types.** The paper evaluates FedDFQ under three different heterogeneous distribution setups (Dirichlet, pathological, and unbalanced coverage) and reports consistent outperformance over baselines (Figure 4), demonstrating practical robustness without per-distribution tuning.
 
 ## Weaknesses
 
 ### Fatal
 
-1. **Section 3.3.1 (Global parameters aggregation) ends mid-sentence; the core weighting mechanism is never specified.** After describing DIEM and the metric proxies, Section 3.3.1 terminates with "Here is the introduction to the algorithm process:" and immediately jumps to Section 4 (Experiments) on the next line. The actual aggregation formula—how cosine similarities from DIEM are converted into per-client weights for global parameter aggregation—is entirely absent. For a methods paper, this is not a missing appendix; it is the central algorithmic contribution left unsaid.
-
-2. **AGAM is mentioned throughout but never described.** The Automatic Gradient Accumulation Module is named in the abstract, introduction, method overview, and ablation study, yet no equation, pseudocode, or algorithmic description of its operation appears anywhere in the paper. The method section heading "3.3 Parameter and gradient integration" includes only the incomplete 3.3.1; there is no subsection for AGAM. The reader cannot determine what AGAM actually does.
-
-3. **FELPA is used in experiments but never defined in the method section.** FELPA appears as an ablation condition in Section 4.3 and in the conclusion (line 175), where it is described as aggregating "weighted parameters of feature extractors according to metric proxies." However, the method section (Section 3) never introduces FELPA, explains what the acronym stands for, or describes its mechanism. This is a critical gap: the ablation study tests a component that was never defined in the proposed method.
-
-**These three issues together mean that the paper's claimed methodological contribution is incompletely specified.** A reader cannot reproduce the method, cannot verify that the design is sound, and cannot assess the novelty of the aggregation and gradient accumulation strategies. This is a structural flaw that prevents acceptance.
+- **Two of the three claimed core modules (FELPA and AGAM) are not algorithmically described.** Section 3.3.1 ("Global parameters aggregation") cuts off mid-sentence after "Here is the introduction to the algorithm process:" and jumps directly to Section 4 — no aggregation formula, no weighting rule, no procedure is given. The AGAM module, listed as a main contribution in the abstract and introduction, receives **no equations, no algorithmic description, and no dedicated subsection at all**. It is only mentioned at a high level (e.g., "regularizes personalized classification layers with re-balanced gradients") with no specification of how this regularization works. Without these descriptions, the paper's central claimed contribution — a novel method for weighted aggregation and gradient regularization — cannot be evaluated for correctness, novelty, or reproducibility. This is not a minor omission; it is the absence of the method itself.
 
 ### Major
 
-1. **The theoretical justification for DIEM as a heterogeneity proxy is overstated.** The exact equivalence between similarity of data identifiers and similarity of class scores holds only in the trivial case where the classifier weights **W** = I and bias **b** = 0 (Appendix A.1, lines 220–224). The paper's claim to "theoretically prove that the similarity of data identifiers can represent the data heterogeneity" (line 107) conflates this degenerate-case algebraic identity with a general proof. The empirical Pearson correlation of r = 0.728 (Table 3) is moderate—suggestive but not strong enough to support the functional equivalence that the method requires for principled aggregation weighting. This weakens the core motivation for DIEM.
-
-2. **Experimental evaluation protocol is underspecified for a method claiming SOTA.** The paper does not state: (a) whether accuracy is measured on a global held-out test set or per-client local test sets, (b) the Dirichlet concentration parameter α used in the main experiments (only mentioned as α_i = 1 in the d1 description, not the main results), (c) the model architecture (no ResNet, CNN, or other architecture is identified), (d) optimizer, learning rate schedule, batch size, or number of communication rounds. The "A.2 Experiment details setup" appendix heading has no content visible in the processed text. While some detail loss may be a parser artifact, the main text itself is missing these specifications, making the reported numbers difficult to interpret or reproduce.
-
-3. **Several recent, directly relevant baselines from the paper's own reference list are not compared experimentally.** GPFL (Zhang et al., 2023a), FedGH (Yi et al., 2023), and FedCP (Zhang et al., 2023b) appear in the references but are not included in Table 1 or any experimental comparison. Since these are 2023 personalized FL methods closely related to the paper's approach, their omission weakens the claim of comprehensive SOTA comparison.
+- **The theoretical justification for metric proxies is insufficient and the claim is overstated.** Section 3.2 attempts to prove that the similarity of DIEM outputs (S(𝐱ᵢ, 𝐱ⱼ)) is a reliable proxy for the similarity of class predictions (S(𝐳ᵢ, 𝐳ⱼ)). The argument invokes an unspecified "matrix A" via "the theory of matrix" (line 89), then expands the cosine similarity of a linear function 𝐳 = 𝐖ᵀ𝐱 + 𝐛 into an expression involving 𝐱, 𝐖, and 𝐛 (Eq. 6). This is algebra — it expresses S(𝐳ᵢ, 𝐳ⱼ) in terms of 𝐱, 𝐖, 𝐛, but does **not** show that S(𝐱ᵢ, 𝐱ⱼ) is a reliable or information-preserving proxy for S(𝐳ᵢ, 𝐳ⱼ) under realistic conditions. The special case 𝐖=𝐈, 𝐛=𝟎 (Appendix A.1) is trivial and irrelevant to the actual setting. The empirical Pearson correlation of r=0.728 (Table 3) suggests a moderate correlation, but the paper does not discuss how proxy errors affect the downstream tasks (weighted aggregation and gradient regularization) or why this correlation level is sufficient. The claim "We theoretically prove that the similarity of data identifiers can represent the data heterogeneity" (line 107) is substantially overstated relative to what is actually shown.
 
 ### Minor
 
-1. **The DIEM operation is described as mapping data into "high-dimension semantic space" (line 14), but the actual output is a low-dimensional vector of length W (image width)—e.g., 32 for CIFAR-10.** This is a simple pixel-row average, not a semantic embedding. The characterization is misleading about what the module does.
+- **The DIEM is only weakly validated as a meaningful descriptor for federated learning.** The DIEM reduces each image to a vector of length W (e.g., 32 for CIFAR-10) by averaging channels then averaging rows. The paper offers no analysis — beyond the single Pearson correlation against prediction similarity — of whether such a coarse descriptor captures label distribution, domain shift, or other forms of heterogeneity that matter for FL. Synthetic examples, t-SNE visualizations, or ablation on the descriptor dimensionality would strengthen the case but are absent.
 
-2. **Privacy claims for DIEM are unsubstantiated.** The paper asserts that uploading DIEM vectors is "privacy-friendly" and preferable to uploading model predictions, but provides no analysis of information leakage, no comparison to alternatives (e.g., differential privacy guarantees), and no discussion of what information these vectors reveal about local data distributions.
+- **FELPA is never defined as an acronym.** The term "FELPA" appears in the ablation study (Section 4.3) and conclusion (Section 5) without ever being spelled out. From context it refers to the weighted global parameter aggregation, but the paper should state this explicitly.
 
-3. **There is no analysis of sensitivity to the DIEM design choices.** Why average along channel-dimension first then row-dimension, rather than column-dimension? Why not use a different aggregation (e.g., median, max pooling)? The design decisions for the DIEM are presented without justification.
+- **Limited evaluation scope.** The experiments only use CIFAR-10 and FashionMNIST. Many recent personalized FL papers additionally evaluate on CIFAR-100, TinyImageNet, or domain-realignment benchmarks. While this is not a fatal flaw, the claim of general applicability would be strengthened by broader evaluation.
 
 ### Trivial
 
-- The paper inconsistently uses "IDEM" and "DIEM" (compare line 4 "DIEM" vs. line 175 "IDEM").
-- The conclusion re-introduces "IDEM" as if it were a separate module when it is the same as DIEM.
+- The conclusion (Section 5) refers to "IDEM" rather than "DIEM," an inconsistency worth fixing.
 
 ## Nice-to-Haves
 
-- Standard deviations over multiple runs and significance tests would strengthen the reliability claims for Table 1.
-- An analysis comparing DIEM-based similarity to alternatives (e.g., penultimate-layer features from a fixed pretrained extractor) would help justify why raw pixel averaging is a better proxy for heterogeneity than learned representations.
-- A formal privacy analysis or differential privacy guarantee would substantiate the claimed "privacy-friendly" nature of DIEM.
+- A visualization (e.g., t-SNE or heatmap of pairwise similarities) showing that DIEM vectors from clients with similar label distributions cluster together would ground the entire proxy mechanism.
+- Adding CIFAR-100 or a federated NLP task would broaden the empirical contribution.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+The following points from the reviews were removed for the reasons stated:
 
-- **Criticism about typos, spelling, and grammatical errors** (e.g., "bechmark," "efifcient," "Tabel"): Removed per instructions — these are parser artifacts or formatting issues, not author errors in the original submission.
-- **Criticism about missing experimental details that would have been in the appendix** (e.g., model architecture, hyperparameters): The appendix heading "A.2 Experiment details setup" exists but its content was stripped by the parser. Per instructions, missing appendix content is not a valid weakness. However, the main-text specification gaps (Dirichlet α, test-set construction, evaluation metric definition) remain as noted in Major #2.
-- **Reviewer's claim that Table 1 reports 96.07% and 96.89% accuracy on CIFAR-10 and that these numbers are "implausibly high":** The table is an embedded image that cannot be read from the text. The numbers in the surrounding text (Local = 88.07% on CIFAR-10; DIEM + FedAvg gains of ~3%) suggest the actual CIFAR-10 numbers are in the low-to-mid 90s, which is less suspicious. This criticism is removed as unverifiable.
-- **Reviewer's claim that GPFL, FedGH, FedCP are "cited in related work":** These papers appear only in the reference list, not in the related work section. The reviewer's phrasing is inaccurate. However, their absence from experimental comparison remains a valid point (kept in Major #3).
-- **Generic strength about "addressing an important problem":** Removed — lacks specificity.
-- **Strength about "theoretical + empirical validation" being a core contribution:** The theoretical part has a verified weakness (trivial-case proof), so this strength is downgraded. The empirical correlation (r=0.728) is kept as a qualified observation but not listed as a standalone strength.
+- **"Tables 1 and 2 are placeholder images so results cannot be verified"** — The tables are embedded as images in the original submission (a formatting choice, not a parser error). The images are the tables, not placeholders. However, since the tables are image-based, the specific numbers are not extractable here. This point is removed as it conflates a format preference with a substantive criticism of the author's content.
+- **Strength: "Plug-and-play AGAM design"** — This strength claims AGAM is a usable plug-and-play component, but this directly conflicts with the verified fatal weakness that AGAM is not algorithmically described. Per instructions, when strength and verified weakness conflict, the weakness prevails.
+- **Strength: "Theoretical and empirical validation for metric proxies"** — This describes the derivation and Pearson correlation as strengths, but the verified Major weakness establishes this theory is insufficient and the claim is overstated. The empirical correlation is genuine but the strength as framed ("principled basis") conflicts with the finding that the theory is incomplete. Relegated here; the empirical part (r=0.728) is acknowledged in the Weaknesses section.
+- **Criticism about missing related works differentiation** — Partially addressed by the paper's discussion of limitations of existing methods in Sections 2.1–2.2; the differentiation is present, if not sharp. Removed as insufficiently specific.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface any insight about the method or problem that the paper itself does not discuss.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Complete the method specification.** Provide the exact aggregation formula: how cosine similarities from DIEM translate into per-client weights for global parameter aggregation. Describe AGAM with full equations or pseudocode: what gradients are accumulated, how they are re-balanced, and how this module regularizes the classification layers. Define FELPA explicitly in Section 3. Without these, the paper is not a methods paper.
-2. **Tone down the theoretical claims.** Replace the oversold "theoretical proof" with an honest statement: the exact equivalence holds only under W=I, b=0, and the empirical correlation of r=0.728 provides suggestive but not conclusive evidence that the approximation works in practice.
-3. **Add standard experimental details to the main text:** model architecture, Dirichlet α parameter, how test accuracy is computed (global vs. per-client), communication rounds, and hyperparameters. Report standard deviations over at least 3 runs.
-4. **Include comparison with GPFL, FedGH, and FedCP** in Table 1, since these are directly relevant personalized FL methods from 2023 that share similar goals.
-5. **Provide a privacy analysis** for DIEM, or at minimum discuss why pixel-averaged vectors are less revealing than model predictions or learned features.
+1. **Complete the algorithmic specification.** Provide the full aggregation rule for FELPA (how metric proxies produce per-client weights, the exact weighted averaging formula) and a full algorithmic description of AGAM (what gradients are modified, how re-balancing works, the update rule). Without these, the paper is a proposal sketch, not a complete research contribution.
+2. **Replace the vague matrix argument** with a clear statement of conditions under which S(𝐱ᵢ, 𝐱ⱼ) approximates S(𝐳ᵢ, 𝐳ⱼ), or replace the theoretical claim with an honest empirical characterization of the proxy's limitations.
+3. **Validate DIEM directly** by showing that the distance/similarity between DIEM vectors correlates with known ground-truth heterogeneity (e.g., label skew measured by the Dirichlet parameter α).
+4. **Define all acronyms** (FELPA) at first use.
 
 ## Score and Decision
 
-The paper identifies a real problem and proposes a genuinely parameter-free approach to heterogeneity quantification. However, the method section is critically incomplete: the core aggregation mechanism (Section 3.3.1) cuts off mid-sentence, AGAM is never described, and FELPA is never defined. For a methods paper, this is a fatal structural flaw that cannot be resolved in a rebuttal. The review is based on the paper as submitted.
+**Originality:** The core idea — parameter-free data identifiers for quantifying FL heterogeneity — is moderately novel. However, the novelty cannot be properly assessed without knowing how the identifiers are actually used in aggregation and gradient regularization.
 
-MY FINAL SCORE: <pineapple>3.0</pineapple>
+**Importance:** Heterogeneity-aware personalized FL is an important and active area.
+
+**Claims support:** The paper's central claims are not supported because the methods that would support them (FELPA, AGAM) are not described. The experimental results are reported but cannot be connected to a specific, replicable algorithm.
+
+**Soundness:** Cannot be evaluated due to missing method descriptions.
+
+**Clarity:** The DIEM and metric proxies sections are reasonably clear; the paper becomes opaque exactly where it matters most — the actual aggregation and gradient modules.
+
+**Value to community:** The paper's idea has potential value, but in its current form it cannot serve as a reproducible reference for other researchers.
+
+The paper is fundamentally incomplete: two of its three claimed modules have no algorithmic description. No amount of positive experimental results can compensate for the absence of the method itself. The strongest revision path requires rewriting the core methodology sections from scratch, after which the theoretical and empirical validation can be properly assessed.
+
+MY FINAL SCORE: <pineapple>2.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

@@ -1,78 +1,94 @@
-Now I have all the evidence needed. Let me compose the final review.
-
 ## Summary
 
-The paper proposes CAPGen, a framework for generating adversarial patches constrained to a small set of "base colors" that can be extracted from the background environment for visual harmony. The paper makes three main contributions: (1) the CAPGen algorithm using a color probability matrix with temperature-controlled Softmax to constrain patch colors, (2) a systematic analysis decomposing adversarial patches into pattern (color-agnostic texture) and color components, finding that patterns dominate attack effectiveness, and (3) a fast generation strategy that recolors existing high-performance patches to adapt to new environments. The method is evaluated on the INRIA pedestrian dataset against six detectors in white-box and black-box settings.
+This paper proposes CAPGen, an adversarial patch generator that constrains the patch to use a small set of base colors (extracted from the environment via K-means clustering) to improve visual stealthiness. The method optimizes a color probability matrix with a temperature-regularized softmax so each pixel maps to exactly one base color. The paper further decomposes adversarial patches into pattern (color-agnostic relative pixel magnitudes) and color components, finding that patterns dominate attack performance. Based on this, it proposes a fast generation strategy: swap colors of a pre-trained high-performance patch to match a new environment without retraining. Experiments on INRIA across six detectors in white-box and black-box settings show CAPGen-P1 (pattern from AdvPatch, colors swapped to arbitrary sets) achieves mean mAP₅₀ of 22.92, close to AdvPatch's 19.58 and far below color-only CAPGen-T1 (48.04).
+
+---
 
 ## Strengths
 
-- **First systematic decomposition of adversarial patches into pattern and color components.** The paper provides a clean conceptual separation between pattern (defined as relative pixel magnitude, operationalized via the color probability matrix) and color (the actual base color values). The controlled comparisons that hold one component fixed while varying the other — particularly AdvPatch vs. CAPGen-P1 (same pattern, colors restricted → small drop of ~3 points) and CAPGen-T1 vs. CAPGen-R1 (same colors, one learned pattern vs. random → large gap of ~34 points) — provide meaningful evidence that patterns dominate attack effectiveness. This insight has practical value for the community.
+- **Systematic decomposition of adversarial patches into pattern and color components.** To my knowledge, this is the first paper to formally separate these two factors and quantify their relative impact. The evidence is internally consistent across multiple comparisons: CAPGen-P1 (pattern preserved, colors swapped) achieves 22.92 mAP₅₀, CAPGen-T1 (color optimized from scratch) achieves 48.04, and CAPGen-R1/R2 (random pattern) ~82 — a clean monotonic ordering that supports the pattern-dominance claim.
 
-- **Fast generation strategy with strong empirical performance.** CAPGen-P1 (recoloring AdvPatch with base colors) achieves a white-box mean mAP₅₀ of 22.92, only 3.34 points above the unrestricted AdvPatch (19.58), and substantially outperforms DAP (42.12) and NAP (44.95). In black-box settings with Yolov4 as substitute, CAPGen-P1 (37.99) matches AdvPatch (38.64). This demonstrates that recolor-based adaptation is a viable and efficient strategy for deploying patches in new environments.
+- **Novel method design that decouples stealth from adversarial optimization.** The color probability matrix with temperature-regularized softmax (Eq. 3) is a neat technical contribution. It forces each pixel to a single base color end-to-end via differentiable optimization, so stealth (choosing environment-matching colors) and attack effectiveness (optimizing spatial allocation of those colors) are handled by separate components without interference. The regularization on m ensures exactly-one-color-per-pixel without post-processing.
 
-- **Novel color probability matrix with temperature-controlled regularization.** The generation mechanism (Eq. 3) using Softmax with low temperature (τ=0.1) to enforce per-pixel membership in one base color is technically interesting. It cleanly decouples the stealth objective (choosing base colors) from the adversarial objective (optimizing the probability matrix), which is a principled design.
+- **Comprehensive evaluation across diverse detector architectures.** White-box results span Yolov2/3/4/5s/5m and Faster R-CNN; black-box transferability is tested with five different substitute models. The pattern-dominance finding holds consistently (every cell in Tables 1 and 3 shows CAPGen-P1 beating CAPGen-T1), and CAPGen-P1 is competitive with (and in some black-box settings essentially matches) the unrestricted AdvPatch baseline.
+
+- **The fast generation strategy, though unvalidated, is conceptually well-motivated by the pattern-dominance finding.** If patterns dominate performance, then reusing a pre-optimized pattern and merely adapting its colors to a new environment is a principled way to avoid retraining. The idea is clearly presented and follows logically from the paper's own experimental evidence.
+
+---
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **The "environment-adaptive" and stealthiness claims are completely unevaluated.** This is the paper's most significant gap. The title, abstract, introduction, and conclusion all emphasize visual harmony and environmental adaptation, yet:
-   - The base colors used in experiments (Bc1, Bc2) are explicitly stated as *randomly selected* (Sec. 4.2: "We randomly select two base color sets, Bc1 and Bc2, to represent different environments."), not extracted from the INRIA dataset or any real environment. This means the method's core mechanism (K-means clustering on background images) is never actually tested.
-   - There is no stealthiness evaluation whatsoever: no human perceptual study, no automated stealth metric (e.g., color histogram distance, conspicuity, SSIM between patch and background), and no qualitative side-by-side of patches placed in scenes. The only mention of a physical experiment (coats in a snowfield, Fig. phy_b2) is a single sentence without reported results or analysis.
-   
-   The paper cannot claim to have solved the problem of "visual harmony" when the claimed solution's key component (environment-specific base color extraction) is not tested, and the outcome (stealthiness) is not measured. This gap reaches the level of a Major weakness because it concerns the paper's central motivation.
+- **The color replacement procedure for converting AdvPatch (continuous pixels) into CAPGen-P1 is completely unspecified.** AdvPatch directly optimizes 640×640×3 pixel values — it has no color probability matrix \(m\) and no notion of "base colors." The paper states CAPGen-P1 is created by "replacing the colors of the AdvPatch with base colors Bc1 and Bc2" but never describes the algorithm that maps AdvPatch's continuous pixel values onto a discrete set of 3 base colors while preserving the pattern. Does it run K-means on AdvPatch's pixels to obtain a pseudo-color-probability matrix? Does it assign each pixel to the nearest base color? If the latter, the quantization error alone could fundamentally alter the pattern. Without this detail, CAPGen-P1 is not a well-defined object, the pattern-dominance claim is unverifiable, and the "fast generation strategy" (which relies on this same operation) cannot be reproduced or trusted. (Sec. 4.2, Sec. 3.3)
 
-2. **CAPGen-T (the gradient-optimized core algorithm) underperforms existing baselines, yet this is not acknowledged.** In white-box settings (Table 1), CAPGen-T1 achieves a mean mAP₅₀ of 48.04, which is *worse* than DAP (42.12) and NAP (44.95). The paper's presentation highlights CAPGen-P1's superiority over DAP/NAP while remaining silent on CAPGen-T1's relative underperformance. The paper's first listed contribution states it "can generate adversarial patches with specified base colors extracted from the environment and has better practicality and invisibility than the mainstream adversarial patch algorithms," but this evaluation relies on CAPGen-P (a post-hoc recoloring) rather than CAPGen-T (the actual optimization procedure). The paper would benefit from acknowledging this and clearly delineating which variant supports which claim.
+- **Stealthiness is claimed but never quantitatively evaluated.** The paper's headline motivation is that CAPGen patches "seamlessly blend with their background for superior visual stealthiness" (abstract) and are "visually concealed in the physical environment" (conclusion). Yet: (a) there is no human perception study, no stealthiness metric, and no quantitative measurement of visual match; (b) the base colors used in all experiments (Bc1, Bc2) are **arbitrarily chosen RGB triplets** (Sec. 4.2: "We randomly select two base color sets..."), *not* extracted from actual environment images via the K-means procedure described in Sec. 3.2. This means the experimental evaluation tests color-constrained patches, not environment-adaptive patches. The only evidence for stealthiness is a qualitative reference to a physical experiment (Fig. phy_b2, not visible in the extracted text) with no controlled measurements. The paper's central value proposition — environment-adaptive visual stealthiness — is assumed rather than demonstrated.
 
-3. **The recoloring procedure is underspecified for reproducibility.** For CAPGen-P1/P2, the paper states only "we modify its colors" and "replacing the colors of the AdvPatch with base colors." It does not specify whether this is per-pixel nearest-neighbor assignment in RGB space, a weighted combination based on original color similarity, or some other procedure. Since CAPGen-P1 is the paper's strongest result, this procedural gap is a concrete reproducibility concern.
+- **The pattern vs. color comparison is confounded by asymmetric starting points.** CAPGen-P1 derives its pattern from AdvPatch (a fully trained, unrestricted adversarial patch that was optimized for attack performance alone). CAPGen-T1 learns its pattern *from scratch* via 200 epochs of gradient optimization. The 25-point gap (22.92 vs. 48.04) is large, and the claim is corroborated by CAPGen-R1/R2 (~82), so this does *not* invalidate the finding. But it is a real confound: the pre-optimized pattern in CAPGen-P1 likely has higher "quality" than what 200 epochs from scratch can achieve under color constraints. A controlled experiment (e.g., starting the same m from AdvPatch's cluster assignments vs. random initialization, both with the same colors) would cleanly isolate the contribution of pattern quality from the pattern-vs-color dichotomy.
 
 ### Minor
 
-4. **Selective reporting in the pattern vs. color analysis.** The paper uses the large gap between CAPGen-P1 (pattern preserved, 22.92) and CAPGen-T1 (gradient-optimized, 48.04) as evidence that "patterns matter more." However, these two variants differ in *both* how the pattern was obtained (one from unconstrained AdvPatch, one from constrained CAPGen optimization) and their inherent adversarial quality. The paper's overall conclusion about patterns dominating colors is still supported by the cleaner comparisons (AdvPatch vs. CAPGen-P1 for color effects, CAPGen-T1 vs. CAPGen-R1 for pattern effects), but this particular comparison is confounded and should not be presented as primary evidence.
+- **The "fast generation" claim has no timing benchmarks.** The paper asserts that color-swapping "can significantly enhance the efficiency of the adversarial attack" but provides no measurement of generation time, no comparison to the 200-epoch CAPGen training pipeline, and no demonstration that the swapped patch actually works in a new environment (the experiments use fixed color sets, not environment-specific ones extracted from a new scene). The idea is plausible but entirely unsubstantiated. (Sec. 3.3)
 
-5. **No variance information.** All tables report single mAP₅₀ values without confidence intervals or standard deviations. Given the modest test set size (288 images) and the fact that several comparisons are close (e.g., Table 3: CAPGen-P1 at 37.99 vs. AdvPatch at 38.64 when Yolov4 is substitute), the absence of error bars makes it impossible to assess whether observed differences are statistically significant.
+- **No variance or confidence intervals reported.** All results in Tables 1 and 3 are single numbers. Given that differences between methods are sometimes small (e.g., CAPGen-P1 vs. AdvPatch in black-box settings differ by <1 point on several entries), it is impossible to assess whether observed differences are meaningful or statistical noise.
 
-6. **Formal framework (Eq. 2) includes terms never instantiated.** The optimization framework introduces S(P; ε) for stealth and R(P; φ) for robustness as explicit regularization terms, but neither is ever specified or computed in the experiments. The paper explains that base colors handle stealth and EOT handles robustness, which is reasonable, but the mismatch between the formal framework and the actual implementation creates confusion.
+- **Ablation on number of base colors (Fig. 3) uses randomly chosen colors, not environment-extracted ones.** The paper says "first randomly choose 3 colors" and then incrementally adds more colors up to 93. Since the method's purpose is environment matching, using random colors tests capacity but not the environment-adaptation claim. The trend that more colors improve attack performance is expected (less constrained) and does not inform the design choice of 3 as the default.
 
-7. **Ablation on base color count reveals an unaddressed tension.** Figure 4 (right) shows attack performance improving as the number of base colors increases (up to 93 colors). The paper motivates 3 base colors for stealth, but never discusses how performance improves with more colors or whether 93-color patches would be visually conspicuous despite containing environmental colors. This tension between the stealth motivation and the empirical findings is left unexplored.
+- **Temperature parameter τ = 0.1 is given without sensitivity analysis.** The paper states τ ensures "each pixel belongs to one of the base colors" but a single value is unexamined. Since τ controls the hardness of the softmax color assignment, it directly affects both the pattern (sharper assignments = more binary spatial structure) and the effective number of colors used per pixel.
 
 ### Trivial
 
-- The paper mentions a physical experiment (coats in snowfield, Fig. phy_b2) but provides no quantitative results, only a single qualitative claim. This figure reference appears to point to content not present in the submitted manuscript (possibly in an appendix stripped during parsing).
+- **Phrasing of the attack performance comparison (Sec. 4.3).** The paper writes: "Even AdvPatch is only 3.34 points lower than CAPGen-P1, further illustrating our approach's advantage." Since lower mAP₅₀ is better, AdvPatch (19.58) outperforms CAPGen-P1 (22.92). The intended meaning ("CAPGen-P1 is competitive despite color constraints") is clear from context, but the phrasing reads as if CAPGen-P1 has an advantage over AdvPatch, which is not true for attack performance. This should be clarified.
+
+---
 
 ## Nice-to-Haves
 
-- A controlled experiment that isolates pattern contribution by holding colors constant and randomizing the pattern spatially (e.g., pixel shuffling of AdvPatch while preserving the color histogram) would further strengthen the pattern-dominance conclusion.
-- A simple automated stealth metric (e.g., Earth Mover's Distance between patch color distribution and background environment color distribution) would validate whether base-color-constrained patches actually blend better, without requiring a full user study.
-- Adding confidence intervals or reporting results over multiple random seeds would significantly improve the paper's statistical rigor.
+- A human perception study (e.g., two-alternative forced-choice detection task, or reaction-time measurement) to directly support the stealthiness claim.
+- Timing benchmarks comparing the fast generation pipeline vs. full CAPGen training (200 epochs) vs. AdvPatch training, in terms of wall-clock time.
+- An experiment where base colors are actually extracted from real environment images (e.g., snow, forest, brick wall) via the described K-means procedure, with both attack performance and visual match evaluated.
+- A controlled experiment for the pattern vs. color analysis: start from the same optimized color probability matrix and compare (a) swapping colors while keeping m fixed vs. (b) randomizing m while keeping colors fixed — both starting from the same initialization.
+- Sensitivity study for the temperature parameter τ and confidence intervals via multiple runs.
+
+---
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed — treat them with caution:
 
-- **"CAPGen-T1 is far closer to the Gray patch (81.84) than to the other attack methods"** (from Harsh Critic). Factually wrong: CAPGen-T1 (48.04) is separated from Gray (81.84) by 33.8 points but from DAP (42.12) by only 5.92 points and from NAP (44.95) by 3.09 points. The critic's claim is false in magnitude and direction.
-- **Missing CamoPatch baseline** (Harsh Critic). CamoPatch uses semi-transparent RGB-valued circles, a fundamentally different approach from the patch-based methods evaluated. The paper already includes DAP and NAP as relevant baselines, and demanding every related method be compared is scope creep given the paper's already substantial evaluation across 6 detectors.
-- **"The paper does not cite prior work touching on patch texture vs. color"** (Harsh Critic). This is a missing-related-works criticism, which by instruction cannot be confirmed without external sources. Removed per policy.
-- **"CAPGen achieves environmental stealth without sacrificing attack efficacy"** (Strength Finder). This conflicts with the verified major weakness that stealthiness is entirely unevaluated and base colors were randomly selected rather than environment-extracted. The weakness finding overrides this claimed strength.
+- **Gray patch description omission** (Harsh Critic, Other Observations): The paper does not elaborate on how the Gray patch is applied (e.g., solid gray rectangle, its size, grayscale value). This is a trivial implementation detail common in adversarial patch papers and does not affect the paper's claims. → **Removed** (trivial implementation detail).
+
+- **"First to comprehensively examine" framing** (Harsh Critic): The reviewer suggests more cautious framing. This is a stylistic opinion about self-claims, not an error or a valid weakness of the paper's technical content. → **Removed** (opinion).
+
+- **"The paper should also cover Y" demands from Strength Finder**: Some of the Strength Finder's claimed strengths about "environment-adaptive stealthiness" are weakened by the fact that experiments use arbitrary base colors. The strength itself is retained (method design is conceptually sound) but the overclaim is noted in the Major weaknesses. No points to remove here.
+
+- **Harsh Critic's claim that "CAPGen-T1 has no pattern optimization at all"** is factually inaccurate: CAPGen-T1 optimizes the color probability matrix m via gradient descent, which does create a pattern (spatial allocation of colors). The real difference is that CAPGen-P1 inherits a pre-optimized pattern while CAPGen-T1 learns one from scratch. The weakness text above reflects the corrected version. → **Corrected in Minor Weakness #1**.
+
+---
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The most interesting observation — that patterns dominate colors by a large margin — is the paper's own finding and is well supported despite the confounds noted above.
+
+---
 
 ## Suggestions
 
-1. Restructure the paper to clearly separate the *analysis contribution* (pattern > color) from the *generation method* (CAPGen). The analysis and fast-recooling strategy are the paper's strongest results; consider foregrounding them.
-2. Most critically: add at least one stealthiness evaluation. A simple quantitative metric — e.g., the distributional distance (Wasserstein or χ²) between the patch's pixel colors and the environmental background's color distribution for images where base colors are *actually extracted* from the environment — would directly validate the claimed adaptation mechanism.
-3. Acknowledge and discuss the performance gap between CAPGen-T and existing baselines (DAP, NAP). If CAPGen-T underperforms, discuss why and whether this is an inherent limitation of constrained optimization or addressable with different training procedures.
-4. Specify the recoloring algorithm for CAPGen-P precisely (per-pixel nearest-neighbor? weighted blend?).
-5. Add variance estimates (e.g., over multiple runs or via bootstrapping) for all main-table results.
+1. **Specify the AdvPatch-to-CAPGen-P1 conversion algorithm explicitly.** If the procedure is: (a) run K-means on AdvPatch's pixels to obtain cluster centroids and assignments, (b) treat cluster assignments as a hard color-probability matrix, (c) replace centroids with Bc1/Bc2 — then say so. If a different method is used, describe it in full. Without this, CAPGen-P1 is not a well-defined experimental condition.
+
+2. **Either evaluate stealthiness quantitatively or temper the stealthiness claims.** If a human study is infeasible, consider a proxy metric (e.g., perceptual distance between patch and background in color space, or a user study on Amazon Mechanical Turk with a modest sample size). At minimum, perform the environment-color extraction experiment (K-means on real background images) that the method describes but the experiments omit.
+
+3. **Add a controlled pattern-vs-color experiment within the CAPGen framework only** (no AdvPatch involvement): take a CAPGen-trained patch, then create two variants — (a) swap colors preserving pattern, and (b) randomize the color probability matrix m preserving colors. This avoids the AdvPatch confound entirely.
+
+4. **Report timing for the fast generation strategy.** Even a single number (e.g., "color replacement takes 0.3s vs. 200 epochs of training") would substantiate the efficiency claim.
+
+5. **Include variance estimates** by running experiments with at least 3 random seeds and reporting mean ± std.
+
+---
 
 ## Score and Decision
 
-The paper has a genuine insight (patterns dominate colors in adversarial patch effectiveness) and a practically useful fast generation strategy. However, the paper's central advertised capability — environment-adaptive generation with demonstrable visual stealth — is completely unvalidated. The core optimized generator (CAPGen-T) underperforms existing baselines without acknowledgment, and the strongest results come from a recoloring operation whose mechanism is underspecified. These gaps are structural enough to prevent acceptance but do not invalidate the analysis contribution.
+The paper tackles a relevant problem and contributes a technically clean method (the color probability matrix with regularized softmax) plus a genuinely interesting finding about pattern vs. color dominance. The writing is clear and the evaluation is broad across detectors. However, the paper has three major weaknesses: (1) the core CAPGen-P1 experimental condition is underspecified to the point of being unreproducible, (2) the paper's main value proposition — environment-adaptive visual stealthiness — is asserted but never quantitatively evaluated, and the experiments use arbitrary (non-environmental) colors, and (3) the pattern-vs-color comparison has an uncontrolled asymmetry. These issues collectively undermine confidence in the central claims. The paper needs substantial revision — particularly specifying the color replacement procedure, adding a stealthiness evaluation, and running a controlled pattern experiment — before it can be accepted. I cannot recommend acceptance in the current form.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+**MY FINAL SCORE:** <pineapple>4.5</pineapple>
+**MY FINAL DECISION:** <orange>Reject</orange>

@@ -1,20 +1,38 @@
-Now I have a thorough understanding of the paper. Let me synthesize the final consolidated review.
+Now I have all the information needed. Let me carefully verify each claim and construct the final review.
+
+**Key verifications against the paper:**
+
+1. **Point 1 (error accumulation assumption):** Confirmed at line 172 - paper explicitly says "we suppose" with "linear error accumulations assumption." The paper is transparent that this is an assumption, not a proven result, for higher-order solvers.
+
+2. **Point 2 (RX-Runge-Kutta approximation):** Confirmed at lines 196-200 - the paper says \(\mathbf{z}_{i-\delta}\) is "approximated as \(\mathbf{z}_{i-1}\) or \(\mathbf z_{i-1-\delta}\)." The paper acknowledges the approximation but does not ablate it.
+
+3. **Point 3 (missing global analysis for RX-Euler):** Confirmed - Section 4.4 (lines 216-227) promises analysis of both Euler and RX-Euler but only presents Euler's before jumping to Algorithm 1.
+
+4. **DPM-Solver++/DEIS comparison:** The reviewer mentions this but per instructions I must not add "missing related works" criticisms.
+
+Let me also check - the Strength Finder's claim about global error analysis being complete is partially wrong since the RX-Euler analysis isn't in the extracted text.
+
+Wait - actually, Strength 1 truly says "Section 4.4 provides a global truncation error analysis, showing that Euler's global error is c/N + O(N^{-2}) while RX-Euler achieves O(N^{-2})." But the RX-Euler analysis isn't in the extracted text. However, the local error for RX-Euler IS established as O(h³) in Equation (19), and the global error of O(N^{-2}) follows by a standard argument. The extracted text may be missing a sentence. The strength is still valid.
+
+Now let me draft the final review.Now I have thoroughly verified all claims against the paper. Here is my final consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes RX-DPM, a method that applies Richardson extrapolation to diffusion model sampling by linearly combining two ODE solutions (a single-step estimate and a k-step estimate computed over the same interval) to cancel the leading truncation error term. The key technical contribution is a generalization of standard Richardson extrapolation to non-uniform time grids (Equation 19), which is essential because DPM samplers typically use non-uniform step scheduling. The method requires no additional network evaluations (NFEs) since the single-step estimate can be reused from intermediate states of the multi-step computation. Experiments across EDM, DDIM, DPM-Solver, PNDM, SN-DPM, and NPR-DPM backbones on multiple datasets show consistent improvements, especially in the low-NFE regime.
+This paper proposes RX-DPM, a method that applies Richardson extrapolation to diffusion ODE solvers. The key idea is to combine a single-step estimate (over a coarse interval) and a multi-step estimate (over the same interval decomposed into finer steps) to obtain a higher-order approximation without requiring additional network function evaluations (NFEs). The paper derives the method rigorously for first-order solvers (Euler/DDIM) on non-uniform time grids, extends it heuristically to higher-order solvers (DPM-Solver, PNDM), and validates it extensively across multiple backbones, datasets, and NFEs regimes.
 
 ## Strengths
 
-- **Novel generalization of Richardson extrapolation to non-uniform time schedules.** The paper derives a tailored extrapolation formula (Equation 19) that works with arbitrary discretizations via the λ_j coefficients, unlike standard Richardson extrapolation which requires uniform grids. This is critical for DPMs where non-uniform step sizes (e.g., EDM-style scheduling) are standard. The ablation in Figure 2 shows this non-uniform formulation significantly outperforms naive uniform Richardson extrapolation.
+- **Zero additional NFEs while improving accuracy.** The method reuses the first prediction of each k-step interval that is already computed during the multi-step run, requiring only a lightweight linear combination (Section 4.2, line 162). This is a direct enabler of computational efficiency.
 
-- **Consistent and often large improvements at low NFEs without additional computational cost.** Across all tested datasets (CIFAR-10, FFHQ, AFHQv2, ImageNet, LSUN Bedroom, CelebA, LSUN Church), RX-DPM consistently improves FID scores over its base solver, with particularly notable margins in the low-NFE regime (N ≤ 10–20 steps). This is achieved without any additional network evaluations — the only extra cost is a negligible linear combination of two stored estimates.
+- **General formulation for arbitrary (non-uniform) time grids.** The paper derives the truncation error for the Euler method on a non-uniform grid (Section 4.1, Equations 11–16), leading to the RX-Euler extrapolation formula (Equation 19). They further show (Figure 2) that naïve uniform-grid Richardson extrapolation performs poorly on DPMs, while their tailored formulation yields large improvements, validating the necessity of the generalization.
 
-- **Simple drop-in integration with diverse DPM solvers.** The method is presented as a generic wrapper (Algorithm 1) and is applied to Euler, DDIM, DPM-Solver-2/3, PNDM (S and F), and even stochastic models (SN-DPM, NPR-DPM). The paper provides specific implementation strategies for Runge-Kutta and Adams-Bashforth families (Section 4.3). The breadth of successful application across Tables 1–4 demonstrates practical versatility.
+- **Strong and consistent empirical gains across diverse backbones, datasets, and baselines.** RX-Euler surpasses Heun, LA-DPM, and IIA on CIFAR-10, FFHQ, AFHQv2, and ImageNet (Figure 3), especially at low NFEs. Improvements are also shown on Stable Diffusion V2 (Table 1), DPM-Solver-2/3 (Table 2), PNDM variants (Table 3), and NPR-DDIM/SN-DDIM (Table 4). This breadth supports the claim of strong generalization.
 
-- **Explicit error analysis and convergence characterization.** The derivation traces from local truncation error on a non-uniform grid (Section 4.1) through the extrapolation formula (Section 4.2) to a global error estimate (Section 4.4), showing the dominant error term shrinks from O(1/N) to O(1/N²). This provides a clear theoretical narrative for why the method works, even if the analysis is simplified.
+- **Theoretically grounded analysis for first-order solvers.** The derivation for Euler/DDIM (Sections 4.1–4.2) is clean and rigorous, establishing a local O(h³) error for the extrapolated estimate. The error model for this case follows directly from Taylor expansion and the linear error accumulation structure is exactly derived.
+
+- **Honest reporting of limitations.** The paper openly discusses the mixed results on Stable Diffusion (lower CLIP scores at 15 NFEs, line 267), the F-PNDM/LSUN Church failure case (Section 5.5), and the heuristic nature of the RX+EDM hybrid (Section 5.3). This transparency strengthens the work.
 
 ## Weaknesses
 
@@ -22,64 +40,59 @@ This paper proposes RX-DPM, a method that applies Richardson extrapolation to di
 None.
 
 ### Major
-None.
+
+- **The extension to higher-order solvers rests on an unverified assumption about error accumulation.** In Section 4.3 (line 172), the paper states: "Analogous to Equation (18), we suppose the following equation holds for \(\hat{\pmb{x}}_{t_{i-k}}^{(k)}\) with the linear error accumulations assumption." For higher-order methods (Runge-Kutta, Adams-Bashforth), error propagation is not simply additive — local errors can interact with internal stages and cancel or compound in ways that violate the assumed additive structure. The paper provides no analysis, numerical demonstration on a tractable ODE, or heuristic argument that this assumption approximately holds for the specific solvers used. While the experimental results are positive, the paper overclaims by stating it "effectively increases the order accuracy" (contributions) for these cases when the theoretical foundation is incomplete. The authors should either (a) restrict theoretical claims to first-order solvers and present higher-order results as empirical extensions, or (b) provide numerical verification of the error model.
+
+- **The RX-Runge-Kutta implementation involves an unverified approximation whose impact is not evaluated.** For the second-order Runge-Kutta case (Section 4.3, lines 196–200), the required intermediate gradient \(\mathbf{z}_{i-\delta'}\) is not directly available and is approximated as \(\mathbf{z}_{i-1}\) or \(\mathbf{z}_{i-1-\delta}\). This approximation introduces an error that is not accounted for in the extrapolation coefficient derivation and is not ablated against a version that computes the exact estimate (e.g., by paying an extra NFE). The quality of this approximation may depend on step size and score function smoothness, and could degrade the expected gain.
 
 ### Minor
 
-- **The higher-order solver extension involves unvalidated approximations.** For RX-Runge-Kutta (Section 4.3), the single-step estimate requires approximating the intermediate function evaluation z_{i-δ'} by z_{i-1} or z_{i-1-δ} — an ad hoc choice with no error analysis. For Adams-Bashforth, the single-step estimate reuses function evaluations on a coarser grid (Equation 27), which alters the method's stability properties. While the empirical results (Tables 2–3) show that RX-DPM improves on higher-order solvers in most cases, the paper does not isolate whether these approximations degrade performance relative to an oracle that could compute the exact single-step estimate. This is a meaningful methodological gap, though it does not invalidate the empirical findings.
+- **The global truncation error analysis for RX-Euler is incomplete in the presented text.** Section 4.4 (line 218) promises analysis for both Euler and RX-Euler but only delivers Euler's result (c/N). While the local O(h³) error for RX-Euler is established (Equation 19), the section does not explicitly show how this translates to global O(1/N²) error under non-uniform grids and repeated extrapolation. This is a presentation gap rather than a fatal flaw, as the local-to-global argument is standard.
 
-- **The F-PNDM failure case on LSUN Church is a real but poorly characterized limitation.** As the paper notes, RX-DPM "does not work well" with F-PNDM on LSUN Church, which the authors attribute to the baseline solver's non-monotonic behavior (best at 10 steps, worse at finer steps). This suggests the method relies on the baseline solver having favorable convergence properties — a condition that is neither formally characterized nor tested elsewhere. The paper mentions that IIA reported similar phenomena, which contextualizes the issue but does not resolve it.
+- **The hybrid RX+EDM approach (Section 5.3) is heuristic and dataset-specific.** The paper uses RX-Euler for the middle half of steps on CIFAR-10 and the last half on other datasets with no principled rule for the split. While this honestly acknowledges the heuristic nature, it limits the reproducibility and transferability of this specific combination.
 
-- **The CLIP score drop on Stable Diffusion at 15 NFEs is noted but not investigated.** Table 1 shows that while FID improves, CLIP scores drop at 15 NFEs. The authors speculate about classifier-free guidance scale tuning but provide no analysis. This is a meaningful trade-off between image quality and image-text alignment that is not discussed or measured elsewhere in the paper.
-
-- **The IIA baseline results are copied from the original paper rather than reproduced under the same experimental conditions.** The paper states that "the values are brought from the tables of the paper" (Section 5.3). This introduces uncertainty in the comparison, as experimental setups (seeds, hardware, preprocessing) may differ. The LA-DPM comparison, while reproduced, uses a fixed λ=0.3 from the original paper. These comparisons could inflate the apparent margin of improvement.
-
-- **The global truncation error analysis (Section 4.4) is a simplified back-of-the-envelope estimate.** The analysis assumes global error ≈ N × local error, which is standard textbook material for linear ODEs under Lipschitz conditions but does not account for the nonlinearity of the learned score function, non-uniform step sizes central to the method, or error propagation across multiple extrapolation blocks. This does not invalidate the method — the empirical results stand on their own — but the theoretical characterization is less complete than claimed.
+- **The method shows mixed results on Stable Diffusion (lower CLIP scores at 15 NFEs) and on SN-RX-DDIM for CIFAR-10.** The paper acknowledges these cases and offers plausible explanations (guidance scale tuning, large covariances), but these indicate that the method is not universally beneficial without task-specific tuning.
 
 ### Trivial
 
-- The hybrid approach (RX+EDM, Section 5.3) is explicitly acknowledged as heuristic by the authors and offered as a bonus finding. This is appropriately scoped and not a weakness of the main method.
+- The denominator in Equations (19) and (23) could be close to zero for certain choices of \(\lambda_j\), potentially causing numerical instability — this is worth a brief note.
+- Some figure/table references are image placeholders (e.g., Table 1, Table 2) whose content cannot be verified from the plain text, but this is a parser artifact.
 
 ## Nice-to-Haves
 
-- An oracle experiment validating the error model: measure actual errors along a trajectory using a high-accuracy reference solution and verify that the extrapolation reduces error at the expected O(h³) rate. This would directly confirm the central assumption.
-- An analysis of the RX-Runge-Kutta approximation: compare the proposed z_{i-δ'} ≈ z_{i-1} approximation against the exact single-step estimate to verify it preserves the order of accuracy.
-- Investigation of the CLIP score drop on Stable Diffusion by varying the classifier-free guidance scale.
-- Sensitivity analysis of the k hyperparameter beyond the fixed k=2 used in most experiments.
+- An ablation comparing the exact single-step estimate (with an extra NFE) against the approximated version in RX-Runge-Kutta would clarify how much of the gain is lost due to the approximation.
+- A numerical verification of the linear error accumulation assumption on a simple ODE with known score function would strengthen the higher-order solver claims.
+- A brief discussion of the condition under which the extrapolation denominator \(1 - \sum \lambda_j^p\) is well-behaved would be useful.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+The following points from the reviewer sources were removed with justification:
 
-- **"The coefficient c in Equations (17) and (18) is assumed to be the same; this would only hold if... likely false."** — REMOVED (factually wrong). The derivation in Section 4.1 shows both error expressions contain the same factor -½x''(t_i), which forms the constant c. The smoothness assumption allows replacing x'' evaluated at nearby points with x''(t_i) at O(h³) cost, which is standard in local truncation error analysis.
-
-- **"The step from Equation (14) to (15) is not valid unless the second derivative is Lipschitz..."** — REMOVED (factually wrong). For smooth f, x'' is continuous, so x''(t_{i-1}) = x''(t_i) + O(h). Substituting adds O(h³) which is absorbed into the O(h³) term. This is standard numerical analysis.
-
-- **"The naive Richardson comparison conflates two changes..."** — REMOVED (misreading). The paper clearly explains both the repeated extrapolation benefit AND the non-uniform adaptation benefit as separate factors.
-
-- **"The global error analysis is not useful for predicting behavior"** — REMOVED (evaluated against wrong standards). This is a simplified textbook-level analysis appropriate for a methods paper; it provides correct asymptotic intuition.
-
-- **"The derivation assumes the second derivative is constant and errors add linearly without interaction"** — WEAKENED to the Minor point above. The critic's framing as a fatal flaw is an overstatement; local truncation error analysis with smoothness assumptions is standard practice for methods papers.
-
-- **"The method only works when the baseline solver least needs improvement"** — REMOVED (over-interpretation). The method works consistently across most settings, and the one documented failure (F-PNDM on LSUN Church) is analyzed transparently. This is a single data point, not a pattern.
-
-- **"The extension to higher-order solvers assumes the sum-of-λⱼᵖ form without justification"** — WEAKENED to the Minor point above. The paper states this as a supposition ("we suppose the following equation holds"), and the empirical results support it. The lack of rigorous derivation is noted but does not undermine the empirical contribution.
+- **"Does not compare against DPM-Solver++ or DEIS"** — Removed per instructions: do not mention missing related works, as I cannot independently verify what the paper should have cited.
+- **"No discussion of memory overhead"** — Removed as a trivial nitpick about a non-issue for a method that adds negligible overhead.
+- **"The paper does not include a global error analysis for RX-Euler"** (presented as a fatal weakness) — Modified to Minor: the local analysis is present and the global error follows from standard arguments; the extracted text may also be incomplete due to parsing.
+- **Strength Finder claimed Section 4.4 "shows RX-Euler achieves O(N^{-2})"** — This is not explicitly shown in the extracted text but is implied by the local O(h³) analysis and the standard local-to-global error argument. The strength is kept but scoped to the local analysis.
+- **"Unfair comparison favoring baselines"** — Not present in the reviews; no action needed.
+- Formatting/style nitpicks from the harsh reviewer — removed as parser artifacts.
 
 ## Novel Insights
 
-The reviews surface one genuinely insightful perspective beyond the paper's own contributions: the method's effectiveness depends on the baseline solver having well-behaved convergence (monotonic error decrease with finer steps), and the F-PNDM failure case serves as a boundary condition that could guide future work on principled diagnostics for when extrapolation will help vs. hurt. This suggests the need for a criterion (e.g., measuring whether the baseline error decreases monotonically with NFE) that could be used to automatically decide when to apply RX-DPM.
+The reviews converge on an important structural observation: the paper is effectively two papers in one. For first-order solvers (Euler/DDIM), it provides a clean, rigorous derivation and strong empirical validation — this is a self-contained contribution. For higher-order solvers, it makes a plausible but unproven theoretical leap that happens to be supported by experiments. The interesting meta-point is that the experiments across DPM-Solver and PNDM are strong enough that one might accept the higher-order claims as empirically grounded even without the full theoretical apparatus. This tension — between theoretical rigor and empirical breadth — is common in applied ML papers and the resolution should determine the paper's framing rather than its acceptance.
 
 ## Suggestions
 
-1. Add an ablation for the higher-order solver approximations: for RX-Runge-Kutta, compute the exact single-step estimate (paying extra NFEs) on a small-scale experiment and compare FID to the approximate version. This would either validate that the approximation is harmless or reveal a performance ceiling.
-2. Investigate the CLIP score drop on Stable Diffusion by varying the classifier-free guidance scale and report both FID and CLIP at multiple scales.
-3. Reproduce the IIA baseline under the same experimental conditions, or at minimum quantify the potential variation from copying table values.
-4. Add a brief discussion of when the method should NOT be applied (e.g., when the baseline solver exhibits non-monotonic error behavior with respect to step size), beyond the single mention of F-PNDM.
-5. Characterize the error propagation across multiple extrapolation blocks — even a simplified analysis would strengthen the theoretical narrative.
+1. Clearly delineate the theoretical scope: present the Euler/DDIM results as the core contribution with rigorous error analysis, and present the higher-order extensions as empirically motivated with a stated assumption. This would honestly reflect the paper's actual evidentiary support.
+2. Add a brief ablation in the appendix for the RX-Runge-Kutta approximation, comparing against a version that computes the exact single-step estimate with one extra NFE.
+3. Complete the global truncation error argument for RX-Euler in Section 4.4 with a short explicit derivation.
+4. Consider a brief note on the denominator condition \(1 - \sum \lambda_j^p \neq 0\) and when it could be near-zero.
 
 ## Score and Decision
 
-The paper presents a well-motivated method with clear practical benefits, extensive experimental validation across a diverse set of solvers and datasets, and transparent discussion of its limitations. The theoretical analysis, while simplified, provides useful intuition consistent with standard numerical analysis. The minor weaknesses (unvalidated higher-order approximations, a few uninvestigated failure modes, IIA comparison fidelity) do not undermine the core contribution: a novel, generally applicable, zero-overhead technique for improving diffusion sampling quality.
+The paper makes a genuine contribution: a simple, practical, zero-extra-NFE method that improves diffusion sampling quality across a wide range of settings. The theoretical foundation for first-order solvers is solid; the higher-order extension is less rigorous but empirically well-supported. The weaknesses identified are addressable and do not invalidate the core contribution.
+
+**Score:** 7.0
+
+**Decision:** Accept
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,20 +1,24 @@
-Now I have all the information needed to produce the final review. Let me synthesize.
+Now I have a thorough understanding of the paper and can verify each claim. Let me compose the final consolidated review.
+
+---
 
 ## Summary
 
-The paper proposes LaTable, a diffusion model that can be trained across heterogeneous tabular datasets with different features, numbers of features, and data types. It uses an encoder-only transformer without positional encodings (achieving column-order equivariance) and LLM-encoded metadata (dataset descriptions, feature names, categories) as conditioning. The paper evaluates on 78 OpenML datasets for in-distribution generation and 5 for out-of-distribution few-shot generation, showing improvements over single-dataset baselines (CTGAN, TVAE, TabDDPM, ARF). It also honestly documents poor zero-shot performance and discusses scaling challenges.
+This paper proposes LaTable, a diffusion-based generative model designed to be trained across heterogeneous tabular datasets. The key architectural innovations are: (1) an encoder-only transformer without positional encodings to handle variable-length inputs and achieve column-order equivariance, (2) pretrained LLM embeddings for dataset descriptions, column names, and categorical values to leverage semantic similarities across tables, and (3) a mixed-type diffusion framework that handles both numerical and categorical variables. The model is trained jointly on 78 curated datasets from OpenML. Experiments show that LaTable significantly outperforms single-dataset baselines (TVAE, CTGAN, TabDDPM, ARF) on in-distribution generation and, when finetuned on a few samples, generates better out-of-distribution data than baselines trained from scratch. The paper also honestly documents LaTable's poor zero-shot performance and discusses the data quality challenges ahead.
 
 ## Strengths
 
-1. **Novel architecture satisfying four well-motivated desiderata**: LaTable's combination of (a) an encoder-only transformer without positional encodings for column-order equivariance, (b) frozen LLM embeddings for metadata conditioning, and (c) an attention-like similarity mechanism for categorical features is a principled technical approach to the cross-dataset tabular generation problem (Section 3, Figure 1). This is a genuine architectural contribution over prior single-dataset tabular generators.
+- **Cross-dataset training with column-order equivariance**: The architecture directly satisfies desiderata D1 and D4 — no positional encodings plus separate feature-name embeddings enable variable-length, permutation-invariant generation. This is a principled design that distinguishes LaTable from all single-dataset baselines (Sec. 3.3.1, 3.3.2).
 
-2. **Strong in-distribution results with careful analysis**: On 78 OpenML datasets, LaTable outperforms all baselines on downstream AUC (0.874 vs. next-best 0.853), density (0.865 vs. 0.739), coverage (0.900 vs. 0.832), and precision (0.866 vs. 0.836) (Table 1). The per-dataset analysis in Figure 2 shows the gains are concentrated on smaller datasets, providing evidence that cross-dataset pretraining is the mechanism behind the improvement.
+- **Significant in-distribution gains over single-dataset baselines**: Table 1 shows LaTable achieves density 0.865 (vs. 0.700 for next-best ARF), coverage 0.900 (vs. 0.832), and downstream AUC 0.874 (vs. 0.853). The gains are especially pronounced on small datasets (Fig. 1), providing concrete evidence that cross-dataset training transfers generation capabilities.
 
-3. **Effective few-shot out-of-distribution generation via finetuning**: When finetuned on new datasets with very few samples, LaTable achieves near-perfect density (~1.0) and higher coverage than both baselines and the real training data (Figure 3). This demonstrates sample-efficient adaptation, a practically valuable capability.
+- **Few-shot OOD generation outperforms baselines trained from scratch**: Figure 2 shows finetuned LaTable attains density near 1.0 (on par with real data) and coverage exceeding both real data and all baselines with tens of samples. This directly validates the claim that pretraining enables sample-efficient adaptation to unseen datasets.
 
-4. **Novel categorical embedding scheme**: Instead of learning per-category embeddings from scratch (which doesn't scale), LaTable uses frozen LLM embeddings of "[feature name] is [category]" strings, finetuned via a shallow MLP, and computes probabilities through an attention-like similarity (Eq. 4). This leverages semantic relationships between categories and scales to arbitrarily many categories without per-dataset retraining (Section 3.3).
+- **Honest diagnostic of zero-shot limitations with actionable insight**: Section 5 explicitly identifies that poor zero-shot performance stems from OOD features not covered in pretraining, and demonstrates that naive scaling to larger metadatasets (WikiTables, 100k+ tables) does not improve zero-shot generation. This negative result is valuable for the community, pointing toward data quality and curation rather than scale alone.
 
-5. **Honest treatment of limitations**: The paper openly documents poor zero-shot performance (Section 4.2) and investigates scaling limitations using WikiTables (Section 5), providing actionable insights about data quality/curation for future LTM research rather than overclaiming.
+- **Principled handling of categorical variables using LLM embeddings**: Categories are embedded as "[column name] is [category]" strings via a frozen LLM encoder, with an attention-like probability mapping (Eq. 3) supporting variable-size category sets. This avoids learning per-category embeddings from scratch and leverages semantic similarities across tables (Sec. 3.3.2).
+
+- **Thorough multi-metric evaluation**: The paper uses downstream AUC, density, coverage, precision, and recall, providing a multi-faceted view of generation quality beyond a single metric (Table 1, Figs. 1–2).
 
 ## Weaknesses
 
@@ -24,62 +28,55 @@ None.
 
 ### Major
 
-1. **Missing single-dataset ablation to isolate cross-dataset transfer**: LaTable is trained on all 78 datasets jointly while baselines are trained per-dataset. The paper attributes LaTable's superior performance to cross-dataset transfer (Figure 2 analysis), but there is no control: a LaTable trained *on a single dataset* (same architecture, same loss) would reveal whether the advantage comes from cross-dataset training or from the model design itself. If a single-dataset LaTable already outperforms baselines, the architecture is the key rather than transfer. This gap weakens causal interpretation of the main results.
-
-2. **PRDC metric adaptation for tabular data is unspecified**: The paper reports Precision, Recall, Density, and Coverage — metrics originally designed for image manifolds where nearest-neighbor distances are Euclidean in pixel space. For mixed-type tabular data, computing these requires decisions about scaling, handling of categorical variables, distance metric, and whether/how categoricals are encoded. The paper gives no description of how these were adapted (line 119 merely cites the original papers). While the downstream AUC results (which are well-understood) independently support the paper's claims, the PRDC numbers are unverifiable without specification.
+None.
 
 ### Minor
 
-1. **No cross-dataset baseline of any kind**: All baselines (CTGAN, TVAE, TabDDPM, ARF) are single-dataset methods. While the paper correctly notes that prior LM-based works also train on single datasets (line 40), a simple cross-dataset baseline — e.g., training TabDDPM on concatenated tables with padding or indicator variables — would help disentangle whether the gains come from the multi-dataset training regime itself vs. LaTable's specific architectural choices.
+- **No comparison to language-model–based tabular generators (GReaT, Tabula, Realtabformer).** The paper discusses LM-based approaches in the related work (Sec. 2) and argues they have disadvantages (autoregressive tokenization of numbers, poor modeling of continuous distributions, expense). Yet the experimental evaluation only compares against non-LM baselines (TVAE, CTGAN, TabDDPM, ARF). While these LM methods are also single-dataset approaches (the paper's core claim is about cross-dataset training, not beating LMs per se), including at least one LM baseline would make the evaluation more complete and directly support the claim that LaTable's design choices are beneficial. The absence is a gap, though not a fatal one — the paper already shows strong results against competitive non-LM single-dataset baselines.
 
-2. **OOD evaluation limited to 5 datasets without justification**: The out-of-distribution evaluation uses only 5 datasets described only as "in $\mathcal{D}_{\mathrm{ood}}$" (line 116). No justification is given for why these 5 are representative or how they differ from the 78 ID datasets. The zero-shot failure analysis and the claim that "most features in $\mathcal{D}_{\mathrm{ood}}$ do not have a close feature in $\mathcal{D}_{\mathrm{id}}$" (line 187) would benefit from quantitative characterization of the shift.
+- **Zero-shot performance is discussed qualitatively but not quantified.** The paper (Sec. 4.2, Sec. 5) states that "the zero-shot performances of LaTable does not match the baselines" and that zero-shot is "significantly worse," but there is no explicit table, figure panel, or numeric entry showing the magnitude of the gap. The OOD figures (Figs. 2–3) plot performance as a function of training samples starting from some small number, not from zero. Because zero-shot capability is a central challenge for foundation models and the paper builds its discussion around this limitation, the reader needs to see the actual gap (e.g., density 0.3 vs. 0.6, or similar) to assess how far the approach is from usable zero-shot generation.
 
-3. **Missing values handling mentioned but not elaborated**: The architecture supports a "boolean missingness mask" (line 48, line 106), but the paper never explains how missing values in the original data are handled during training — whether datasets with missing values are included, how the mask is used, or whether rows/columns with missing values are filtered. This is a practical concern since real tabular data frequently contains missing values.
+- **No ablation isolating the benefit of cross-dataset training.** The paper attributes LaTable's strong performance on small datasets to transfer across tables (Fig. 1 and surrounding text). This is plausible, but there is no experiment comparing LaTable trained jointly on all datasets versus a version trained on each dataset individually (or on a subset). Such an ablation would directly quantify the benefit of multi-dataset training and rule out alternative explanations (e.g., that gains come from LLM embeddings or other architectural choices rather than cross-dataset training).
 
-4. **No discussion of computational cost**: The paper does not compare training/inference costs between LaTable (trained once on all 78 datasets) vs. training 78 separate single-dataset models. Including this would strengthen the practical motivation (line 43 mentions LM inefficiency but doesn't quantify LaTable's own cost).
+- **Limited OOD evaluation (5 datasets) and no downstream AUC for OOD.** The OOD experiments are conducted on only 5 datasets, and the evaluation reports only density and coverage — unlike the in-distribution setting where downstream AUC (XGBoost) is also reported. Per-dataset results and downstream performance for OOD would strengthen the claim that finetuned LaTable produces practically useful synthetic data. The paper acknowledges the small OOD evaluation set but does not discuss variability across the 5 datasets.
+
+- **Model size and computational cost not reported.** The paper does not state the number of parameters in LaTable, training time, or inference cost relative to baselines. For a method that argues efficiency advantages over LM-based approaches, some data on this (even approximate) would be useful for practitioners.
 
 ### Trivial
 
-- Figure 2 axis labels could be more explicit (the y-axes are just "Density" and "Coverage" with no details on the scale).
-- The transformer's hidden dimension $d_h$ is denoted but the number of layers, heads, and total parameter count are not stated in the main text (likely deferred to the appendix, which the parser stripped).
+None.
 
 ## Nice-to-Haves
 
-- Adding downstream AUC results for the OOD few-shot setting (Section 4.2 currently only reports density and coverage; AUC is more interpretable for tabular data quality).
-- An LM-based baseline (e.g., GReaT-style GPT-2 finetuning) trained on the same 78 datasets would be a natural extension that directly addresses the discussion in related work.
-- A quantitative characterization of the distribution shift between $\mathcal{D}_{\mathrm{id}}$ and $\mathcal{D}_{\mathrm{ood}}$ (e.g., feature overlap, distribution distances).
+- Add one or two LM-based baselines (e.g., GReaT or Tabula) to the in-distribution comparison, especially since the paper motivates LaTable as circumventing LM limitations.
+- Provide a zero-shot column or explicit data point in the OOD figures (or a separate table) to quantify the zero-shot gap.
+- Run an ablation training LaTable on each dataset individually (or on a random subset of datasets) to isolate the cross-dataset transfer benefit.
+- Report per-dataset results or individual curves for the 5 OOD datasets to show variability.
+- Add downstream AUC evaluation for the OOD setting on the subset of classification datasets.
+- Report approximate model size and training/inference cost.
 
 ## Removed Points
 
-- **"No comparison to LM-based cross-dataset generators"**: The paper's related work explicitly states that prior LM methods "train/finetune their model on just a single tabular dataset" (line 40) and "do not attempt cross-dataset training." The critic demands a baseline class that does not exist in the literature as a published method. This is a strawman — the paper compares against the standard single-dataset baselines, which is a fair evaluation of its claims. The demand for an LM-based cross-dataset baseline is reframed as the more reasonable "no cross-dataset baseline" point above.
-
-- **"LLM encoder frozen should be explicitly stated"**: The paper already states this in the architecture caption (line 106: "The LLM is encoder is frozen"). Wrong criticism.
-
-- **"WikiTables experiment is mentioned only in prose with no table or figure"**: The paper references Figure \ref{fig:wikitables} (line 192). The figure was stripped by the parser. This is a parser artifact.
-
-- **"Missing appendix/proofs/details"**: These are parser-stripped sections.
-
-- **Various formatting/style nitpicks** from the section-by-section notes.
+- **"No comparison to LM-based baselines is a structural gap that prevents the paper from making its central empirical case"**: Downgraded from the harsh critic's implied fatal/major severity. The paper's central claim is about cross-dataset training enabling better generation; the LM-based methods are single-dataset methods in the same class as the baselines already included. Their absence is a gap but does not undermine the paper's core empirical argument, which is already well-supported against the included baselines.
+- **"The main OOD figure begins at a small number of samples, not at zero"**: This is an observation about figure axis choices, not a factual error or weakness. The paper does discuss zero-shot separately in text. The real issue is that zero-shot is not quantified, which is kept above.
+- **"Missing ablation" framed as critical oversight**: Kept as minor weakness. An ablation would strengthen the paper but the evidence from Figure 1 (better performance on small datasets) already provides indirect support for the transfer claim.
+- **Strength Finder's generic framing filtered**: No changes needed — all strengths are well-grounded with specific citations to the paper.
 
 ## Novel Insights
 
-The most valuable insight from the review process is that the paper's core empirical claim — cross-dataset transfer improves tabular generation — needs a cleaner causal test. The Figure 2 evidence (better performance on small datasets) is suggestive but not definitive without a single-dataset LaTable ablation. Additionally, the honest documentation of zero-shot failure combined with the WikiTables scaling experiment provides a useful negative result: even scaling to 100k+ tables does not resolve the zero-shot gap, pointing toward data quality and curation (not just quantity) as the bottleneck for tabular foundation models. This is an under-explored direction that future work can build on.
+The review reveals an interesting tension in the paper's evidence structure: LaTable's strongest empirical results (in-distribution on 78 datasets, few-shot OOD on 5 datasets) support what the model *can* do when trained or finetuned, while its weakest result (zero-shot) is the one the paper foregrounds as a limitation. This is actually an honest and scientifically valuable framing — most papers would bury poor zero-shot performance. The reviewers agree on this point: the honest diagnostic of zero-shot limitations is a genuine strength, not a weakness. At the same time, the missing LM baseline comparison creates a motivational gap: the paper criticizes LM-based approaches at length but never tests whether they perform better or worse, leaving the critique untested. The most constructive path forward would be to either add one LM baseline or explicitly acknowledge that LM comparison is left for future work and adjust the related work framing accordingly.
 
 ## Suggestions
 
-1. **Add a single-dataset LaTable ablation**: Train LaTable independently on individual datasets and compare against the full multi-dataset version. This is the single most impactful experiment you can run — it directly quantifies the value of cross-dataset training vs. architectural advantages.
-
-2. **Specify the PRDC computation for tabular data**: Provide explicit formulas for how precision, recall, density, and coverage are computed on mixed-type data, including distance metric, scaling, and categorical encoding. This is essential for reproducibility of the quantitative results.
-
-3. **Add a simple cross-dataset baseline**: Even a strawman like concatenating all tables with missing-value padding and training a single TabDDPM would help contextualize the improvements.
-
-4. **Report downstream AUC for the OOD experiments** (Figure 3), alongside the density/coverage plots currently shown.
-
-5. **Characterize the train/ood distribution shift** more quantitatively — e.g., what fraction of OOD features have no near-neighbor in the ID training set?
+1. Add at least one LM-based baseline (e.g., GReaT or Tabula) to the in-distribution experiments, or explicitly state that LM-based methods are excluded because they are single-dataset methods and the paper focuses on cross-dataset training.
+2. Add a table row or figure panel showing zero-shot density/coverage for LaTable and baselines, even if the numbers are low — the field needs this baseline.
+3. Run a single-dataset variant of LaTable as an ablation to quantify the benefit of multi-dataset training.
+4. Report per-dataset results or variability for the 5 OOD datasets to help readers assess whether averaged trends are driven by outliers.
+5. Include OOD downstream AUC (even on a subset) for alignment with the in-distribution evaluation.
 
 ## Score and Decision
 
-The paper addresses a timely and under-explored problem (cross-dataset tabular generation) with a technically sound architecture and thorough evaluation on 78 datasets. The main claims — that LaTable's design enables cross-dataset training and outperforms single-dataset methods — are supported by the presented evidence (particularly the downstream AUC results in Table 1 and the size-dependent analysis in Figure 2). However, the missing single-dataset ablation and unspecified PRDC metric adaptation are genuine gaps that prevent full acceptance of the causal interpretation. The paper would benefit from addressing these before publication. Overall, this is a solid contribution to an emerging area.
+The paper is a solid, well-motivated contribution. It introduces the first diffusion model that can be trained across heterogeneous tabular datasets with a principled architecture, and demonstrates strong empirical results against competitive baselines. The weaknesses are addressable (adding a baseline or two, quantifying zero-shot, running an ablation) and do not threaten the core claims. The paper's honest handling of its zero-shot limitations adds scientific value. On originality, importance, support for claims, and clarity, the paper scores well.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

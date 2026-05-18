@@ -1,74 +1,78 @@
-Now I have all the information I need. Let me synthesize the final consolidated review.
+I have all the information I need. Let me now construct the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes BFLP (Bag of Features for Link Prediction), a simple method that combines five traditional structural similarity indices (Common Neighbors, Jaccard, Salton, Sorensen, Adamic-Adar) with node-attribute-based domain similarity features, and feeds them into XGBoost for link prediction. The paper compares BFLP against 12+ GNN baselines on six benchmarks (CORA, CITESEER, PUBMED, PHOTO, COMPUTERS, OGBL-COLLAB) and finds it outperforms or matches most GNNs, challenging the view that GNNs are always superior for link prediction.
+This paper proposes BFLP (Bag of Features for Link Prediction), a model that combines handcrafted structural features (Common Neighbors, Jaccard, Salton, Sorensen, Adamic-Adar) with domain (attribute-similarity) features and feeds them into XGBoost for link prediction. The central claim is that this simple feature-engineering pipeline matches or outperforms most GNN-based methods across six standard benchmarks (CORA, CITESEER, PUBMED, PHOTO, COMPUTERS, OGBL-COLLAB), suggesting that current GNNs are not fully leveraging the information available in graph structure and node attributes.
 
 ## Strengths
 
-1. **Timely and important research question.** The paper empirically tests whether GNNs genuinely outperform traditional feature engineering for link prediction — a question directly motivated by theoretical results on WL-limited expressivity of message-passing GNNs (Xu et al., 2019; Morris et al., 2019; Li & Leskovec, 2022). This is a worthwhile empirical contribution.
+- **Consistently competitive performance across multiple benchmarks.** Tables 3–5 show that BFLP achieves the best or second-best result on 5 out of 6 datasets across multiple metrics (AUC, AP, Hits@20, Hits@50), including surpassing the prior OGBL-COLLAB leader (55.19 vs. 54.63). This directly substantiates the claim that traditional feature engineering can rival state-of-the-art GNNs.
 
-2. **Competitive results on OGBL-COLLAB.** BFLP achieves 58.51 Hits@50 on OGBL-COLLAB (Table 5), exceeding all reported GNN baselines including the leaderboard entry at the time. Since OGB uses standardized splits and metrics, this is the cleanest evidence in the paper that simple features can beat dedicated GNNs on a large-scale benchmark.
+- **Ablation study confirms synergistic benefit of combining feature types.** Table 6 systematically compares structural-only, domain-only, and combined features across four datasets. In every case, the combined set yields higher AUC than either subset alone (e.g., CORA: combined 0.852 vs. structural 0.805 vs. domain 0.788), demonstrating that the fusion of neighborhood-based and attribute-based features is a key mechanism behind the model's effectiveness.
 
-3. **Ablation study shows synergistic gains.** Table 6 demonstrates that combining structural and domain features consistently outperforms either alone across all datasets. This validates the core design and provides a clear methodological insight — the two feature types contribute complementary information that a tree-based classifier can exploit.
+- **Comprehensive coverage of baselines.** The paper evaluates against 13 GNN-based methods (GCN, GraphSAGE, GAT, SEAL, GAE, VGAE, ARGA, ARVGA, MVGRL, DBGAN, LGLP, MSVGAE, CFLP) plus classical embedding techniques (MF, MLP, Node2Vec) across multiple metrics, providing broad evidence that the results are not due to cherry-picked comparison points.
 
-4. **Computational efficiency is demonstrated.** The paper reports 30-minute end-to-end runtime for OGBL-COLLAB and provides complexity analysis O(|V|k³). The code is provided (link in paper), enabling reproduction.
-
-5. **Comprehensive coverage of traditional similarity indices.** Section 2.2 provides a clear, self-contained exposition of the five structural features used, which supports reproducibility at the structural-feature level.
+- **Computational efficiency is clearly documented.** End-to-end runtime for the largest dataset (OGBL-COLLAB) is reported as 30 minutes, and the worst-case complexity is given as O(|V|k³), with code provided.¹ Footnote: ¹ The paper states "We provide our code at the link1" — the link itself is not resolved in the extracted text.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **Uncontrolled comparison with GNN baselines.** The paper reports BFLP's results against GNN numbers taken from Li et al. (2023) and prior publications, without re-running those baselines under identical conditions. The paper uses 70/10/10/10 splits for citation datasets (following Zhao et al., 2022) and 85/5/10 for co-purchase datasets (following Guo et al., 2022). Several classic baselines (GAE, VGAE, GCN) were originally evaluated under different splits (e.g., 60/20/20). Since differing amounts of training data, negative sampling ratios, and masking protocols can substantially affect results, the reported improvements may partly reflect protocol differences rather than genuine superiority of the feature set. The paper should at minimum verify that the cited baseline numbers were obtained under matching splits, and transparently report any discrepancies. This is the single most important threat to the paper's central claim.
+- **Baseline comparisons are not controlled.** The paper takes GNN baseline results from Li et al. (2023) and the OGB leaderboard without confirming that they were obtained under identical experimental conditions. The paper uses train/val/test splits from (Zhao et al., 2022) for CORA/CITESEER/PUBMED and (Guo et al., 2022) for PHOTO/COMPUTERS, but it is not verified whether Li et al. (2023) used these same splits. For OGBL-COLLAB the splits are standardized, which mitigates this concern for that dataset, but for the other five datasets the comparison rests on an assumption of compatible experimental setups. Since the paper's central claim is that BFLP "outperforms most GNNs," the lack of a controlled re-evaluation of baselines under matching conditions is a significant gap. The paper would be substantially stronger if even three representative GNNs (e.g., GCN, GAT, SEAL) were re-run under the exact same splits and negative sampling procedure.
 
-2. **No variance reporting despite repeated runs.** The paper states experiments were repeated 10 times (citation datasets) or 5 times (co-purchase datasets), yet all tables report single-point numbers without standard deviations, confidence intervals, or significance tests. Without variance estimates, it is impossible to assess whether BFLP's lead over the second-best baseline is stable or within noise. This is a basic omission for an empirical claim paper.
+- **Domain features are critically underspecified.** The paper defines domain features as "the relevant similarity measure between the node features" (Section 3.2) but never states precisely which similarity functions are used for which datasets. Node feature types vary: bag-of-words (CORA, CITESEER, PUBMED, PHOTO, COMPUTERS) and 128-dimensional averaged word embeddings (OGBL-COLLAB). The paper mentions that features were "adjusted" for OGBL-COLLAB "since [it] is dynamic and weighted" (Section 4.1) without specifying the adjustment. The authors themselves acknowledge this as a limitation (Section 4.2), but the current description is insufficient for replication. Because the ablation study shows domain features contribute substantially in some cases (e.g., CORA: combined 0.852 vs. structural alone 0.805), their exact formulation is critical for interpreting results. At minimum, the precise similarity measure(s) (e.g., cosine similarity, dot product, RBF kernel) and any normalization should be stated per dataset.
 
 ### Minor
 
-1. **Domain feature computation is underspecified in the paper text.** The paper defines domain features only as "the relevant similarity measure between the node features" (Section 3.2) without stating which specific similarity function (cosine, Euclidean, dot product, RBF, or something else) is used, or whether it is applied directly to raw attribute vectors or after transformation. For PHOTO/COMPUTERS, Table 2 lists 12 features while only 5 structural indices + 1 domain measure would yield 6 — suggesting additional features or transformations that are not explained. Code is provided (mitigating reproducibility), but the paper itself should specify these design choices.
+- **Hyperparameters are tuned separately per metric without variance reporting.** The paper sets different XGBoost hyperparameters for AUC, AP, Hits@20, and Hits@50 (Section 4.1). While different metrics may genuinely benefit from different configurations, this practice risks overfitting to the specific evaluation protocol, especially since no standard deviations or confidence intervals are reported despite running 5 or 10 repetitions. Without variance estimates, readers cannot assess whether the observed performance differences between BFLP and baselines are statistically meaningful.
 
-2. **The GNN baseline set is not fully up to date for the claims made.** The paper compares against GNNs predominantly from 2016–2022. More recent link-prediction-specific methods (e.g., NCN, BUDDY, ELPH, Neural Bellman-Ford) are absent. While the paper does include the OGB leaderboard entry (Wang et al., 2022) and cites Li et al. (2023) as a survey, the claim "outperforms most current benchmarks" (Section 4.2) would be strengthened by including stronger, more recent baselines — particularly those that also use structural features (like BUDDY/ELPH).
+- **The inductive/versatility claim is unsupported.** The paper describes transductive, inductive, and semi-inductive settings in Section 3.1 and states that BFLP "exhibits a high degree of versatility and can easily adapt to any of these settings." However, all experiments are conducted in the transductive setting only (explicitly noted in Section 4.1). The adaptability claim is thus untested. The paper should either add an inductive experiment (e.g., on a dataset with explicit train/inductive-test splits) or remove the unsupported claim.
 
-3. **Hyperparameter tuning per metric is described but the selection procedure is unclear.** The paper reports different XGBoost hyperparameters for AUC, AP, Hits@20, and Hits@50. The paper does have a held-out validation set (10% for citation datasets, 5% for co-purchase), but the tuning procedure (e.g., grid search, cross-validation) is not described. Since the hyperparameters vary non-trivially per metric (depth 3 for AUC vs. depth 11 for Hits@50), the sensitivity of results to these choices is unclear.
+- **WL expressivity motivation is superficial.** The paper invokes the Weisfeiler-Lehman equivalence result to motivate the investigation, but the proposed method does not engage with expressivity in any formal sense — it simply uses handcrafted structural features that WL-type GNNs are already known to be able to compute. The paper would be more coherent if it framed the contribution as a practical empirical demonstration without claiming validation of a specific theoretical bound.
 
-4. **Ablation study is limited to AUC only.** Table 6 reports ablation results only for AUC. Reporting ablation for AP and Hits@K metrics would strengthen the analysis and show whether the synergistic effect is consistent across metrics.
+- **Negative sampling strategy is underspecified for reproducibility.** The paper states that negatives are "randomly selected" (Sections 4.1) but does not specify the sampling distribution (uniform? degree-based? using any bias correction?). Different negative sampling strategies can substantially affect link prediction results and comparability with baselines. This detail should be stated explicitly.
+
+- **Runtime comparison lacks context.** The paper provides BFLP runtime (30 minutes for OGBL-COLLAB, 18 hours for COMPUTERS) but no corresponding runtime for any GNN baseline. The efficiency claim is qualitative without a reference point. Additionally, 18 hours on a CPU is not obviously more efficient than a GPU-trained GNN — a direct comparison would clarify the practical advantage.
 
 ### Trivial
-None that are not parser artifacts.
+
+- None beyond the points already covered above.
 
 ## Nice-to-Haves
-- A comparison against using a single similarity index (e.g., Adamic-Adar alone) without ML, to isolate the value of feature combination vs. the ML classifier.
-- A classifier ablation (e.g., XGBoost vs. random forest vs. logistic regression) to understand whether the key insight is the feature set or the learning algorithm.
-- Runtime comparison between BFLP and a representative GNN (e.g., GCN or SEAL) on the same hardware, to substantiate the efficiency claim beyond a single number.
-- Exploration of alternative domain similarity measures (cosine vs. Euclidean vs. dot product) to quantify sensitivity.
+
+- **Analysis of *why* GNNs fail to capture these features.** The ablation study shows that combining structural and domain features helps, but the paper does not analyze whether GNNs are theoretically or empirically unable to capture the same signals. Such analysis could turn the paper from a demonstration into an explanation, but this is beyond the stated scope.
+- **Direct comparison with Singh et al. (2021).** The paper notes that another feature-engineering method ranks highly on OGBL-COLLAB but does not compare BFLP against it directly. A side-by-side comparison would strengthen the positioning.
+- **Statistical significance tests.** Given the reported repetitions, paired tests (e.g., Wilcoxon signed-rank) comparing BFLP against the best GNN baseline per dataset would give readers a principled way to assess reliability.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
 
-- **Criticism that hyperparameters were tuned "using the same test sets" and the paper lacks a held-out validation set**: The paper clearly specifies 70/10/10/10 splits (Section 4.1, line 120–122) with a dedicated 10% validation set (5% for co-purchase datasets). The claim that the paper lacks a validation set for tuning or that tuning was done on test data is factually incorrect. Removed.
-- **Criticism about missing appendix / proofs**: The parser strips supplementary material. These exist in the original submission. Removed per instruction.
+These points were raised by reviewers but removed after verification against the paper:
+
+- *"The paper does not report whether it re-ran any baselines under identical conditions"* — **Kept** (this is accurate and kept as a Major weakness above).
+- *"The ablation study does not analyze why GNNs might fail to capture these same features"* — **Moved to Nice-to-Haves** (scope creep; the paper is an empirical demonstration, not a theoretical analysis).
+- *"WL expressivity criticism implies the paper's framing is misleading"* — **Kept** (this is accurate and kept as a Minor weakness).
+- *All criticisms related to formatting, missing appendix, or incomplete sections* — **Removed** (these are parser artifacts, not author errors).
+- *"Does not compare directly with Singh et al. (2021)"* — **Moved to Nice-to-Haves** (relevant context but not a core weakness of the paper).
+- *Strength Finder's claim of "fair comparison"* — **Rephrased to "comprehensive"** (the breadth of baselines is a strength, but "fair" conflicts with the verified uncontrolled-comparison weakness).
 
 ## Novel Insights
-The reviews collectively highlight a tension that the paper itself does not fully resolve: the central finding (simple features + XGBoost matching GNNs) is potentially important for the field, but the evidentiary base is weakened by an uncontrolled comparison protocol and missing statistical reporting. The most interesting observation from the reviews is that the uncontrolled-comparison issue is not merely a methodological nitpick — it cuts to whether the paper's headline claim is valid. The Strengths finder correctly identifies the OGBL-COLLAB result as the cleanest piece of evidence (since OGB standardizes splits). A revised version that re-runs key baselines under matched conditions, reports variances, and fully specifies the feature set would be a genuinely useful empirical contribution.
+
+None beyond the paper's own contributions. The reviews raise standard methodological concerns (uncontrolled comparisons, underspecification, lack of variance) and do not contribute novel analytical perspectives on the paper's core findings.
 
 ## Suggestions
-1. **Re-run the most important GNN baselines** (GCN, GAE, VGAE, SEAL, and at least one recent method like BUDDY or ELPH) under the exact same splits, negative sampling, and masking protocol used for BFLP. Even re-running just CORA, PUBMED, and OGBL-COLLAB would transform the paper's evidence from a literature meta-analysis into a controlled experiment.
-2. **Report means and standard deviations** over all repeated runs in every result table. Add a simple statistical comparison (e.g., paired Wilcoxon) between BFLP and the best-performing baseline for each dataset/metric.
-3. **Fully specify the feature vector composition.** Add a table or explicit formulas listing every feature for each dataset: which similarity measures are used for domain features, how they are computed, and what additional features (if any) explain the counts in Table 2.
-4. **Describe the hyperparameter tuning procedure.** State how hyperparameters were selected for each metric (e.g., grid search on the validation set) to rule out over-optimism.
+
+1. **Re-run at least 2–3 representative GNN baselines** (e.g., GCN, GAT, SEAL) under the exact same splits, negative sampling procedure, and evaluation protocol used for BFLP. This single change would transform the comparison from uncontrolled to controlled and significantly strengthen the paper.
+2. **Report standard deviations** for all metrics across the 5/10 repetitions. Include them in the tables.
+3. **Precisely specify the domain similarity measures** used per dataset. Create a small table stating whether cosine similarity, dot product, or another function is applied to node features, including any normalization or the "adjustment" for OGBL-COLLAB.
+4. **Either add an inductive experiment or retract the unsupported versatility claim** in Section 3.1.
+5. **Report the negative sampling distribution** explicitly (e.g., "uniform random over all non-edges" or "degree-based sampling").
+6. **Remove or soften the WL-expressivity framing** if the paper is meant as a purely empirical contribution, or engage with the theory more carefully by explaining whether the features used here circumvent any WL limitations.
 
 ## Score and Decision
 
-**Originality:** Moderate — combining known features with XGBoost is not novel, but the empirical demonstration at scale is useful.  
-**Importance of research question:** High — challenging the necessity of GNNs for link prediction is timely and practically relevant.  
-**Claims well-supported:** Partially — the OGBL-COLLAB result is well-supported, but the comparison with other baselines is weakened by uncontrolled protocols and missing variance estimates.  
-**Soundness of experiments:** Moderate — reasonable design choices but lacking statistical rigor and controlled comparisons.  
-**Clarity of writing:** Acceptable for the structural features, but the domain feature computation and tuning procedure are underspecified.  
-**Value to the research community:** Moderate — would be a useful baseline paper after revisions; in current form the methodological gaps limit its impact.
+The paper's core finding — that well-chosen handcrafted features plus XGBoost can match or exceed GNNs on standard link prediction benchmarks — is a timely and valuable empirical contribution in a field where GNNs are often assumed to be dominant. The breadth of datasets, baselines, and the ablation study are genuine strengths. However, the three major weaknesses (uncontrolled comparison, underspecified domain features, and per-metric tuning without variance) directly affect the credibility of the central claim and prevent acceptance in the current form. The issues are fixable, and the paper could be strong after revisions, but the experimental validation as presented is not yet rigorous enough to support the strength of the claims made.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

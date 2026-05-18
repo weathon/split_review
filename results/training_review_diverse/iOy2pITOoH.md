@@ -1,63 +1,89 @@
-Now I have a thorough understanding of the paper and can synthesize the review accurately. Let me compose the final consolidated review.
+Now I have all the information I need. Let me construct the final consolidated review, carefully cross-referencing every claim against the paper.
+
+---
 
 ## Summary
 
-The paper introduces Spark Transformer, an architectural variant that achieves sparse activation in both FFN (8% nonzeros) and attention (≤256 tokens) via Statistical Top-k, an approximate thresholding algorithm requiring only 2d FLOPs with theoretical error guarantees. The method re-purposes existing parameters as predictors, enabling single-stage training without extra parameters. Pretrained using the Gemma-2 2B recipe, the paper reports that Spark Gemma-2 matches the original's quality while achieving 3.1× FLOP reduction, translating to up to 1.79× decoding speedup on CPU.
+This paper introduces Spark Transformer, an architectural variant that induces sparsity in both FFN and attention by combining (1) **statistical top‑k** — an O(d) approximate thresholding algorithm based on Gaussian quantiles — and (2) **low‑rank predictors** formed by partitioning query/key dimensions. The authors train a 2B‑parameter Spark Gemma‑2 model from scratch using the standard Gemma‑2 recipe. The resulting model matches the quality of the original Gemma‑2 (e.g., MMLU 55.8 vs. 55.9) while using only 8% FFN nonzeros and ≤256 attended tokens, achieving a 3.1× theoretical FLOP reduction and 1.70–1.79× measured CPU speedup.
+
+---
 
 ## Strengths
 
-1. **Statistical Top-k is a well-motivated algorithmic contribution.** The algorithm requires only 2d FLOPs (vs. O(d log d) for sorting), comes with a theoretical relative error bound (Theorem 1) that vanishes with increasing dimension, and is continuously differentiable under a Huber smoothing (Theorem 2). The training slowdown comparison (Figure 4) confirms this translates to practical efficiency — Statistical Top-k is substantially faster than JAX's `approx_max_k` even at 50% recall. This is the paper's clearest technical contribution.
+1. **Statistical top‑k reduces top‑k complexity from O(d log d) to O(d) FLOPs, enabling efficient training on accelerators.** Section 2.1 shows the threshold estimation requires only 2d FLOPs, and Figure 4 demonstrates that statistical top‑k incurs negligible training slowdown compared to JAX's optimized `approx_max_k` even at 50% recall. This directly supports the method's viability on TPU/GPU hardware where exact top‑k sorting is expensive.
 
-2. **Clean single-stage design without extra parameters.** Spark FFN (Eq. 9) and Spark Attention (Eq. 14) use a fixed projection matrix P to partition input dimensions into a low-cost predictor and a residual path, avoiding separate predictor parameters or multi-stage training. Maintaining the same parameter count as the base model while achieving high sparsity is a genuine improvement over methods that require post-training finetuning or additional parameters (Yerram et al., 2024; Lee et al., 2024b).
+2. **Single‑stage training achieves high sparsity in both FFN and attention without extra parameters or post‑training steps.** Section 3 explains how shared parameters (via the dimension‑splitting matrix P) serve as joint predictors trained end‑to‑end. Section 4.1 confirms the model is trained from scratch using the standard Gemma‑2 recipe, contrasting with prior work (e.g., Yerram et al., 2024) that requires separate fine‑tuning or additional predictor parameters.
 
-3. **Measurable real-world CPU speedups.** Using gemma.cpp, Spark Gemma-2 achieves up to 1.79× decoding speedup and 1.70× prefill speedup on 16-core CPU (Table 3, Figure 3). The breakdown showing FFN dominance for short prompts and attention dominance for long prompts is informative. The absolute decode time of 86 ms/token on a 4-core VM is a concrete accessibility result.
+3. **Spark Gemma‑2 matches Gemma‑2 quality on standard benchmarks despite extreme sparsity.** Table 2 reports near‑identical scores across MMLU, HellaSwag, ARC‑C, and other tasks (e.g., MMLU 55.8 vs. 55.9), while the 8% FFN nonzeros and ≤256 attended tokens enable the 3.1× FLOP reduction. This is the paper's central empirical result and directly supports its core claim.
 
-4. **Ablation studies validate key design choices.** Figure 5a shows the optimal r ≈ d_model/2, matching the FLOP optimum in Eq. 11. Figure 5b shows quality is robust across 5–10% sparsity, with degradation only at extreme 3% sparsity. These ablations support the hyperparameter choices used in the main experiment.
+4. **Concrete CPU speedups of 1.70× (prefill) and 1.79× (decoding) are measured on real hardware.** Figure 3 and Table 3 report these speedups on a 16‑core CPU VM under realistic settings (batch‑size‑1 decoding, 4096‑token prompts). On a 4‑core VM, Spark Gemma‑2 achieves 86 ms/token, surpassing average human reading speed — a tangible efficiency gain for resource‑constrained deployment.
+
+5. **Theoretical contributions strengthen the method's credibility.** Theorem 1 provides a probabilistic bound on the deviation between target k and actual selected entries, with error vanishing as d grows. Theorem 2 establishes continuous differentiability of the soft‑thresholded output, justifying gradient‑based training. The variational form connecting statistical top‑k to ℓ₁ regularization (Section 2.2) provides a principled grounding.
+
+---
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **The central claim of "matching Gemma-2 quality" lacks a direct comparison column in Table 2.** The paper trains Spark using the same procedure and data as Gemma-2 (line 193) and evaluates on the same benchmarks (line 204), so the comparison to published Gemma-2 numbers is meaningful. However, the claim is sufficiently central that a "Gemma-2 (published)" column in Table 2 would eliminate any ambiguity about evaluation pipeline differences. The table as described ("We compare Spark Gemma-2 with ProSparse and LLaMA ReGLU") focuses on cross-paper comparisons, but the most important comparison — to the actual base model — is left implicit. This weakens the evidential support for the paper's headline claim.
+1. **The low‑rank predictor is never directly validated.** The paper's FLOP reduction in both Spark FFN and Spark Attention depends on the predictor (via the dimension‑splitting matrix P) identifying the correct top‑k entries of the full activation *before* the expensive computation is performed. If the predictor disagrees with the true top‑k, either quality degrades or the model learns to place important information in dimensions the predictor can identify — a very different mechanism. The paper provides no direct measurement of predictor accuracy: no recall@k, precision, or rank correlation between the predictor's selected indices and the true top‑k entries of K^T q (or the full FFN activation). The ablation on r (Figure 5a) shows that r ≈ d_model/2 gives the best loss, but this measures overall model quality, not whether the predictor is actually identifying the right entries. While the end‑to‑end quality results (Table 2) provide *indirect* evidence that the method works, the core mechanism remains unverified. This is the paper's most significant gap.
+
+2. **The gap between theoretical FLOP reduction and measured speedup is discussed only qualitatively.** The paper reports 3.1× FLOP reduction but only 1.70–1.79× CPU speedup. While the paper attributes this to "hardware limitations" and discusses the "hardware lottery" (Section 5), there is no breakdown of where the theoretical FLOPs are lost — e.g., memory bandwidth saturation, overhead of sparse index management, workload imbalance across cores, or the fact that not all FLOPs are equally costly. For an efficiency‑focused paper, deeper quantitative analysis of this gap would strengthen the contribution and provide actionable guidance for future work. (Note: the paper does not *hide* this gap — both numbers are stated in the abstract — but the explanation remains at the level of generalities.)
 
 ### Minor
 
-2. **Statistical top-k's selection quality relative to exact top-k is not analyzed.** The paper verifies that Statistical Top-k produces the right sparsity level (8% nonzeros, ≤256 tokens) and that the end-to-end model achieves good quality. However, it does not directly measure whether Statistical Top-k selects the same entries that exact top-k would select at the same sparsity level, nor whether using exact top-k would change the quality. The paper defers the Gaussian assumption validation to Appendix D.1 (stripped by parser), and while the end-to-end quality results suggest the approximation is adequate, a direct comparison would strengthen the analysis. This is addressable with a small probe experiment.
+1. **Statistical top‑k's selection quality is not evaluated.** The paper presents statistical top‑k as "an approximate algorithm for obtaining the k largest entries of an input vector" (line 22), but only validates the *count* guarantee (Theorem 1; Figure 1). There is no measurement of whether the selected entries are actually the largest‑magnitude ones, or just any set of approximately k entries above the Gaussian quantile threshold. The quality results suggest the model adapts to the selection mechanism successfully, but the paper could be clearer about whether this is truly "top‑k by value" or "sparse thresholding with a budget." This is primarily a communication issue rather than a technical flaw — the method works as evidenced by Table 2 — but the framing could mislead readers about what is being validated.
 
-3. **GPU/TPU inference results are absent.** The efficiency evaluation is limited to CPU using gemma.cpp. The paper acknowledges this limitation (Section 5: "hardware limitations currently hinder the full exploitation of sparse activation in Transformers, particularly on GPUs and TPUs") and frames the contribution around CPU accessibility. However, given that training was done on TPU (Figure 4 measures training slowdown), some GPU inference characterization — even if the sparse kernels are not yet competitive — would help assess the generality of the efficiency claims.
+2. **The training slowdown comparison with JAX's `approx_max_k` (Figure 4) does not report recall for statistical top‑k.** `approx_max_k` has a controllable recall target shown on the x‑axis, but statistical top‑k's recall (fraction of true top‑k entries identified) is never reported. This makes the comparison one‑dimensional (only speed, not selection quality). The paper should at minimum acknowledge that recall is a relevant dimension for comparing approximate top‑k algorithms.
 
-4. **No evaluation at longer context lengths.** The evaluation uses 8k context for FLOP calculations and up to 4096-token prompts for speed measurements. Since attention sparsity is motivated partly by long-context efficiency, evaluating at longer contexts (e.g., 16k or 32k) would strengthen the claim that the 256-token attention limit holds up under more demanding conditions.
+3. **Ablation on k (Figure 5b) reports training loss at 25k steps only, not final downstream metrics.** For a method whose core trade‑off is quality vs. sparsity, showing final benchmark scores for a few sparsity levels (e.g., 3%, 5%, 10%) would be more informative than a partial training curve. While full training runs are expensive, even one additional run at a different sparsity level would clarify the trade‑off.
 
 ### Trivial
 
-5. The term "predictor" is mildly overloaded — it refers to a subspace of existing weights (via matrix P), not a separately trained module. Clarifying this earlier would help.
-6. The loss curves in Figure 5 use Gaussian smoothing (σ=200), which is acceptable but should be noted in the caption (it is mentioned).
+None worth enumerating.
+
+---
 
 ## Nice-to-Haves
-- Ablation of the softplus nonlinearity in Spark Attention (Eq. 14) and the soft-vs-hard thresholding choice.
-- Discussion of hyperparameter sensitivity for the Gaussian threshold estimation under multimodal activation distributions.
+
+- A histogram of activation entries at several training steps placed in the main text (currently deferred to Appendix D.1) would help readers verify the Gaussian assumption without consulting supplementary material.
+- The 2d FLOP cost of computing mean/std for statistical top‑k could be explicitly included in the per‑token FLOP table (Table 1) for completeness, though it is negligible relative to the main terms.
+
+---
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution:
-- **"Unfair and uncontrolled baseline comparisons"** — REMOVED. The paper clearly states "Numbers in parentheses are taken from the respective original papers." This is standard practice for providing context. The comparison is not presented as a controlled head-to-head; the disclosed provenance suffices.
-- **"The claim of 'competitive performance' is not substantiated"** — REMOVED. The paper provides Table 2 with benchmark results; the numbers are there even if the Gemma-2 comparison column is absent.
-- **Various formatting/style nitpicks and missing appendix references** — REMOVED per instructions (parser strips appendix content; formatting artifacts are not author errors).
-- **"Missing related work"** — REMOVED per instructions (cannot confirm existence of unmentioned works).
-- **Strength Finder strengths about "favorable comparison to existing methods"** — WEAKENED and moved here. The comparison numbers are from different base models/training regimes and are informative context, not controlled evidence of superiority.
+
+- **"The FLOP comparison is theoretical/misleading"**: The harsh critic argued that the title and abstract foreground the 3.1× FLOP figure without adequate context. **Removed.** The abstract explicitly states "3.1× reduction in FLOPs, yielding a 1.70× speedup for prefill and a 1.79× speedup for decoding on a 16-core CPU VM." Both numbers are presented together. The gap between FLOP reduction and speedup is real, but the paper does not hide it. The underlying concern about insufficient analysis of the gap is retained in Major #2.
+
+- **"Table 2 comparisons are not controlled"**: The harsh critic acknowledged the paper does not claim superiority from this table and called it "acceptable." **Removed** — the reviewer themselves did not treat this as a substantive weakness.
+
+- **"Gaussian assumption should be in main text"**: The paper states "we empirically observe it to hold approximately (see Section D.1)" (line 221). Per the hard rules, criticisms about content deferred to the appendix are not valid weaknesses — the appendix exists in the original submission. Moved to Nice-to-Haves.
+
+---
 
 ## Novel Insights
-None beyond the paper's own contributions. The key novelty — using a statistical (Gaussian quantile) approximation to top-k for activation sparsity, with single-stage training and zero extra parameters — is clearly articulated by the paper itself.
+
+The harsh critic's framing of the predictor validation gap is the most insightful observation across both reviews: because the SPARK architecture uses a fixed dimension‑splitting matrix P to partition query/key dimensions into a "predictor" subspace and a "residual" subspace, there is an implicit assumption that the top‑k pattern is recoverable from the first r dimensions alone. If the model counterfactually learned to make the important entries predictable from any low‑rank projection (i.e., the true top‑k entries correlate with the dimensions used in P), then the method's success would owe more to the model's adaptability than to the predictor's fidelity — a distinction the paper does not explore. This observation suggests a controlled experiment (e.g., shuffling which dimensions belong to P at initialization) would be a strong follow‑up study.
+
+---
 
 ## Suggestions
-1. Add a "Gemma-2 (published)" column to Table 2 showing the original model's scores on the same benchmarks. This directly addresses the most significant evidential gap.
-2. Add a short analysis (1 paragraph + small table) comparing the entries selected by Statistical Top-k vs. exact top-k on a few forward passes from the trained checkpoint, reporting overlap/recall.
-3. Include at least one GPU inference experiment (even if the sparse kernel is not fully optimized) or a more explicit discussion of what would be needed to realize the FLOP reduction on accelerators.
+
+1. **Add a direct predictor validation experiment** (highest priority): For a sample of layers and tokens from the trained Spark Gemma‑2, compute the overlap (IoU or recall@k) between indices selected by the low‑rank predictor and the true top‑k indices of the full activation. This requires no retraining and directly addresses the most significant gap in the paper's evidence chain.
+
+2. **Report recall of statistical top‑k**: Measure what fraction of the true top‑k entries are retained by statistical top‑k (relative to exact top‑k) on a subset of layers, to complement the count guarantee in Theorem 1.
+
+3. **Provide a more detailed analysis of the FLOP/speedup gap**: Quantify the contribution of memory bandwidth, sparse indexing overhead, and workload imbalance to the gap between 3.1× FLOP reduction and 1.70–1.79× speedup.
+
+4. **Add a full‑run ablation at one additional sparsity level** (e.g., 3%) to show final downstream metrics rather than only 25k‑step training loss.
+
+---
 
 ## Score and Decision
-The paper presents a genuine architectural contribution (Statistical Top-k for activation sparsity, single-stage training with re-purposed parameters) and provides reasonable empirical support: controlled training setup matching Gemma-2, real CPU speedups, and informative ablations. The weaknesses are presentational (missing direct comparison column, missing selection-quality analysis) rather than structural. With relatively minor revisions — most importantly, adding the direct Gemma-2 comparison — the paper would be solid.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

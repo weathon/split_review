@@ -1,78 +1,68 @@
-Now I have a thorough understanding of the paper and can verify each reviewer claim against the source text. Let me produce the consolidated final review.
+Now I have a comprehensive view of the paper. Let me synthesize the final review.
 
 ## Summary
 
-This paper presents an empirical study evaluating whether uncertainty-based abstention can improve LLM reliability across three scenarios: correctness on answerable questions, hallucination detection on unanswerable questions, and safety on adversarial prompts. Using statistical uncertainty measures (negative log-likelihood, predictive entropy, semantic entropy) and a verbalized measure (In-Dialogue Uncertainty / InDU — a hedge-word count), tested on Llama2 models (7B–70B), the study finds that selecting the right uncertainty type for each scenario enables effective abstention: statistical uncertainty for correctness and safety, InDU for unanswerable questions.
+This paper investigates uncertainty-based abstention in LLMs across three failure modes — correctness, hallucinations (unanswerable questions), and safety — using two families of uncertainty measures: statistical measures (predictive entropy, semantic entropy, negative log-likelihood) and a verbalized measure called In-Dialogue Uncertainty (InDU, a simple hedge-word count). It compares pretrained, instruction-tuned, and RLHF-aligned Llama2 models. The key findings are: (1) statistical uncertainty improves correctness by 2–8% when abstaining, (2) InDU detects ~50% of unanswerable questions at a 10% false positive rate, and (3) statistical uncertainty on RLHF models filters 70–99% of unsafe responses.
 
 ## Strengths
 
-1. **Scenario-specific uncertainty selection yields large, quantifiable gains.** The paper provides concrete numbers demonstrating meaningful improvements: on TriviaQA, rejecting the 25% most uncertain samples boosts accuracy from 84.4% to 92.6% (+8.2%); on the SelfAware dataset, InDU filters nearly 50% of unanswerable questions at only 10% false positive rate; on AutoDAN, statistical uncertainty on RLHF models filters 99% of unsafe responses with only 10% false refusals. These numbers directly support the paper's core claim.
+1. **Systematic joint study of two uncertainty types across three failure modes.** The paper is the first to evaluate statistical and verbalized uncertainty under a unified framework for correctness, hallucinations (unanswerable questions), and safety, showing that the optimal uncertainty measure differs per scenario. This scenario-dependent mapping goes beyond prior work that examines settings or metrics in isolation (Section 5, Tables 1–3).
 
-2. **RLHF preserves and even enhances uncertainty awareness for specific scenarios.** While prior work noted RLHF increases miscalibration, this paper demonstrates that RLHF models maintain strong AUROC for correctness (e.g., 0.85 semantic entropy on TriviaQA) and safety (0.99 negative log-likelihood on AutoDAN), and actually improve InDU for detecting unanswerable questions (AUROC 0.75 with RLHF vs. 0.69 without). This is a non-obvious finding.
+2. **InDU as a zero-cost signal for unanswerable questions.** The paper introduces a simple hedge-word frequency count as a signal to detect unanswerable questions. On SelfAware, InDU achieves AUROC 0.75 (RLHF) and can identify ~50% of unanswerable questions while falsely refusing only 10% of answerable ones (Figure 3b, Section 5.2). This requires no additional model or prompting — only a word list — making it practically cheap.
 
-3. **Systematic evaluation across diverse datasets and model scales.** The study covers five QA datasets (including reasoning and math), one dedicated unanswerable-question dataset, and two adversarial safety datasets, using model sizes from 7B to 70B. This breadth strengthens the generality of the conclusions.
+3. **Substantial safety gains from statistical uncertainty on RLHF models.** On AutoDAN, abstaining the 10% most uncertain responses (via NLL) raises the safe response rate from 92.5% to 99.4%, filtering 99% of unsafe outputs (Section 5.3, Figure 3c). Importantly, the paper isolates the effect of alignment by comparing pretrained, instruction-tuned, and RLHF models, showing that only RLHF yields high AUROC for safety (e.g., NLL AUROC 0.99 on AutoDAN, Table 3).
 
-4. **Methodological clarity in comparing multiple uncertainty metrics.** By jointly evaluating predictive entropy, semantic entropy, negative log-likelihood, and InDU under identical conditions, the paper provides a clean apples-to-apples comparison using both AUROC and Accuracy-Rejection Curves with specific threshold examples.
+4. **Empirical comparison of alignment methods for uncertainty awareness.** The paper compares base → instruction-tuned → RLHF along the same uncertainty metrics, demonstrating that RLHF not only improves safety rates but also makes the model's probability vectors informative about safety — a granular finding absent from prior safety studies.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None. All identified issues are addressable and do not threaten the paper's core claims.
+
+1. **InDU conflates hedging style with genuine uncertainty; the mechanism behind its effectiveness is unclear.** The paper operationalizes InDU as a simple count of hedge words from a fixed list. While the paper acknowledges this is "not a perfect metric" (Section 3.2), it then treats InDU as evidence of "uncertainty awareness" (e.g., "RLHF finetuning enhances In-Dialogue Uncertainty awareness for unanswerable questions," Section 5.2). Because RLHF trains models to mimic human conversational patterns — including hedging — the higher InDU for unanswerable questions could reflect learned stylistic correlations rather than the model being aware of its own uncertainty. A model could be completely confident in a wrong answer and still hedge because its training data does so. Conversely, an uncertain model might not hedge. The paper does not disentangle these. The empirical finding that InDU correlates with unanswerability is useful, but the framing as "uncertainty awareness" overstates what a word-count measure can support. The authors should either validate InDU against human-annotated uncertainty or reframe it as a simple heuristic that happens to work for unanswerable questions.
+
+2. **The safety results lack mechanistic analysis; the uncertainty signal may be detecting atypical responses rather than unsafety per se.** The RLHF Llama2 model already has a 92%+ safe response rate. The paper shows that most of the few unsafe responses have high statistical uncertainty. However, this could occur because unsafe responses are out-of-distribution for the RLHF-trained policy — the model internally "wants" to refuse but a small subset slip through, and those exceptional responses have high entropy due to internal conflict. The pretrained and instruction-tuned models produce many unsafe responses, and uncertainty fails to detect them, which is consistent with this explanation. The paper does not analyze what the high-uncertainty unsafe responses actually look like (e.g., do they contain partial refusals? are they linguistically atypical?). Without this analysis, it is unclear whether the uncertainty signal is detecting unsafety or merely detecting responses that deviate from the model's trained policy. This limits practical value: the method requires a highly safe base model, and an adversary could potentially adapt to produce low-entropy unsafe responses.
 
 ### Minor
 
-1. **ARC evidence for correctness is limited to one dataset.** The paper's abstract claims "improve correctness by 2% to 8%," but Accuracy-Rejection Curves (ARC) are shown only for TriviaQA (Figure 3a). While AUROC values in Table 1 confirm that uncertainty measures can rank correct vs. incorrect responses across all five datasets, the actual accuracy improvement under abstention is demonstrated for only one dataset. Adding ARC plots for at least one or two additional datasets (e.g., SciQA or CoQA) would substantiate the generality of the claim. (Section 5.1, Figure 3a)
+1. **The "hallucination" framing is broader than what is actually studied.** The paper studies only *unanswerable questions* (from SelfAware) and equates abstaining from these with "reducing hallucinations." This conflates two distinct failure modes: (a) the model not knowing and hedging versus (b) the model confidently fabricating a plausible but false answer (e.g., on counterfactual or conflicting-fact questions). InDU will only help for case (a). The title and abstract use "reduces hallucinations" without this qualification, overclaiming the scope. A more precise framing would be "detects unanswerable questions," which is a different and arguably easier problem than detecting confident hallucinations.
 
-2. **Hallucination results use an ROC curve rather than the ARC promised in the methodology.** The methods section states "We compute ARC and AUARC for both hallucinations and safety" (line 102), but for hallucinations only an ROC curve is presented (Figure 3b). While the ROC is informative and the specific operating point (≈50% detection at 10% FPR) is stated, the paper does not deliver the promised ARC/AUARC for this setting. The discrepancy should be resolved — either provide the ARC or adjust the methods text. (Section 5.2, Figure 3b)
+2. **No confidence intervals or statistical tests.** Results (AUROCs, accuracy improvements) are reported as exact numbers without error bars, confidence intervals, or significance tests. Given the modest number of datasets and single-seed runs, some reported numbers (e.g., AUROC varying from 0.43 to 0.89 across datasets) could be unstable. The core findings are likely robust, but the paper would benefit from bootstrapped intervals or multi-seed runs for key results.
 
-3. **AUARC values mentioned in methodology but never reported.** The paper states it computes the Area Under the Accuracy-Rejection Curve (AUARC) — a threshold-free summary — but never reports any AUARC numbers in text, tables, or figure annotations. This is a missed opportunity for a clean comparison across settings. (Section 3.3, line 101)
-
-4. **InDU validation is thin.** InDU is central to the hallucination claim, but the paper provides no analysis of how the hedge-word list performs across individual SelfAware categories (five distinct types of unanswerable questions), nor does it compare against a simple baseline like detecting explicit refusal phrases ("I don't know"). The paper acknowledges InDU "is not a perfect metric" (Section 3.2), but given that the ~50% hallucination reduction claim depends on it, additional validation would strengthen confidence. (Section 3.2, Section 5.2)
-
-5. **No error bars or variance reported.** AUROC values in all three tables are point estimates. Sampling multiple responses for predictive/semantic entropy introduces randomness, but no standard deviations, confidence intervals, or bootstrap estimates are reported. For an empirical study comparing multiple metrics, this makes it difficult to assess whether observed differences (e.g., 0.78 vs. 0.85) are reliable. (Tables 1–3)
-
-6. **The "almost no additional computational overhead" claim is unquantified.** The abstract and results describe the approach as having "almost no additional computational overhead" but semantic entropy requires multiple forward passes (N samples) plus running a Deberta-large entailment model. The paper should quantify this cost (e.g., latency multiplier or FLOPs relative to a single forward pass) to help practitioners assess the trade-off. (Abstract, Section 5.1)
+3. **No comparison against simple abstention baselines.** The paper compares uncertainty-based abstention against no abstention but does not compare against prompting the model to say "I don't know" or using a separate classifier/reward model as a filtering baseline. Such comparisons are standard in the abstention literature and would contextualize the reported gains. Moreover, the paper claims "almost no additional computational overhead" for statistical uncertainty, but predictive and semantic entropy require multiple samples and a bi-directional entailment model (Deberta-large), which is nontrivial overhead. A cost comparison would strengthen the claims.
 
 ### Trivial
 
-1. **Missing implementation details.** The hedge-word list is referenced to Islam et al. (2018) but not reproduced or summarized; the parameters of the "fuzzy exact match" (e.g., substring matching rules) are not specified. These are easy to fix and would improve reproducibility.
-
-2. **Safety labeling approach not disaggregated.** The paper uses both Llama Guard and a keyword-based approach for labeling safety but does not discuss whether results differ across the two labeling methods. A brief note on agreement/disagreement would be useful. (Section 4.3)
+None.
 
 ## Nice-to-Haves
 
-- **Additional model family.** The paper uses only Llama2 models. Including at least one other model family (e.g., a Mistral variant with log-probability access) would substantially increase confidence that findings generalize beyond a single architecture.
-- **Simple baseline for safety abstention.** Comparing uncertainty-based abstention against a simple guardrail (e.g., "reject if prompt contains explicit keywords") would contextualize the practical gain.
-- **Category-wise InDU analysis on SelfAware.** Breaking down InDU performance by the five SelfAware question categories would clarify whether the measure works uniformly or is driven by specific question types.
+- Evaluate on confident hallucination datasets (e.g., TruthfulQA, counterfactual QA) to test whether *any* uncertainty measure can detect non-hedged hallucinations. Even negative results would properly bound the claims.
+- Analyze token-level probabilities on safe vs. unsafe responses for RLHF models to illuminate the mechanism behind the safety results.
+- Provide a failure analysis with examples of high-uncertainty safe responses (false alarms) and low-uncertainty unsafe responses (missed detections).
+- Report the specific hyperparameters (temperature, number of samples N, entailment threshold) in the main text if not already in the appendix.
 
 ## Removed Points
 
-- **"The 2–8% correctness improvement claim is empirically undersupported"** — softened to Minor (point 1 above). The AUROC evidence across five datasets supports that the uncertainty measures work; one detailed ARC plus the AUROC table constitutes reasonable support for an empirical study, though more ARC plots would strengthen it.
-- **"The hallucination reduction claim lacks an abstention curve"** — softened to Minor (point 2 above). An ROC curve is the standard visualization for binary classification and does show the trade-off across thresholds. The real issue is the mismatch between what the methods section promises (ARC) and what is delivered (ROC), not a missing visualization per se.
-- **"No comparison with alternative rejection criterion for safety"** — moved to Nice-to-Haves. The paper's contribution is about uncertainty-based abstention, not about proposing a complete guardrail system. This would be an extension, not a missing essential baseline.
-- **"The paper should also cover more domains/tasks"** — removed as scope creep. The paper already covers five QA datasets, one unanswerable-question dataset, and two safety datasets. Demanding broader coverage would turn it into a different paper.
-- **"Only operating points illustrated, not systematically tuned thresholds"** — softened. The paper shows ARCs (which cover all thresholds) and highlights specific operating points (5%, 10%, 25%) for concreteness. This is standard practice.
-- **Formatting/style nitpicks and parser artifacts** — removed per hard rules. These are not present in the original submission.
-- **Criticisms about missing appendix content** — removed per hard rules. The parser strips appendix sections; they exist in the original submission.
+- **Criticism that correctness improvements (84.4% → 86.0% at 5% rejection) are "not impressive."** Remove: the paper is transparent about the trade-off via ARC curves; whether this is impressive is subjective and the 25% rejection case shows 8.2% absolute gain. The paper's claim is that uncertainty *can* improve correctness, which is supported.
+- **Criticism about "abstention" being misleading (post-hoc filtering vs. built-in refusal).** Remove: Chow's rule (1970), which the paper cites, uses threshold-based abstention on classifier probabilities. The usage is standard and not misleading.
+- **Criticism about fuzzy exact match being a weak evaluation.** Remove: fuzzy exact match is a widely used, defensible choice for free-form QA evaluation.
+- **Criticism about missing hyperparameters (N, temperature, entailment threshold).** Remove per guidelines: these details are likely in the appendix, which the parser strips. They exist in the original submission.
+- **Claim that the paper "does not discuss the cost of false refusals."** Remove: the paper reports the false refusal rate (e.g., 10% falsely refused answerable questions, Section 5.2) and shows full ROC/ARC curves, which explicitly characterize this trade-off.
 
 ## Novel Insights
 
-The paper's most valuable finding is the **scenario-dependent asymmetry** between uncertainty types: statistical uncertainty (entropy-based) works for correctness and safety, while verbalized uncertainty (hedge words) works for detecting unanswerable questions — and these roles do not switch or generalize. Equally notable is the finding that RLHF, despite reducing output diversity and increasing miscalibration, actually *preserves or enhances* the discriminative power of uncertainty measures for both correctness and safety, while specifically improving InDU for unanswerable questions. This nuanced picture is more informative than the blanket "RLHF hurts calibration" narrative common in prior work.
+The most interesting cross-cutting insight is that different model *training stages* yield uncertainty measures that are informative for different failure modes, and that the relationship is not monotonic: pretrained models have poor uncertainty for safety; instruction tuning improves safety rates slightly but does not make uncertainty informative; RLHF suddenly makes statistical uncertainty highly predictive of safety (AUROC 0.99). This suggests that RLHF does not merely calibrate the model but fundamentally restructures the output distribution such that safety-relevant information is encoded in token-level probabilities. This pattern — where a training method creates the very signal needed to detect its own failures — is worth deeper investigation and could inform the design of built-in abstention mechanisms.
 
 ## Suggestions
 
-1. Add ARC plots for at least 1–2 additional correctness datasets (e.g., SciQA, CoQA) to substantiate the 2–8% improvement claim.
-2. Either provide the promised ARC/AUARC for the hallucination setting or adjust the methods text to match what is actually presented.
-3. Report error bars (e.g., bootstrap confidence intervals) for AUROC values.
-4. Include the hedge-word list in the appendix and specify fuzzy exact match parameters.
-5. Quantify the computational overhead of semantic entropy (multiple forward passes + entailment model) to support the "minimal cost" claim.
+1. Reframe the hallucination claim from "reduces hallucinations" to "detects unanswerable questions" to match the actual scope of the experiments.
+2. Conduct a mechanistic analysis of the safety results: examine token-level probability patterns in high-uncertainty unsafe vs. low-uncertainty unsafe responses to clarify whether uncertainty detects unsafety or merely out-of-distribution responses.
+3. Add a prompting baseline ("answer 'I don't know' if uncertain") and a lightweight classifier baseline to contextualize the reported gains.
+4. Validate InDU against human-annotated uncertainty on a small sample, or explicitly reframe it as a simple heuristic rather than evidence of "uncertainty awareness."
 
 ## Score and Decision
 
-The paper is a solid empirical study addressing an important practical problem. The safety results are particularly strong and well-supported. The main gaps are missing supplementary analyses and minor presentation inconsistencies rather than fundamental flaws. The paper's central findings are believable and useful.
+The paper provides a useful empirical mapping between uncertainty types, model training, and failure modes. The core findings — that InDU cheaply detects unanswerable questions and that statistical uncertainty on RLHF models substantially improves safety — are novel and practically relevant. The weaknesses are about overclaiming and insufficient mechanistic analysis, not about invalidity of the results. With revision (particularly reframing the hallucination scope and adding mechanism analysis for safety), the contribution is solid.
 
 MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

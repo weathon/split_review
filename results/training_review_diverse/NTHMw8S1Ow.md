@@ -1,24 +1,28 @@
-Now I have a thorough understanding of the paper. Let me synthesize the final review.
+Now I have thoroughly verified all claims against the paper. Let me construct the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes **informed meta-learning**, a framework that learns a mapping from human-interpretable knowledge representations (e.g., natural language) to inductive biases of a model via conditional meta-learning. Instead of learning a fixed prior, the model learns a knowledge-conditioned prior $p_\theta(f|\mathcal{K})$ that can be adjusted per task. The paper formalizes the data-knowledge relationship (Section 2), provides theoretical motivation (Theorem 1), instantiates the framework as an Informed Neural Process (INP, Section 4), and demonstrates feasibility on synthetic and real-world experiments (weather prediction, CUB few-shot classification). The contribution is primarily conceptual—introducing a paradigm for automated, steerable inductive bias specification—rather than a state-of-the-art method.
+This paper proposes **informed meta-learning**, a framework for automatically integrating human-interpretable knowledge (including natural language) into predictions by learning a mapping from knowledge representations to inductive biases via conditional meta-learning. It formalizes the problem setting, provides a theoretical motivation (Theorem 1 showing conditioning on knowledge reduces expected KL divergence to the true predictive distribution), instantiates the framework as Informed Neural Processes (INPs), and evaluates on synthetic regression, weather forecasting, and few-shot image classification (CUB-200-2011). The paper is explicitly positioned not as a new SOTA method but as a new viewpoint and proof-of-concept.
+
+---
 
 ## Strengths
 
-1. **Novel and well-motivated conceptual contribution.** The idea of learning a mapping from human-interpretable knowledge to inductive biases is genuinely novel and timely given the growing use of LLMs for generating knowledge. The paper clearly distinguishes this from manual knowledge integration and standard meta-learning (Section 1, Section 3). The formalization in Section 2 (distinctions D1–D3) provides a clean problem setting.
+1. **Clean formalization of an underexplored problem.** Section 2 lays out the generative process for data and knowledge (Fig. 2), explicitly distinguishes knowledge from empirical data along three axes (D1–D3), and formalizes the goal as learning the map \(K \mapsto p_\theta(f | K)\). This provides a principled foundation that prior work on knowledge integration lacks.
 
-2. **Theoretical motivation for knowledge conditioning.** Theorem 1 (Section 3.2.1) formally shows that conditioning on knowledge reduces the expected KL divergence to the true predictive distribution compared to using data alone, under the conditional independence assumption. This provides a principled foundation for why informed meta-learning should improve data efficiency.
+2. **Empirical evidence that the concept works across multiple settings.** INPs consistently outperform uninformed NPs: (a) data efficiency on synthetic sinusoidal regression — log-likelihood gap grows as context size shrinks (Fig. 4a); (b) OOD generalization — knowledge of the shifted parameter nearly closes the train/test performance gap (Fig. 5a); (c) few-shot image classification on CUB — e.g., 5-way 1-shot accuracy improves from 73.8% to 82.8% with attribute knowledge (Table 1). These results are clean and demonstrate feasibility.
 
-3. **Demonstrated generalization under distribution shift.** The synthetic experiment (Section 5.1.2, Fig. 5a) directly shows that when the parameter responsible for the domain shift ($b$) is provided as knowledge, the INP maintains predictive log-likelihood on out-of-distribution tasks while the uninformed NP degrades sharply. This concretely supports the claim that informed meta-learning can mitigate task distribution shift.
+3. **Generalization to novel knowledge representations.** In the distribution-shift experiment (Sec. 5.1.2), INPs maintain near-flat log-loss even when parameter \(b\) is sampled from ranges not seen during training, while the uninformed NP degrades sharply (Fig. 5b). This directly supports the claim that the learned mapping can generalize beyond the training distribution of knowledge.
 
-4. **Improved data efficiency in low-data regimes.** The synthetic experiments (Section 5.1.1, Fig. 4a) show that the performance gap between INP and NP widens as the number of context points decreases, confirming that knowledge integration improves data efficiency.
+4. **Graceful handling of missing knowledge.** By randomly masking knowledge during training (Sec. 4), INPs match vanilla NP performance when knowledge is absent at test time (Fig. 4a). This is a practical design choice that addresses a realistic deployment scenario.
 
-5. **Real-world demonstration with loosely formatted knowledge.** The CUB image classification experiment (Section 5.2.2, Table 1) shows meaningful improvements over the uninformed NP baseline across all shot settings using genuine knowledge sources (class attributes, human captions, GPT-4 generated descriptions). This demonstrates that the framework works beyond structured synthetic setups.
+5. **Qualitative uncertainty decomposition.** Using conditional entropy and mutual information (Sec. 5.1.3, Fig. 6), the paper separates epistemic from aleatoric uncertainty and shows that knowledge (e.g., oscillation parameter \(b\)) reduces epistemic uncertainty globally, while a single data point reduces it locally — providing insight into how knowledge and data play different roles.
 
-6. **Honest discussion of limitations and practical considerations.** Section 3.2.2 provides a candid discussion of finite-sample approximation, the need for meta-training sets, and distribution shift challenges. Section 6 acknowledges the lack of guaranteed correctness compared to model-based methods. This transparency strengthens the paper's credibility.
+6. **Honest and well-scoped presentation.** The paper repeatedly states its aims are illustrative, not competitive ("not to present a new method that surpasses existing baselines"), and frankly discusses limitations (finite-sample issues, meta-training data requirements, lack of correctness guarantees). This intellectual honesty is a strength.
+
+---
 
 ## Weaknesses
 
@@ -26,54 +30,67 @@ This paper proposes **informed meta-learning**, a framework that learns a mappin
 None.
 
 ### Major
-None.
+
+1. **Missing empirical comparison against LLM-based in-context learning.** The paper acknowledges LLM-based methods that handle the same task — using natural-language knowledge and context data in an LLM prompt for numerical prediction (Requeima et al., 2024; Jin et al., 2024) — in its own Related Work section (Sec. 6). The temperature-forecast experiment (Sec. 5.2.1, setting B) uses natural-language knowledge (GPT-4-generated forecasts) and few context points, which is precisely the setting where an LLM prompting baseline is the most direct alternative. Without this comparison, the reader cannot judge whether informed meta-learning offers any advantage beyond doing the same thing with a simpler LLM call. The paper's scope disclaimer ("not a SOTA method") partially mitigates this, but the central claim — that informed meta-learning is a *promising* approach for automated knowledge integration — is substantially weakened without positioning relative to the obvious alternative. This gap does not invalidate the paper's contribution but limits how strongly a reviewer can advocate for it.
 
 ### Minor
 
-1. **Knowledge source in the weather experiment (Section 5.2.1) requires clarification.** The paper states: "For each task, knowledge κ is a vector encoding two values: the minimum temperature and the maximum temperature on the day" but does not specify whether these are computed from the ground-truth temperature record of that day or obtained from a genuinely separate forecast source. Condition B is explicit about using GPT-4 "based on values from the ground truth temperature measurements," but Condition A is ambiguous. Even if the min/max are derived from the same day's ground-truth data, they are truthful properties of the underlying function $f$ (consistent with the paper's framework), so the concern is not "cheating." Nevertheless, the source should be clarified to match the paper's framing of knowledge as externally-provided information. If the values are computed from the ground truth, the authors should note that this mirrors the synthetic setup where knowledge is a known property of $f$.
+2. **"Controllable" inductive bias selection is not convincingly demonstrated for natural-language knowledge.** The paper claims that informed meta-learning enables "controllable" bias specification (line 10, line 35). For structured/synthetic knowledge, Fig. 6 shows that different parameter values (\(a, b, c\)) lead to interpretably different function samples. However, for the natural-language experiments (weather forecasts, CUB captions), only aggregate accuracy numbers are reported. There is no analysis of whether varying the language in the knowledge (e.g., "hot day" vs. "cool day"; "red breast" vs. "blue wings") produces predictably different model behavior. Without this, "controllable" remains a promissory label rather than a demonstrated property.
 
-2. **Uncertainty decomposition lacks quantitative summary.** The epistemic uncertainty analysis in Section 5.1.3 (Fig. 6, last column) is visually suggestive but only reported qualitatively. Reporting average epistemic uncertainty reduction across tasks (e.g., mean and standard deviation) would make the analysis more informative and support the claim that knowledge reduces model uncertainty.
+3. **Theorem 1 provides thin theoretical grounding.** The result — that conditioning on knowledge reduces expected KL divergence under conditional independence — is a straightforward information-theoretic inequality. The paper honestly calls this "theoretical motivation" (line 35), but the theorem says nothing about the learned approximation \(p_\theta\), sample complexity, or when the finite-sample version of the inequality holds. This is adequate as motivation but adds little beyond what intuition already suggests.
 
-3. **No discussion of computational overhead.** Encoding knowledge at test time (especially via LLMs for natural language) adds computational cost. The paper should at least acknowledge this trade-off, even if a full cost analysis is beyond the paper's scope.
+4. **Quantitative results for the weather experiment are partially reported.** Figure 7 shows sample predictions and a relative performance gap, but the paper does not include a table of absolute log-likelihood or RMSE values with standard errors (as it does for CUB in Table 1). This makes it harder to compare across settings or reproduce the exact numbers.
 
-4. **Baseline NP for classification is not contextualized.** The CUB results (Table 1) show large gains (e.g., 5-way 1-shot: 30.9% vs. 16.7%), but the paper does not discuss whether the baseline NP implementation is well-tuned. A brief comment on how the baseline compares to typical CUB results (even if the goal is not SOTA) would help readers calibrate the improvements.
+5. **Knowledge in the weather experiment is derived from ground-truth values.** The GPT-4-generated forecasts in Sec. 5.2.1 are produced "based on values from the ground truth temperature measurements." This blurs the line between knowledge and data — the knowledge is a textual paraphrase of actual measurements, not independent expert knowledge. A more convincing experiment would use expert-provided text not derivable from the same measurements.
 
 ### Trivial
-None.
+
+6. The paper does not provide exact prompts for the GPT-4 knowledge generation in the main text (deferred to appendix, which may be absent in the parsed version). Including example prompts would help reproducibility.
+
+7. The simple sum fusion of data and knowledge representations is noted without ablation. While the paper says "we find that choosing \(a\) to be a simple sum works well in practice" (line 145), no comparison to concatenation or attention-based fusion is reported.
+
+---
 
 ## Nice-to-Haves
+- **LLM prompting baseline** for the temperature-forecast experiment (this would address the most significant gap).
+- **A cross-domain transfer experiment** where meta-training tasks come from a different (but related) distribution than test tasks, mimicking the rare-disease scenario described in Sec. 3.2.2.
+- **Robustness to misleading knowledge** — does the model learn to ignore contradictory knowledge when sufficient data is available?
+- **Ablation on the fusion mechanism** (sum vs. concatenation vs. attention) — would clarify whether the simple design choice is a limitation or a strength.
+- **Uncertainty calibration** (reliability diagrams) for the INP's predictive distributions.
+- **Computational cost comparison** (training/inference time) between INPs and vanilla NPs.
 
-- **Provide a brief proof sketch or intuition for Theorem 1 in the main text.** Even a one-paragraph explanation (e.g., "conditioning on K reduces posterior variance, tightening the KL") would help readers who do not consult the appendix. This would strengthen the theoretical framing without changing the paper's claims.
-
-- **Add a simple experiment on robustness to inaccurate knowledge.** Since D2 assumes knowledge is truthful, a natural extension would be to corrupt the knowledge in the synthetic setup (e.g., adding noise to the revealed parameters) and measure the INP's ability to discount unreliable information. This would deepen the practical narrative without broadening the paper's scope.
-
-- **Comparison to a simple Bayesian baseline in the synthetic experiment.** For the sinusoidal regression with known parameters, a Bayesian linear regression with informative priors would serve as a gold-standard. Showing that INP approaches this baseline would strengthen the claim that automated integration is competitive with hand-crafted priors.
+---
 
 ## Removed Points
+These points were raised by reviewers but are removed or downgraded for the reasons noted:
+- **"INP model is a straightforward extension of NPs — not novel"** — The paper acknowledges this; the INP is intentionally an illustration of the framework, not a novel architecture.
+- **"The paper should also cover fine-tuning/prompt-tuning baselines"** — Scope creep; the paper's claim is about a new *framework*, not SOTA on any benchmark.
+- **"The paper does not test the rare-disease scenario"** — This is a motivating example, not an experimental requirement; the distribution-shift experiment (Sec. 5.1.2) partially addresses cross-domain transfer.
+- **"Theoretical contribution is overclaimed"** — The paper honestly labels it as "theoretical motivations" (line 35) and discusses the finite-sample caveat (Sec. 3.2.2); the framing is appropriate.
 
-These points are flagged to be removed; treat them with caution.
-
-1. **Criticism that Theorem 1 is "stated without a proof sketch, making its exact meaning ambiguous."** The paper states the theorem clearly and references Ashman et al. and the appendix for details. The parser likely stripped the appendix content that contains the proof. The theorem's statement is unambiguous as written. This is moved to Nice-to-Haves (as a suggestion to add a sketch).
-
-2. **Criticism that D2's assumption ("knowledge should contain only true information") is "strong and not tested."** The paper explicitly acknowledges this limitation in Section 6 ("this approach lacks the guaranteed correctness that conventional methods enjoy"). The paper's scope is to propose a framework, not to test every assumption's violation.
-
-3. **"No comparison to manual knowledge integration methods."** The paper explicitly states in the intro (line 33): "The aim of our work is not to present a new method that surpasses existing baselines on a benchmark dataset; rather, we propose a new viewpoint on meta-learning." Demanding this comparison would judge the paper against expectations that do not match its stated goals.
+---
 
 ## Novel Insights
+The most interesting observation emerging from the reviews — one that goes beyond what the paper itself articulates — is the tension between the paper's two core value propositions: (a) that informed meta-learning automates knowledge integration, and (b) that this approach is especially compelling for natural-language knowledge. The paper's own natural-language experiments rely on GPT-4 to *generate* the knowledge, which raises the question: if the bottleneck is obtaining high-quality natural-language knowledge, and an LLM is already involved in producing it, why not just use the LLM directly as the predictor? This tension is not resolved in the paper and points to a deeper question about what unique value the meta-learning pipeline adds over end-to-end LLM-based solutions.
 
-The primary insight from the reviews is that the paper's core conceptual contribution — learning a mapping from knowledge representations to inductive biases via conditional meta-learning — is well-received and considered timely. The harsh critic correctly notes that the weather experiment's knowledge source needs clarification, but this is a presentation issue rather than a structural flaw. The reviewer's framing of this as "structural" overstates the severity: even in the worst-case interpretation (min/max from ground truth), the knowledge is a truthful summary statistic of the underlying function $f$, consistent with the paper's own generative model (Section 2). The real strength of the empirical section is the CUB classification experiment, where the knowledge sources are genuinely separate from the labels, and the distribution-shift synthetic experiment, which cleanly demonstrates the framework's potential. The most useful suggestion across both reviews is the call for a robustness-to-inaccurate-knowledge experiment, which would address the paper's acknowledged limitation (D2's truthfulness assumption) and strengthen the practical narrative.
+---
 
 ## Suggestions
+1. **Add an LLM in-context learning baseline** to the temperature-forecast experiment (Sec. 5.2.1, setting B). This is the single most impactful addition the authors could make. Even if the LLM baseline outperforms INPs, discussing the trade-offs (compute, uncertainty quantification, reliability) would sharpen the paper's contribution.
+2. **Provide a controllability analysis** for the CUB setting: show that varying a specific attribute description leads to interpretable changes in predictions or latent representations.
+3. **Report absolute quantitative metrics (log-likelihood, RMSE)** for the weather experiment in a table, analogous to Table 1.
+4. **Include example GPT-4 prompts** and a brief discussion of potential biases in the synthetic knowledge.
 
-1. **Clarify the weather experiment's knowledge source in Condition A.** State explicitly whether the min/max values are computed from the ground-truth temperature measurements of the same day, obtained from a separate forecast source, or synthetically generated. If from ground truth, note that these are summary statistics of $f$ (consistent with the synthetic setup) and acknowledge the limitation that this is not a genuinely external knowledge source.
-
-2. **Add a quantitative summary to the uncertainty decomposition analysis** (Section 5.1.3). Report the mean and standard deviation of epistemic uncertainty reduction across tasks, rather than only showing one example in a figure.
-
-3. **Briefly acknowledge the computational overhead** of using LLMs for knowledge encoding at test time, even if only in the Limitations section.
+---
 
 ## Score and Decision
 
-This is a well-written, well-motivated conceptual paper that introduces a novel framework for automated knowledge integration. The theoretical motivation is sound, the experiments (while illustrative rather than exhaustive) support the claims, and the authors are transparent about limitations. The weather experiment clarification is a minor issue that can be resolved without changing the paper's conclusions. The contribution — a new paradigm for steerable inductive bias specification via conditional meta-learning — is timely and clearly articulated.
+**Originality:** 7/10 — The framework itself (informed meta-learning) is novel and well-motivated, though the INP instantiation is architecturally simple.  
+**Importance of research question:** 8/10 — Automating knowledge integration is practically important and timely.  
+**Claims supported:** 6/10 — The core feasibility claims are supported, but the missing LLM baseline weakens the claim of "promising approach."  
+**Soundness of experiments:** 7/10 — Clean experiments for what they test, but gaps in completeness (no LLM baseline, no controllability analysis for language).  
+**Clarity of writing:** 9/10 — Well-structured, honest about limitations, clear prose.  
+**Value to community:** 7/10 — The framework is likely to inspire follow-up work; the identified limitations are productive starting points.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

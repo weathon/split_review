@@ -1,95 +1,84 @@
-Now I have all the evidence I need. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper. Let me synthesize the final review.
 
 ## Summary
 
-The paper proposes Fuzzed Randomized Smoothing (FRS), a defense against textual backdoor attacks injected during pre-training. FRS combines (1) biphased model parameter smoothing — adding Gaussian noise to the top-H layers during fine-tuning and inference — with (2) MCTS-guided fuzzed text randomization that identifies vulnerable trigger-containing segments and concentrates randomization probability on them. The paper provides a theoretical analysis of the certified robustness radius and validates the method across three datasets, three attack methods, and five victim models (BERT-base/large, RoBERTa-base/large, LLaMA3-8B), showing consistent improvements over baselines including TextGuard.
+This paper proposes Fuzzed Randomized Smoothing (FRS), a certified defense against pre-training backdoor attacks on PLMs. It combines (1) biphased model parameter smoothing (adding Gaussian noise to top-H layers during fine-tuning and inference), and (2) MCTS-guided fuzzed text randomization (identifying trigger-prone segments and concentrating randomization probability there). The paper claims a broader certified robustness radius via Corollary 1 and validates empirically across three datasets, three attack methods, and five victim models.
 
 ## Strengths
 
-- **Novel integration of MCTS-guided fuzzing with randomized smoothing for textual backdoor defense.** The paper proposes using Monte Carlo tree search to proactively identify vulnerable text segments (trigger-prone areas) and then applies probability-weighted randomization concentrated on those segments (Section 4.3). This differs from prior randomized smoothing defenses (e.g., TextGuard) that use uniform randomization and from empirical defense methods that lack theoretical guarantees.
+- **Novel problem framing and practical motivation**: FRS is explicitly designed for the post-attack scenario where defenders have no access to the original poisoned pre-training data (Section 4.2). This directly targets a gap in prior work that requires in-attack access.
 
-- **Consistent state-of-the-art defense across diverse model architectures, scales, and attack strategies.** Table 1 shows FRS achieving the highest clean accuracy (CA) and poisoned accuracy (PA) and lowest attack success rate (ASR) among both empirical defenses and the certified baseline TextGuard across three datasets and three attack methods. Table 4 extends this to five victim models (BERT-base/large, RoBERTa-base/large, LLaMA3-8B), showing FRS consistently outperforms TextGuard in CA, PA, and ASR — including on the billion-parameter LLaMA3-8B.
+- **Strong and consistent empirical defense across multiple dimensions**: FRS outperforms all baselines (six empirical + TextGuard) on CA, PA, and ASR across SST-2, OffensEval, and AG's News under RIPPLe_a, LWP, and BadPre attacks (Table 1). Example: on SST-2 under RIPPLe_a, FRS achieves 91.3% PA and 6.2% ASR vs. TextGuard's 85.1% PA and 15.8% ASR, while maintaining higher CA (92.4% vs. 85.2%). These results use K=20 for both methods.
 
-- **Biphased model parameter smoothing to reduce computational overhead.** Instead of fine-tuning K separate models on K randomized datasets, FRS performs parameter smoothing on a single fine-tuned model by adding noise only to the top-H output-proximal layers during both fine-tuning and inference (Section 4.2). This avoids the prohibitive training cost of prior methods while still providing certified guarantees — a practical contribution for large PLMs.
+- **Ablation confirms additive contribution of both modules**: Table 3 shows that removing either BMPS or FTR degrades PA and increases ASR across all three datasets. E.g., on SST-2 with BadPre, PA drops from 88.7% (full FRS) to 83.2% (-FTR) and 80.5% (-BMPS).
 
-- **Theoretical analysis of a broader certified robustness radius from non-uniform text randomization.** Corollary 1 (Eq. 18) formally shows that concentrating randomization probability on vulnerable areas (ω_H > ω_M) yields a larger radius: R_r^new = (log(ω_M)/log(ω_H)) × R_r^old > R_r^old. Table 2 empirically validates this with average radius improvements of 25.72%–34.87% over TextGuard.
+- **Consistent advantage across diverse architectures and scales**: FRS maintains its edge over TextGuard across BERT-base/large, RoBERTa-base/large, and LLaMA3-8B (Table 4), covering 110M to 8B parameters and both encoder and decoder architectures. On OffensEval under RIPPLe_a with RoBERTa-large: FRS 85.3% PA vs. TextGuard 78.7% PA.
 
-- **Ablation study confirms both components contribute positively.** Table 3 shows that removing either the biphased model parameter smoothing (BMPS) or fuzzed text randomization (FTR) degrades PA and ASR across all three datasets and attack methods, demonstrating the complementary value of each component.
-
-- **Addresses the underexplored post-attack scenario.** The paper focuses on backdoors injected during pre-training (not fine-tuning), where defenders have no access to poisoned data and must defend after the fact — a more challenging and realistic setting than assumed by prior randomized smoothing defenses that require access to training data.
+- **Novel MCTS-based fuzzing for non-uniform text randomization**: The idea of using MCTS to proactively search for trigger-prone segments before applying randomized smoothing is genuinely novel and borrows productively from software fuzzing (Section 4.3).
 
 ## Weaknesses
 
 ### Fatal
-None. While the paper's theoretical framework has gaps, they do not invalidate the core empirical contributions or the overall approach.
+
+None.
 
 ### Major
 
-- **Assumption 1 is stated without rigorous justification, weakening the certified robustness claim.** The paper's theoretical framework (Section 4.4) relies on Assumption 1 — that the smoothed model's output on benign inputs matches the clean fine-tuned model. The paper asserts this is "approximately guaranteed" with a small learning rate η but provides no proof, sketch, or formal argument (Section 4.4, paragraph after Eq. 15). Since the certification guarantee depends on this assumption holding, the lack of rigorous justification means the claimed "certified robustness" is conditional on an unverified premise. To be clear: the theory about radius improvement from non-uniform text randomization (Corollary 1) is coherent on its own terms; the gap is in connecting the parameter-level smoothing to the base model quality required by that theory.
+1. **The theoretical certificate rests on an unverified premise about MCTS success.** Theorem 1 and Corollary 1 assume that the identified vulnerable area contains the trigger and that randomization probability ω_H applies to the trigger segment. But the MCTS identification procedure (Section 4.3.1) is heuristic — there is no guarantee it locates the trigger, no analysis of its failure probability, and no quantification of how MCTS failure degrades the certificate. The paper acknowledges that "with more MCTS iteration budget, the confidence that the trigger is successfully captured can be higher" but provides no analysis linking iteration budget to capture probability. Without this, the certified robustness guarantee is not grounded.
+
+2. **No standard certified accuracy curves (accuracy vs. radius).** In the randomized smoothing literature (Cohen et al., 2019 and follow-ups), the standard evaluation is to report certified test-set accuracy as a function of radius. The paper instead reports average and maximum robustness radii (Table 2). While these numbers show FRS outperforms TextGuard, they do not convey how many test points are certified at various radii, nor do they allow comparison with other certified defenses in the standard way. The description in §5.2.2 ("find the maximum percentage of tokens that can be perturbed while the model still maintains correct prediction with high probability") describes an empirical search rather than a formal certification procedure, and the paper does not clarify how the binary search over radii is connected to the beta-binomial confidence bound of Theorem 1. Without accuracy-vs-radius curves, the claim of "broader certified robustness" — the paper's headline theoretical contribution — is only partially supported.
+
+3. **The theoretical derivation is not a rigorous robustness certificate in the standard RS sense.** The derivation of Theorem 1 and Corollary 1 uses a simple bound Δ = 1 − ω^{R_rL} that assumes independent token randomization — it does not account for the adversarial selection of trigger tokens within the radius, nor does it derive a tight bound via the Neyman-Pearson lemma as in standard RS. The resulting "radius" R_r^{new} = log(ω_M)/log(ω_H) × R_r^{old} follows from simple algebraic manipulation of this bound; it is not a certificate that any perturbation within this radius is safe, but rather a calculation of how the Δ bound changes with ω. The paper conflates a bound comparison with a certified robustness guarantee. The gap between the claimed "provably broader certified robustness radius" and what is actually derived is significant.
 
 ### Minor
 
-- **No undefended baseline in the experimental evaluation.** Tables 1, 3, and 4 report defense performance (CA, PA, ASR) against various attacks but never show the attacked model's performance *without any defense*. Without this, it is impossible to assess the severity of the attacks or the absolute magnitude of improvement provided by FRS. For example, FRS achieves ASR 3.91% on SST-2 with RIPPLe_a — but if the undefended ASR is already low (e.g., <20%), the result is less impressive. This baseline is standard in the backdoor defense literature and its absence is a notable omission.
+1. **The radius computation procedure is underspecified.** Section 5.2.2 describes finding "the maximum percentage of tokens that can be perturbed while the model still maintains correct prediction with high probability (e.g., 95% confidence)" but does not detail the search algorithm, confidence correction for multiple testing, or how this connects to the beta-binomial bound in Theorem 1. The use of K=20 base models is modest for RS — standard practice uses thousands of Monte Carlo samples. The paper should clarify how certification is performed in practice.
 
-- **Key hyperparameter values for the FRS-specific components are not reported.** The paper introduces ω_H, ω_L, ω_M (text randomization probabilities), Λ (Damerau-Levenshtein distance threshold), C (MCTS exploration constant), and the MCTS iteration budget — but none of these are given numerical values in Section 5.1 or anywhere else. The MCTS iteration budget is especially important because Corollary 1's promise of ω_H→1 depends on having sufficient budget. Without these values, the method cannot be reproduced and the theoretical radius formula cannot be evaluated against the empirical setup.
+2. **No runtime or memory analysis.** The method requires: (a) fine-tuning with clipped SGD + noise (Eq. 4), (b) generating K=20 pre-duplicated models with noise on top-H layers at inference start (Eq. 5), (c) per-sample MCTS search, and (d) K=20 forward passes per sample. The paper provides no runtime comparison against TextGuard or any baseline. The claim of "efficient" defense is unsubstantiated. Note: the reviewer's claim of "160B parameters" is incorrect — noise is applied only to top H=10 layers, so the memory overhead is approximately one base copy plus 20 noise vectors for H layers, which is more tractable. Still, the computational cost deserves quantification.
 
-- **The certified robustness radius computation (Table 2) is not described as a reproducible algorithm.** The paper states: "for each test sample, we find the maximum percentage of tokens that can be perturbed while the model still maintains correct prediction with high probability (e.g., 95% confidence)." This describes the *goal* but not the procedure — e.g., how the search is performed, what hypothesis test is used, what values of α and K are used in the binomial/Beta test, or how the confidence intervals from the Monte Carlo voting are mapped to a radius. This makes the central empirical claim in RQ2 difficult to verify or reproduce.
+3. **No hyperparameter sensitivity analysis.** The paper uses fixed values for ω_H, Λ, H, σ, and MCTS budget without justification, ablation, or sensitivity study. These parameters likely interact in complex ways (e.g., H controls how much of the model is perturbed; σ controls the noise variance; the MCTS budget affects trigger identification quality).
 
-- **MCTS identification accuracy is not validated.** The method's key claim is that MCTS-guided fuzzing successfully identifies trigger-containing segments. However, the paper never reports what fraction of test samples this identification is correct, nor does it analyze how identification failures affect the effective ω_H and the resulting radius. The ablation study (Table 3) partially addresses this by showing that removing FTR degrades performance, but a direct validation of the MCTS component's accuracy is missing.
+4. **Assumption 1 requires stronger justification.** The paper assumes "the output of the smoothed model on benign input is consistent with that of the clean fine-tuned model" and claims this "can be approximately guaranteed with the biphased parameter smoothing as long as η is set small enough." No evidence or analysis is given to support this claim. Given that pre-training backdoors are known to persist through standard fine-tuning, this assumption is nontrivial and warrants explicit validation (e.g., comparing FRS's outputs on benign inputs to a truly clean model's outputs).
 
-- **No confidence intervals or variance reported for radius results (Table 2).** The radius improvements are reported as single values (e.g., 25.72%–34.87% improvement). Given that the radius is computed via Monte Carlo sampling with K=20, variance is expected. Reporting only point estimates without standard deviations or confidence intervals makes it unclear whether the improvements are statistically significant.
-
-- **The biphased parameter smoothing is only justified for top-H layers.** The paper adds noise to the top H output-proximal layers, citing (Kurita et al., 2020) that these layers are most vulnerable. However, the paper does not discuss whether this holds for all attack types evaluated (RIPPLe_a, LWP, BadPre), and does not report whether the choice H=10 was validated or how sensitive results are to this choice.
+5. **Standard deviations not reported.** Table 1 reports numbers with four decimal places but no standard deviations, despite 5 random seeds being run. The t-test significance is mentioned but unverifiable without variance information.
 
 ### Trivial
 
-- The statistical significance markers (asterisks in Tables 1 and 4) are explained as t-test at p<0.01, but the reference comparison (compared to which baseline?) is not specified.
-
-- The paper states in the abstract and introduction that FRS "achieves a broader certified robustness radius" before presenting the evidence — standard framing, but slightly premature.
-
-- The evaluation in Section 5.2.3 (ablation) shows that removing BMPS improves CA slightly (because smoothing degrades benign accuracy), which is a known trade-off that the paper acknowledges.
+None worth enumerating separately beyond what is already listed above.
 
 ## Nice-to-Haves
 
-- A discussion of computational cost. The method requires K=20 forward passes per test sample plus the overhead of MCTS search. The paper claims "efficient" but provides no runtime or memory figures.
-- A sensitivity analysis for key hyperparameters: σ, H, K, MCTS iteration budget, Λ, ω_H/ω_L.
-- A dedicated limitations section discussing the dependence on MCTS accuracy, the assumption about trigger location, and the diminishing returns for large models.
+- Certified accuracy vs. radius plots (this is the single most impactful addition — would address Weakness 2 above).
+- Ablation of the MCTS component: compare FRS against (a) uniform randomization, (b) random segment selection, (c) an oracle that knows the trigger location. This would directly quantify the benefit of MCTS-guided fuzzing.
+- Runtime and memory comparison with TextGuard and empirical baselines.
+- Sensitivity analysis for key hyperparameters (ω_H, MCTS budget, H, σ).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **"Abstract claim is stated as fact before evidence"** — Removed per formatting/style nitpick rule. Standard abstract framing, not a substantive weakness.
-- **"Missing comparison to concurrent randomized-smoothing defenses (denoised smoothing, word-substitution smoothing)"** — Removed per hard rule about not mentioning missing related works. These methods target evasion attacks, not backdoors, and the paper's scope is clearly scoped to backdoor attacks.
-- **"Statistical significance asterisk not explained"** — Partially removed. The paper does explain it's a t-test at p<0.01 in the table captions. The question of "compared to what baseline" is fair but trivially addressed.
-- **"No sensitivity analysis"** — Downgraded to Nice-to-Have. Standard practice but not a core flaw.
-- **"Section 4.1 'abandons' its approach in Section 4.2"** — Overstated severity. Section 4.1 presents a general framework and Section 4.2 develops a practical scheme. The two are connected via Assumption 1; the gap is that Assumption 1 lacks proof (kept as Major weakness above), not that the approaches are disconnected.
-- **"No computational cost discussion"** — Moved to Nice-to-Have.
-- **"Ablation magnitude is modest"** — Removed. The paper doesn't claim each component provides huge improvements; it claims they contribute positively, which the data supports.
+These points from the reviewer were removed per the filtering rules:
+- **"Notation in Eq. 2 is garbled"** — The garbled LaTeX (`\big\langle\big|\frac{\d H^{\prime}}{\d F}`) appears in the prose of Section 3, not Eq. 2. Per the instruction, formatting artifacts from PDF extraction are parser issues, not author errors.
+- **"The paper never clarifies how biphased parameter smoothing relates to the ensemble definition"** — The paper explicitly states in Section 4.1 that θ̃_F = [θ̃_F,1, ..., θ̃_F,K] is the ensemble, and Section 4.2 describes generating the K copies via Eq. 5. The connection is clearly drawn.
+- **"20 × 8B = 160B parameters, not feasible"** — The noise in Eq. 5 is applied only to top-H layers (H=10), not the full model. The memory overhead is one base copy plus noise vectors for H layers, not 20 full copies. The computational cost concern is valid (kept in Minor) but the memory claim is factually incorrect.
+- **"TextGuard may require a different K"** — The paper states "we adopt the same number of base models here in TextGuard and FRS for fair comparison" (Section 5.2.1), directly addressing this concern.
+- **"No comparison to other certified defenses (Zhang et al. 2023, Weber et al. 2023)"** — Missing-baseline complaints about papers I cannot independently verify are removed per instructions. The paper cites relevant vision-only RS works (Weber et al., Wang et al., Xie et al.) in the related work and notes the gap in text-domain certified backdoor defenses.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface an interesting tension: the paper's strongest selling point (certified robustness) hinges on an unproven assumption about parameter smoothing, yet the empirical results may be strong enough to stand on their own as a heuristic defense. This suggests the paper could benefit from either (a) a formal proof connecting parameter smoothing to input-level smoothing, or (b) an honest reframing as an effective empirical defense with a theoretically-motivated radius formula, rather than a fully certified approach. The consistent performance across diverse settings (5 models, 3 datasets, 3 attacks) indicates the core idea has merit regardless of the theoretical framing.
+The reviews surface an interesting tension: the paper's strongest contribution — the MCTS-guided fuzzing that proactively searches for triggers — is also what undermines its theoretical rigor as a *certified* defense. Certification requires covering the worst-case perturbation; a heuristic search that might miss the trigger cannot provide a worst-case guarantee. This suggests the paper might be more honestly positioned as a **practical defense with empirical robustness guarantees** (where the MCTS search demonstrably improves robustness in practice) rather than a **certified defense with provable guarantees** in the strict RS sense. Re-framing the contribution around the empirical improvement — supported by the strong results in Tables 1-4 — would resolve much of the tension between the claimed theory and what is actually demonstrated.
 
 ## Suggestions
 
-1. **Tighten the theoretical framework.** Either prove Assumption 1 formally (perhaps relating parameter noise variance σ² and learning rate η to the approximation error) or reframe the contribution as an empirically effective defense with a theoretically-motivated heuristic, dropping the pretense of formal certification for the practical algorithm.
+1. **Re-frame the theoretical contribution honestly.** Either (a) tighten the certificate to account for MCTS failure probability (e.g., via a union bound over identification failure), or (b) drop the "certified" framing and present the method as an empirically validated defense that uses RS-style voting as a component. The empirical results are strong enough to stand on their own without overclaiming the theory.
 
-2. **Add a no-defense baseline** to all experimental tables with the attacked model's CA, PA, and ASR without any defense applied.
+2. **Add standard certified accuracy vs. radius curves** for all three datasets, with comparisons to TextGuard. This is the minimal addition needed to support the "broader certified robustness radius" claim.
 
-3. **Report all missing hyperparameters** — ω_H, ω_L, Λ, MCTS iteration budget, C — in the implementation details section.
+3. **Ablate the MCTS component** against uniform randomization, random segment selection, and an oracle that knows the trigger. This would directly quantify how much of the benefit is due to intelligent trigger search.
 
-4. **Describe the radius computation algorithm** as a reproducible procedure (e.g., binary search over perturbation radii, using a binomial test with α=0.05 and K=20, etc.).
+4. **Report standard deviations** for all main results (Tables 1, 2, 4) and clarify the certification procedure (how the beta-binomial bound connects to the binary search for radius in §5.2.2).
 
-5. **Validate MCTS identification accuracy** by reporting the overlap between identified vulnerable areas and true trigger positions (when known from the attack configuration), perhaps broken down by attack type and model.
-
-6. **Add confidence intervals or standard deviations** to Table 2, computed over the five runs mentioned in Section 5.1.
+5. **Include a runtime comparison** (inference time per sample) and **memory analysis** for FRS vs. baselines.
 
 ## Score and Decision
 
-The paper addresses an important and underexplored problem: certified defense against textual backdoor attacks injected during pre-training. The MCTS-guided fuzzing approach is novel and the empirical results are consistently strong across diverse settings. However, the paper suffers from a significant gap in its theoretical grounding (Assumption 1 is unproven), which undermines the central "certified robustness" claim, and the experimental evaluation is missing key baselines and implementation details needed for proper assessment and reproducibility. The paper also presents some results (radius improvements, attack success rates) without critical context (no-defence baseline, confidence intervals).
-
-These weaknesses are addressable in revision. The core empirical finding — that FRS consistently outperforms existing defenses — is likely robust. I would support acceptance if the authors can either provide rigorous justification for Assumption 1 or honestly reframe the contribution, and fill in the missing baselines and implementation details.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

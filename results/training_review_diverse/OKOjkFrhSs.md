@@ -1,18 +1,22 @@
-Now I have verified the paper's content thoroughly. Let me write the final consolidated review.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me compose the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes the Prompt-Guided Dynamic Network (PDN) for single image super-resolution, which uses multi-modal prompts (text captions or related images) via CLIP to guide dynamic convolutional kernel generation. The key component is the Dynamic Correlation Module (DCM), comprising a Spatially Multi-Modal Attention Module that highlights prompt-relevant spatial regions and a Prompt-Guided Dynamic Convolution Module that generates spatially-adaptive kernels from prompt embeddings. DCM can be plugged into existing SR architectures (EDSR, RDN, RCAN) and yields consistent PSNR/SSIM improvements.
+This paper proposes the Prompt-guided Dynamic Network (PDN) for single image super-resolution, together with a plug-and-play Dynamic Correlation Module (DCM) that can be inserted into existing SR backbones. DCM consists of two components: a Spatially Multi-Modal Attention Module that computes pixel-wise similarity between LR features and a prompt embedding (text or image), producing an attention mask that highlights prompt-relevant regions; and a Prompt-Guided Dynamic Convolution Module that generates dynamic convolutional kernels conditioned on the prompt embedding rather than on image features. The method uses CLIP to extract prompt embeddings offline. The strongest evidence for the method's effectiveness is Table 3, where inserting DCM into EDSR, RDN, and RCAN (all trained identically on COCO) yields PSNR gains of 0.11–0.51 dB at ×4 scale.
 
 ## Strengths
 
-- **Novel use of multi-modal prompts for dynamic convolution in SR.** The paper is the first to use CLIP prompt embeddings to generate dynamic convolutional kernel weights for SR, rather than image features as in prior dynamic convolution (e.g., CondConv). The Remark in Section 3.3 clearly explains why prompt embeddings (high variance, sparse distributions) are better suited for discriminative kernel generation than image features, which tend to produce "averaged" static-like kernels in SR tasks. This is a genuine technical distinction from prior work.
+- **Plug-and-play DCM consistently boosts multiple SR backbones under fair comparison.** When DCM is inserted into EDSR, RDN, and RCAN and all models are retrained on COCO ×4 with identical settings (Table 3), the upgraded networks achieve PSNR gains of 0.11–0.51 dB and SSIM gains of 0.009–0.02. This is the paper's cleanest and most convincing evidence, as it controls for training data and protocol.
 
-- **Ablation study validates both submodules.** Removing either the Spatially Multi-Modal Attention Module or the Prompt-Guided Dynamic Convolution Module from EDSR+ reduces performance (Table 4), confirming both components contribute to the reported gains.
+- **First to condition convolutional kernel estimation on multi-modal prompts in SR, with clear differentiation from prior work.** The paper argues in the Remark (Section 3.3) that using prompt embeddings from CLIP (rather than image features as in CondConv) yields higher-variance, more discriminative dynamic kernels. This is distinguished from TGSR, which uses text attention but not kernel estimation. The novelty claim is specific and defensible.
 
-- **Plug-and-play integration across three architectures.** DCM is inserted into EDSR, RDN, and RCAN with consistent quantitative improvements (Table 3: up to 0.51 dB PSNR, at least 0.11 dB), demonstrating broad applicability without architectural redesign.
+- **The attention masks are interpretable and align with prompt content.** Figures 4 and 5 show that the learned attention masks highlight spatial regions corresponding to informative words in captions (e.g., "cats," "tennis player"). This provides qualitative validation that the model learns meaningful cross-modal correspondences.
 
-- **Qualitative evidence of prompt-guided attention.** Visualizations (Figures 4, 5) show attention masks highlighting regions corresponding to semantically informative words in captions (e.g., "cats," "tennis player"), confirming the model learns cross-modal relevance.
+- **PDN outperforms the only prior text-guided SR method (TGSR) on most metrics.** On what is contextually the COCO ×8 task (Table 2), PDN achieves higher PSNR, SSIM, lower NIQE, and lower FID. The paper offers reasoned analysis for why TGSR underperforms (e.g., LSTM trained from scratch, static inference).
+
+- **Ablation confirms both sub-components contribute.** Table 4 shows that removing either the attention module or the dynamic convolution module from EDSR+ degrades performance, validating the two-part design.
 
 ## Weaknesses
 
@@ -22,63 +26,54 @@ None.
 
 ### Major
 
-- **Quantitative results on standard SR benchmarks are not reported.** The abstract and Section 4.1 claim the paper "conduct[s] extensive experiments on four popular benchmark datasets, Set5, Set14, Urban100, and Celeba-HQ" and that these datasets are used "for evaluation." However, Table 1 only reports quantitative PSNR/SSIM on COCO (×2, ×4) and FFHQ (×8, ×16). The only mention of Urban100 is a single visual comparison (Figure 3). No quantitative results are provided for Set5, Set14, or Celeba-HQ. Since essentially all prior SR works report numerical results on these benchmarks, the paper's core claim — that PDN "elevates existing SR performance" — cannot be verified against the standard evaluation protocol used in prior work. The quantitative evidence that exists (COCO, FFHQ) is on non-standard evaluation sets, making comparison with published state-of-the-art results impossible.
+- **Table 1 comparison likely uses baselines trained on different data, undermining the claimed state-of-the-art results.** Section 4.2 compares PDN (trained on COCO/FFHQ) against RCAN, RDN, EDSR, SRGAN, ESRGAN, and SPSR, but never states that these baselines were retrained on the same data. The mention that "RDN does not provide ×8 and ×16 models in the official source code, so we add additional up-sampling blocks" implies use of pretrained (likely DIV2K-trained) models. This makes the observed PSNR/SSIM gap uninterpretable — it could stem from different training distributions rather than from the proposed method. The only fair comparison for PDN as a full network would require retraining all baselines on COCO/FFHQ.  
+  **Mitigating factor:** The paper's core claim (DCM boosts existing methods) is independently validated by Table 3, which uses fair, same-data comparisons. The Table 1 issue primarily affects the claim that "PDN achieves state-of-the-art" as a standalone network, not the DCM contribution.
 
-- **Comparison with TGSR is based on an unverifiable reproduction.** The authors state (Section 4.3) that TGSR code was not released and they "reproduce the experiments with the same setup as reported in the paper." The large performance gap (0.54 dB PSNR on ×4) cannot be independently validated, and the reproduction fidelity is unknown. Since PDN differs fundamentally in architecture (CLIP-based, no adversarial training), this comparison is preliminary.
+- **The ablation study never isolates the prompt itself.** Table 4 removes entire sub-modules (replacing dynamic convolution with standard convolution, removing the attention mask) but never replaces the prompt embedding with a baseline (e.g., a zero vector, a random vector, or a learned constant) while keeping the rest of DCM intact. Without this, the improvement cannot be attributed to the *semantic content* of the prompt versus the added network capacity of the dynamic convolution + attention machinery. This is a genuine gap: the flipped-image prompts used on FFHQ/Set5/Set14/Urban100 are transformations of the same image, so the "semantic information" from the prompt is largely redundant with the LR features, making the capacity-based explanation especially plausible.
 
-- **Train/test splits for COCO and FFHQ are not specified.** Section 4.1 states COCO and FFHQ are used for training, and Section 4.2 reports "comparison on the COCO dataset" — but no test split (e.g., COCO val2014, a held-out subset, or cross-validation) is defined. The reader cannot determine whether results reflect held-out evaluation or in-distribution performance.
+- **The TGSR comparison (Table 2) does not explicitly state the evaluation dataset.** The caption reads "Quantitative results of TGSR and PDN" without specifying which dataset or scale factor was used. The surrounding text discusses COCO context, but the omission is a reproducibility concern.
 
 ### Minor
 
-- **Parameter count is not controlled when evaluating DCM's contribution.** Adding DCM modules increases model capacity (basis kernels, MLP, attention projection). The ablation study (Table 4) replaces DCM submodules with standard convolutions, which partially addresses this, but a direct comparison with a parameter-matched baseline (e.g., equally widening the baseline network) is not provided. The reported improvements could partly reflect added capacity rather than prompt-guided dynamic weighting.
+- **No parameter count, FLOPs, or inference time reported for DCM.** The paper describes DCM as "lightweight" and "plug-and-play" but provides no quantitative overhead numbers. This makes it difficult to assess the practical cost-benefit trade-off, especially since DCM is inserted at multiple positions (e.g., after every residual block in EDSR).
 
-- **The horizontal-flip prompt for captionless datasets is not validated.** For FFHQ, Set5, Set14, and Urban100 (which lack captions), the prompt is a horizontally flipped LR image. The paper does not analyze whether this provides useful signal beyond the LR itself — a flipped image is nearly identical in content. An ablation with a random/fixed prompt would clarify whether the method depends on meaningful prompts or merely benefits from any additional input.
+- **Several hand-tuned hyperparameters without sensitivity analysis.** The temperature coefficient (initialized at 34, decayed by 3 every 10 epochs), the scaling factor ζ (initialized at 50), and the number of basis kernels (n=4) are set without any ablation or robustness study. It is unclear how sensitive the results are to these choices.
 
-- **Varying gains across architectures are not explained.** DCM improves EDSR by 0.11 dB, RDN by 0.51 dB, and RCAN by 0.47 dB (Table 3). Section 3.4 describes different insertion densities (1 DCM per block for EDSR/RDN, 3 per RIR block for RCAN), but the paper does not explain why RDN and RCAN benefit substantially more than EDSR.
-
-- **Hyperparameter choices lack justification.** The number of basis kernels (n=4), the softmax temperature schedule (initial 34, decayed by 3 every 10 epochs), and the scaling factor initialization (ζ=50) are reported but not justified or ablated.
-
-- **No limitations or failure case discussion.** The paper does not discuss dependence on prompt quality, computational overhead from DCM modules, or failure cases when prompts are irrelevant or misleading.
+- **No limitations or failure-case discussion.** The paper does not discuss scenarios where the method might falter (e.g., inaccurate or too-generic captions, mismatch between prompt and image content, or failure modes on out-of-distribution prompts).
 
 ### Trivial
 
-- The abstract's claim "PDN improves PSNR up to 0.11... over state-of-the-art SR methods" is ambiguous — the 0.11 dB improvement comes from EDSR+ vs. EDSR (Table 3, a baseline comparison), not from PDN vs. published state-of-the-art results on standard benchmarks. This could confuse readers about which comparison supports the claim.
+None.
 
 ## Nice-to-Haves
 
-- Reporting results on standard SR benchmarks (Set5, Set14, Urban100, Celeba-HQ) trained on a standard training set (e.g., DIV2K) would make the evaluation directly comparable to prior work and significantly strengthen the paper.
-- An analysis of prompt necessity (e.g., comparing true captions vs. random captions vs. fixed text) would clarify how much the method depends on semantically meaningful prompts.
-- Reporting FLOPs and parameter counts for baseline vs. upgraded networks would help assess the practical cost of DCM.
+- A qualitative / ablative comparison between text prompts, flipped-image prompts, and a no-prompt baseline (e.g., zero embedding) would substantially strengthen attribution.
+- Retraining the full set of baselines on COCO/FFHQ for Table 1, or at minimum adding a clarifying statement about the training data used for each baseline.
+- Reporting overhead (parameters/FLOPs for DCM vs. the base model).
+- A hyperparameter sensitivity study for the temperature coefficient, ζ, and n.
 
 ## Removed Points
 
 These points are flagged to be removed; treat them with caution.
 
-- **"First to introduce multi-modal prompts" claim is questionable (Harsh Critic).** The critic argues this is questionable given TGSR. However, the paper's claim is specifically about introducing multi-modal prompts *into convolutional kernel estimation*, not about multi-modal guidance in SR generally. TGSR uses text attention for feature modulation, not for generating dynamic kernel weights. The paper explicitly acknowledges TGSR and differentiates its contribution. This criticism misunderstands the paper's specific claim. **Removed: strawman/misunderstanding.**
-
-- **Strength Finder's claim #2: "PDN achieves the best PSNR and SSIM on all four benchmark datasets (Set5, Set14, Urban100, Celeba-HQ) at scale factors ×2, ×4, ×8, ×16 (Table 1)."** The paper does not report quantitative results on Set5, Set14, or Celeba-HQ in Table 1 or anywhere in the main text. This claim is factually unsupported by the paper. **Removed: factually incorrect.**
-
-- **"The core technical idea is a direct adaptation of CondConv with a different input" (Harsh Critic).** This is an opinion, not a factual weakness. The paper explicitly discusses CondConv in the Remark (Section 3.3) and details why the prompt-based approach differs (high-variance embeddings enable discriminative patterns). **Removed: opinion, not a verifiable weakness.**
+- **"Set5 and Set14 are no longer standard for modern SR."** (Harsh Critic, "Other Observations"). This is factually incorrect — Set5 and Set14 remain standard benchmarks in SR literature, and the paper additionally evaluates on Urban100 and Celeba-HQ. The paper itself describes them as "commonly used benchmarks."
+- **"The novelty is incremental: the dynamic convolution module is a standard CondConv..."** (Harsh Critic, "Other Observations"). This is a subjective opinion, not a verifiable weakness. The paper explicitly distinguishes from CondConv in the Remark (Section 3.3), noting the use of prompt embeddings rather than image features, which the authors argue yields higher-variance kernels. Whether this constitutes sufficient novelty is a judgment call, not a factual error.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one useful observation: the paper's evaluation strategy reveals a broader tension in the field. The paper trains on COCO/FFHQ rather than DIV2K (the standard SR training set) because captions are available there. This highlights a structural challenge for multi-modal SR methods — standard SR benchmarks lack paired text annotations, forcing methods to rely on proxy prompts (flipped images) whose utility is unclear. This tension is worth acknowledging explicitly and could motivate future dataset construction.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Report quantitative results on standard SR benchmarks.** Add PSNR/SSIM on Set5, Set14, Urban100, and Celeba-HQ (trained on a standard set like DIV2K or the current COCO/FFHQ training setup) to make results comparable with prior work. This is the single most impactful improvement.
-
-2. **Clarify train/test splits.** Specify which subset of COCO (e.g., val2014, a random 10% hold-out) and FFHQ are used for evaluation in Table 1.
-
-3. **Add a parameter-matched baseline for the integration experiments (Section 4.4).** Control for capacity by comparing DCM-augmented networks against wider/deeper versions of the baseline with comparable parameter counts.
-
-4. **Ablate the prompt's role.** Compare true captions vs. random captions vs. fixed prompts (e.g., "a photo") vs. no prompt to isolate whether semantically correct prompts drive the improvement.
-
-5. **Provide a limitations section** discussing dependence on prompt availability/quality, computational overhead, and failure modes.
+1. **Add a prompt-level ablation.** Replace the prompt embedding with (a) a zero vector, (b) a random fixed vector, and (c) a learned constant vector, while keeping all other DCM components intact. This would directly test whether the *semantic content* of the prompt drives the improvement, or whether the gains come from added capacity alone.
+2. **Clarify the training data for all baselines in Table 1.** If baselines are pretrained on different data, either retrain them on COCO/FFHQ or add a clear statement and discuss the potential confound.
+3. **Explicitly state the evaluation dataset and scale factor for Table 2.**
+4. **Report the parameter count and FLOPs** for DCM relative to each base model, and discuss the practical overhead.
+5. **Add a limitations paragraph** discussing when prompts may be unavailable, inaccurate, or unhelpful.
 
 ## Score and Decision
 
-The paper presents a technically novel approach to incorporating multi-modal prompts into SR via dynamic convolution. The method is clearly described, the ablation study is sound, and the plug-and-play integration is practically appealing. However, the evaluation has a critical gap: quantitative results on the standard benchmarks promised in the abstract (Set5, Set14, Urban100, Celeba-HQ) are not reported, making the claimed improvements unverifiable against prior work. The TGSR comparison is based on an unverifiable reproduction, and several minor methodological questions remain unaddressed. The contribution is promising but the evidence is incomplete in its current form.
+**Overall assessment:** The paper has a genuine contribution — conditioning dynamic convolution on multi-modal prompt embeddings for SR is a novel direction with practical potential. The strongest evidence is Table 3, where DCM boosts three established backbones under fair, same-data conditions. However, the evaluation has two significant gaps: (1) the main Table 1 comparison appears to use baselines trained on different data, making the headline "state-of-the-art" claim unsubstantiated, and (2) the ablation never isolates the prompt itself, so the improvement cannot be attributed to semantic guidance rather than added capacity. These issues are addressable with revision but limit the paper's credibility in its current form.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

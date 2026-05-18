@@ -1,78 +1,84 @@
-Now I have all the information needed. Let me synthesize the final review.
+Now I have all the information needed. Let me compose the consolidated review.
 
 ## Summary
 
-HATFormer adapts the TrOCR transformer architecture for historical Arabic handwritten text recognition (HTR), introducing three key domain-specific components: a BlockProcessor that preserves horizontal information when resizing text-line images for ViT input, a custom Arabic BBPE tokenizer that reduces token sequence length by over 300% compared to the ASCII-biased default, and a two-stage synthetic-to-real training pipeline with overtraining. The system achieves 8.6% CER on the Muharaf historical dataset (a 51% relative improvement over the prior best baseline at 17.6%) and demonstrates better cross-dataset generalization than existing approaches.
+HATFormer adapts the TrOCR transformer architecture for historical Arabic handwritten text recognition (HTR) with three customizations: (1) a BlockProcessor that packs text-line images into a 384×384 ViT container while preserving horizontal resolution, (2) a custom Arabic BBPE tokenizer that reduces token counts by over 300%, and (3) a two-stage training pipeline using 1M synthetic printed images followed by overtraining on real handwritten data. The main empirical result is an 8.6% CER on the Muharaf historical dataset, a 51% improvement over the previous best published baseline (17.6%).
 
 ## Strengths
 
-- **Strong empirical result on the primary target dataset (Muharaf):** HATFormer achieves 8.6% CER on the largest public historical Arabic HTR dataset, a clear 51% relative improvement over the prior best baseline (Saeed2024, 17.6%). This is the paper's core contribution and is well-supported.
+- **Strong empirical gains on the most relevant benchmark.** On the historical Muharaf dataset, HATFormer achieves 8.6% CER vs. 17.6% for Saeed et al. (2024), a 51% relative improvement. This is the paper's central claim and is well-supported by Table 1. The ablation study (Table 3) shows each proposed component contributes substantially to this gain: BlockProcessor removal increases CER by 11.4%, custom tokenizer removal by 10.9%, and synthetic pretraining removal by 4.2%.
 
-- **BlockProcessor ablation shows a large and convincing effect:** Removing the BlockProcessor increases CER by 11.4% absolute (Table 1, Section 5.4). The design is well-motivated by the observation that ViT's default 384×384 resizing compresses Arabic text lines horizontally by ~1.6× on average, and the ablation confirms this matters substantially.
+- **Novel BlockProcessor design with clear motivation.** The paper identifies that ViT's default 384×384 resize compresses typical Arabic text-line images by ~1.6× horizontally (Section 4.1), degrading stroke clarity. The proposed solution — packing the line into a 384×384 grid via segmentation into 384-pixel-wide chunks stacked vertically — is well-motivated and its critical importance is validated by the ablation study (11.4% CER increase when removed).
 
-- **Custom Arabic BBPE tokenizer yields measurable gains:** The paper trains a BBPE dictionary on an Arabic corpus and shows via ablation that replacing it with the ASCII-biased default increases CER by 10.9%. The observation that the ASCII-biased tokenizer requires "over 300% more tokens" (Section 4.2) provides a clear mechanism for the improvement.
+- **Custom Arabic BBPE tokenizer with substantial compression.** Training a BBPE dictionary on an Arabic corpus reduces token sequence length by over 300% compared to the default ASCII-biased tokenizer. The ablation confirms this is not merely an efficiency gain: removing it increases CER by 10.9%, demonstrating that compact representation simplifies the classification problem.
 
-- **Cross-dataset evaluation demonstrates better generalization:** When trained on Muharaf and tested on KHATT, HATFormer achieves 27.5% CER versus Saeed2024's 33% (a 16.7% relative improvement, Table 2, Section 5.3), showing that the system transfers better to unseen modern handwriting than the leading hybrid CRNN-RNN baseline.
-
-- **Sensitivity analysis (beam width, length penalty, synthetic dataset size) provides practical deployment guidance:** Section 5.5 reports inference speed on a single A10 GPU, showing practical feasibility, and empirically identifies optimal operating parameters.
+- **Comprehensive cross-dataset evaluation.** Section 5.4 reports systematic cross-dataset experiments showing that training on historical Muharaf generalizes to modern handwriting (26% CER) better than the reverse (≥40% CER). The system also outperforms the Saeed baseline on most cross-dataset pairs (e.g., 27.5% vs. 33% on Muharaf→KHATT).
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **Overstated claim of state-of-the-art performance across all datasets.** Contribution 1 (line 46) states that HATFormer "outperforms the state of the art across various Arabic handwritten datasets." This is contradicted by the paper's own results: on KHATT, Saeed2024 achieves 14.1% CER vs. HATFormer's 15.4% (Table 1, Section 5.3); on MADCAT, Rawls2018 achieves 1.5% vs. HATFormer's 4.2%. While the paper discusses these discrepancies in Section 5.3, the high-level framing in the abstract and contributions list is stronger than warranted. This directly affects how the contribution is perceived — the genuine achievement is a large advance on historical Arabic (Muharaf) specifically, not universal superiority. The claim should be qualified to match what the evidence supports.
+- **Claim that attention addresses three specific Arabic challenges is asserted without direct evidence.** The abstract and introduction (lines 6, 36–37) state that the attention mechanism "effectively address[es]" cursive writing, context-dependent character shapes, and diacritics, and Contribution 2 (line 47) says the method "has proven effective" in this regard. Yet no experiment isolates or measures the model's handling of these phenomena. The ablation study tests the BlockProcessor, tokenizer, synthetic data, and overtraining — none of which directly probe the attention mechanism's role. No analysis compares CER on words with vs. without diacritics, on characters in different positional forms (initial/medial/final/isolated), or on text where cursive joins are artificially broken. The attention maps (Figure 5) are referenced but not quantitatively analyzed against these three challenges. This claim appears in the abstract, introduction, and contribution list, but the evidence for it is merely the overall system performance — which conflates many factors. The paper would be stronger without this attribution claim, or with targeted experiments to support it.
 
 ### Minor
 
-- **Ablation study does not report whether hyperparameters were re-tuned for ablated models.** The large ablation deltas (e.g., −11.4% from removing BlockProcessor, −10.9% from removing custom tokenizer) are presented as the value of each component. However, the paper does not state whether learning rate, warmup steps, or batch size were re-optimized for each ablated variant. If all ablations used the same hyperparameters as the full model, these deltas could be inflated by hyperparameter mismatch. This does not invalidate the ablation — showing that components are critical in the optimal configuration is meaningful — but it weakens the quantitative attribution of each component's standalone contribution.
+- **BlockProcessor description lacks full precision for the segmentation step.** The paper says the processor "warp[s] it to fill in the ViT's 384×384-pixel image container from left to right and top to bottom" (line 106) and mentions "six nonoverlapping complete rows that are 384 pixels wide" (line 107). The intended operation — segmenting the 64-pixel-high line into 384-pixel-wide contiguous chunks and stacking them vertically — can be inferred from context and dimensions, but the term "warping" is geometrically imprecise for this packing/tiling operation. A step-by-step description (or pseudocode/diagram) would make the core contribution fully reproducible without guesswork.
 
-- **No variance or confidence measures for any result.** All CER numbers (main results, ablation, cross-dataset) come from single runs. Given the known sensitivity of transformer-based HTR to random seed and data ordering, especially on datasets of moderate size (e.g., 25,767 training lines for Muharaf), the absence of standard deviations or multiple-run statistics makes it impossible to assess whether observed differences (e.g., the 1.3% CER improvement attributed to overtraining in Table B) are statistically meaningful. While single-run evaluation is common in large-scale HTR benchmarks, this is a gap that should be acknowledged.
+- **Baseline comparison transparency is incomplete.** For the Lamtougui (2023) and Momeni (2024) baselines, the paper relies on published CER numbers and explicitly notes that "dataset splits used in these baselines may differ from those in our experiments, potentially affecting direct comparisons" (line 172). This is an honest acknowledgment, but the paper does not report what splits those baselines used, making it difficult for readers to assess the comparison's fairness. For the Saeed (2024) baseline on Muharaf (17.6% CER), the paper says they "retrained their model on each dataset for a fair comparison" (line 172), yet 17.6% matches Saeed's original publication — it should clarify whether this is the retrained result or the published number.
 
-- **Claim that attention "addresses three intrinsic challenges of Arabic" is not directly supported by experiment.** The paper states (Section 1, line 36–37, and Contribution 2, line 47) that the transformer's attention mechanism differentiates cursive characters, decomposes context-dependent shapes, and identifies diacritics. The sole supporting evidence is the attention map visualization (Figure 3), which is qualitative. No experiment isolates attention (e.g., comparison against a non-attention CRNN trained on the same data, or an attention-head ablation) to substantiate this attribution. This is a post-hoc rationalization rather than a demonstrated property — it does not weaken the system's results but over-interprets them.
+- **No quantitative analysis of attention maps.** Figure 5 is referenced (line 177) to "illustrate how the attention mechanism captures character relationships," but no quantitative metrics (e.g., attention entropy, positional bias, per-head relevance scores) are provided. For a paper that attributes a significant part of its performance gain to the attention mechanism's handling of Arabic-specific challenges, this is a missed opportunity to substantiate the claim.
 
-- **No comparison to a vanilla TrOCR baseline on Muharaf.** The paper never reports what an unmodified TrOCR (no BlockProcessor, no custom tokenizer, no synthetic stage, just fine-tuned on Muharaf) achieves. Such a baseline would contextualize the large ablation deltas: if vanilla TrOCR gives, say, 30% CER, the component effects become more interpretable; if it gives 15%, the gains attributable to individual components shrink. This single experiment would strengthen the ablation story substantially.
+- **"CNNs and RNNs are no longer required" overstates the evidence.** The paper claims (line 176) that results "imply that CNNs and RNNs are no longer required for HTR," but on KHATT, the Saeed (2024) hybrid baseline actually outperforms HATFormer (14.1% vs. 15.4%). The paper acknowledges this but still makes the sweeping statement. Transformer-only HTR works well on some benchmarks but the evidence does not yet support declaring CNNs/RNNs obsolete.
 
 ### Trivial
 
-- **BlockProcessor width limit not discussed as a limitation.** The method pads line images to a maximum width of 2,304 pixels (six 384-wide rows, line 107). The paper does not note what happens for wider images (clipping), nor discuss whether this is a practical concern for some use cases. This is a minor documentation gap.
+- The word "warping" in the BlockProcessor description (line 106) would be better replaced with "packing" or "tiling" to avoid confusion with geometric image warping (stretching/distortion).
 
 ## Nice-to-Haves
 
-- Apply the same text normalization/MADCAT-specific postprocessing used by Rawls2018 to HATFormer for a more controlled comparison on MADCAT. The paper already notes this as a likely cause of the gap (Section 5.3), so running the experiment would cleanly resolve the comparison.
-- Report per-character error distributions for the ablated models to connect component effects to the Arabic-specific challenges (cursive joins, diacritics, context-dependent shapes) the paper claims to address. The error diagnostic app mentioned in the paper already provides infrastructure for this.
-- Compare to Momeni2024 on Muharaf using publicly reported numbers, if available, to strengthen the transformer-vs-transformer comparison on the historical dataset.
+- A targeted analysis of diacritic handling (CER on lines with vs. without diacritics) or character-form accuracy (initial/medial/final/isolated) would substantially strengthen the claim about attention addressing Arabic-specific challenges.
+- A brief qualitative error analysis showing common failure modes would complement the ablation study and guide future work.
+- Discussion of the domain gap between printed synthetic data and historical handwriting (and whether a handwriting-specific synthetic generator could yield further gains) would be a natural addition.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged by reviewers but are removed or downgraded for the following reasons:
 
-- **"51% improvement framing could mislead"** — The abstract says "51% improvement over the best baseline" which inherently means relative improvement. This is standard usage and not misleading. (Reviewer nitpick.)
-- **"MADCAT comparison is unfair because paper doesn't run with same normalization"** — The paper already acknowledges this issue in Section 5.3 (line 181), explaining that Rawls2018's 1.5% CER likely benefits from aggressive text normalization. This is a forthright discussion, not an omission.
-- **"Limited comparison to Momeni on Muharaf"** — The paper compares to Momeni on KHATT, the dataset where Momeni reports results. Asking for a comparison on a dataset where the baseline did not publish numbers is scope creep.
-- **"Ablation deltas are implausibly large"** — The BlockProcessor (preventing 1.6× horizontal compression) and the tokenizer (reducing sequence length by 300%) address fundamental input representation issues. Deltas of 11.4% and 10.9% are large but not implausible given the severity of the problems they solve. The valid concern (hyperparameter re-tuning) is preserved in Minor weaknesses above; the "implausible" framing is removed.
+- **"Overtraining presented as a novel finding"** — The paper explicitly credits Mosbach et al. (2020) and Hao et al. (2019) (lines 140–143) and frames it as a technique they leverage, not a discovery. Removed because the paper does not claim novelty here.
+- **"Synthetic data domain gap weakens claims"** — The paper acknowledges using printed text (Section 5.1) and the ablation shows synthetic pretraining helps by 4.2% CER. The observation is valid but is a future-work direction, not a weakness of the presented system. Moved to Nice-to-Haves.
+- **"Missing reproducibility details" beyond BlockProcessor** — The reviewer's concern about reproducibility centered on the BlockProcessor description (addressed above in Minor). Other concerns about undisclosed hyperparameters are standard for a conference paper and are addressed in Section 4.3 (learning rate, batch size, warmup steps, GPU count).
+- **"No discussion of handwritten synthetic generator"** — This is a suggestion for future work, not a weakness of the current paper. Moved to Nice-to-Haves.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a perspective that the authors have not already articulated in the paper itself.
+None beyond the paper's own contributions. The reviews do not surface a synthetic insight that reinterprets the paper's results in a way the authors did not themselves identify.
 
 ## Suggestions
 
-1. **Qualify the SOTA claim** in the abstract and contributions to reflect that HATFormer achieves state-of-the-art results on historical Arabic HTR (Muharaf specifically) with competitive results on other datasets. This is the single highest-impact fix.
-2. **Add a vanilla TrOCR baseline** on Muharaf to calibrate the ablation study. This would immediately validate or contextualize every component delta.
-3. **Report whether hyperparameters were re-tuned for each ablation**, and if not, acknowledge this limitation explicitly.
-4. **Add variance estimates** (at least 3 seeds) for the main Muharaf result and the ablation study.
-5. Add a brief **limitations paragraph** discussing the BlockProcessor width ceiling, reliance on English pretrained weights, and sensitivity to line-level segmentation quality.
+1. **Replace "warping" with explicit language.** Describe the BlockProcessor operation step by step: given a 64-pixel-high line image of width W, segment it into ⌈W/384⌉ contiguous chunks of 384 pixels each (except the last), pad the last chunk if needed, and stack these chunks vertically to form a 384×384 image. Include a diagram or pseudocode.
+
+2. **Clarify baseline comparisons.** Report the train/validation/test splits used in the Lamtougui (2023) and Momeni (2024) papers, or justify why cross-split comparison is still meaningful. Clarify whether the 17.6% CER for Saeed on Muharaf is from the authors' retraining or from the original publication.
+
+3. **Either substantiate or drop the attention-challenge claim.** If kept, add an experiment comparing CER on lines with vs. without diacritics, or on characters in initial/medial/final/isolated forms. If no such experiment is feasible, remove the claim from the abstract and contribution list, as the overall system results are already strong without it.
+
+4. **Add quantitative attention analysis.** Report at minimum the average attention entropy or a positional-attribution metric to support the claim that attention is meaningfully focusing on character-relevant regions.
+
+5. **Tone down the "CNNs/RNNs no longer required" statement.** Replace with a more measured conclusion, e.g., "transformer-only architectures can be competitive with or surpass hybrid CNN-RNN baselines on historical Arabic HTR, as shown by the Muharaf results."
 
 ## Score and Decision
 
-The paper makes a genuine and well-demonstrated contribution to historical Arabic HTR. The 8.6% CER on Muharaf is a meaningful advance, and the ablation study convincingly shows that the BlockProcessor, custom tokenizer, and synthetic training each contribute substantially. The weaknesses are primarily in framing and documentation, not in the validity of the core results. The overstated SOTA claim is the most significant issue and requires correction, but it does not undermine the paper's primary contribution — the system is genuinely strong on historical Arabic, just not universally superior. With revisions to qualify the claims and add the suggested baselines and methodological details, this paper would be a solid contribution.
+**Originality:** 6/10 — The paper adapts an existing architecture (TrOCR) with well-motivated customizations. The BlockProcessor and Arabic BBPE tokenizer are practical engineering contributions rather than architectural novelty.  
+**Importance of research question:** 8/10 — Historical Arabic HTR is genuinely underserved, and the 51% improvement on Muharaf is practically meaningful for digital humanities.  
+**Claims well supported:** 6/10 — The central empirical claim (8.6% CER on Muharaf) is well supported by ablation studies. However, the unsupported attribution to the attention mechanism for Arabic-specific challenges detracts from an otherwise clean paper.  
+**Soundness of experiments:** 7/10 — The ablation study is thorough and the cross-dataset evaluation is a strength. The baseline comparisons have acknowledged limitations but are handled transparently.  
+**Clarity of writing:** 6/10 — Generally clear, but the BlockProcessor description uses imprecise language ("warping") and the paper would benefit from more explicit implementation details for its core contribution.  
+**Value to community:** 7/10 — The planned release of model weights, tokenizer, synthetic data generator, and error diagnostic app would be valuable resources for Arabic HTR research.  
 
-Score: 7.0 (good paper, clear contribution, issues addressable in revision).
+The paper makes a solid empirical contribution to an important and under-resourced problem. The main weaknesses — the unsupported attention-challenge claim, imprecise BlockProcessor description, and baseline transparency — are addressable but need attention. The core empirical results (51% improvement on Muharaf, validated by ablation) are credible and practically significant.
 
-Decision: Accept (contribution is real and the main issues are fixable).
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

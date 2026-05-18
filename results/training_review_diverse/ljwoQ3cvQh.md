@@ -1,65 +1,72 @@
-Now I have a thorough understanding of the paper and can verify each claim. Let me write the consolidated review.
+I've now thoroughly read the paper and verified claims. Let me construct the final review.
+
+---
 
 ## Summary
 
-This paper identifies and provides evidence for a phenomenon: neural network predictions on high-dimensional OOD inputs tend to revert toward the optimal constant solution (OCS)—the best input-independent prediction under the training loss. The authors propose a mechanism (feature norm decay → bias domination → OCS approximation), study aspects of it empirically on small-scale models and theoretically on simplified homogeneous networks, and demonstrate an application to risk-sensitive selective classification.
+This paper makes the empirical observation that as inputs become increasingly out-of-distribution (OOD), neural network predictions tend to converge toward the Optimal Constant Solution (OCS) — the best constant prediction achievable without observing the input. The authors demonstrate this phenomenon across 8 datasets, 3 loss functions (cross-entropy, MSE, Gaussian NLL), and multiple architectures (ResNet, VGG, DistilBERT). They propose a mechanism (OOD features have smaller norms → output dominated by accumulated bias terms → bias approximates OCS), support it with both empirical analysis and theoretical results in a simplified setting, and illustrate a practical application to risk-sensitive selective classification.
 
 ## Strengths
 
-- **Well-supported core empirical claim**: The "reversion to the OCS" phenomenon is demonstrated across 8 datasets (CIFAR10, ImageNet, ImageNet-R/S, OfficeHome, BREEDS, WILDS Amazon, etc.), 3 loss functions (cross-entropy, MSE, Gaussian NLL), and multiple architectures (ResNet, VGG, DistilBERT), as shown in Figure 3. This systematic evidence is the paper's strongest contribution and is not undermined by any of the weaknesses below.
+- **Comprehensive empirical validation of the reversion-to-OCS phenomenon.** The paper demonstrates this behavior across 8 datasets with both synthetic and natural distribution shifts, 3 loss functions, both vision and text modalities, and CNNs and transformers. Figure 3 shows a clear monotonic relationship between an independent OOD score and prediction-OCS distance across all settings, with standard deviations over 5 runs. This breadth of evidence strongly supports the paper's central observational claim.
 
-- **Extends prior observations to a general principle**: While prior work noted softmax confidence drops for OOD inputs (Hendrycks & Gimpel 2016), this paper generalizes the observation to arbitrary loss functions and continuous outputs, and identifies the specific constant (OCS) to which predictions revert. This reframes a well-known phenomenon under a unified, testable hypothesis.
+- **Generalization beyond prior work.** The paper extends earlier observations about softmax confidence decreasing on OOD inputs (Hendrycks & Gimpel, 2016) to arbitrary loss functions and continuous outputs. The Gaussian NLL case (where predicted variance *increases* OOD) is particularly compelling because it cannot be explained by a simple decrease in output magnitude, isolating the OCS reversion mechanism.
 
-- **Clear and testable mechanistic hypothesis**: The proposed explanation—OOD features have smaller norms and align less with weight subspaces, causing outputs to be dominated by accumulated biases that approximate the OCS—is intuitive, grounded in empirical measurements (Figure 4), and independently verifiable.
-
-- **Demonstrates the practical relevance of OCS alignment**: The selective classification example (Section 5) illustrates a conceptually important point: the loss function's OCS determines the model's "default behavior" on OOD inputs, and this can be aligned with cautious actions. This insight is valuable regardless of whether the specific implementation is state-of-the-art.
+- **Clear, practical demonstration of how loss function choice affects OOD behavior.** The selective classification experiments cleanly illustrate that by designing the loss function so the OCS aligns with a cautious default action (abstention), the model automatically becomes more conservative on OOD inputs. This is a non-obvious design principle with direct practical relevance. The paper is appropriately measured, stating explicitly that the goal is not SOTA selective classification but illustrating the OCS effect.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The theoretical analysis does not match the claimed mechanism of multi-layer bias accumulation.** The paper's mechanism (Section 4 intro, line 119) describes "accumulation of model constants (e.g. bias terms)" across layers. However, the theory in Section 4.2 studies homogeneous ReLU networks that have *no bias terms in intermediate layers* (line 143–144). Bias is only introduced as a final-layer additive term (line 168: $\mathcal{\tilde{F}} = \{f(W; \cdot) + b\}$). The theory therefore cannot explain the *accumulation* of biases across multiple layers that the mechanism posits. The theory instead shows something narrower: with only a final bias, under certain margin-point conditions, the bias approximates the OCS. This is a structural gap between the claimed mechanism and what is formally supported. The authors should either extend the theory to include per-layer biases or clearly delineate what the theory does and does not cover.
-
-- **The selective classification comparison is against an unrealistically weak baseline.** The paper compares a reward-prediction (MSE) agent to a "standard classification" agent that *never abstains* (Figure 6–7). In selective classification, standard practice involves thresholding on a confidence measure (e.g., maximum softmax score) to decide when to abstain. The paper does not include this natural baseline. The claim that "appropriately leveraging reversion to the OCS can substantially improve an agent's performance on OOD inputs" is weakened by this omission—a thresholded classifier, even with a threshold tuned only on in-distribution data, would likely also increase abstention on OOD inputs and could achieve competitive rewards. The oracle baseline (temperature-scaled on OOD labels) is not a substitute for a practical baseline. The paper's conceptual point about OCS alignment is valid, but the empirical comparison overstates the practical advantage.
+1. **The evidence for the bias-approximates-OCS mechanism is limited.** The paper's mechanistic explanation has two parts: (i) OOD inputs produce smaller-magnitude layer activations, and (ii) accumulated bias terms approximate the OCS. Part (i) is reasonably supported (columns 1–2 of Figure 4, showing feature norm and subspace alignment decrease with shift). However, part (ii) is supported by only two data points: a single layer in two models (MNIST 4-layer net and CIFAR10 ResNet-20), for two loss functions (CE and MSE), shown in columns 3–4 of Figure 4. This is a narrow demonstration for what the paper frames as a general mechanism. The paper does not examine whether this approximation holds systematically across different architectures, layers, or depths. The theoretical result (Proposition 4.3) studies bias only in the *final* layer under exponential loss, and shows bias proportional to the sum of margin-point labels — which equals the OCS only when the margin points' label marginal matches the training marginal, a condition the paper acknowledges but does not verify empirically. While the paper is honest about incomplete understanding, the mechanism is presented in the abstract and introduction as a core contribution, making this gap significant.
 
 ### Minor
 
-- **The mechanism analysis (Section 4.1) is conducted only on small-scale models and datasets (MNIST with a 4-layer net, CIFAR10 with ResNet20).** The main phenomenon experiments (Figure 3) include ImageNet-scale models and DistilBERT, but the mechanism analysis is not replicated at this scale. It is unclear whether the feature-norm drop and bias-approximation patterns hold for ResNet50 on ImageNet-R or DistilBERT on WILDS Amazon. This limits the generality of the mechanistic explanation relative to the broader empirical claim.
+2. **The theory and empirics are not bridged.** The theoretical analysis (Section 4.2) studies deep homogeneous ReLU networks with exponential loss, gradient flow, and bias only in the final layer. The experiments use standard networks (ResNet, VGG, DistilBERT) with cross-entropy, MSE, or Gaussian NLL, biases at every layer, and SGD. The paper does not check whether the trained models satisfy the theoretical conditions (e.g., whether weight matrices are nearly rank-1 as predicted by theory for sufficiently deep/wide networks). Computing singular value distributions or subspace alignment for the CIFAR10 ResNet-20 would meaningfully connect the two analyses. As it stands, the theory is an isolated result about a different model class, and the paper would be strengthened by bridging this gap.
 
-- **The paper does not specify which layer $k$ is used for the "accumulation of model constants" computation** (line 136: "at one of the final layers $k$"). The approximation quality of the accumulated constants may vary across layers; specifying the choice is important for reproducibility and for assessing robustness of the finding.
+3. **The selective classification experiments, while valid for their stated purpose, would benefit from a non-oracle thresholded baseline.** The paper compares reward prediction (MSE) against standard classification (CE, which never abstains because its OCS is the label marginal) and an oracle (confidence-thresholded classifier calibrated on OOD data). The critic's claim that this is a "straw-man" is overstated — the paper's stated goal is to illustrate the OCS effect, not SOTA comparison, and the oracle is itself a thresholded classifier. However, including a standard confidence-thresholded classifier that selects its threshold on held-in validation data (without OOD access, unlike the oracle) would strengthen the comparison by showing that the reward prediction model's advantage is not merely a function of being able to abstain at all, but specifically of how the OCS drives OOD behavior.
 
-- **No causal intervention test of the mechanism.** The paper shows correlations (OOD features have smaller norms; biases approximate the OCS) but does not demonstrate that the norm drop *causes* the output to revert to the OCS. An intervention such as zeroing out biases at test time would test whether the bias accumulation is causal. Without this, the mechanism remains a plausible correlation rather than a validated explanation.
+4. **The OOD score discriminator is underspecified.** The paper says it trains "a low-capacity model to discriminate between the training and evaluation datasets" but does not specify the architecture, capacity, or training procedure. Since the OOD score is the independent variable in the paper's central figure (Figure 3), this detail matters for reproducibility.
+
+5. **No quantification of how close predictions actually get to the OCS.** Figure 3 shows *relative* distance decreasing, but the y-axis is unnormalized. A normalized measure (e.g., distance to OCS divided by average in-distribution distance) would help assess the practical magnitude of the effect. The paper would also benefit from showing explicit examples where reversion fails.
 
 ### Trivial
-None (the email truncation noted by the reviewer is a parser artifact, not a paper flaw).
+
+6. The title "Deep Neural Networks Tend To Extrapolate Predictably" is bolder than the evidence supports — the paper does not study cases where reversion fails, and the empirical scope, while broad, does not guarantee generality. A title like "...Often Revert to the Optimal Constant Solution" would be more precise.
 
 ## Nice-to-Haves
-- Include a thresholded softmax classifier baseline in the selective classification experiments to show the practical value of OCS-aligned methods versus a standard alternative.
-- Replicate the mechanism analysis (Figure 4) on at least one larger-scale model/dataset (e.g., ResNet50 on ImageNet-R).
-- Perform a causal intervention test (e.g., zeroing biases at test time) to strengthen the mechanism claim.
-- Discuss known failure modes or OOD shifts where reversion to the OCS is weak or absent.
-- Commit to releasing code for reproducibility.
+
+- A discussion or explicit test of failure modes (e.g., adversarial perturbations, inputs from completely different modalities) to clarify boundary conditions.
+- A normalized measure of distance-to-OCS to assess effect magnitude.
+- Computing rank/singular-value distributions of weight matrices in the ResNet-20 to connect theory and empirics.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-- *"The propositions and theorem are stated informally and without proof"* and *"Consider relegating it to the appendix"* — Removed because the proofs almost certainly exist in the appendix (appendix sections are stripped by the PDF parser). Criticizing absent appendix content that exists in the original submission is not valid.
-- *"The blfootnote contact email appears truncated"* — Removed as a PDF parsing artifact, not an error in the original paper.
-- *"Code release: Not mentioned"* — Removed as this is a standard suggestion, not a weakness of the paper content.
+
+- The critic's claim that the selective classification baseline is a "straw man" and that the paper should be faulted for comparing against a classifier that cannot abstain. **Removed because:** the paper includes an oracle (thresholded classifier with abstention) as a baseline, and the primary comparison is explicitly designed to contrast OCS effects, not to claim SOTA. The paper states this goal clearly. The criticism overstates the flaw.
+
+- The critic's framing that Figure 4's bias-approximates-OCS evidence is "the [entire] support" for a central piece. **Weakened from fatal/major to major:** the criticism is factually correct about limited evidence, but the paper's primary contribution is the empirical observation (well-supported), and the mechanism is presented as a plausible explanation with partial validation, not as the sole result.
+
+- The critic's suggestion that the theory is entirely disconnected. **Kept as minor (not major):** many ML papers use simplified theoretical settings, and the paper's theoretical results do provide formal bounds consistent with the empirical pattern. The gap is real but not structural — the paper could check rank conditions in its trained models to tighten the connection.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews confirm the value of the core empirical finding while narrowing the scope of what is actually proven about the mechanism and the application.
+
+None beyond the paper's own contributions. The reviews largely converge on the paper's strengths and weaknesses without introducing a genuinely new framing or observation not already present in the paper.
 
 ## Suggestions
-1. **Disambiguate the theory's scope.** Either extend the theory to model per-layer biases, or explicitly state in the main text that the theory covers only the final-bias component of the mechanism and that the multi-layer accumulation remains an empirical finding. This would prevent readers from over-interpreting what is formally supported.
-2. **Add a thresholded classifier baseline** to the selective classification experiments. Tune a softmax threshold on in-distribution validation data (without OOD labels) and compare rewards. This would directly test whether the OCS-alignment insight provides genuine practical value beyond a simple heuristic.
-3. **Specify the chosen layer $k$** for the accumulation-of-constants computation, and ideally show results for multiple choices of $k$ to demonstrate robustness.
+
+1. **Expand the bias-approximates-OCS evidence.** For the CIFAR10 ResNet-20 and other models, systematically sweep across layers and multiple OOD datasets, measuring the distance between accumulated bias output and the OCS. If the approximation holds broadly, this substantially strengthens the mechanism. If it does not hold at earlier layers, this reveals a boundary condition worth documenting.
+
+2. **Bridge theory and empirics.** For the trained ResNet-20, compute the singular value distribution of weight matrices and check whether the low-rank / nearly-rank-one pattern predicted by Theorem 1 holds. Even a single sanity check would substantially increase coherence between Sections 4.1 and 4.2.
+
+3. **Add a non-oracle thresholded classifier baseline.** Include a classifier that selects its abstention threshold on held-in validation data (without OOD access), to show that the reward prediction model's advantage is not simply a function of being able to abstain.
+
+4. **Specify the OOD discriminator architecture and training details** for reproducibility.
+
+5. **Add a normalized distance metric** in Figure 3 (e.g., distance-to-OCS divided by avg. in-distribution distance) to help readers assess effect magnitude.
 
 ## Score and Decision
 
-The paper makes a genuine contribution: it identifies, names, and systematically validates a general pattern in how neural networks extrapolate on OOD inputs. This core observation is well-supported and likely to influence how researchers think about OOD behavior and uncertainty. The weaknesses—the theory not matching the full mechanism, the weak baseline in the application, and the limited scale of the mechanism analysis—are real but do not invalidate the central claim. They primarily affect the secondary contributions (mechanism explanation and practical demonstration). These issues are addressable in revision.
+This paper's core contribution — the empirical observation that neural network predictions on OOD inputs tend to revert toward the OCS — is well-supported, novel, and of genuine interest to the community. The paper generalizes a known classifier behavior to arbitrary loss functions, provides a plausible mechanism with partial validation, and illustrates a practical design principle. The weaknesses (thin mechanism evidence, theory-empirics gap, selective classification comparison could be tighter) are real but do not invalidate the central finding. With reasonable revisions, this is a solid paper.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**MY FINAL SCORE: <pineapple>6.5</pineapple>**
+**MY FINAL DECISION: <orange>Accept</orange>**

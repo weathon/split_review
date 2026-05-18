@@ -1,73 +1,84 @@
-Now I have all the information I need. Let me compose the final review.
+Now I have all the information needed to verify each claim. Let me synthesize the final review.
 
 ## Summary
 
-The paper proposes G2T-LLM, a method that converts molecular graphs into JSON/XML tree-structured text representations and fine-tunes LLaMA3.1-8B on a partial-molecule completion task with token-constraining during inference. The approach achieves competitive validity and novelty on QM9 and ZINC250k benchmarks, with ablation studies showing the importance of each component.
+G2T-LLM converts molecular graphs into hierarchical JSON/XML tree representations (depth-first traversal with unique atom IDs to handle rings/cycles), fine-tunes LLaMA 3.1-8B on these representations as a completion task, and applies token constraints during inference to enforce chemical and structural validity. The approach achieves competitive results on QM9 and ZINC250k benchmarks—top-two validity across both datasets, high novelty (88–100%), and the best Scaffold score on ZINC250k—while trading off some FCD quality against the best diffusion methods.
 
 ## Strengths
 
-1. **Novel graph-to-tree encoding with concrete algorithmic specification**: The paper provides clear, reproducible procedures (Algorithms 1 and 2) for converting molecular graphs to/from hierarchical JSON trees. The ablation against "Talk like a Graph" (Table 3) shows this encoding dramatically outperforms naive natural-language graph descriptions (98.60% vs 59.20% validity), directly validating the central claim that tree-structured representations better suit LLMs.
+- **Novel graph-to-tree encoding that bridges molecular graphs with LLM-friendly formats.** The paper introduces a depth-first traversal that converts molecular graphs into hierarchical JSON/XML while preserving cycles via unique atom IDs (Algorithm 1, Figure 2). This is a clean design choice that aligns molecular data with LLMs' pre-training on structured hierarchical formats, directly addressing the graph-sequential mismatch.
 
-2. **Thorough ablation studies isolating each component**: Separate ablations analyze the effect of encoding type (§4.3), supervised fine-tuning (§4.4), dataset size (§4.5), and token constraining (§4.6). This enables readers to assess each contribution independently and gives credibility to the empirical claims.
+- **Systematic ablation studies that isolate each component's contribution.** The paper separately evaluates the effect of the encoding method (Table 4 — JSON vs. Talk Like a Graph), supervised fine-tuning (Table 5), dataset size (Table 6), and token constraining (Table 7). This decomposition allows the reader to weigh each piece of the pipeline independently.
 
-3. **Competitive validity and novelty with a small fine-tuning set**: Using only 5,000 molecules for fine-tuning (versus full datasets used by baselines), G2T-LLM achieves top-two validity on both datasets and the best or tied-best novelty (88.29% QM9, 100% ZINC250k). This data efficiency is an understated strength.
+- **Competitive benchmark performance with distinctive novelty advantage.** On QM9, G2T-LLM achieves 88.29% novelty compared to <40% for DiGress and Grum, while maintaining reasonable FCD (0.815) and validity (99.47%). On ZINC250k, it achieves the best Scaffold score (0.6062) and second-best FCD (2.445). This novelty-FCD trade-off is a genuine differentiator from methods that achieve excellent FCD by closely replicating the training distribution.
 
-4. **Efficient method design**: The approach uses LLaMA3.1-8B with QLoRA on a single A100, achieving strong results without the computational overhead of larger models (e.g., GPT-4). This makes the approach accessible to more research groups.
-
-5. **Incisive discussion of the novelty-FCD tradeoff**: The paper correctly identifies that DiGress and Grum achieve strong FCD/Scaf at the cost of novelty (<40% on QM9), arguing this signals overfitting rather than superior generalization. This framing appropriately contextualizes where G2T-LLM's strengths lie.
+- **Encoding provides large gains over prior graph-to-text methods.** Table 4 shows JSON encoding achieves 98.60% validity vs. 59.20% for Talk Like a Graph on ZINC250k, with >3× better FCD. This quantifies the advantage of tree-structured formats over natural-language graph descriptions.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **Missing direct SMILES/SELFIES baseline on the same model**: The paper's central claim is that "tree-structured formats are particularly adept at processing" molecular information (Abstract) and that the graph-to-tree encoding is responsible for the performance. However, no experiment fine-tunes the *same* LLaMA3.1-8B on SMILES strings with a comparable completion task. Without this baseline, it is impossible to tell whether the gains come from the specific JSON tree encoding or simply from applying supervised fine-tuning to any reasonable molecular representation on a capable LLM. The single ablation against "Talk like a Graph" (a weak, never-designed-for-generation baseline) is insufficient to support the encoding's claimed superiority. This gap undermines the paper's core contribution.
+- **Overstated performance claims in the conclusion.** The abstract and introduction appropriately claim "comparable performances with state-of-the-art methods," but the conclusion (Section 5) asserts "achieving state-of-the-art performance on benchmark datasets." The results do not support blanket SOTA: on QM9, FCD (0.815) is an order of magnitude behind DiGress (0.095) and Grum (0.108), and the method ranks 3rd on FCD and 2nd on validity behind Grum. The paper is competitive but not uniformly SOTA, and the conclusion overclaims.
 
-2. **Large FCD gap on QM9 not adequately explained**: The method's FCD on QM9 (0.815) is roughly 7–8× worse than DiGress (0.095) and Grum (0.108). The paper attributes this to a novelty-FCD tradeoff and potential overfitting by those baselines. While plausible, no evidence is provided (e.g., nearest-neighbor Tanimoto similarity to the training set) to substantiate the overfitting claim. A reader could equally conclude that G2T-LLM generates lower-quality molecules on this dataset. This gap weakens the "competitive performance" claim.
+- **Token constraining does the dominant share of validity work, which the paper under-acknowledges.** Table 7 shows that without token constraining, validity is 41.6%; with constraining it jumps to 98.6% — a ~57 percentage point improvement. The paper presents this transparently in the ablation but does not squarely discuss what this means for the contribution: the raw LLM output (even after fine-tuning) is overwhelmingly invalid without hand-crafted rules about valid atom types, bond types, and parent-child relationships. The constraints are effectively a validity envelope around a model that, by itself, has limited understanding of chemical validity. The paper should explicitly discuss whether a simpler grammar-based or constrained decoder could achieve similar results, and what value the LLM specifically adds beyond the constraints.
+
+- **Missing comparisons with other LLM-based molecular generation methods.** The paper cites LMLF, Grammar Prompting, and LLM4GraphGen but argues that "direct comparisons are not feasible" due to methodological differences (rule-based prompting vs. SFT) and architecture size (GPT-4 vs. LLaMA 3.1-8B). This reasoning is not fully satisfying: the paper could report those methods' published results as a reference point (with caveats about incomparability) rather than omitting them entirely. Leaving out all LLM baselines creates a gap — it is unclear whether G2T-LLM advances over existing LLM-based approaches or simply achieves comparable results via a different recipe.
 
 ### Minor
 
-1. **Overclaimed SOTA in the conclusion**: Line 311 states "achieving state-of-the-art performance on benchmark datasets." Table 1 shows G2T-LLM holds the top spot in only 3 of 8 metric-dataset combinations (Scaf on ZINC250k, Novelty on ZINC250k tied, and second-best in most others). The abstract's phrasing ("comparable performances with state-of-the-art methods") is accurate; the conclusion should match it.
+- **Uniqueness and diversity metrics missing from the main comparison table (Table 1).** Uniqueness and internal diversity are standard metrics in molecular generation and appear only in the SFT ablation experiment (Table 5), not alongside the main baselines. Without them in the main table, readers cannot assess whether the model produces diverse structures or collapses to modes. (The ablation shows 98.98% uniqueness in a 1,000-molecule sample, but this is under different settings and not directly comparable to baselines.)
 
-2. **Token-constraining rules underspecified for reproducibility**: Section 3.3 describes constraints at a high level ("dictate acceptable parent-child relationships," "enforce valid connections between atoms"). The ablation shows TC is responsible for a 57 percentage-point validity swing (41.6% → 98.6%), making it the single most important component. For a method to be reproducible, the exact constraint rules (allowed atom types, valency limits, parent-child schema constraints) must be listed, not just gestured at.
+- **No variance reporting for main results.** The table caption states "mean of 3 different runs" but no standard deviations, confidence intervals, or per-run values are reported. This is standard practice for the field and would improve confidence in the results.
 
-3. **No variance reporting despite 3 runs**: The caption of Table 1 states "We report the mean of 3 different runs" but no standard deviations or confidence intervals are provided. This is especially important for FCD, which can be noisy; the gap between G2T-LLM's 0.815 and DiGress's 0.095 on QM9 could be less stark if variance were shown.
+- **Underspecified partial-prompt construction during training and inference.** The paper states that fine-tuning uses "a partial molecular structure" and inference "begins with selecting a random molecular component, which could be an atom, a bond, or even a larger motif" (Section 3.5). No details are given about: (a) how the starting component is selected (random walk? random subgraph? from the training set?), (b) how the "partial" structure is constructed during training (always a prefix of the DFS tree? a random subtree?), or (c) whether training-set molecules can serve as starting components during evaluation. This makes the evaluation setup difficult to reproduce and assess for potential data leakage.
 
-4. **Ambiguity in the w/o SFT ablation**: Section 4.4 does not state whether token constraining was applied during the "w/o SFT" condition. If TC was applied (the most reasonable reading, since the inference pipeline description in §3.5 includes it by default), then the base model achieves 70.8% validity with TC, and SFT boosts this to 98.6%. But if TC was not applied, the interpretation differs dramatically. This should be clarified.
+- **Selection of the 5,000-molecule fine-tuning subsets is not described.** The paper uses 5,000 molecules for fine-tuning on ZINC250k (and varies size on QM9) but does not specify how these subsets were sampled (random? stratified by molecular size? scaffold-based?). Replication requires this detail.
 
-5. **Overfitting claim about DiGress/Grum is stated as "suggesting" but needs evidence**: The paper mentions "suggesting potential overfitting" (line 228), which is appropriately hedged, but given that this claim is central to justifying the weaker FCD, some corroborating evidence (e.g., similarity to training set molecules) would substantially strengthen the argument.
+- **Token-constraining rules are described only in prose, not formalized.** Section 3.3 describes constraints as "acceptable parent-child relationships," "valid connections between atoms," and restrictions on atom/bond types, but no grammar, rule set, or formal specification is provided. This makes the approach impossible to implement independently without reverse engineering.
 
 ### Trivial
-None.
+
+None beyond the minor issues above.
 
 ## Nice-to-Haves
-- A comparison against fine-tuning the same LLaMA model on SMILES strings (with equivalent constrained decoding) would directly validate or refute the encoding's claimed advantage.
-- Reporting standard deviations for Table 1.
-- A figure showing the generated JSON tree for a small ring molecule (e.g., cyclopropene from Figure 1) to clarify the ring-closure encoding.
-- Listing the exact token-constraining rules in an appendix or supplement.
+
+- **A limitations paragraph** acknowledging: (a) that token constraining dominates validity and what the LLM uniquely contributes; (b) that the method is computationally heavier than graph-based baselines (LLaMA 3.1-8B + QLoRA on A100 vs. much smaller graph models); (c) generalization beyond QM9/ZINC250k has not been tested.  
+- **An experiment comparing JSON encoding to SMILES or SELFIES** under the same LLM and training setup would isolate whether the tree-structured format itself matters beyond being a serialization. The current encoding ablation compares to Talk Like a Graph, which is a weak baseline.  
+- **An analysis of error types** without token constraints (are failures syntactic JSON errors or chemically implausible structures?) would clarify what the LLM has vs. hasn't learned.
 
 ## Removed Points
-- **Missing SELFIES/DeepSMILES in Related Work**: Removed per the rule against introducing criticisms about missing related works (cannot verify whether these are relevant omissions from external knowledge).
-- **"Essentially SMILES with JSON wrapping" (Introduction note)**: The reviewer notes the algorithm is structurally similar to SMILES — the paper acknowledges this ("Inspired by SMILES"). This is a valid observation but not a weakness; the contribution is the change in *output format*, which is non-trivial for LLM processing.
-- **Strength about "Thorough experimental design with multiple ablations"**: Removed because it conflicts with verified weaknesses about missing baselines — the ablation design is thorough for the components tested but incomplete for the central encoding claim.
+
+These points from the critic were removed per the filtering rules:
+
+1. **Algorithm 2 "bug" (mismatched arguments `child, atom` vs. `node, parent, bond_type`).** This could be a parser artifact from the LaTeX algorithmic environment, not a real algorithmic error. Per the rules, formatting artifacts from parsing are not author errors.
+
+2. **Criticism that the paper claims "state-of-the-art performance" in Section 1.** The paper actually says "comparable performances with state-of-the-art (SOTA) models" in the introduction (line 18) and "comparable performances with state-of-the-art methods" in the abstract. Only the conclusion overclaims. The reviewer's characterization is partially inaccurate.
+
+3. **The suggestion that LMLF/Grammar Prompting/LLM4GraphGen cannot be compared because they use "rule-based prompt engineering" vs. SFT.** This is a genuine methodological difference, and the paper's reasoning about architecture disparity (GPT-4 vs. LLaMA 3.1-8B) is a legitimate concern for fair comparison. The weakness is kept but downgraded to minor — the paper could at least report their numbers for context.
+
+4. **Complaint that "the authors should also cover Y/domain Z/additional tasks"** (not present in the critic's core criticisms, but the critic's "Strengthening the Paper" suggestions about SMILES comparison and raw-LLM-with-constraints experiments are kept as Nice-to-Haves rather than weaknesses).
 
 ## Novel Insights
-None beyond the paper's own contributions. The review surfaces the tension between the paper's encoding-centric narrative and the empirical reality that token constraining is the dominant driver of validity — but this tension is already visible in the paper's own ablation tables. The main novel insight from the review process is that the paper would need a SMILES baseline to substantiate its strongest claims.
+
+The most interesting finding that emerges across the review and the paper's own data is that the novelty-FCD trade-off is structural, not accidental. Methods that achieve near-perfect FCD (DiGress at 0.095, Grum at 0.108) do so by closely mimicking the training distribution, yielding novelty below 40%. G2T-LLM operates at the other end of this spectrum: its constraints guarantee structural validity but the LLM's tendency to explore (even with 5k training samples) produces high novelty (88–100%) at the cost of worse distribution fidelity (FCD 0.815). This suggests that LLM-based molecular generation may be inherently biased toward exploration over exploitation of the training distribution — a property that could be either a bug or a feature depending on the application (de novo drug discovery vs. library refinement). The paper touches on this but does not fully articulate the implication.
 
 ## Suggestions
-1. **Add a SMILES fine-tuning baseline on LLaMA3.1-8B**: This single experiment would validate or refute the paper's core hypothesis. If JSON encoding outperforms SMILES, the contribution is clear. If the gap is small, reframe the contribution around the full pipeline (encoding + TC + SFT) rather than the encoding alone.
-2. **Clarify the w/o SFT ablation setup**: State explicitly whether token constraining was applied in this condition.
-3. **Provide evidence for the overfitting claim**: Compute average maximum Tanimoto similarity of DiGress/Grum generated molecules to the training set.
-4. **Specify the token-constraining rules**: Provide the exact grammar constraints (allowed atom types, valency rules, parent-child schema) in an appendix.
-5. **Tone down the conclusion**: Replace "achieving state-of-the-art performance" with language matching the abstract ("competitive with state-of-the-art methods").
+
+1. **Calibrate the language in the conclusion.** Replace "achieving state-of-the-art performance" with "achieving competitive performance" or "top-two validity with high novelty" — this aligns with what the data actually show.
+
+2. **Add uniqueness and diversity (e.g., average pairwise Tanimoto) to Table 1**, or at minimum add a note in the main results about the ablation-based uniqueness figure.
+
+3. **Report standard deviations or per-run ranges** for the main results (Table 1) since the caption already states three runs were performed.
+
+4. **Formalize the token-constraining rules** — either as a grammar in the supplementary material or as a pseudocode constraint function — to make the method reproducible.
+
+5. **Clarify the partial-prompt construction:** specify how starting components are chosen during both training and inference, and whether training-set molecules can appear as prompts at test time.
+
+6. **Add an explicit limitations section** discussing the role of token constraining vs. LLM learning, the computational cost, and the scope of tested domains.
 
 ## Score and Decision
 
-This is a solidly executed paper with a clear motivation, well-designed ablations, and competitive validity and novelty. However, the central claim—that the tree-structured encoding is responsible for the performance—is not adequately supported due to the absence of a same-model SMILES baseline. Combined with the large FCD gap on QM9 and an overclaimed SOTA statement, the paper's contribution is somewhat narrower than advertised. The method clearly works, but it is unclear how much of the success is attributable to the specific encoding versus the general approach of fine-tuning an LLM with constrained decoding.
-
-The paper is not fatally flawed—the approach is sound, the experiments are careful, and the results are useful. With a SMILES comparison and more precise claims, it could be a solid contribution.
+This paper presents a novel and sensible encoding that makes LLMs applicable to molecule generation, with reasonable experimental support and clear ablation studies. However, the weaknesses are non-trivial: the conclusion overclaims what the data support, the dominant role of token constraining in achieving validity is under-discussed, the absence of any LLM-based comparisons leaves a genuine gap, and several reproducibility details are missing. These are addressable in revision, but in the current form the paper's contribution is more incremental and less cleanly demonstrated than the presentation suggests.
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

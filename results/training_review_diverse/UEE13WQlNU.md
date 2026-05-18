@@ -1,18 +1,20 @@
-Now I have all the information I need to produce the final consolidated review. Let me synthesize everything.
+Here is my consolidated final review after cross-checking all claims against the paper.
+
+---
 
 ## Summary
 
-This paper proposes CTV-FAS, a CLIP-based framework for generalizable Face Anti-Spoofing (FAS) that supplements text-prompt-based semantic supervision with learned **visual anchors** to handle attacks (e.g., high-resolution replay) that are difficult to describe linguistically. The framework introduces three modules: a Self-Supervised Consistency Module (SSCM) using patch-masked images with teacher-student EMA training, a Visual Anchors Updating Module (VAUM) that dynamically selects and updates visual anchors from samples with low cosine similarity to their text prompts, and an Adaptive Modality Integration Module (AMIM) that fuses text and visual predictions based on prediction entropy. Experiments across three cross-domain protocols on MCIO, SCW, and the OULU-NPU benchmarks show consistent improvements over state-of-the-art methods, including very large gains (up to +27.07 HTER in single-source settings).
+This paper proposes CTV-FAS, a framework for generalizable face anti-spoofing (FAS) that complements CLIP-based text prompts with dynamically updated "visual anchors" — learned visual class prototypes designed to capture attack types (e.g., high-resolution replays) that resist linguistic description. The framework has three components: a Self-Supervised Consistency Module (SSCM) using masked-image feature alignment, a Visual Anchors Updating Module (VAUM) that selects and refines visual prototypes via a momentum teacher, and an Adaptive Modality Integration Module (AMIM) that entropy-weights the two branches at inference. Results are reported across three protocols spanning seven datasets, with consistent improvements over prior methods.
 
 ## Strengths
 
-- **Novel and well-motivated use of visual anchors to compensate for text-prompt limitations in FAS** — The paper clearly identifies that certain attack types (high-resolution replay, paper attacks) are difficult to capture via text-only prompts (Section 3.3, lines 93-95) and introduces visual anchors as a complementary modality. The VAUM update criterion (samples with lowest cosine similarity to semantic prompts) directly targets this gap, and the idea of adaptive entropy-based fusion (AMIM) is principled and effective.
+1. **Principled and well-motivated approach to a recognized limitation.** The paper identifies a concrete gap in prior vision-language FAS work: text prompts cannot describe certain attack types (e.g., high-resolution replays), and proposes visual anchors specifically to compensate. This framing (Fig. 1, Sec. 1) is domain-specific and not a generic complaint about vision-language models.
 
-- **Consistent and substantial performance gains across all three protocols** — In Protocol 1 (without CelebA-Spoof), the average improvement over SOTA is +3.14 HTER (Table 1). In Protocol 2, a +8.71 HTER gain on SW→C (Table 2). In Protocol 3, average gains of +9.99 HTER without auxiliary data, including dramatic individual improvements (e.g., +27.07 HTER for I→O, Table 3). These numbers are concrete and the pattern is consistent across settings.
+2. **Consistent SOTA-level results across diverse protocols.** CTV-FAS outperforms prior methods on all three protocols (Tables 1–3), with and without the CelebA-Spoof auxiliary dataset. In Protocol 1 (without CelebA-Spoof), average HTER improvement is +3.14 over prior best. In Protocol 2, gains of +8.71 and +1.34 on two settings. In Protocol 3, average improvement of +9.99 without auxiliary data. The evaluation covers small-scale (M, C, I, O) and large-scale (S, C, W) datasets, matching established evaluation conventions.
 
-- **Well-controlled ablation studies confirming each component's contribution** — Table 4 shows that adding VAUM (+2.49), SSCM (+1.05), and AMIM (+1.07) each independently improves average HTER over the CLIP baseline, totaling +5.10. Table 5 further dissects SSCM (SW Aug, TS Learning, EMA each help). Table 8 shows AMIM outperforms mean-weighted and confidence-weighted fusion (5.31 vs. 7.33 and 7.63 HTER). These ablations provide strong internal validity.
+3. **Granular ablation with clear component contributions.** Each module is individually validated (Table 4): VAUM contributes +2.49 HTER, SSCM contributes +1.05, AMIM contributes +1.07, totaling +5.1 over the CLIP baseline. SSCM is further dissected (Table 5) to isolate patch-masked augmentation (+1.07) from teacher-student learning (+0.42). AMIM is compared against mean and confidence-based ensembling (Table 8) and outperforms both (HTER 5.31 vs. 6.20/6.07).
 
-- **Comprehensive evaluation setup** — Testing on three protocols (leave-one-out with MCIO, leave-one-out with large-scale SCW, and single-source-to-single-target), with both with and without CelebA-Spoof auxiliary data, covers data-rich and data-scarce scenarios.
+4. **Design choices grounded in targeted analyses.** The paper compares cosine vs. MSE vs. KL losses for self-supervised learning (Table 6), validates entropy-based weighting against alternatives (Table 8), and shows t-SNE visualizations of feature separation (Fig. 3). The visual anchor visualization (Fig. 4) shows anchors becoming harder over training, supporting the intended selection mechanism.
 
 ## Weaknesses
 
@@ -20,47 +22,56 @@ This paper proposes CTV-FAS, a CLIP-based framework for generalizable Face Anti-
 None.
 
 ### Major
-- **No uncertainty quantification for any reported result** — The paper reports no standard deviations, confidence intervals, or multi-run averages for any experiment. This is particularly problematic for the very large claimed gains (e.g., +27.07 HTER in I→O under Protocol 3). Without variance estimates, the reader cannot distinguish a genuinely superior method from a lucky initialization or an anomalously weak baseline run. While single-run reporting is common in FAS, the magnitude of the claimed improvements — far larger than typical margins in this area — demands more rigor. The core contribution (visual anchors help) is supported by the consistent pattern across settings, but the exact magnitude of gains is unverifiable as reported.
+
+1. **VAUM is underspecified, impairing reproducibility and assessment of the core novelty.** The Visual Anchors Updating Module is central to the paper's contribution, but critical details are missing: (a) How many visual anchors exist — one per class (real/spoof) or per attack type? (b) How is the visual anchor embedding initialized (zero, random, semantic prompt embedding)? (c) The momentum coefficient β is stated to lie in [0,1] but never given a numerical value (similarly, γ for the EMA teacher update is unspecified). (d) The selection procedure — are "hard" images the global bottom-k by similarity, or thresholded, and what is the value of k or threshold? (e) Is the number of selected images per class held constant or does it vary with dataset size? Without these details, a reader cannot reproduce the method, understand its complexity, or determine whether the gains stem from the updating mechanism or simply from adding a second learnable set of class embeddings. This is the single most consequential weakness of the paper.
 
 ### Minor
-- **Baseline comparison methodology is unclear** — The paper states "To fairly compare with FLIP" (line 198) but does not specify whether FLIP and other baselines (VL-FAS, etc.) were re‑implemented in the same codebase with identical training conditions (same optimizer, augmentations, iterations, batch size) or whether numbers are cited from original papers. Given that the proposed method shares the same CLIP backbone as FLIP, a controlled re-implementation would be the cleanest comparison. This is a common issue in the FAS literature, but it weakens the confidence in the claimed margins.
 
-- **"Cannot be described linguistically" motivation is asserted without direct empirical analysis** — The paper repeatedly claims that certain attacks cannot be described linguistically (Abstract, Section 1, Section 3.3) and gives examples (high-resolution replay, paper attacks), but never provides a direct experiment showing *where* and *why* text prompts fail. A small analysis — e.g., showing that the text branch alone produces near-chance or high-entropy predictions on specific attack types while the visual branch corrects them — would strengthen the core motivation significantly. As presented, this claim remains an intuition rather than a demonstrated phenomenon.
+2. **The extremely large gain on I→O (Protocol 3, +27.07 HTER) is not analyzed or explained.** The paper reports this dramatic improvement but offers no per-setting breakdown, no mechanism analysis, and no exploration of why this particular source-target pair benefits so disproportionately. The ablation (Table 4) is limited to C→I, C→M, C→O settings (the paper explains it uses C as source due to domain gap), so the I→O result is never decomposed by component. While the overall trend of improvement across all 12 combinations is robust, the single largest claimed gain lacks the scrutiny needed to make it fully credible. The paper would substantially benefit from reporting the baseline HTER values for each setting and discussing why I→O specifically sees such a large improvement.
 
-- **Visual anchor implementation details are underspecified** — The paper describes a "visual anchor cache" (line 63, 93) and a visual anchor embedding \(\mathbf{P}_v\) (line 104) that is updated once per epoch using samples with low cosine similarity to semantic prompts. However, it does not specify: (a) the number of visual anchors maintained (one per class? multiple?), (b) the cache size, (c) how many samples per epoch are selected to update the anchor (top-k? threshold on cosine similarity?), or (d) whether \(\beta\) (momentum coefficient for anchor update, Eq. 5) is tuned or set. These details affect reproducibility.
+3. **SSCM's 75% masking ratio is used without justification or ablation.** The paper masks 75% of patches for the student branch without motivating this specific ratio or ablating alternatives (e.g., 50%, 90%). Since the loss is cosine similarity between features (not reconstruction), it is unclear whether this aggressive masking forces attention to fine-grained cues or merely encourages reliance on coarse statistics. The modest ablation impact (removing SW Aug drops HTER by only 1.07) suggests the ratio may not be critical, but this should be explicitly validated.
 
-- **75% masking ratio in SSCM is not ablated** — The paper uses an aggressive 75% patch masking for the student model (line 70) but provides no sensitivity analysis. Given that this hyperparameter likely has a strong effect on what the student learns from the teacher, ablating it (e.g., 0%, 25%, 50%, 75%, 90%) would be informative and is standard practice for such design choices.
+4. **No statistical significance or variance reporting.** All results are point estimates from what appears to be a single run. Given the small batch size (3) — which introduces variance in the SimCLR contrastive loss and EMA teacher updates — standard deviations over multiple runs should be reported for the main results and ablation studies.
 
-- **No discussion of failure cases, limitations, or when the method might underperform** — The conclusion (Section 5) and the rest of the paper make strong claims of superiority without acknowledging any settings where the method might struggle (e.g., on attacks that *are* well-described linguistically, or when the visual anchor cache is small). A brief limitations paragraph would improve intellectual honesty and trustworthiness.
+5. **Potential selection bias from coupled anchor-teacher evolution.** The VAUM selects "hard" images based on cosine similarity to semantic prompts, but both the prompting embeddings and the teacher model (which provides the features for anchor updates) evolve during training. The student is itself trained against the visual anchor loss. This coupling could introduce selection drift (e.g., the anchor gravitates toward a narrow subset of data). The paper does not analyze which images are selected across training epochs or whether the selection stabilizes.
 
 ### Trivial
-None.
+
+6. **The claim "first attempt of unifying semantic prompts and discriminative visual cues" could be softened.** Prior CLIP-based FAS work (FLIP, VL-FAS) uses text prompts only, so the direction is novel, but the contribution is incremental — adding a learnable visual prototype alongside text prompts is a natural extension. The paper's value does not depend on this "first attempt" framing.
 
 ## Nice-to-Haves
-- **Training/inference computational cost** — The method adds a teacher model, self-supervised training (SSCM), and anchor updates (VAUM). Reporting training time and inference latency relative to FLIP or the CLIP baseline would help practitioners assess the practical trade-off.
-- **Code release or checkpoints** — Given the pipeline's complexity (EMA teacher, anchor updates, entropy-based fusion), releasing code would significantly aid reproducibility.
-- **Sensitivity analysis on the SSCM masking ratio** — As noted above, a curve from 0% to 90% masking would help the community understand how this choice affects learning.
-- **A direct "text-branch-failure" analysis** — As noted in Minor weaknesses, showing concrete examples where the text branch alone fails and the visual anchor corrects it would substantially strengthen the paper's central motivation.
+
+- A cleaner ablation that fixes the visual anchor (e.g., from random initialization or clustering) and compares against the full VAUM update, to isolate whether the updating mechanism itself is responsible for the gain vs. simply adding a second set of learnable class embeddings.
+- Analysis of per-sample agreement/disagreement between the text and visual branches on the target domain, and which attack types are resolved by the visual anchor. The paper's motivating hypothesis (high-resolution replay attacks cannot be described linguistically) could be directly tested with a controlled experiment on such attack types.
+- Per-setting ablation breakdown for the I→O and other high-gain settings, not just the C-as-source subset.
 
 ## Removed Points
-- **"Implausibly large gains" → downgraded from Fatal to Major** — The critic frames the lack of error bars as undermining the core claims. While the lack of uncertainty quantification is a real weakness (kept in Major), it does not invalidate the core contribution. The improvements are consistent across 20+ settings (Tables 1-3), and the ablation studies (Table 4) confirm each module helps. The direction of improvement is robust even if the exact magnitudes carry some uncertainty.
-- **"Overstated novelty — first attempt is overbroad"** → downgraded from the critic's framing to a Minor weakness. The paper qualifies the claim as "for FAS tasks" (lines 30, 264), and the critic acknowledges the specific FAS application is novel. The criticism is valid regarding phrasing but minor in impact.
-- **Criticism about studying VAUM risk (poor prompts → noisy anchors)** — This is speculative without evidence. The ablation (Table 4) shows VAUM improves performance, suggesting the selected anchors are informative. Removed as a strawman concern the paper's own results address.
-- **"The paper does not ablate 75% masking"** — kept as Minor (it's a valid point), not removed.
-- **"t-SNE visualizations are qualitative"** — The critic concedes they are "supportive." This is not a genuine weakness; visualizations are by nature qualitative. Removed.
-- **"fellow FLIP" typo (line 158)** — Removed per the rule that parser-extracted text may contain artifacts not in the original submission.
+
+These points from the reviewers were flagged for removal; they are listed here for transparency but should be treated with caution.
+
+1. **"Discrepancy between +5.1 (ablation) and +9.99 (full results) is unexplained"** — Removed because this misunderstands the paper. The +5.1 is improvement over the CLIP *baseline* on the C→I, C→M, C→O subset (3 settings with C as source). The +9.99 is improvement over prior *SOTA* averaged across all 12 Protocol 3 combinations. These are different baselines and different settings; there is no discrepancy to explain.
+
+2. **"The ablation does not test VAUM in isolation from the visual branch's training loss"** — Removed because the cumulative ablation design used by the paper (starting from CLIP baseline, adding SSCM, then VAUM, then AMIM) is standard practice. The critic's preferred design (fixing the visual anchor) is a useful additional experiment but the absence of it is not a weakness of the existing evaluation.
+
+3. **"FLIP already uses multiple textual prompts" as a novelty counterargument** — Removed/weakened because FLIP uses *text-only* prompts; the contribution of this paper is specifically the addition of *visual* anchors. The "first attempt" claim is defensible as stated. The observation was moved to Trivial (point 6 above) as a suggestion to soften the language.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews do not surface a perspective on the paper that its authors did not already articulate.
+
+The most interesting observation arising from the reviews is the tension between the method's design and the paper's justification. The paper motivates visual anchors by arguing that certain attacks (high-resolution replays) are "linguistically indescribable" — yet the datasets used (MSU-MFSD, CASIA-MFSD, Replay-Attack, OULU-NPU, CASIA-SURF, CASIA-CeFA, WMCA) do not isolate or control for high-resolution replay as a distinct attack type. This means the paper's motivating example is not directly tested in its experiments. The dramatic improvement on I→O (+27.07) could stem from visual anchors compensating for something entirely different from what the paper's narrative suggests. This gap between the stated motivation and the experimental evidence is the review's most genuinely novel critical insight — it goes beyond any single reviewer's observation and identifies a structural weakness in how the paper connects its problem framing to its evaluation.
 
 ## Suggestions
-1. **Add error bars** for at least the main results and key baselines (Tables 1-3): run the method and FLIP 3–5 times with different seeds and report mean ± std. If the margins shrink, discuss honestly.
-2. **Clarify baseline reproduction status** in a single sentence: e.g., "Baseline numbers are cited from original papers except for FLIP, which we re‑implemented using [specific settings]."
-3. **Add a brief empirical analysis** showing text-branch-only vs. visual-branch-only vs. fused performance on a few concrete examples of the attacks the paper claims are linguistically indescribable.
-4. **Specify the visual anchor cache size, selection mechanism (top-k or threshold), and the value of β** in Section 3.3.
-5. **Add a limitations paragraph** in the conclusion acknowledging at least one setting where the method might underperform.
+
+1. Provide complete VAUM specifications: number of anchors, initialization method, β value, γ value, exact selection procedure (top-k or threshold, with values), and whether the selection is per-class or global.
+2. Report baseline HTER values for each setting in Protocol 3 alongside the CTV-FAS results, and include a brief discussion of why certain settings (especially I→O) see disproportionately large gains.
+3. Add an ablation over masking ratios (e.g., 50%, 75%, 90%) for SSCM.
+4. Report means and standard deviations over at least 3 runs for main results and key ablations.
+5. Analyze which images are selected by VAUM across training epochs to demonstrate that selection does not collapse or drift pathologically.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+SCORE: 6.0
+
+**Reasoning**: The paper addresses a relevant problem with a structurally sound approach, and the empirical evaluation is extensive (three protocols, multiple datasets, granular ablations). The results are consistently positive across diverse settings, which supports the core claim. However, the central methodological component (VAUM) is insufficiently specified for reproduction or rigorous assessment, and the largest claimed gain (+27.07 HTER) is presented without the analysis needed to make it fully credible. These are addressable weaknesses but they are substantive enough that the paper in its current form does not meet the bar for strong acceptance. With the VAUM details clarified and the I→O result contextualized, the paper would be significantly stronger.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,71 +1,90 @@
-Now I have a thorough understanding of the paper. Let me produce the consolidated review.
+Now I have all the information needed to write the final consolidated review. Let me cross-check each claim against the paper.
+
+---
 
 ## Summary
 
-This paper proposes LQ-LoRA, a method that decomposes each pretrained weight matrix into a quantized component (fixed during finetuning) and a low-rank component (trainable), using an iterative algorithm alternating between SVD and quantization. It further introduces an integer linear programming (ILP) formulation for assigning different quantization configurations to different matrices under a memory budget, and explores a data-aware variant using Fisher-weighted reconstruction. Experiments on RoBERTa and LLaMA-2 (7B and 70B) show that LQ-LoRA outperforms QLoRA and GPTQ-LoRA at comparable bit widths.
+LQ-LoRA proposes decomposing each pretrained weight matrix into a quantized component (fixed during finetuning) and a high-precision low-rank component (updated during finetuning), using an iterative algorithm inspired by robust PCA. An integer linear program (ILP) assigns different quantization configurations to each matrix under a user-specified memory budget, and a Fisher-weighted variant weights the reconstruction objective using calibration data. The method is evaluated on LLaMA-2 (7B, 70B) and RoBERTa-Large across language modeling, instruction tuning, and GLUE benchmarks, consistently outperforming QLoRA and GPTQ-LoRA at comparable or lower bit rates.
+
+---
 
 ## Strengths
 
-- **Iterative low-rank plus quantized decomposition improves upon static quantization for LoRA initialization.** The paper shows that the iterative algorithm reduces reconstruction error compared to first quantizing then applying standard LoRA (Figure 1), and this improved initialization translates to consistent downstream gains across model sizes and tasks (Figure 2, Tables 1 and 2). This is the paper's primary contribution and is well-supported.
+1. **Core decomposition idea is effective and well-motivated.** The low-rank plus quantized decomposition reduces reconstruction error over vanilla quantization for all layers (Figure 1, right) and translates to consistent downstream gains. The key result — 2.75-bit LQ-LoRA matching or exceeding 3.127-bit QLoRA — is clean and reproducible.
 
-- **Mixed-configuration quantization via ILP enables flexible, non-uniform bit allocation across layers.** The ILP framework assigns different quantization parameters (bit-width, block size) to each matrix subject to a target memory budget, achieving lower storage with less accuracy loss than uniform schemes. The 2.75-bit LQ-LoRA (ILP-allocated) matches or beats 3.127-bit QLoRA on multiple metrics (Figure 2), demonstrating a real practical advantage.
+2. **Comprehensive evaluation across multiple settings, model scales, and tasks.** Experiments cover continual language modeling (C4), instruction tuning (OpenAssistant), GLUE finetuning (RoBERTa-Large), and model compression, on both 7B and 70B LLaMA-2 models. In nearly all settings, LQ-LoRA outperforms QLoRA and GPTQ-LoRA at similar bit budgets. The 70B results are especially valuable.
 
-- **Ablation shows LQ-LoRA makes better use of increased LoRA rank than QLoRA.** Table 5 (rank analysis) shows that raising rank from 8 to 256 improves LQ-LoRA by 1.3 perplexity points, whereas QLoRA improves by only 0.3 points. This cleanly confirms that the decomposition utilizes additional rank for error reduction at initialization.
+3. **ILP-based mixed quantization provides a flexible memory-performance knob.** The ILP formulation (Eq. 3) allows users to specify a target average bit rate and automatically assigns configurations per matrix. The allocation visualizations (Figure 4) show that the ILP makes non-trivial, layer-dependent decisions that differ between Fisher and non-Fisher variants.
 
-- **Memory-breakdown analysis quantifies practical deployment gains.** Figure 5 shows that sub-3-bit quantization dramatically reduces storage of the 70B model, enabling single-GPU deployment and finetuning on an 80GB GPU, which is a concrete demonstration of the method's memory efficiency.
+4. **LoRA rank analysis reveals a meaningful property.** Table 3 (analysis section) shows that LQ-LoRA benefits from higher ranks (improving perplexity when moving from rank 64 to 128), while QLoRA plateaus — confirming that the decomposed initialization makes better use of additional rank capacity.
+
+5. **Memory analysis demonstrates practical feasibility.** Figure 5 shows sub-3-bit 70B models fit under 40 GB for storage, and the paper reports that finetuning fits on a single 80 GB GPU — a concrete indicator of practical utility for resource-constrained settings.
+
+---
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-- **The model compression comparison against PTQ methods is confounded by additional finetuning.** In §5.2, LQ-LoRA is compared against sub-4-bit PTQ methods (GPTQ, OmniQuant, etc.), but the LQ-LoRA procedure involves additional finetuning on a larger calibration dataset (two C4 partitions + WikiText-2, sequence length 2048) and subsequent quantization of the LoRA components. Standard PTQ methods perform one-shot quantization without finetuning. This asymmetry favors LQ-LoRA, making the claim that it "generally outperforms other sub-4-bit PTQ methods" (line 250) misleading. The paper should either report LQ-LoRA performance *without* the additional finetuning as a fair PTQ baseline, or clearly frame these results as "model compression via continued finetuning" rather than PTQ. This does not undermine the core finetuning contributions, but it weakens a secondary claim presented in the abstract and §5.2.
+None. The paper's central claim — that decomposing pretrained matrices into quantized + low-rank components improves LoRA adaptation — is well-supported by the empirical results across multiple models, tasks, and bit rates. No single weakness invalidates this core finding.
 
 ### Minor
 
-- **The Fisher-weighted variant delivers inconsistent benefits and rests on an unvalidated approximation.** In §3.3, the weighted SVD problem is solved by assuming homogeneous rows or columns of the Fisher information matrix — an assumption the authors acknowledge "clearly does not hold" (line 184). No analysis is provided to quantify how far F deviates from this structure or whether the approximation error is empirically small. The empirical results are inconsistent: on GLUE (Table 2), Fisher helps at 2.5 bits (87.3 vs. 85.7) but is *worse* at 2.75 bits (86.4 vs. 87.1), and essentially tied at 3.0 and 3.25 bits. On LLaMA-2-7B it helps consistently, but "this discrepancy shrinks at the 70B scale" (line 243). Given that Fisher computation requires backprop through the entire model (partly undermining the memory-efficiency motivation, as the paper notes), the marginal and inconsistent gains do not convincingly justify the added complexity. This is a weakness of the Fisher variant specifically, not of the core LQ-LoRA method (which works well without it).
+1. **Missing ablation: iteration depth on downstream performance.** The paper shows that the iterative algorithm reduces decomposition error over steps (Figure 1, left), but no experiment reports how downstream metrics (perplexity, accuracy) vary with the number of iterations (e.g., 0 vs. 1 vs. 5 steps). The footnote mentioning that initializing Q⁽⁰⁾ to quantize(W) "did not observe significant differences" hints that the iteration may not be critical, but this is never directly tested on a downstream task. While not fatal — the method clearly works as a whole — this leaves ambiguity about whether the iteration contributes meaningfully or whether a single SVD of the residual suffices.
 
-- **No ablation isolating ILP allocation from the decomposition itself.** The paper compares LQ-LoRA to QLoRA and GPTQ-LoRA, both of which use uniform quantization. To quantify the contribution of the ILP mixed-configuration scheme specifically, the paper should include a control where LQ-LoRA uses the same (uniform) configuration for all matrices at a matched average bit rate. Without this, it is unclear how much of the gain comes from the decomposition versus the dynamic allocation.
+2. **Missing ablation: ILP vs. uniform quantization within LQ-LoRA.** The comparison against QLoRA (uniform NF-4) confounds two changes: the low-rank decomposition *and* the mixed-precision ILP. Showing that LQ-LoRA with ILP outperforms LQ-LoRA with uniform quantization (same average bit rate) would isolate the ILP's contribution. Without this, the paper can claim that the *combined* method works well, but not specifically that the ILP improves over uniform allocation within the same decomposition framework. The claim on line 243 that the results "highlight the utility of the mixed-quantization scheme since these mixed strategies would not even have been found without the ILP" is speculative without this control.
 
-- **The ILP pre-computation cost for larger models is not discussed.** The paper states the pre-computation takes "a few hours" for LLaMA-2-7B on 4 A100s (line 129). For LLaMA-2-70B, which has roughly 10× the matrices with larger dimensions, this cost likely scales substantially. Since the method's motivation is memory efficiency, the practical overhead of this one-time cost should be acknowledged.
+3. **PTQ comparison is not apples-to-apples.** In the model compression results (Table 3), LQ-LoRA is compared against GPTQ, OmniQuant, and other pure PTQ methods — but LQ-LoRA additionally finetunes on calibration data via LoRA, while the baselines only quantize without gradient-based training. The paper is transparent about this (line 5: "When finetuned on a language modeling calibration dataset"), but the framing as a PTQ method (line 22) is misleading. LQ-LoRA should be described as "quantization + post-training adaptation" rather than presented as a drop-in alternative to PTQ.
 
-- **The analysis of mixed-configuration allocations (Figure 4) remains shallow.** The discussion only notes that "ILP is able to allocate different configurations to different matrices" and that allocations differ between Fisher and non-Fisher variants. Systematic patterns (e.g., do deeper layers get more or fewer bits? are certain matrix types systematically assigned higher precision?) are not examined, leaving the ILP analysis as a descriptive rather than informative result.
+4. **Fisher-weighted variant's gains are inconsistent.** The data-aware version shows clear improvements over non-Fisher LQ-LoRA at 7B scale, but "this discrepancy shrinks at the 70B scale" (line 243), and on GLUE (Table 1) the Fisher variant underperforms the non-Fisher variant at 2.75 bits (86.4 vs. 87.1). The paper acknowledges this honestly, but the contribution of the Fisher extension as a reliable improvement is weak. It is most clearly beneficial only at very low bit widths (2.5 bits on GLUE) and smaller scales.
 
 ### Trivial
 
-- **Stopping criterion for the iterative algorithm is underspecified.** The paper states "terminate the algorithm if the error increases" (line 69), but does not clarify whether this is relative to the previous iteration, whether oscillations are handled, or whether the algorithm can restart. This is minor and easy to clarify.
+1. **Stopping criterion iteration count is not reported.** The paper states that termination occurs when error increases (line 69), but the actual number of iterations used in experiments is never stated, making reproduction harder.
+
+2. **Fisher objective for LLaMA-2 is implicit.** The paper specifies the masked LM objective for RoBERTa (line 193) but only says "randomly sampled sequences from C4" for LLaMA-2, leaving the causal LM objective implied. Though clear to practitioners, this should be explicit for reproducibility.
+
+---
 
 ## Nice-to-Haves
 
-- A version of the model compression experiment using LQ-LoRA *without* additional finetuning, to serve as a fair comparison to one-shot PTQ methods.
-- A simple control experiment isolating the effect of ILP allocation from the decomposition (LQ-LoRA with uniform config at matched bit rate).
-- Quantification of the Fisher approximation error on a few representative matrices, to validate that the row/column-scaling solution correlates with the true weighted SVD objective.
+- An ablation showing downstream perplexity as a function of iteration count (0, 1, 2, 5) would resolve the main ambiguity about the iterative algorithm's value.
+- Comparing LQ-LoRA with uniform quantization vs. LQ-LoRA with ILP at the same average bit rate would cleanly isolate the ILP's benefit.
+- The Fisher-weighted variant would be more compelling if accompanied by a comparison against a direct (iterative) weighted SVD solver to validate the row/column-mean approximation.
+
+---
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+- **"The iterative algorithm's contribution is not isolated"** (partially kept as Minor Weakness #1). The reviewer's framing that this "undermines the paper's central technical novelty" and the claim that "the iteration may contribute little" are overstatements. Figure 1 shows the error decreasing with iterations. The core finding (decomposition helps) is not undermined. The weakness is real but minor.
+- **"The ILP's benefit over uniform quantization within LQ-LoRA is not shown"** — kept as Minor Weakness #2. The reviewer's characterization that this makes the ILP "decorative rather than functional" is too harsh; the overall method works well, but the specific ILP contribution is unisolated.
+- **"Fisher-weighted variant's gains are inconsistent"** — kept as Minor Weakness #4. The reviewer's claim that "the evidence is too weak to claim this as a robust contribution" is fair and the paper partially acknowledges this.
+- **"PTQ comparison is misaligned"** — kept as Minor Weakness #3.
+- **"Stopping criterion underspecified"** and **"Fisher computation details incomplete"** — kept as Trivial Weaknesses.
+- Strengths from Strength Finder that were generic ("this paper addressed an important problem") were already filtered by the Strength Finder itself — none of the listed strengths are generic.
 
-1. **"The claim that the quantized component remains fixed and only the low-rank component is updated is standard in QLoRA as well."** — The critic treats this as a presentation issue, suggesting the novelty should be clearer. The paper's novelty is in the *decomposition/initialization*, which is explicitly stated in the same paragraph (lines 19-20) and the method section. The paper is clear about this distinction; the critic's reading does not reflect a substantive flaw.
-
-2. **"No confidence intervals or significance tests for any metric; Vicuna evaluation has no tie rates reported."** — The experimental setup follows QLoRA's conventions exactly, where single-run evaluation is standard for LLM finetuning at this scale, and Vicuna-style GPT-4 pairwise comparisons (80 questions) are canonical. Demanding confidence intervals here would be applying a standard not typical for this class of paper.
+---
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviewers converged on the core method being sound and the main results convincing, with disagreements confined to the Fisher variant (which is optional) and the PTQ framing (which is secondary). The most valuable insight from the meta-review is that the paper would be stronger if it removed the PTQ comparison claim or added a fair control, and if it presented the Fisher variant as an exploratory extension rather than a core contribution — neither of which changes the accept/reject judgment.
+The review surface reveals that the paper's main strength — consistent outperformance of QLoRA/GPTQ-LoRA across scales — coexists with a genuine gap in component-level attribution. The iterative algorithm and ILP are presented as concrete technical innovations, but neither is ablated against simpler alternatives (single-step decomposition, uniform quantization within LQ-LoRA). This creates a situation where the paper's empirical contributions are stronger than its technical narrative: the reader knows the combination works, but not precisely which piece drives the gains. This is a common pattern in systems/methods papers where the whole outperforms baselines, but the reviewer correctly identifies that the paper claims credit for components that haven't been validated independently.
+
+---
 
 ## Suggestions
 
-1. **Reframe the model compression section.** Either report LQ-LoRA perplexity *without* the additional finetuning (so that the comparison to one-shot PTQ methods is fair), or explicitly frame the results as "post-training with continued language modeling" rather than "post-training quantization."
-2. **Add an ILP vs. uniform ablation control.** Run LQ-LoRA with a single uniform configuration at the same average bit rate to isolate the benefit of mixed-configuration allocation from the benefit of the decomposition itself.
-3. **Provide at least a basic validation of the Fisher approximation** on a few representative matrices (e.g., comparing the true weighted reconstruction error against the approximate solution), or de-emphasize the Fisher variant as an exploration rather than a core contribution.
-4. **Clarify the stopping criterion.** Specify: "terminate if the error increases relative to the previous iteration" or similar.
+1. Add a downstream ablation of iteration depth (0, 1, 2, 5 steps) on C4 perplexity with LLaMA-2-7B, holding the ILP configuration fixed. This would either validate or de-emphasize the iterative component and clarify what the algorithm actually contributes.
+2. Add a comparison of LQ-LoRA with uniform quantization at (e.g.) 3.0 bits vs. LQ-LoRA with ILP at the same average bit rate on at least one setting, to isolate the ILP's contribution independently of the decomposition.
+3. Reframe the model compression section to explicitly distinguish "quantization with post-training adaptation" from pure PTQ methods, and consider adding a baseline that applies pure PTQ to the same decomposition framework.
+4. Report the number of iterations used in the main experiments and make the Fisher objective explicit for causal LMs.
+
+---
 
 ## Score and Decision
 
-This paper's primary contribution — the iterative low-rank plus quantized decomposition for initializing LoRA components, combined with ILP-based mixed-configuration quantization — is novel, well-motivated, and empirically validated across multiple model sizes (RoBERTa-Large, LLaMA-2-7B, LLaMA-2-70B) and tasks (language modeling, instruction tuning, GLUE). The method consistently outperforms strong baselines (QLoRA, GPTQ-LoRA) at comparable bit widths. The weaknesses identified (confounded PTQ comparison, inconsistent Fisher benefits, missing ablation) are real but do not threaten the core contributions and can be addressed without altering the paper's main findings. The paper is honest about limitations and includes useful negative results.
+The paper presents a practical, well-evaluated method with consistent gains over strong baselines across multiple settings and model scales. The weaknesses are primarily about missing ablations that would strengthen component-level attribution — none threaten the core empirical finding. The paper makes a clear contribution to efficient LLM adaptation and is ready for acceptance with minor revisions.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

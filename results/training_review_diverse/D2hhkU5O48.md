@@ -1,20 +1,22 @@
-Now I have a thorough understanding of the paper. Let me synthesize the final review.
+Now I have thoroughly read and verified the paper against the reviewer claims. Let me construct the final review.
 
 ## Summary
 
-This paper introduces β-calibration, a generalization of average-case calibration that conditions on groups of question-answer pairs defined by a function β. The authors propose two posthoc calibration algorithms (β-binning and scaling-β-binning) that achieve this grouped notion of calibration, provide a distribution-free theoretical guarantee, and instantiate β concretely via kd-tree on DistilBERT embeddings. Experiments on 5 QA datasets with 2 LLMs show that the proposed methods substantially reduce β-calibration error and improve or match selective QA performance.
+This paper introduces β-calibration, a group-conditional generalization of standard calibration for generative QA, where the calibration guarantee is conditioned on a partition β of question-answer pairs. The authors propose two posthoc calibration schemes — β-binning and hierarchical scaling-β-binning — and prove a distribution-free approximate β-calibration guarantee for both. Experiments across 5 QA datasets with Mistral and Gemma show that the proposed methods substantially reduce β-calibration error compared to standard calibration baselines, and in some settings improve selective QA performance.
 
 ## Strengths
 
-1. **Well-motivated new calibration target.** The paper identifies a genuine limitation of average-case calibration for generative QA — that it can mask systematic miscalibration for subgroups of QA pairs. Example 1 (Section 2.2) cleanly illustrates this, and β-calibration formalizes the intuitive requirement that calibration should hold conditional on groups. This is a principled and useful generalization.
+1. **Well-motivated generalization of calibration.** The paper identifies a fundamental limitation of average-case calibration for generative QA — it can be misleading for individual user groups or topic clusters — and formalizes this with a clear counterexample (Example 1, Table 1). The notion of β-calibration (Definition 3) directly addresses this by conditioning on a partition of the QA space, and it recovers standard calibration as a special case when β is constant. This is the paper's central conceptual contribution and is clearly articulated.
 
-2. **Distribution-free guarantee with practical guidance.** Theorem 1 provides a high-probability bound on β-calibration error that depends on interpretable quantities (bin size b, per-bin sample count, misspecification ν) and Figure 2 translates this directly into hyperparameter choices. Such actionable theoretical guidance is rare in the LM calibration literature.
+2. **Distribution-free guarantee with explicit bounds.** Theorem 1 provides a finite-sample, high-probability bound on the conditional β-calibration error for both proposed schemes. The bound has a simple closed form (ε = √(log(2N/bα)/(2(b−1))) + ν), depends only on the bin size b and misspecification ν, and holds for any discrete β. The paper also provides practical guidance (Figure 2) for choosing b based on target ε and dataset size.
 
-3. **Consistent empirical gains on β-calibration error.** On both datasets and both LLMs, the proposed methods (especially HS-BB) achieve dramatically lower CE(h;β) than all baselines — e.g., from ≈0.53–0.64 (None) down to ≈0.15–0.18 (HS-BB) on MMLU (Table 2). The gap is large and consistent across settings.
+3. **Consistent and large improvements in β-calibration error.** Across all settings in Table 2 (MMLU and BigBench with Mistral and Gemma), the proposed methods (especially HS-BB) achieve substantially lower β-calibration error than all baselines. For example, on MMLU Verb1s-Top1 with Mistral, CE(h;β) drops from 0.639 (None) to 0.149 (HS-BB), a 77% reduction. On BigBench Ling1S-Top1 with Mistral, it drops from 0.245 to 0.138. The improvements are consistent and far exceed what could be attributed to the baselines being "unsuited" for the metric — the gap is too large to be explained away.
 
-4. **Hierarchical scaling addresses sparse partitions.** Scaling-β-binning's use of hierarchical logistic regression (random intercepts and slopes per partition, Equation 4) is a principled solution to the key practical challenge that fine-grained partitions may have few data points, allowing information sharing across groups.
+4. **Principled instantiation of β via kd-tree embeddings.** Using DistilBERT [CLS] embeddings with a kd-tree provides an efficient, adaptive, and semantically meaningful partitioning of QA pairs. The instantiation is well-justified: it generalizes standard calibration at depth d=0, produces cohesive groups, and is computationally efficient. The paper's methods work with any β, but this concrete instantiation makes the framework reproducible.
 
-5. **Framework generalizes standard calibration.** Setting kd-tree depth d=0 recovers average-case calibration, making β-calibration a true generalization. The hyperparameter d is chosen by optimizing downstream AUAC, providing a practical tuning strategy.
+5. **Robust handling of data scarcity via hierarchical scaling.** The scaling-β-binning method uses hierarchical logistic regression with random intercepts and slopes (partial pooling), allowing information sharing across partitions. This directly addresses the practical challenge of partitions with few data points — a realistic concern for fine-grained β — and the experiments confirm that HS-BB consistently outperforms the fully-pooled S-BB.
+
+6. **Comprehensive experimental design.** The evaluation spans 5 datasets, 2 LLMs, 2 confidence elicitation prompts, and 4 strong baselines. The 4-way data split (20:60:10:10 for kd-tree construction, calibration training, hyperparameter tuning, and testing) is a careful protocol that strengthens reliability.
 
 ## Weaknesses
 
@@ -22,60 +24,54 @@ This paper introduces β-calibration, a generalization of average-case calibrati
 None.
 
 ### Major
-
-1. **Theorem 1 is missing a formal union bound over partitions for the "for all s∈S" condition.** The conditional β-calibration definition (Definition 3) requires the bound to hold simultaneously for all s∈S and all p∈range(h). However, the algorithm trains separate UMD calibrators per partition, each on n_s points. The stated bound ε = √(log(2N/bα)/(2(b-1))) + ν does not include any dependence on |S| (the number of partitions), which would be needed for a union bound over partitions to guarantee the "for all s" condition. Using N (total data) instead of n_s (partition size) is conservative and therefore safe, but the missing union bound over |S| is a genuine gap. This is fixable (adding a log|S| term via standard union bound), but the theorem as stated does not logically follow from the per-partition UMD guarantees as applied. This undermines the claim of a rigorous distribution-free guarantee.
-
-2. **Evaluation uses a proxy for ground truth labels for both training and testing.** The paper uses Llama 3.1 to assess semantic equivalence between generated answers and gold answers, and the AUAC metric is computed "based on a ground truth proxy of y" (line 366). While this semantic-equivalence proxy is standard in generative QA evaluation (following Tian et al. 2023), using the same proxy for both training and evaluation without quantification of its agreement with human judgment creates the risk that results reflect the proxy's biases rather than true calibration quality. The paper should either (a) evaluate on human-verified gold labels for at least one dataset to validate the proxy, or (b) report the proxy's agreement rate with human judgment.
+None. While the paper has limitations (discussed below), none invalidate its core claims or contributions.
 
 ### Minor
 
-3. **Primary metric (CE(h;β)) favors the proposed methods by construction.** The paper acknowledges this ("While the first result, in itself, may not be surprising as our proposed schemes aim to minimize CE(h;β)", Section 5), which is appropriate. However, the selective QA (AUAC) results — the more objective measure — show that the "None" baseline is competitive in some settings (e.g., MMLU Ling1s-Top1 Mistral: HS-BB 0.269 vs. None 0.269, overlapping confidence intervals). The claimed "up to 30% increase in selective answering performance" is not uniformly supported across all settings.
+1. **The theoretical guarantee's assumptions are not operationalized in experiments.** Theorem 1 requires that every partition s ∈ S have at least b calibration points (n_s ≥ b). The paper's hyperparameter search ensures this by construction — it selects depths such that each partition admits 3–10 bins, implying n_s ≥ 3b — but it never explicitly reports the fraction of test points that fall into partitions satisfying n_s ≥ b. Since the root fallback (used for test points in unseen partitions) does not carry the same guarantee, reporting this coverage statistic would meaningfully connect theory to practice. The authors should add this to strengthen the paper; without it, the empirical connection to the theorem is implicit rather than verified.
 
-4. **Gap between the motivating example and the actual instantiation.** The paper's running example (User 1 vs. User 2, topical groups like geography/politics/medicine) motivates β as a user-specified topic function. But the instantiation uses a kd-tree on DistilBERT embeddings, producing partitions that are not interpretable to an end user ("group 7 of the kd-tree"). The paper does not address how users could specify or interpret groups relevant to their decision-making.
+2. **CM(h;β) estimation procedure is underspecified for continuous scores.** Definition 4 defines the β-calibration error at the population level, but computing it from finite samples requires binning along both the confidence scale and β-induced groups. For methods that output continuous scores (e.g., the "None" baseline), the inner conditional expectation must be approximated via discretization. The paper does not specify how this estimation is done — e.g., what binning scheme is used for the confidence dimension when computing CM(h;β) for None, Platt scaling, etc. Since different binning choices can affect the reported error, this should be clarified.
 
-5. **Limited reporting of sensitivity and diagnostic statistics.** The paper does not report: (a) how many test points fall outside the bounded kd-tree space and thus use the root calibrator, (b) the proportion of partitions that have very few points and how often they are used, (c) the effective number of partitions used after filtering empty/small ones, or (d) the tuned kd-tree depths. These would help assess how much of the β-calibration machinery is actually operational.
+3. **Proxy labels introduce unquantified misspecification.** The ground truth proxy is generated by Llama 3.1 (line 610), introducing a misspecification factor ν in the theoretical framework. The paper mentions that ν could be estimated using a hold-out set with true labels (line 308), but does not provide such an estimate. As a result, the reported CM(h;β) and AUAC values reflect calibration to the proxy, and the gap between proxy and true correctness is unknown. A rough empirical bound on ν, even on a small subset with human-verified labels, would strengthen the connection between theory and evidence.
+
+4. **Hyperparameter sensitivity to kd-tree depth d is not explored.** The depth d, which controls the granularity of β partitions, is selected by optimizing AUAC on a held-out set. The paper states that the optimal d is never 0 (line 373), but does not show how CM(h;β) or AUAC vary with d, nor whether the optima are sharp. Given that d is arguably the most important design choice in the β instantiation, an ablation would help practitioners understand the trade-off between partition granularity and statistical reliability.
+
+5. **Selective QA gains are modest in several settings.** While the paper claims "up to 30% increase in selective answering performance," the AUAC gains are inconsistent across settings. In several cases (e.g., MMLU Ling1s-Top1 Mistral: 0.269 vs. 0.269; BigBench Ling1S-Top1 Mistral: 0.690 vs. 0.684), the proposed methods are essentially tied with the None baseline within confidence intervals. The claim is technically accurate with the "up to" qualifier (a 33.7% gain occurs for MMLU Verb1s-Top1 Gemma BB), but the selective QA benefits are not as universal as the β-calibration error improvements.
 
 ### Trivial
-- Only 2 of 5 datasets appear in the main table; results for TriviaQA, SciQ, and OpenBookQA are relegated to the appendix. A brief summary of those results in the main text would strengthen the paper.
-- The data split (20:60:10:10) is unusual but adequately explained.
+- The paper uses "Table 1" and "Table 2" inconsistently in the text (line 370 references "Table 2" but the main results table is labeled Table 1 in the embedded caption). This should be harmonized.
 
 ## Nice-to-Haves
-- An ablation on the choice of embedding model (DistilBERT vs. Sentence-BERT vs. last-layer LM embeddings) for the kd-tree.
-- A comparison on standard ECE to verify that β-calibration gains do not come at the cost of average-case miscalibration.
-- Qualitative examples showing QA pairs that fall into the same kd-tree leaf, to help ground the interpretability claim.
-- Statistical significance testing (e.g., win/loss counts across all datasets×prompts×LLMs) for the AUAC comparisons.
+- A breakdown of CM(h;β) per β-group for at least one dataset, illustrating which groups are most miscalibrated and how the methods improve them.
+- A brief discussion of computational cost (wall-clock time) for scaling-β-binning, since the hierarchical logistic regression scales with the number of partitions.
+- Sensitivity analysis with alternative β functions (e.g., random partitioning, topic-model-based groupings) to demonstrate generality.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
+These points were removed from the critic's input as they were either factually wrong, based on misunderstanding the paper, or violated the review guidelines:
 
-- **Criticism that Theorem 1 uses N instead of n_s (partition size).** Using N ≥ n_s is conservative (produces a larger ε), so this direction does not invalidate the bound. Removed because it is factually not a flaw — the bound is looser but still valid.
+- **"Unfair baseline comparison" (Critical Issue 3):** The reviewer proposed adding a "partition-specific baseline that applies UMD independently to each β-induced group" to isolate the benefit of β-grouping. This is exactly what β-binning (BB) already does — it applies UMD independently per partition. The comparison B (pooled UMD) vs. BB (per-partition UMD) already isolates this effect. The reviewer's criticism reflects a misunderstanding of the paper's own method. Factually incorrect; removed.
 
-- **Claim that "None is competitive or even better in several cases" on AUAC.** Comparing the best proposed method per setting against None: across all 6 rows in Table 2, the proposed method is either strictly better or tied — never worse. Removed because it is factually wrong.
+- **"Inflated performance claims" (Critical Issue 2) — specifics re: CE(h;β):** The reviewer claimed the β-calibration improvements are only "10-40%." In reality, the improvements over None are often 50-77% (e.g., from 0.639 to 0.149 on MMLU Verb1s-Top1 Mistral). The paper's stated "10-40%" range is actually conservative for the β-calibration metric, not inflated. Removed the CE-specific sub-claim; kept the AUAC nuance as Minor #5.
 
-- **"The bound does not follow from the underlying UMD guarantee."** The UMD bound per partition depends on partition-specific quantities, but the theorem's use of N is a conservative upper bound. The real issue is the missing union bound (captured in Major weakness 1), not the use of N. Removed because this phrasing is imprecise.
+- **"Inflated performance claims" (Critical Issue 2) — AUAC specifics:** The reviewer claimed "many other entries contradict" the "up to 30%" AUAC claim and singled out BigBench Ling1S-Top1 Mistral (0.690 vs. 0.684). However, "up to 30%" means the maximum observed gain, not the average. The BB method on MMLU Verb1s-Top1 Gemma achieves a 33.7% relative AUAC improvement over None, supporting the claim. The paper is not claiming that every setting achieves 30% gains. Overstated criticism; kept only the qualified version in Minor #5.
 
-- **Concern about proxy labels being an "evidential issue" that could "inflate results."** While the proxy concern is real (Minor weakness 2), the framing as an "evidential issue" is overstated — using a separate LM for semantic-equivalence checking against gold answers is standard practice in generative QA evaluation (Tian et al. 2023, cited by the paper), and the cited entities (Llama 3.1, the benchmark datasets) exist and are properly referenced.
-
-- **"DistilBERT choice is arbitrary, no ablation."** The choice is explained (smaller/faster, rich semantic embeddings — Section 2.3), and an ablation across embedding models would be a nice-to-have but is not a structural weakness. Removed from weaknesses; moved to Nice-to-Haves.
-
-- **"Only 2 of 5 datasets in main table."** The paper clearly states that additional results are in the appendix (Tables S1, S2). Given space constraints, this is within normal practice. Retained as Trivial.
-
-- **Formatting/style nitpicks.** Removed per hard rules.
+- **Criticism about "line 399" and "line 564" references:** These line numbers refer to the original LaTeX, not the parsed text; the content referenced (fallback to root calibrator) is present and discussed in the paper (Algorithms 1-3, lines 200-226). Not a valid weakness.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews do not surface a perspective on β-calibration that the paper itself does not already articulate.
+
+None beyond the paper's own contributions. The reviews identify useful suggestions for strengthening the empirical validation but do not surface a fundamentally new perspective on the work.
 
 ## Suggestions
-1. **Fix Theorem 1** by adding a formal union bound over partitions. The corrected bound should include dependence on |S| (or the total number of bins across all partitions, which is bounded by N/b). Show that log|S| enters logarithmically, so the impact is small in practice.
-2. **Validate the proxy.** Evaluate on at least one dataset using the original human-verified gold labels (checking exact match or using a held-out human evaluation) to confirm that results are not artifacts of the Llama 3.1 proxy.
-3. **Report diagnostic statistics:** number of test points using the root calibrator, distribution of partition sizes, tuned kd-tree depths, and how often the fallback root calibrator is invoked.
-4. **Address the interpretability gap** by either (a) providing qualitative examples of kd-tree leaves, or (b) discussing how a practitioner could define a custom β for their domain.
+
+1. Report, for each experimental setting, the fraction of test points that fall into partitions with n_s ≥ b (where Theorem 1's guarantee holds) versus those handled by the root fallback. This directly connects the theory to practice.
+2. Clarify the finite-sample estimation procedure for CM(h;β) — specifically, how the inner conditional expectation is binned for methods that output continuous confidence scores.
+3. Provide an empirical estimate of the misspecification factor ν on a small subset with human-labeled ground truth, even if approximate.
+4. Add an ablation showing how CM(h;β) and AUAC vary with kd-tree depth d for at least one dataset/model combination.
+5. Qualify the selective QA claim slightly by noting that AUAC gains are most pronounced on MMLU compared to BigBench, rather than presenting a single universal number.
 
 ## Score and Decision
 
-The paper makes a genuine contribution: β-calibration is a principled generalization of calibration that addresses a real need in generative QA. The algorithms are sound, the hierarchical scaling approach is thoughtful, and the empirical results on β-calibration error are striking. The main concern is the theoretical guarantee missing a union bound over partitions — but this is fixable (the log|S| correction is typically small) and does not invalidate the core ideas or the empirical findings. The proxy-label evaluation is standard practice but warrants a sanity check. The AUAC results, while more modest than the CE(h;β) gains, still consistently favor the proposed methods.
+The paper makes a well-motivated conceptual contribution (β-calibration), provides practical algorithms with a clean theoretical guarantee, and demonstrates large and consistent improvements on its target metric across diverse settings. The weaknesses are minor and addressable — none undermine the core claims. The writing is clear, the experimental design is thorough, and the work has clear practical value for deploying generative QA systems with reliable confidence scores.
 
-This is a solid paper that would benefit from a cleaned-up theoretical statement and a proxy validation. The weaknesses are addressable and do not undermine the paper's overall contribution.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

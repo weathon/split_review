@@ -1,26 +1,22 @@
-Here is my consolidated final review.
+Now I have all the evidence needed. Here is my consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes **Ross**, a training framework that adds *vision-centric* supervision to Large Multimodal Models (LMMs) by having the model reconstruct input images (specifically, denoise latent tokens from a frozen VAE) conditioned on its own visual outputs. This "intrinsic activation" approach is contrasted with "extrinsic assistance" methods that aggregate multiple visual experts. The paper demonstrates consistent gains across architectures (CLIP/SigLIP, Vicuna/Qwen2), especially on fine-grained and hallucination benchmarks, and shows that a single-encoder Ross-7B outperforms multi-expert Cambrian-1-8B on 6 of 8 benchmarks.
-
----
+This paper proposes Reconstructive Visual Instruction Tuning (Ross), which adds a denoising reconstruction objective on the visual outputs of LMMs during training. Rather than supervising only text outputs, Ross forces the model's visual tokens to be useful for reconstructing latent image representations via a lightweight denoiser that is discarded at inference. The method is evaluated across multiple visual encoders (CLIP, SigLIP) and LLMs (Vicuna-7B, Qwen2-7B), with consistent improvements on fine-grained comprehension and hallucination benchmarks, and competitive or superior results compared to multi-expert systems like Cambrian-1 using only a single encoder.
 
 ## Strengths
 
-1. **Novel and principled supervision signal.** Unlike conventional LMMs that supervise only text outputs, Ross directly supervises visual outputs via reconstruction of input images (Section 3). This is a clean departure from both LLM-centric and extrinsic-assistance paradigms, and the motivation — that visual outputs carry rich information not captured by text supervision — is well-articulated.
+1. **Consistent, significant improvements across diverse backbones and benchmarks.** Table 2 (tab:llm) shows Ross adds +0.9 to +12.6 points across hallucination (HallusionBench), fine-grained comprehension (MMVP, ChartQA), and OCR benchmarks, using two different LLMs and two visual encoders. With Qwen2-7B + SigLIP, MMVP improves from 40.7 → 49.3 (+8.6) and OCRBench from 432 → 448.
 
-2. **Systematic ablation identifies the critical design choices.** The paper methodically ablates reconstruction targets (pixel → latent) and objectives (regression → denoising), showing that latent denoising with a KL-16 VAE tokenizer consistently outperforms alternatives (Figures 3–5, Section 4.1). The progression cleanly validates that handling spatial redundancy is the key challenge, and denoising is the right solution.
+2. **Outperforms multi-expert systems with a single encoder.** Table 1 (tab:main) shows Ross-7B (single SigLIP) surpasses Cambrian-1-8B (which aggregates CLIP, SigLIP, DINOv2, and ConvNext) on HallusionBench (57.3 vs 48.7, +8.6), MMVP (54.7 vs 51.3, +3.4), MMBench-EN (79.0 vs 75.9, +3.1), and MMMU (43.4 vs 42.7, +0.7). This directly supports the paper's central claim that intrinsic reconstructive supervision can be more effective than extrinsic aggregation of visual experts.
 
-3. **Consistent improvements across multiple architectures.** Ross improves every combination of visual encoder (CLIP, SigLIP) and LLM (Vicuna-7B, Qwen2-7B) tested, with large gains on fine-grained benchmarks like MMVP (+8.6 to +12.6 points) and ChartQA (+1.9 to +6.9 points) (Table 2, tab:llm). This breadth supports the claim that the benefit is systematic, not architecture-specific.
+3. **Denoising objective validated over regression.** Figure 4 (fig:denoising_regression) shows Ross^D (denoising) substantially outperforms Ross^R-Latent (regression) with the same KL-16 tokenizer on HallusionBench (55.7 → 59.1) and MMVP (38.0 → 42.2), confirming that the denoising formulation is crucial for handling spatial redundancy.
 
-4. **Competitive performance against multi-expert systems with a single encoder.** Ross-7B (SigLIP only) outperforms Cambrian-1-8B (aggregating four visual experts) on HallusionBench (57.3 vs. 48.7), MMVP (54.7 vs. 51.3), MMBench (79.0 vs. 75.9), and other benchmarks (Table 3). This concretely demonstrates the paper's central thesis that intrinsic activation can match or exceed extrinsic assistance.
+4. **Attention analysis quantitatively demonstrates improved visual focus.** Table 3 (tab:attention) reports significantly higher mean and median attention scores on visual tokens (mean: 2.36×10⁻⁴ vs 2.03×10⁻⁴, p=1.27×10⁻⁷), directly showing the training objective changes model behavior.
 
-5. **Attention analysis provides mechanistic evidence.** Quantitative analysis shows significantly higher mean/median attention scores to visual tokens for Ross vs. LLaVA (p-values < 1.3e-7, Table 1), with qualitative maps aligning to relevant image regions (Figure 6). This supports the claim that reconstructive supervision improves visual focus.
-
----
+5. **Transfer learning on depth maps shows practical flexibility.** Table 4 (tab:depth) demonstrates that Ross can exploit extra depth map inputs (+8.4 points on SpatialBench average), while the baseline LLaVA actually degrades with depth input, and even an external MiDaS-3.0 expert fails to help. This is a genuine advantage of the intrinsic activation approach.
 
 ## Weaknesses
 
@@ -28,61 +24,50 @@ This paper proposes **Ross**, a training framework that adds *vision-centric* su
 None.
 
 ### Major
-None.
+
+**1. Comparative claim against generative methods is overreaching.** The paper states "reconstructive objectives boost comprehension while generative alternatives *cannot*" (lines 365, 424). However, only one specific generative formulation was tested (learnable query tokens following DreamLLM/SEED), using creation data converted from captions. This is a single implementation with confounded differences (architectural choice + data distribution). The claim that "generative alternatives cannot boost comprehension" in general is stronger than the evidence supports. The paper's own ablations show that the reconstructive loss on the same 102K data (without the caption ↔ creation conversion) also underperforms the full reconstructive variant but still clearly beats the generative variant. The finding is valid for this specific comparison but should not be generalized to all possible generative formulations (e.g., autoregressive visual token prediction was not tested).
 
 ### Minor
 
-1. **The depth-map transfer experiment underspecifies the MiDaS integration.** Section 4.3 compares Ross with an "extrinsic assistance" baseline (LLaVA + MiDaS) to argue that Ross can leverage depth maps while extrinsic methods cannot. However, the paper does not describe *how* MiDaS is integrated into the LMM — as an additional visual encoder with a connector? Do its features replace or supplement CLIP features? Are they concatenated at the token level? Without this detail, the comparison is uninterpretable: the failure of LLaVA+MiDaS with RGB+D inputs (62.1 → 60.0) could stem from a poor integration design rather than a fundamental limitation of extrinsic assistance. This undermines one of the paper's narrative claims about intrinsic vs. extrinsic activation. The main within-model comparison (Ross RGB vs. Ross RGB+D, +8.4 points) is clean and stands on its own, but the MiDaS comparison needs clarification or removal.
+**1. Mechanistic explanation is plausible but unsubstantiated.** The paper claims that reconstruction supervision "preserves image detail" and "enhances fine-grained comprehension." However, the only evidence connecting the training objective to representation quality is the attention analysis (which shows higher attention weights, not richer representations) and downstream benchmark numbers. The paper would benefit from a direct probe of the visual outputs (e.g., linear probing on fine-grained classification or retrieval tasks) to demonstrate that the representations themselves encode more detail. Without this, the mechanism is a plausible story rather than a tested claim. This does not undermine the empirical contribution—the method works—but weakens the paper's narrative about *why* it works.
 
-2. **The generative-vs-reconstructive comparison has an asymmetric data transformation step.** Section 4.2 compares Ross (reconstructive) with a generative variant using learned latent queries. The generative variant requires transforming caption data into text-to-image "creation" data via GPT-4o; the paper does not describe this transformation or verify its quality. The reconstructive variant uses the same caption data directly. Since the generative variant could be hurt by poor-quality transformed data rather than by the generative objective itself, the conclusion that "reconstructive objectives boost comprehension while generative alternatives cannot" is somewhat overclaimed. The paper acknowledges the data-format limitation but does not validate the transformation quality.
+**2. Training cost is unreported.** The denoiser introduces a separate network with multiple transformer blocks, involves running a VAE encoder and multiple diffusion timesteps per image during training, yet the paper reports no training time, peak GPU memory, or throughput compared to the baseline. For a method whose practical appeal is "lightweight inference," the training cost is a relevant practical trade-off that practitioners need to assess. This omission does not affect the validity of the results but limits reproducibility and adoption.
 
-3. **The main comparison with Cambrian-1 uses different training data composition.** Ross-7B uses 2M caption + 1.2M instruction data (ShareGPT4V + ALLaVA + Cambrian-737K + SMR-473K), while Cambrian-1-8B uses 7M instruction data. The paper frames this as data efficiency, which is fair, but does not discuss the confound that different data *sources* (not just quantity) may differ in quality or benchmark alignment. The controlled ablations within the paper's own framework (Section 4.1) already demonstrate the method's value independent of this comparison, so this does not threaten the core contribution, but it tempers the headline comparison.
-
-4. **Denoiser architecture description is ambiguous.** The paper states that each denoiser block has "three linear projection layers and a standard self-attention block" (line 244) and "three extra projections for conditions, inputs, and timesteps" (line 250). However, it does not explain how these projected representations are combined before the self-attention — are they concatenated, summed, or used as cross-attention? The diagram (Figure 4b) appears to suggest concatenation, but the text should be self-contained. This does not affect the validity of the results but hinders reproducibility.
+**3. Loss weighting hyperparameter is unspecified.** The paper combines losses as L_Ross = L_LMM^text + L_LMM^visual (line 138) with no weighting scalar and no discussion of how the two terms are balanced or whether the sensitivity was studied. This is a relatively minor reproducibility gap.
 
 ### Trivial
-- None that survive filtering.
 
----
+**1. Statistical significance not reported for main benchmarks.** The attention analysis (Table 2) reports p-values, but the main benchmark results (Tables 5 and 6) do not report confidence intervals or significance tests, even though some improvements are modest (e.g., +0.6 on MMBench for Ross-7B with SigLIP).
 
 ## Nice-to-Haves
 
-- **Training overhead discussion.** The denoiser is used only during training. Reporting its parameter count and training FLOPs overhead would help practitioners assess the cost.
-- **Broader hallucination evaluation.** Adding CHAIR (caption-based) or AMBER would strengthen the hallucination claim beyond POPE and HallusionBench, which is known to correlate with visual reasoning difficulty.
-- **Denoiser capacity ablation.** A brief study varying denoiser depth/size would guide future work on how much capacity is needed.
-
----
+- **Linear probing or retrieval evaluation on the LMM's visual outputs** would directly test whether reconstructive supervision actually produces richer visual representations, rather than relying on downstream benchmarks and attention weights as indirect evidence.
+- **An ablation replacing the visual outputs with a fixed/constant condition** would clarify how much the denoiser relies on the LMM's learned features vs. any reasonable visual signal.
+- **High-resolution benchmarks.** The paper scopes this out explicitly (line 484), but testing on high-resolution tasks (where visual detail is especially critical) would be a natural extension.
 
 ## Removed Points
 
-These points were flagged for removal. Treat them with caution; they do not appear in the final assessment.
+The following points from the reviewer inputs were removed due to factual inaccuracy or irrelevance:
 
-- *Criticism about the paper not reporting confidence intervals or distribution shapes for attention analysis.* The paper already reports quantitative stats (mean, median, percentiles, p-values) which are appropriate for this analysis. Qualitative maps supplement it.
-- *Criticism that qualitative depth examples could be cherry-picked.* The paper provides quantitative results (Table 4) alongside the qualitative examples. This is a generic concern applicable to any paper with qualitative figures.
-- *Criticism about missing inference-time analysis, limited hallucination benchmarks, and denoiser ablation.* These have been moved to Nice-to-Haves above — they are wishlist items, not actual weaknesses.
-- *Criticism implying the generative-vs-reconstructive comparison is "evidentially weak."* The paper acknowledges the data-format difference transparently; the comparison is suggestive and properly scoped.
-- *Strength claiming "transfer learning experiment shows Ross enables effective depth map understanding."* This strength is retained in the main review (it is supported by the data). The criticism about MiDaS integration is about the *extrinsic* comparison, not about Ross's own improvement.
-
----
+1. **"The reconstruction loss trains the denoiser, not the LMM"** — This is factually incorrect. Equation (4) (line 231) defines Θ = {θ, ξ, φ, π} as the parameter set, meaning the LLM (θ), visual encoder (ξ), and projector (φ) all receive gradients through the denoising loss. The reviewer partially corrects this by later acknowledging the LMM receives gradients, but the initial framing is misleading and has been removed.
+2. **Concern about "missing depth of tokenizer latent space specification"** — The paper does not specify the exact number of latent tokens KL-16 produces for a given image, but this is a reference implementation detail of a frozen teacher tokenizer from Rombach et al. 2022. This is not a meaningful weakness of the present paper.
+3. **"Pure formatting/style nitpicks"** — The reviewer's observation about bold formatting for in-text references is a presentation comment, not a weakness.
+4. **Certain generic observations** (e.g., "the motivation is conceptually clear but the distinction between intrinsic and extrinsic is fuzzy") — The definitions of "intrinsic activation" vs. "extrinsic assistance" are clearly laid out in Section 1 (lines 34-54) and Figure 1. The distinction is well-motivated.
 
 ## Novel Insights
 
-The reviews surface the following insight beyond the paper's own contributions: The paper's central tension is between its clean *intrinsic* claim (supervise visual outputs → better comprehension) and its somewhat overextended *extrinsic vs. intrinsic* narrative. The reviewers agree that the core methodological contribution — reconstructive supervision via latent denoising — is novel and well-supported by the controlled ablations. However, the claimed advantage over extrinsic-assistance methods is weaker than presented because (1) the MiDaS integration baseline is underspecified, and (2) the main comparison uses different training data. The honest contribution of this paper is "a new and effective self-supervised objective for LMM visual outputs" rather than "proof that intrinsic activation beats extrinsic assistance," and the paper would be stronger if the claims were scoped accordingly.
-
----
+None beyond the paper's own contributions. The reviews largely confirm the paper's stated findings and surface standard supplementary concerns (more analysis, fairer comparisons, training cost reporting).
 
 ## Suggestions
 
-1. **Clarify the MiDaS integration in the depth experiment** — describe whether features are concatenated at the token level, as an additional encoder, or other. If the integration was ad-hoc, consider removing the extrinsic comparison and keeping only the clean within-model comparison (Ross RGB vs. Ross RGB+D), which already makes the point that Ross can learn to use depth maps.
-2. **Validate or remove the generative comparison** — either describe the GPT-4o transformation in detail with quality checks, or soften the claim to "preliminary evidence that generative objectives do not help comprehension."
-3. **Add a caveat about data composition** when comparing with Cambrian-1 — acknowledge that different data sources could contribute to the performance gap, even if the data efficiency advantage in terms of quantity is real.
-4. **Clarify the denoiser architecture** — specify how projected conditions, inputs, and timestep embeddings interact with the self-attention block (concatenation? addition?).
-
----
+1. **Temper the claim about generative methods.** Rephrase to "in our controlled comparison, the reconstructive objective significantly outperformed a representative generative alternative (learnable query tokens with creation data), suggesting that reconstruction may be better suited for comprehension-oriented supervision." Note that other generative formulations were not tested.
+2. **Report training efficiency.** Add a brief table showing training GPU-hours and peak memory for baseline vs. Ross.
+3. **Add representation probing.** Evaluate the LMM's visual outputs (before the LLM) on a probe task to directly measure whether information content improves.
+4. **Report loss sensitivity.** Note whether the equal weighting (L_text + L_visual) was tuned or if it was the default, and discuss sensitivity.
 
 ## Score and Decision
 
-The paper presents a novel, well-motivated approach to supervising visual outputs in LMMs. The core idea is sound, the ablations are thorough, and the results are consistent and meaningful. The weaknesses are all addressable — the depth experiment integration can be clarified or scoped down, the generative comparison can be caveated, and the data confound in the main comparison does not undermine the within-paper controlled experiments. The paper's main narrative about "intrinsic vs. extrinsic" is somewhat overclaimed given these issues, but the methodological contribution stands on its own.
+**Score: 7.0 / 10** — A technically solid and empirically well-supported paper with a clean, novel idea and thorough experiments. The main weakness is an overclaimed comparison (generative methods) and some missing practical details (training cost, loss weighting), but the core empirical contribution is strong and reproducible. The paper makes a genuine contribution to the field.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,24 +1,22 @@
-Now I have a thorough understanding of the paper and can verify reviewer claims against the actual text. Let me compose the final review.
+Now I have all the information I need. Let me construct the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper presents the first systematic empirical study of privacy risks (membership inference and attribute inference) under curriculum learning (CL). Across 9 datasets, 4 CL methods, multiple attack variants, and 4 defenses, the paper finds that CL slightly increases MIA vulnerability (0.01–2.46%), with the increase concentrated on samples the curriculum ranks as difficult. The paper also proposes Diff-Cali, a new MIA that calibrates membership scores with difficulty levels to improve TPR at low FPR, and evaluates existing defenses under CL. The core contribution is the measurement and characterization, not a new state-of-the-art method.
+This paper presents the first systematic study of how curriculum learning (CL) affects privacy risks in machine learning models. Through extensive experiments on 9 datasets with multiple CL methods (bootstrapping, transfer learning, baseline, anti-curriculum), it evaluates membership inference attack (MIA) and attribute inference attack (AIA) effectiveness. The key findings are: (1) CL slightly increases MIA vulnerability (0.01%–2.46%), with a much larger effect on difficult samples (gap up to 4.23%); (2) CL does not increase AIA vulnerability; (3) existing defenses remain effective under CL, albeit with accuracy trade-offs. The paper also proposes a difficulty-calibrated MIA (Diff-Cali) that improves TPR at low FPR.
 
 ## Strengths
 
-1. **First systematic study of privacy risks in CL.** The paper evaluates 9 real-world datasets (6 image, 3 tabular), 4 CL methods (bootstrapping, transfer learning, baseline, anti-curriculum), and multiple attack vectors (NN-based, metric-based, label-only MIA, and AIA), providing a comprehensive baseline absent from prior work on ML privacy. Table 2 and Figures 1–2 document the breadth.
+- **First systematic quantification of CL's privacy impact.** The paper evaluates 9 real-world datasets (6 image, 3 tabular), 4 CL variants, and multiple attack families (NN-based, metric-based, label-only MIA; NN-based AIA). Tables 1 and 2 provide comprehensive evidence that CL modestly increases MIA vulnerability, and the evaluation spans multiple architectures (ResNet-18/34, MobileNet) to confirm the pattern generalizes.
 
-2. **Demonstrates that CL increases MIA vulnerability disproportionately for difficult samples.** Table 2 shows meaningful CL methods raise MIA accuracy by up to 2.46% (Tiny ImageNet). More importantly, Figure 2 reveals the increase is concentrated in difficult deciles — e.g., on CIFAR100 with bootstrapping, the gap between hardest and easiest decile is 4.23% (absolute) in attack accuracy, while under normal training the gap is negligible. This disparate-impact finding is the paper's most novel insight.
+- **Identification of disparate privacy impact on difficult samples.** This is the paper's most novel and actionable finding. The paper demonstrates that CL increases MIA accuracy much more for high-difficulty samples than easy ones, with gaps up to 4.23% on CIFAR100. Figure 2 shows attack accuracy by difficulty bucket; Figure 3 shows confidence scores narrowing for difficult members under bootstrapping/transfer learning. The memorization analysis (Figure 5) provides a principled explanation: CL forces stronger memorization of difficult samples via data ordering, not data value (corroborated by KNN-Shapley analysis in Figures 6–7).
 
-3. **Identifies that ordering matters more than repetition.** The consistent contrast between bootstrapping/anti-curriculum (both use fixed order, opposite directions) and baseline (random order, fixed across epochs) isolates the contribution of data ordering vs. data repetition. Table 2 shows anti-curriculum consistently *decreases* attack accuracy while bootstrapping increases it, establishing that ordering direction — not just repetition — drives the effect.
+- **Memorization and data-valuation analysis provide causal evidence.** The memorization experiment (Figure 5) isolates that data ordering—not just repetition—causes CL to memorize difficult samples more strongly. The KNN-Shapley analysis (Figures 6–7) differentiates the effect from data value, confirming that difficulty, not value, drives the increased vulnerability. This elevates the paper beyond a purely observational study.
 
-4. **Shows CL does not increase AIA risk (important negative result).** Table 5 reports normal training yields the highest AIA accuracy (e.g., 0.107 on Place100), while CL methods produce lower values. This distinguishes CL's privacy profile from contrastive learning (where AIA increases per He et al.) and is a practically useful boundary condition.
+- **Evidence that CL does not increase AIA vulnerability.** Table 5 shows normal training yields higher or comparable AIA accuracy to all CL methods across three datasets (Place100, Place60, UTKFace). This finding isolates CL's privacy impact to membership inference, not attribute inference, and is explained by the fact that difficulty scores are computed from the original task labels, not sensitive attributes.
 
-5. **Evaluates four existing defenses under CL and quantifies trade-offs.** Table 7 shows DP-SGD drops MIA accuracy to near random (~50.5%) but severely harms target accuracy (~17%). Memguard caps NN-based MIA at 50% yet leaves label-only attacks at 81–86%. MixupMMD reduces MIA by ~8% while improving target accuracy. This head-to-head comparison is a practical contribution for deployers.
-
-6. **Findings are robust across architectures.** Table 4 shows the same trends for ResNet-18, ResNet-34, and MobileNet — strengthening the claim that CL's privacy impact is architecture-agnostic.
+- **Comprehensive attack methodology coverage.** The paper evaluates 7 attack variants including NN-based (black-box-top3), 4 metric-based attacks, label-only attacks, the existing Cali calibration method, and the proposed Diff-Cali attack, providing a thorough picture of how different attack strategies interact with CL.
 
 ## Weaknesses
 
@@ -26,60 +24,49 @@ This paper presents the first systematic empirical study of privacy risks (membe
 None.
 
 ### Major
-None.
+
+- **The proposed attack's advantage over existing calibration is not fully demonstrated on the key metric.** The paper builds on Watson et al.'s calibration-based MIA (referred to as "Cali") but does not compare Diff-Cali against Cali on TPR at low FPR—the very metric where Diff-Cali claims its main advantage. Table 3 shows Diff-Cali has higher overall accuracy than Cali (e.g., 0.8519 vs 0.7889 on normal training), but the TPR@lowFPR plots in Figure 6 only compare Diff-Cali against the standard NN-based attack, not against Cali. This makes it difficult to assess whether the improvement comes from using difficulty scores specifically, or simply from having a better calibration procedure than the existing Cali implementation. A direct TPR@lowFPR comparison between Diff-Cali and Cali would resolve this.
+
+- **Defense evaluation is limited to one dataset and one architecture.** The defense experiments (Table 4) use only CIFAR100 with ResNet-18. While this is acknowledged as a limitation, the claim that "DP-SGD can reverse the impact of CL on MIA" (Finding 6) and the broader finding that "none of the studied defenses can significantly drop MIA accuracy while maintaining target model accuracy" would be substantially stronger if validated on at least one additional dataset or model architecture. Different datasets (e.g., with more or fewer classes) and model sizes may interact differently with DP-SGD under CL.
 
 ### Minor
 
-1. **The practical significance of the MIA increase is not contextualized.** The paper reports MIA accuracy improvements of 0.01–2.46% for image datasets. While the paper honestly describes these as "slightly" more vulnerable, it does not discuss what these numbers mean for an attacker — e.g., how many additional members would be identified at a fixed FPR, or whether the effect exceeds natural variance. The standard deviations are sometimes reported as 0.0000 (presumably due to rounding to 4 decimal places with STD < 0.00005), which the table caption clarifies ("entry without ± STD means the STD is less than 0.01%") but the main MIA accuracy table (Table 2) lacks this note, making the zeros look suspicious. The paper would benefit from adding a brief practical-significance discussion and adding the "less than 0.01%" note to Table 2's caption.
+- **Practical significance of the small overall MIA increase is unclear.** The paper honestly describes the effect as "slightly more vulnerable" and reports increases of 0.01%–2.46%. However, given that baseline MIA accuracy is already very high (often >90%), a 1–2% increase means the attacker already identifies most members; the additional gain is marginal. The paper's key and well-supported contribution is the *disparate impact on difficult samples*, not the small aggregate increase. The framing could better emphasize this differential effect as the primary finding rather than the aggregate increase.
 
-2. **The DP-SGD evaluation uses a large ε (124,496), limiting conclusions about privacy.** The paper transparently acknowledges this and explains it is due to 200 training epochs and ResNet-18's parameter count, citing prior work using similarly large ε. However, Finding 6 states that "DP-SGD can reverse the impact of CL on MIA" based on this evaluation. At ε ≈ 124,496 the DP guarantee is vacuous (effectively no privacy), so the claim that DP-SGD "reverses" CL's impact is only about MIA accuracy reduction — not about formal privacy protection. The paper should either (a) include at least one experiment with a meaningfully smaller ε (e.g., ε ≤ 10) to show the finding holds under a real DP guarantee, or (b) rephrase the finding to avoid implying a meaningful privacy guarantee. The paper's discussion of tunability (citing Bu et al. 2022) helps but does not resolve the gap.
+- **The attack requires knowledge of difficulty scores, an additional assumption.** The proposed Diff-Cali attack assumes the adversary has access to the difficulty scores used by the target model's CL method. While this is feasible if the adversary can replicate the difficulty measurer (e.g., by training a shadow model), it is an extra informational assumption that the standard NN-based attack does not need. The paper acknowledges this implicitly but does not discuss the practical scenarios where such scores would be available to an adversary.
 
-3. **The memorization analysis is a reasonable approximation of the Feldman (2020) definition but does not compute the actual memorization score.** The paper cites the standard definition (Equation in Section 5.2: difference in prediction accuracy with vs. without a sample) but instead compares "not seen" (800 samples removed) to "first seen", "last seen", and "random" orderings of those 800 samples. This is a reasonable proxy for studying ordering effects on memorization, but it does not isolate memorization per the formal definition, which requires per-sample inclusion/exclusion comparisons. The paper also does not justify why 800 samples (4%) are used, or show results across more than one dataset (only CIFAR100). The KNN-Shapley analysis uses a surrogate model whose behavior may not match the deep network, a limitation the paper acknowledges.
+- **Some standard deviations reported as 0.0000.** In Table 3, several metric-based attacks report standard deviations of exactly 0.0000. While this likely reflects deterministic attack thresholds rather than measurement error, it looks suspicious and should be clarified (e.g., with a footnote noting these are deterministic). Without clarification, readers may question the measurement precision.
 
-4. **Diff-Cali's improvement is modest and its novelty is limited.** The paper acknowledges that NN-based attack achieves higher overall accuracy. Diff-Cali's edge is in TPR at low FPR (better than random below 0.045 where NN-based attack fails) and in making difficult samples more vulnerable. However, the improvement is incremental: e.g., 2.64% and 2.35% better attack accuracy for difficult samples under normal and anti-curriculum ML. The attack requires difficulty scores, which are naturally available when CL is used but may not be in other settings. The paper would be strengthened by clarifying precisely how Diff-Cali differs from Watson et al.'s calibration method beyond using CL-derived difficulty scores.
-
-5. **LiRA, a current SOTA MIA, is not tested.** The paper discusses this omission in the limitations (citing the need for many shadow models and smaller dataset partitions). This is a reasonable justification but still leaves open whether CL's impact on MIA would be larger, smaller, or different under a stronger attack. Given that Diff-Cali's contribution is partly about improving low-FPR performance — LiRA's strength — the omission is notable.
-
-6. **The "baseline curriculum" (random order, fixed across epochs) sometimes decreases attack accuracy** (e.g., Place100: 0.9425 vs. 0.9416). Finding 2 states "Both data ordering and data repeating make a model more vulnerable under MIA," but the baseline's effect is inconsistent. The paper acknowledges this nuance in the text ("For baseline CL, the attack accuracy decreases for Place100, whereas a slight increase is observed...") but the finding boxes oversimplify.
+- **AIA results have low baseline accuracy.** The AIA attack accuracy is 10–17% for Place100/Place60 and 52% for UTKFace (vs 42% random baseline). The conclusion that CL does not increase AIA vulnerability is sound, but the analysis would benefit from a more explicit discussion of whether the AIA setting is meaningful when overall accuracy barely exceeds random guessing.
 
 ### Trivial
-
-- Several tables show standard deviations of 0.0000. The defense table caption clarifies that entries without "± STD" means STD < 0.01%, but Table 2 (the main MIA accuracy table) lacks this note. Adding it would prevent confusion.
-- The paper does not specify the random seeds or exact sizes of the "three disjoint parts" used for splitting datasets. While sufficient for a study of this scope, exact split sizes would aid reproducibility.
+- The paper uses `\attack{}` as a command name throughout; the rendered name in the PDF should be verified to be descriptive rather than a placeholder.
 
 ## Nice-to-Haves
-
-- Including one DP-SGD evaluation with ε ≤ 10 would substantially strengthen the defense analysis. The paper already notes this is achievable with tuning (citing Bu et al. 2022).
-- Computing actual per-sample memorization scores (Feldman definition) on a small subset would directly test whether CL increases memorization of difficult samples, rather than the current proxy analysis.
-- A brief quantification of practical significance: e.g., "at a fixed 1% FPR, an attacker using CL can identify X more members per 10,000 queries compared to normal training."
+- A control experiment measuring the relationship between MIA accuracy and the train-test accuracy gap under each training method would help isolate whether CL's effect on MIA is independent of overfitting.
+- Computational cost analysis of the proposed Diff-Cali attack (training shadow models + computing difficulty scores) relative to standard NN-based attack would help practitioners assess adoption.
+- Evaluating Diff-Cali against defenses beyond DP-SGD (e.g., MemGuard, MixupMMD) would be informative, though not required given the paper's scope.
 
 ## Removed Points
-
-These points are flagged to be removed, treat them with caution:
-- **"DP-SGD accuracy cost is well-known":** The paper reports this as an observation in the context of CL, not as a claimed novel finding. Removed as a strawman.
-- **"Does not specify how training/validation/test splits were created":** The paper states "three disjoint parts," which is sufficient for a benchmark paper of this scope. Removed as a nitpick.
-- **"Anti-curriculum is not a realistic training method":** The paper explicitly states anti-curriculum is used "to understand the impact of data ordering and repeating" — it is an analytical tool, not presented as a practical method. Removed.
-- **"Missing related works":** Per instructions, I cannot verify whether related works are missing without external sources. Removed.
-- **"Abstract claims about DP-SGD significant impact" and other presentational nitpicks:** These are factual statements about results, not overclaimed novelty. Removed.
-- **Complaints about stripped appendix content:** The parser strips appendix content from all papers; the original submission contains it. Removed.
-- **"The paper should also discuss that the MIA effects are small":** The paper uses language like "slightly more vulnerable" and "slightly more effective" throughout, accurately characterizing the effect size. Removed as already addressed.
-- **Missing proofs/figures from appendix:** Parser strips appendix content from all papers. Removed.
+These points are flagged to be removed; treat them with caution:
+1. **"Advanced attack methodology is not in main text"** — The attack description is in an `\input{advanced_attack}` file which was stripped by the parser; it exists in the original submission. Removed per parser artifact rules.
+2. **"The paper uses 'attack' as a placeholder name"** — This is a formatting nitpick about a LaTeX command; the rendered PDF would show the proper name. Removed per formatting nitpick rules.
+3. **"Connection between data ordering and memorization noted before (Shumailov et al.)"** — The paper already cites Shumailov et al. (line 21) and distinguishes its contributions. Removed as already addressed.
+4. **"Attack only evaluated against standard training and CL methods, not against defenses"** — The paper evaluates Diff-Cali under DP-SGD (line 610: "attack accuracy for normal and bootstrapping are dropped to 53.67% and 53.09%"). This claim is factually incorrect. Removed.
 
 ## Novel Insights
-
-**Beyond the paper's own contributions**, the reviews surface an interesting tension: the paper's main empirical contribution is the *characterization* of CL's privacy impact (small on average, concentrated on difficult samples, ordering-driven), but several of the criticisms implicitly evaluate it as if it were a *method* paper requiring large effect sizes or SOTA attack performance. This mismatch suggests the paper would benefit from more explicitly framing its contribution as a measurement study — where honestly reporting small effects is itself a valid and useful finding — rather than allowing readers to expect dramatic results. The finding that CL's privacy impact is *selective* (affects MIA but not AIA, affects difficult samples more than easy ones) is structurally more interesting than the headline numbers, and this deserves greater emphasis in framing.
+None beyond the paper's own contributions.
 
 ## Suggestions
-
-1. Add a practical-significance discussion. For a fixed low FPR (e.g., 1%), how many more members per 10,000 queries would an attacker correctly identify under CL vs. normal training?
-2. Add at least one DP-SGD experiment with ε ≤ 10 (or as close as feasible given computational constraints) to validate whether CL still increases MIA vulnerability under meaningful DP guarantees.
-3. Compute actual memorization scores (per Feldman 2020) on a small subset of one dataset to validate the proxy analysis.
-4. Clarify in Table 2's caption that entries without ±STD have STD < 0.01% (as done in the defense table), to avoid confusion over "0.0000" entries.
-5. More clearly delimit Diff-Cali's novelty relative to Watson et al. (2021): which component is the calibration method, which component is the difficulty-score adaptation, and what would be required for the attack to work without CL-provided difficulty scores.
+1. Reframe the paper's primary contribution around the *disparate impact on difficult samples* rather than the small aggregate MIA increase; this is the most novel and practically actionable finding.
+2. Add a direct TPR@lowFPR comparison between Diff-Cali and the existing Cali method to clearly establish the advantage of using difficulty scores.
+3. Extend the defense evaluation to at least one additional dataset (e.g., Tiny ImageNet) to strengthen the generalizability of Finding 6.
+4. Add a footnote explaining the 0.0000 standard deviations in Table 3 (e.g., "attack thresholds are deterministic").
+5. Discuss the practical feasibility of the adversary obtaining difficulty scores in realistic threat models.
 
 ## Score and Decision
 
-This paper is a solid empirical study that provides the first systematic characterization of privacy risks in curriculum learning. Its strengths — breadth of evaluation, the difficult-samples finding, the negative AIA result, the defense comparisons — outweigh its weaknesses, which are about effect size interpretation and methodological depth rather than core validity. The paper honestly reports modest effects and transparently discusses limitations. With the suggested additions (particularly a meaningful DP evaluation and practical-significance framing), it would be a valuable reference for the community.
+The paper makes a solid empirical contribution as the first systematic study of privacy risks in curriculum learning. The core finding about disparate impact on difficult samples is well-supported and non-trivial. The evaluation is thorough in its coverage of datasets, CL methods, and attack variants. The main weaknesses are the incomplete comparison of the proposed attack against the existing calibration baseline on the key metric, and the limited scope of the defense analysis — both addressable. The contributions are genuine and the paper will be a useful reference for the community.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**MY FINAL SCORE: <pineapple>6.5</pineapple>**
+**MY FINAL DECISION: <orange>Accept</orange>**

@@ -1,78 +1,86 @@
-Now I'll synthesize the final review based on my careful verification of the paper.
+Now I have a thorough understanding of the paper and all the review inputs. Let me produce the consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes Subgraph Multilinear Extension (SubMT), a theoretical framework that formalizes interpretable subgraph learning in GNNs through the lens of multilinear extension. It identifies that existing attention-based XGNNs face a fundamental gap in approximating SubMT due to the nonlinearity of multi-layer message passing (a Jensen-type gap). To address this, the paper introduces Graph Multilinear neT (GMT) with two variants: GMT-lin (reducing message-passing rounds to preserve linearity) and GMT-sam (random subgraph sampling with a Monte Carlo guarantee). Extensive experiments on graph classification and geometric benchmarks show consistent improvements over state-of-the-art XGNNs.
+This paper introduces the Subgraph Multilinear Extension (SubMT) as a theoretical lens for analyzing intrinsically interpretable GNNs (XGNNs). The authors observe that existing attention-based XGNNs approximate the expectation of the classifier output over subgraphs by feeding a soft (attention-weighted) adjacency matrix through a nonlinear GNN, creating a systematic gap due to Jensen's inequality. They propose two practical remedies — GMT-lin (reducing weighted message-passing to one round) and GMT-sam (Monte Carlo sampling from the learned subgraph distribution) — along with a counterfactual fidelity metric. Empirical results across regular and geometric graph benchmarks show consistent improvements over prior XGNNs like GSAT and LRI, often by sizable margins.
 
 ## Strengths
 
-1. **Novel theoretical framework connecting XGNNs to multilinear extension**: The SubMT formulation (Def. 3.1) is a principled and original way to analyze what interpretable GNNs are optimizing. The connection between subgraph distribution modeling and multilinear extension is well-motivated and provides a formal language for understanding approximation failures in existing methods. This is the paper's most distinctive intellectual contribution.
+- **Consistent and sizable empirical improvements.** Tables 1–4 show that both GMT variants outperform state-of-the-art XGNNs across multiple datasets and backbones (GIN, PNA, EGNN). The gains reach up to 15% on Spurious-Motif and 6–8% on MNIST-75sp and geometric benchmarks, with shadowed entries indicating statistical robustness. This is the paper's strongest evidence and directly supports the claim of practical effectiveness.
 
-2. **Provable guarantee for GMT-sam**: Theorem 5.1 provides a rigorous Monte Carlo bound showing that GMT-sam with t i.i.d. subgraph samples achieves an (εC/2)-approximation of SubMT with high probability (at least 1 − e^{−tε²/4}), and satisfies (δ, 1 − εC/δ)-counterfactual fidelity. This directly connects the method's design to the theoretical framework.
+- **Generality across graph types and backbones.** The evaluation covers both regular graphs (BA-2Motifs, Mutag, MNIST-75sp, Spurious-Motif, Graph-SST2, OGBG-MolHIV) and geometric graphs (ACTSTRACK, TAU3MU, SYNMOL, PLBIND), using three different GNN backbones. This breadth convincingly shows that the SubMT framework and GMT improvements are not tied to a single architecture or domain.
 
-3. **Consistent and substantial empirical improvements**: GMT-sam outperforms the best baseline (GSAT) by up to 15% on Spurious-Motif (GIN, interpretation AUC), up to 8% with PNA, and up to 13–16% in prediction accuracy. Improvements hold across 10+ datasets spanning regular graphs, molecular benchmarks, and geometric data, with multiple backbone architectures (GIN, PNA, EGNN). The gains are not limited to one setting.
+- **Useful conceptual framework (SubMT).** The formulation of interpretable subgraph learning as a multilinear extension (Definition 3.1) provides a clean mathematical abstraction that clarifies what existing XGNNs are trying to compute. While the core observation (nonlinearity creates a gap between f(𝔼[A]) and 𝔼[f(A)]) is basic, the paper is the first to formalize this as SubMT and connect it to XGNN architecture design. This framing has pedagogical value and provides a clear motivation for the proposed methods.
 
-4. **Novel counterfactual fidelity measure for XGNNs**: Definition 4.1 introduces (δ, ε)-counterfactual fidelity, a faithfulness measure designed specifically for intrinsic XGNNs (as opposed to post-hoc explainers). The paper demonstrates empirically that GSAT's counterfactual fidelity is 2–3× lower than simulated SubMT (Fig. 2b, 2c), and that GMT variants achieve higher fidelity (Fig. 3a), linking the theoretical SubMT approximation to empirical reliability.
+- **Provably correct estimation via sampling (Theorem 5.1).** Theorem 5.1 provides a probabilistic guarantee that GMT-sam's Monte Carlo estimate converges to the SubMT expectation under the learned attention distribution. While this is structurally a standard Hoeffding concentration bound, its application to the XGNN setting is novel and directly supports the claim that GMT-sam better approximates SubMT than methods that simply feed the soft adjacency through a nonlinear GNN.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None. No single weakness invalidates the paper's core contributions. The theoretical framework (SubMT), the GMT-sam guarantee (Theorem 5.1), and the empirical results are individually and jointly valuable.
+
+- **Overclaimed theoretical contribution relative to what is actually proved.** The paper is framed as providing a "theoretical framework" for XGNN expressivity, but the theoretical content is substantially thinner than the rhetoric suggests:
+  - **Proposition 3.3** claims that linear GNNs with k>1 "cannot approximate SubMT." The main text supports this with a single example (k=2, |𝒱|=1) invoking Jensen's inequality. Even if a full proof resides in the appendix (which was stripped by the parser), presenting a sweeping impossibility claim with only an illustrative example in the main body creates a misleading impression of rigor. The proposition as stated is essentially the observation that nonlinear functions do not commute with expectation — which, while true, does not constitute a deep theoretical characterization of when and how XGNNs fail.
+  - **Section 3 as a whole** does not deliver the promised "theoretical framework for characterizing the expressivity of XGNNs." There is no taxonomy of existing XGNN architectures by their SubMT approximation error, no quantitative bounds on the gap for specific GNN families (e.g., GIN with sum pooling, PNA), and no analysis of how the gap propagates through training. The paper identifies a real problem but does not provide the systematic theoretical apparatus that the framing advertises.
+
+- **Theorem 5.1's scope is narrower than the paper's central claims about it.** Theorem 5.1 shows that, *given* the attention matrix Â, GMT-sam's Monte Carlo average approximates the expectation under the *same* distribution with high probability. This is a correct but unsurprising concentration bound. The theorem says nothing about whether Â (and therefore the subgraph distribution) is itself close to the true causal subgraph distribution — which is what interpretability and OOD generalization ultimately require. The paper's claim that GMT-sam is "provably more powerful" conflates unbiased estimation of a *fixed* expectation with better *learning* of the subgraph distribution. The real empirical improvements likely come from the training dynamics (e.g., Gumbel softmax gradients, avoiding weighted message passing during training), but these are not covered by Theorem 5.1. The paper would be stronger if it separated what is formally proven (concentration under a fixed distribution) from what is empirically observed (better subgraph learning).
+
+- **The counterfactual fidelity metric mixes definition-level generality with measurement-level specificity in a problematic way.** Definition 4.1 is stated in terms of arbitrary full-graph pairs (G, G̃), but the interpretation (line 168) immediately translates it to "perturbations on Ĝ_c." The practical estimation (Eq. 11) then perturbs the attention matrix Ã rather than the subgraph directly. The "simulated SubMT" baseline used in Figures 2(b)/(c) is not clearly defined — the paper never specifies how the ground-truth subgraph distribution is obtained for datasets like BA-2Motifs and Mutag. Moreover, the high counterfactual fidelity of GMT-sam (Figure 3(a)) may be partially an artifact of Monte Carlo averaging smoothing the prediction, rather than a sign of better subgraph identification. The metric is a useful idea, but its formulation, estimation, and interpretation need significant clarification before it can support the paper's claims.
 
 ### Minor
 
-1. **Proposition 3.3 is supported by an example rather than a general proof**: The paper states that "Eq. 8 with linear GNNs (Eq. 9) and k>1 can not approximate SubMT" but provides only an illustrative case (k=2, |Y|=1) invoking Jensen's inequality. The general claim for arbitrary k>1 is asserted without a full argument. While the intuition is reasonable (nonlinearity of multi-layer message passing creates a Jensen gap), the proposition's framing as a formal claim is not matched by the evidence provided. This weakens the theoretical motivation but does not affect the GMT contribution, which stands on its own empirical and theoretical (Theorem 5.1) footing.
+- **GMT-lin's theoretical motivation does not directly extend to the non-linear backbones used in experiments.** GMT-lin is derived under the assumption of a *linearized* GNN classifier (k=1 preserves linearity in A). Yet the experiments use GIN, PNA, and EGNN — all with non-linear activations and pooling. The paper acknowledges this gap (Section 5.2, line 208: "GMT-lin may also suffer from the SubMT approximation failure" with non-linear GNNs) and appeals to empirical results. This is acceptable but creates a disconnect between the theory (which requires linearity) and the practice (which does not enforce it). The paper should clarify what architectural changes GMT-lin actually makes when combined with a non-linear backbone, and whether the empirical gains stem from SubMT approximation or from other factors (e.g., reduced depth, different gradient flow).
 
-2. **Non-standard significance reporting**: The paper uses "shadowed entries" where mean−1×std of the proposed method exceeds the mean of the best baseline. This criterion is unusual and weak — with high variance, even small gains can trigger shadowing. Standard practice would include confidence intervals or statistical tests (e.g., paired bootstrap). Additionally, variance for baseline methods is not reported in the tables, making it difficult for readers to assess whether improvements are meaningful. (Note: the images of tables cannot be fully verified from the text, but the caption description suggests this limitation.)
+- **Training details for GMT-sam are underspecified.** The paper mentions incorporating Gumbel softmax and straight-through estimators for backpropagating through discrete sampling (line 226) but gives no details on which specific variant is used, how the temperature is annealed, or what the sampling budget t is across datasets. The "learning neural SubMT" (retraining a classifier with frozen extractor) is described in a single paragraph (lines 228–232) with no experimental disentanglement of its contribution. These are not fatal omissions but harm reproducibility.
 
-3. **Omission of CAL (Chen et al., 2022a) from experimental baselines**: The paper cites CAL as a causal XGNN, discusses it in the causal framework (Sec. 4.1), and repeatedly references it throughout. Yet CAL is not included in the experimental comparison. The paper's justification ("we mainly compared with XGNNs that have the state-of-the-art interpretation abilities, i.e., GSAT and LRI") is reasonable, but given the prominence of CAL in the causal narrative of Sec. 4, a reader cannot assess whether GMT outperforms a key competing causal approach. Including CAL or providing a clearer explanation for its omission would strengthen the experimental evaluation.
-
-4. **Counterfactual fidelity's δ parameter is not operationalized**: Definition 4.1 depends on a "meaningful minimal distance δ," but the paper does not specify how δ is chosen in practice. The empirical estimation (Eq. 11) uses Gaussian perturbations on the pre-attention matrix, which is a reasonable choice but not validated against alternative operationalizations. The fidelity plots (Fig. 2, Fig. 3a) show single lines without error bars, making it unclear whether observed differences are significant.
+- **No computational cost analysis.** GMT-sam requires t forward passes per graph during both training and evaluation. The paper does not report t values, wall-time comparisons with GSAT, or any discussion of the accuracy-efficiency trade-off. A practitioner cannot assess whether the gains justify the overhead without this information.
 
 ### Trivial
 
-- No dedicated limitations section. The paper would benefit from explicitly discussing (a) the edge-independence assumption of SubMT, (b) the computational overhead of GMT-sam's multiple forward passes, and (c) the scope of the theoretical guarantee for GMT-lin.
-- The proof of Theorem 5.1 is stated as deferred ("The proof for Theorem 5.4" appears to be a formatting artifact) — it should be clearly referenced.
-- The neural SubMT distillation (Sec. 5.2) is described but not empirically evaluated. A comparison between the distilled single-pass model and the multi-sample GMT-sam would strengthen the completeness.
+- The "shadowed entries" criterion in Tables 1–4 (mean minus one standard deviation exceeding the best baseline mean) is non-standard; reporting mean ± std with explicit statistical significance tests would be more conventional.
+- Figure 2 captions and descriptions are garbled in the extracted text, making the "simulated SubMT" procedure unclear.
 
 ## Nice-to-Haves
 
-- **Replace the shadowing convention** with standard confidence intervals and statistical significance tests (e.g., paired t-tests over multiple seeds) for a more conventional and interpretable presentation.
-- **Include CAL as a baseline** in at least a subset of the experiments (e.g., Spurious-Motif, where OOD generalization is the focus).
-- **Validate counterfactual fidelity** against established faithfulness metrics (e.g., fidelity+, fidelity−, sparsity) on a subset of datasets to demonstrate its utility as a community tool.
-- **Evaluate neural SubMT distillation** empirically to show whether the distilled single-pass model retains the benefits of GMT-sam with lower cost.
+- An ablation separating the benefit of (i) training with soft subgraph + evaluating with sampling vs. (ii) training with sampling + evaluating with sampling would help isolate whether the improvements come from training or evaluation.
+- Quantitative bounds on the SubMT approximation gap for specific GNN families (e.g., GIN with sum pooling, PNA with attention) would strengthen the theoretical contribution.
+- Reporting the number of samples t used in GMT-sam and the resulting wall-clock time vs. GSAT would improve practical utility.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were identified by reviewers but are removed or downgraded for the reasons noted:
 
-- *"The theoretical guarantee for GMT-lin is overstated"*: The paper clearly states "for a XGNN f with linearized GNN as the classifier" before deriving the guarantee (Sec. 5.1, lines 189–201), and explicitly notes "even with non-linear GNNs in experiments" as an empirical observation. The criticism that the guarantee is claimed for nonlinear architectures misreads the paper's own qualifiers.
-- *"SubMT assumes edge independence which is strong"*: The paper acknowledges this assumption (line 85: "implicitly assumes the random graph data model") and notes it can be generalized to other graph models. This is already addressed.
-- *"Implementation details missing from main text"*: These are standard to defer to appendix/supplementary material. The paper mentions hyperparameter tuning following prior work.
-- *Formatting/style nitpicks* from the harsh critic's section-by-section notes, including minor presentation concerns that reflect parser artifacts rather than author errors.
+- *"XGNN notation could cause confusion"* — The paper clearly defines XGNN as intrinsically interpretable GNNs in Section 2 (line 31). This is an explicit definition, not a source of confusion. **Removed (misunderstands the paper's clear definition).**
+- *"The theoretical contribution is just Jensen's inequality"* — While the core mathematical observation is indeed Jensen's inequality, the paper's contribution lies in *framing* interpretable subgraph learning as SubMT, identifying its consequences for XGNN faithfulness, and designing architectures around it. Reducing the contribution to "just Jensen's inequality" ignores the framing and architectural novelty. **Removed (overly reductive characterization).**
+- *"Proposition 3.3 proof is missing"* — The full proof may reside in the appendix, which was stripped by the parser. The main text provides an illustrative example; the complete proof likely exists in the original submission. **Removed (per rule: parser-stripped appendix content).**
+- *"GMT-lin with non-linear backbones is insufficiently explained"* — The paper explicitly acknowledges this limitation (line 208). The claim is that GMT-lin *works empirically* with non-linear backbones, not that the theory covers this case. **Downgraded from major to minor.**
+- *"Counterfactual fidelity is a new metric (strength)"* — This conflicts with the verified weakness that the metric's definition and measurement are misaligned. Per rules, when strength and weakness disagree, the weakness wins. **Moved to Removed Points.**
+- *"Addresses practical deployment challenges (strength)"* — Generic, lacking specific evidence. **Moved to Removed Points.**
 
 ## Novel Insights
 
-Beyond the paper's own contributions (SubMT, GMT, counterfactual fidelity), the review reveals that the key tension in evaluating this work lies in distinguishing between the paper's two claimed theoretical contributions: Proposition 3.3 (diagnosing existing methods) and Theorem 5.1 (guaranteeing the proposed solution). Proposition 3.3 is weaker than claimed — it is an example-based argument rather than a general proof — but this does not undermine the value of GMT, since GMT-sam's guarantee (Theorem 5.1) is independently rigorous and the empirical results are broadly convincing. The paper would be stronger if it either (a) provided a full proof of Proposition 3.3 in the appendix, or (b) reframed it as a demonstrated failure mode rather than a proven theorem. The SubMT framework itself remains the paper's most distinctive and original contribution regardless of the fate of Proposition 3.3.
+The most valuable observation from the review process is the identification of a confound in the counterfactual fidelity metric: Monte Carlo averaging in GMT-sam smooths the prediction, which could artifactually inflate the measured fidelity. This means the fidelity differences in Figure 3(a) may partially reflect prediction variance reduction rather than improved subgraph identification. Disentangling these two effects would substantially strengthen the paper's evaluation. Additionally, the review highlights that the paper's strongest evidence is empirical (consistent gains across diverse settings), while the theoretical framing — while useful — is best read as a motivating conceptual lens rather than a rigorous expressivity analysis.
 
 ## Suggestions
 
-1. **For Proposition 3.3**: Either provide a complete proof in the appendix showing that the Jensen gap exists for all k>1 under the stated assumptions, or explicitly reframe the proposition as an identified failure mode (illustrated by the k=2 case) rather than a proven theorem. This would make the narrative more honest without weakening the paper.
+1. **Right-size the theoretical claims.** Reframe Section 3 as a "motivating observation" or "conceptual framework" rather than a full theoretical characterization. Qualify Proposition 3.3 to reflect what is actually shown. If the full proof is in the appendix, reference it explicitly in the main text.
 
-2. **For significance reporting**: Supplement the shadowing convention with a standard test (paired bootstrap or t-test over 5+ seeds) for at least the main results (Tables 1 and 2). Report mean±std for all methods, not just GMT variants.
+2. **Clarify the scope of Theorem 5.1.** Acknowledge explicitly that the theorem bounds estimation error *under the learned distribution*, not the quality of the learned distribution itself. Separate the formal guarantee (concentration) from the empirical claim (better subgraph learning via training).
 
-3. **Add a limitations paragraph** to the conclusion covering: the edge-independence assumption in SubMT, the computational overhead of GMT-sam (O(t) forward passes), and the scope of the GMT-lin guarantee.
+3. **Fix the counterfactual fidelity metric.** Align the definition with what is actually measured (sensitivity to attention perturbations). Explain how the "simulated SubMT" baseline is constructed. Discuss the potential confound that Monte Carlo averaging may inflate fidelity values.
 
-4. **Include CAL** as a baseline on a subset of datasets (e.g., the OOD benchmarks Spurious-Motif and Graph-SST2) to close the gap between the causal discussion in Sec. 4 and the experimental comparison.
+4. **Provide missing experimental details.** Report: the number of samples t used in GMT-sam, the Gumbel softmax temperature schedule, wall-clock time vs. baselines, and whether the "learning neural SubMT" retraining is used in the main experiments.
+
+5. **Include an ablation separating training vs. evaluation benefits.** Compare (train soft, eval sampling) vs. (train sampling, eval sampling) to attribute gains correctly.
 
 ## Score and Decision
 
-This paper makes a genuinely novel contribution — the SubMT framework is a principled new lens for analyzing XGNNs, GMT-sam is theoretically grounded and empirically effective, and the results are consistent across diverse benchmarks and backbones. The weaknesses are real but addressable: Proposition 3.3 is not fully proven, the significance reporting is non-standard, and CAL is omitted from baselines. None of these threaten the core value of the paper. I recommend acceptance.
+This paper makes a genuine empirical contribution — the two proposed GMT variants consistently and substantially outperform existing XGNNs across diverse benchmarks. The SubMT formulation, while not deep as a theory, provides useful conceptual clarity. However, the paper systematically overstates its theoretical contributions, and several key claims (Proposition 3.3, Theorem 5.1's scope, counterfactual fidelity measurement) need correction or clarification. These issues are addressable in revision and do not undermine the core empirical findings.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

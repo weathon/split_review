@@ -1,18 +1,50 @@
-Now I have verified all claims against the paper. Let me synthesize the final review.
+Now I have all the information needed to produce a thorough, verified final review.
 
 ## Summary
 
-This paper proposes TopoSD, a method that integrates standard-definition map (SDMap) priors into a lane segment perception framework. It introduces two complementary SDMap encoding strategies — spatial map encoding (rasterizing road attributes into 2D feature maps processed by a CNN) and map tokenization (encoding polyline instances via a transformer) — that are fused early into the BEV feature. A Topology-Guided Decoder (TGD) is also proposed to iteratively refine predictions using a predicted adjacency matrix. Experiments on OpenLaneV2 show substantial gains over LaneSegNet (+6.7 mAP, +9.1 TOP).
+2-3 sentence summary of the paper's contribution.
+
+## Strengths
+- strength 1 with evidence
+- strength 2 with evidence
+
+## Weaknesses
+### Fatal
+// Errors that invalidate the paper's core claims or results.
+### Major
+// Issues that a reviewer would weigh against acceptance
+### Minor
+### Trivial
+
+## Nice-to-Haves
+
+## Removed Points
+
+## Novel Insights
+
+## Suggestions
+
+## Score and Decision
+
+---
+
+Here is my consolidated review:
+
+## Summary
+
+TopoSD proposes incorporating Standard-Definition Map (SDMap) priors into lane segment perception. It introduces two complementary SDMap encoding methods — spatial map encoding (rasterized canvas maps fused via addition) and map tokenization (transformer-encoded polyline tokens fused via cross-attention) — and a Topology-Guided Decoder (TGD) that iteratively refines geometry and topology predictions using a predicted adjacency matrix. On OpenLaneV2, the full model outperforms the LaneSegNet baseline by +6.7 mAP and +9.1 TOP$_{lsls}$, with ablations confirming each component contributes independently.
 
 ## Strengths
 
-- **SDMap fusion yields large and consistent gains across geometry and topology metrics.** The proposed method improves LaneSegNet's mAP by +6.4 (Ours-1) to +6.7 (Ours-2 with TGD) and TOP$_{lsls}$ by +6.6 to +9.1 (Table 1). These margins are significantly larger than those of concurrent SDMap-based integrations (SMERF at +3.6 mAP) on the same backbone, directly supporting the paper's central claim.
+1. **Large, consistent gains on a standard benchmark.** The full model outperforms LaneSegNet by +6.7 mAP, +9.1 TOP$_{lsls}$, and +5.5 OLS (Tables 1 and 2). These margins are substantial and hold across both lane-segment-specific metrics and the full map-element bucket. The main baseline (LaneSegNet) is reproduced at its published numbers (33.5 mAP), establishing a reliable comparison point.
 
-- **The spatial encoding and tokenization are shown to be complementary.** Ablation (Table 3) shows spatial encoding alone yields 36.8 mAP / 28.9 TOP, tokenization alone yields 37.2 / 30.5, and combining both yields 39.9 / 32.0. This confirms the two encodings capture different aspects of road structure (local geometry vs. global topology) and that their pre-fusion is effective.
+2. **Ablation study cleanly isolates each contribution.** Exp 1→4→6→7 in Table 2 dissects the gains: spatial encoding alone (+3.3 mAP, +3.5 TOP), tokenization alone (+3.7 mAP, +5.1 TOP), their combination (+6.4 mAP, +6.6 TOP), and TGD on top (+0.8 AP$_{ls}$, +2.5 TOP$_{lsls}$). This stepwise analysis gives confidence that each design choice earns its place.
 
-- **State-of-the-art performance on the full OpenLaneV2 map bucket.** Table 2 shows the method surpasses LaneSegNet on all five evaluation metrics (DET$_{ls}$, DET$_a$, DET$_t$, TOP$_{lsls}$, TOP$_{lste}$) and the overall OLS score (41.2 vs. 35.7), demonstrating that gains generalize beyond the lane-segment subtask.
+3. **The Topology-Guided Decoder is a genuinely novel mechanism** that exploits mutual relationships between geometry and topology in a clean way — using the predicted adjacency matrix to propagate successor/predecessor information via left/right multiplication. Unlike prior work that treats topology as a post-hoc prediction, TGD integrates it into iterative refinement, and the ablation confirms it improves both geometry and topology simultaneously.
 
-- **Robustness to SDMap noise is demonstrated with a practical mitigation strategy.** The noise study (Table 4, Figure 4) shows that a model trained with noise augmentation suffers only -1.4% mAP drop under the same test noise, while a model trained without noise collapses by -41.3%. This provides concrete evidence that noise augmentation can mitigate real-world SDMap errors.
+4. **Noise robustness analysis addresses real deployment concerns.** Table 3 shows that a model trained with noise injection degrades only 1.4% mAP under the same noise, while a model trained on clean maps collapses by 41.3%. Figure 3 extends this across multiple noise levels via curves, providing broader evidence than the single-configuration table. This goes beyond typical benchmark reporting.
+
+5. **Efficiency analysis is thorough and honest.** Table 5 reports FPS, parameter counts, and resolution settings for every variant, including a Jetson Orin latency measurement (2–4ms for SD fusion). The paper explains clearly why cross-attention fusion (P-MapNet) requires downsampling while additive fusion does not, and provides the data to support the trade-off discussion rather than hiding it.
 
 ## Weaknesses
 
@@ -21,44 +53,54 @@ None.
 
 ### Major
 
-- **P-MapNet comparison is evaluated at a resolution disadvantage without showing the higher-resolution variant in the main results table.** The paper integrates P-MapNet's SDMap encoding into LaneSegNet but downsamples BEV and SD features to 50×25 for cross-attention fusion (Table 1 caption), while the proposed method operates at 200×100. The paper explains this is because P-MapNet's cross-attention complexity ($O(h_{bev} w_{bev} h_{SD} w_{SD})$) makes full-resolution fusion impractical. However, the compute table (Table 5) shows a P-MapNet variant at 100×50 (61.4M params, 3.3 FPS) — comparable in speed to the proposed method — yet no metrics are reported for this variant in Table 1. The fact that P-MapNet underperforms the *no-SDMap* LaneSegNet baseline (30.0 vs. 33.5 mAP) is a red flag that warrants explanation and a fairer comparison. Including P-MapNet at 100×50 with full metrics would either confirm the architectural disadvantage is intrinsic or reveal a confound.
+1. **P-MapNet comparison conflates method design with resolution advantage.** P-MapNet is evaluated at 50×25 resolution (Table 1) while the proposed method uses full 200×100 resolution, because P-MapNet's cross-attention has O(h·w·h_SD·w_SD) complexity requiring downsampling. The paper shows P-MapNet is also runnable at 100×50 (3.3 FPS, Table 5) but does **not** report its performance at that resolution. The gap between P-MapNet at 50×25 (33.2 mAP) and the proposed method (40.2 mAP) therefore conflates two differences: fusion mechanism *and* input resolution. The paper acknowledges the downsampling necessity (Section 5.4) but does not report what P-MapNet achieves at 100×50 or explicitly disentangle whether the gain comes from the fusion design or simply from having higher-resolution features downstream. This does **not** undermine the core claim against LaneSegNet (which is the primary baseline), but the comparative claim against P-MapNet specifically is less clean than presented.
 
 ### Minor
 
-- **Model capacity / parameter count is not controlled.** The proposed method adds a ResNet-18 (~13M params) and a transformer encoder (~3.2M) to LaneSegNet (45.4M → 67.0M total). The paper does not include a baseline where LaneSegNet's own encoder or decoder is scaled up by a comparable parameter budget without SDMap input. While the large gain magnitude (+6.7 mAP) and non-monotonic relationship between params and performance (e.g., SMERF at 48.6M achieves only 37.1 mAP; tokenization alone at +3.2M achieves 37.2 mAP; full method at +21.6M achieves 40.2 mAP) suggest the gains are not purely from capacity, a controlled ablation would strengthen the claim that the SDMap *prior itself* drives improvement.
+2. **No variance or statistical reliability reported.** All results are single runs without error bars. While single-run evaluation on large benchmarks is standard in this field (and the large margins vs. LaneSegNet make noise-driven fluke unlikely), the TGD ablation shows a smaller +2.5 TOP gain, and a handful of numbers in Table 2 differ by ~0.3 (e.g., Exp 6 vs 7 mAP: 39.9 vs 40.2). Without run-to-run variation, the reader cannot assess whether these smaller gaps are stable. Reporting mean and std over 3 seeds for at least the key configurations (baseline, SD-fusion, +TGD) would strengthen confidence.
 
-- **Spatial map encoding is underspecified for reproducibility.** The method description (§3.2) states that polylines are "drawn with thick lines" and that "cosines and sines of the inclination angle" are used, but does not specify: how many canvas channels are created, how multiple attributes (road type, curvature, connectivity) are combined into channels, what line thickness is used, or the precise architecture of the CNN beyond "ResNet-18" (which is only revealed later in the compute table). These details are needed for independent implementation.
+3. **Noise analysis table is limited to one configuration.** Table 4 shows only *rot5_std5_prob0.5*. Figure 3 provides curves across multiple noise levels, which is valuable, but the table — which carries the headline robustness numbers cited in the paper — presents only a single configuration. The claim that "models trained with noisy SDMaps develop robust reliance on both SDMap and visual features" would be stronger with a table showing 2–3 noise levels and the corresponding degradation percentages.
 
-- **SDMap data source and preprocessing for OpenLaneV2 are not described.** The paper states that SDMap polylines are preprocessed to a ±100m × ±50m range (line 185-186) but does not specify whether the SDMap comes from OpenStreetMap or another provider, or how polylines are extracted and aligned with the perception frame. This is critical for reproducibility.
-
-- **Inconsistency cases between SDMap and lane annotations are shown qualitatively but not quantified.** Figure 6 shows examples where SDMap road lines disagree with ground-truth lane annotations, but the paper does not report what fraction of scenes contain such mismatches or how model performance differs on consistent vs. inconsistent scenes. This limits the practical understanding of when SDMap fusion helps vs. hurts.
+4. **OLS score is used to claim improvement (+5.5) but never defined.** The OLS metric appears in Table 2 and the abstract, is the primary score on the OpenLaneV2 bucket, yet the paper never explains what it stands for or how it is computed. This is a small omission but affects self-containedness.
 
 ### Trivial
-- The noise study (Table 4) tests only one noise configuration (rot5_std5_prob0.5) in the main table, though Figure 4 provides broader variation. The "spike" in performance at intermediate noise levels in Figure 4 is not explained.
+
+5. **Dataset split is underspecified.** The paper says "subset A set of OpenLaneV2" but does not explicitly state whether results are on the official validation set, test set, or a custom split. The numbers match LaneSegNet's published validation results (33.5 mAP), strongly suggesting the validation set is used, but this should be stated explicitly.
+
+6. **Number of lane segment queries (N) not reported.** The decoder uses N learnable instance queries (Section 3.3), but the value of N is never given. This is a standard architectural detail that should be specified.
+
+7. **Map tokenization vs. spatial encoding asymmetry is mentioned but not analyzed.** The paper notes that spatial encoding helps AP$_{ped}$ more (+4.2 over baseline) while tokenization helps AP$_{ls}$ more (+4.9 over baseline), but does not discuss *why* this complementarity arises. A sentence or two of analysis would deepen the contribution.
 
 ## Nice-to-Haves
-- An experiment removing SDMap input at test time for the noise-trained model would reveal reliance on SDMap vs. visual features.
-- A systematic variation of noise parameters (shift, rotation independently) with sensitivity analysis would strengthen the robustness claims.
-- Ablating the tokenization range (e.g., ±50m vs. ±100m) would clarify whether encoding beyond the perception range actually matters.
+
+- Include P-MapNet performance at 100×50 resolution (which Table 5 confirms is feasible) to give a cleaner comparison.
+- Ablate simpler alternatives to the TGD mechanism (e.g., using the predicted adjacency as additive bias to self-attention rather than the separate left/right multiplication pipeline) to justify the specific design.
+- Provide tabular noise results for 2–3 configurations (e.g., mild, moderate, severe) alongside the figures.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-- **"The paper does not discuss graph-based decoders for topology reasoning (e.g., TopoNet, LaneGAP)"** — Factually wrong. The paper discusses TopoNet (line 68) and LaneGAP (line 67) in the related work section under "Lane Topology Reasoning."
-- **"The paper overclaims when it says 'the mutual influence of topology and geometry has not been fully explored'"** — The paper qualifies this claim by referring specifically to LaneSegNet's approach ("In LaneSegNet, the topology information is inferred using the final queries after the geometrical locations of centerlines have been predicted"), not claiming universal novelty. The criticism misreads the scope.
-- **Demands for missing appendix content / formatting/style nitpicks** — Parser artifacts, not author errors.
+
+These points from the reviewers were checked against the paper and found to be inaccurate, generic, or invalid per the review guidelines:
+
+1. **"P-MapNet comparison is unfair" framed as fatal/invalidating.** The critic's own text acknowledges the core claim vs. LaneSegNet stands; it is not a fatal issue. The weakness is real but confined to one secondary comparison; it does not threaten the paper's main result.
+2. **"The paper does not discuss whether simpler alternatives would work for TGD."** This is a nice-to-have, not a weakness — the paper is not required to exhaust all alternatives for every design choice. Moved to Nice-to-Haves.
+3. **"The paper does not report lane segment queries as an underspecified detail."** The exact number of queries (N) is a minor reporting omission, not a methodological flaw. Kept as Trivial.
 
 ## Novel Insights
-None beyond the paper's own contributions.
+
+The harsh critic observes an interesting tension that the paper itself does not fully articulate: the P-MapNet comparison is not just about fairness but reveals a genuine architectural insight — additive spatial fusion enables high-resolution SDMap integration that cross-attention cannot sustain without quadratic cost. If the authors reframed the comparison not as "our method is better than P-MapNet" but as "additive fusion allows us to work at 4× the resolution of cross-attention-based fusion, which is a structural advantage," the comparison would become a strength rather than a vulnerability. This reframing could elevate the paper's narrative from "we outperform X" to "we identify and exploit a fundamental capacity limitation in prior fusion designs."
 
 ## Suggestions
-1. **Add P-MapNet at 100×50 with full metrics to Table 1** to resolve the fairness concern about the baseline comparison. This directly addresses the most substantive weakness.
-2. **Add a capacity-controlled baseline** — scale up LaneSegNet's decoder or add a ResNet-18 processing BEV features without SDMap input — to isolate the effect of the SDMap prior from added parameters.
-3. **Specify the spatial encoding details** (number of canvas channels, line thickness, CNN architecture name and layer counts) and the SDMap data source in the main text or appendix.
-4. **Quantify the inconsistency cases** — report the fraction of scenes with SDMap-vs-annotation mismatches and per-group performance.
+
+1. Add a table or discussion showing P-MapNet's performance at 100×50 resolution (which Table 5 confirms is feasible) to cleanly separate the effect of resolution from the effect of fusion mechanism. If P-MapNet at 100×50 still lags behind, this actually *strengthens* the paper's claim.
+2. Report mean±std over 3 seeds for at least the baseline (LaneSegNet), SD-fusion (Exp 6), and full model (Exp 7) to quantify variability.
+3. Explicitly state "validation set of subset_A" in the dataset description.
+4. Define OLS in the metrics section.
+5. Add a second noise configuration to Table 4 (e.g., a milder *rot2_std2_prob0.3*) to make the robustness trend more concrete.
+6. Report the value of N (number of lane segment queries) in the method section.
 
 ## Score and Decision
 
-The paper presents a well-motivated approach with clearly demonstrated empirical gains. The core finding — that SDMap fusion via complementary spatial and tokenized encodings substantially improves lane segment perception — is supported by the ablation study and comparisons. However, the evaluation has two credible weaknesses that reduce confidence in the claimed *degree* of superiority over prior SDMap-based methods: (1) the asymmetric resolution comparison with P-MapNet in the main table, and (2) the lack of capacity control. These are fixable but require additional experiments. The topology-guided decoder, while novel, contributes modest gains (+0.8 mAP, +2.5 TOP) relative to the SDMap fusion itself, making the primary contribution the encoding and fusion strategy.
+This is a solid empirical paper with a clear, well-motivated contribution. The core claims — that SDMap priors via complementary encodings and a topology-guided decoder substantially improve lane segment perception — are supported by the evidence. The weaknesses are real but manageable: the P-MapNet comparison is the most substantive concern, but it does not affect the primary result against LaneSegNet. The paper would benefit from the suggested additions (variance reporting, P-MapNet at matched resolution, protocol clarification) but is already publishable as-is. I recommend acceptance based on the strength of the core results, the clean ablation design, and the practical value of the SDMap prior direction.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

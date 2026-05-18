@@ -1,20 +1,18 @@
-Now I have all the information needed. Let me write the final consolidated review.
-
 ## Summary
 
-This paper studies automatic data selection for instruction tuning by measuring data along three dimensions—complexity, quality, and diversity. It proposes DEITA, a score-first diversity-aware selection strategy: complexity and quality scores are predicted by small LLaMA-1-7B scorers trained on ChatGPT-ranked evolution variants, then combined via multiplication, and samples are selected iteratively with an embedding-based diversity filter (Repr Filter). The core empirical claim is that DEITA, trained on only 6K–10K SFT samples, matches or outperforms models trained on orders-of-magnitude more data—e.g., DEITA-Mistral-7B (6K SFT) achieves 7.22 MT-Bench vs. 5.89 for random selection, and with DPO reaches 7.55 MT-Bench/90.06% AlpacaEval, comparable to zephyr-beta (200K SFT + 60K DPO).
+This paper investigates what makes good data for instruction tuning through controlled studies across three dimensions — complexity, quality, and diversity — and proposes a selection pipeline (DEITA) that scores samples by the product of learned complexity and quality scores, then applies an embedding-based diversity filter. The key finding is that only 6K–10K automatically selected samples suffice to match or exceed models trained on over 10× more data across multiple backbones (LLaMA-1/2, Mistral-7B) and benchmarks (MT-Bench, AlpacaEval, Open LLM Leaderboard).
+
+---
 
 ## Strengths
 
-- **Systematic controlled study across three data dimensions with clean isolation.** The paper separately studies complexity (Table 1), quality (Table 2), and diversity (Table 3) in controlled experiments on LLaMA-1-13B, each time comparing multiple baselines. For each dimension, the proposed metric (Evol Complexity, Evol Quality, Repr Filter) outperforms all baselines, e.g., Evol Complexity achieves 6.27 MT-Bench vs. 5.84 random on X_sota (Table 1).
+1. **Comprehensive controlled study isolating three data dimensions with novel, effective metrics.** The paper systematically investigates complexity, quality, and diversity in separate controlled experiments (Sections 3.2–3.4). For complexity, the proposed Evol-Complexity achieves the best MT-Bench scores on both data pools (6.27 on X_sota, 5.57 on X_base, Table 1), outperforming all baselines including Instag Complexity and IFD. For quality, Evol-Quality similarly generalizes better than direct scoring (Table 2). This rigorous per-dimension comparison provides concrete evidence distinguishing what "good data" means. The evolution-based relative scoring method (presenting all variants of a single sample within one prompt) is a clever design that enables finer-grained differentiation than absolute scoring.
 
-- **Strong empirical results demonstrating dramatic data efficiency.** DEITA-Mistral-7B (6K SFT) achieves 7.22 MT-Bench and 80.78% AlpacaEval, outperforming zephyr-beta-sft (200K SFT, 5.32 MT-Bench) and Vicuna-13B-v1.3 (125K SFT, 6.39 MT-Bench). With DPO added (6K SFT + 10K DPO), it reaches 7.55 MT-Bench and 90.06% AlpacaEval, comparable to zephyr-beta (200K + 60K DPO) — an order-of-magnitude data reduction. These results hold across three backbone models (LLaMA-1-13B, LLaMA-2-13B, Mistral-7B) and multiple evaluation benchmarks.
+2. **Extreme data efficiency demonstrated across multiple backbones and benchmarks.** DEITA models trained with only 6K–10K selected SFT samples match or surpass models trained on 10–30× more data. For example, DEITA-Mistral-7B_6K achieves 7.22 MT-Bench and 80.78% AlpacaEval (Table 3), outperforming Zephyr-beta-sft (200K samples) at 5.32 and 75.12, and Vicuna-13B (125K samples). With DPO (6K SFT + 10K DPO), it reaches 7.55 MT-Bench and 90.06% AlpacaEval — comparable to Zephyr-beta (200K SFT + 60K DPO). The data scaling curve (Figure 4) further shows DEITA with only 3K samples matches the full 300K pool.
 
-- **Cost-effective scoring pipeline with practical value.** Evol Complexity and Evol Quality train small LLaMA-1-7B scorers on a 2K seed dataset scored once by ChatGPT, then apply them to the full pool without additional API calls. This avoids the prohibitive cost of per-sample ChatGPT annotation required by Direct Scoring and Instruction Node baselines.
+3. **Data scaling law insight: more selected data can hurt alignment even from a high-quality pool.** The analysis in Figure 4 reveals that performance peaks then declines as dataset size increases, even when selecting from X_sota. This supports the paper's central claim that instruction tuning data has a limited pool of truly effective examples, underscoring the importance of automated selection.
 
-- **Data scaling analysis revealing diminishing returns.** Figure 4 shows that DEITA with 3K samples matches using all 300K samples, and performance plateaus/declines beyond 6K–10K. This supports the paper's central thesis that careful selection matters more than raw quantity.
-
-- **Robustness across data pools of different quality.** The proposed metrics perform well on both X_sota (high-quality) and X_base (lower-quality) pools. For instance, Evol Complexity achieves 5.57 on X_base vs. 4.93 random, while Instag Complexity drops to 4.98 (Table 1).
+---
 
 ## Weaknesses
 
@@ -22,55 +20,59 @@ This paper studies automatic data selection for instruction tuning by measuring 
 None.
 
 ### Major
-None. The paper's core claims are well-supported by the evidence presented.
+
+1. **The diversity condition is stated in a way that logically contradicts the paper's goal of promoting diversity.** The paper defines the Repr Filter condition as `d < τ` where `d` is the cosine distance (1 − cosine similarity) between a candidate sample and its nearest neighbor in the selected set. When `d` is *small*, the sample is *close* to an existing example — i.e., it is *redundant*, not diverse. A small `d < τ` condition selects samples similar to what is already selected, which is the opposite of diversity promotion. The same condition appears in Algorithm 1 (`IF d(x, S) < τ THEN add`). Since the method empirically works well (Repr Filter outperforms random and Instag Diversity), this is almost certainly a typo — the implementation likely uses `d > τ` or an equivalent logic. But as presented, the paper's method section is logically incoherent on a point central to the contribution. The authors must correct this, specify the actual threshold value, and explain how it was chosen. *(Verified: lines 293–295 and Algorithm 1, line 331.)*
+
+2. **Missing ablation isolating the diversity filter's contribution in the full pipeline.** The final DEITA method combines score-sorting (by `c * q`) with the Repr Filter for diversity. The controlled studies in §3 separately test each dimension, but the paper never compares: select top-6K by `c * q` score **without** the diversity filter vs. the full method **with** the filter. This comparison is essential because: (a) the data pool X_sota is already described as diverse, so top-scoring samples may themselves be reasonably diverse; (b) the diversity studies in §3.4 were conducted on randomly ordered pools, not on score-sorted pools — the interaction between score ordering and the filter is unknown. Without this ablation, the contribution of the diversity component to the reported results is unsubstantiated. *(Verified: no such ablation exists anywhere in the paper.)*
 
 ### Minor
 
-- **No variance or statistical significance reported for MT-Bench / AlpacaEval.** The paper reports single-run evaluation without confidence intervals, standard deviations, or multiple random seeds. While single-run evaluation is common practice on these benchmarks, several comparative claims rely on modest margins (e.g., DEITA-LLaMA2-13B_6K at 6.65 vs. LLaMA2-13B-Chat at 6.65 — a tie; DEITA-LLaMA2-13B_10K at 6.79 vs. LLaMA2-13B-Chat at 6.65). Without variance estimates, the reader cannot assess whether the finer-grained differences are reproducible or within evaluation noise. The large-gap claims (DEITA-Mistral-7B at 7.22 vs. random at 5.89) are robust to this concern, but the fine-grained ones are not.
+3. **The threshold value for the Repr Filter is truncated and its sensitivity is unexamined.** The threshold τ is shown as "$0." — truncated, likely a parser artifact. More importantly, the paper does not discuss how τ was chosen (e.g., validated on a held-out set, set heuristically) or how sensitive the results are to its value. This information is needed for reproducibility and to understand whether the method is brittle.
 
-- **Missing ablation: combined score (c × q) vs. individual dimensions within the same selection framework.** The controlled studies evaluate complexity alone (Table 1) and quality alone (Table 2), and the combined DEITA method (Table 4) outperforms both individually. However, the paper never directly ablates whether the product c × q outperforms either c-only or q-only selection when the diversity filter is held constant. The choice of multiplication over sum or max is stated without justification or comparison. These are empirical questions the paper's framework is well-suited to answer but does not.
+4. **Single-run evaluations without variance estimates.** All MT-Bench scores are reported as single numbers with no confidence intervals, standard deviations, or multiple seeds. The reported gaps are sometimes small (e.g., Evol Complexity 6.27 vs. Instag Complexity 6.18 on X_sota — a 0.09 difference). Given known noise in GPT-4-as-judge evaluations, providing variance would strengthen confidence in the conclusions. This is not fatal — single-run reporting is common in this literature — but it limits the reader's ability to assess significance.
 
-- **Data scaling comparison may not be apples-to-apples on training schedule.** Figure 4 claims that 3K DEITA samples match using all 300K samples (100× reduction), but the paper does not specify whether the full 300K model was trained for the same number of steps/epochs as the DEITA subsets. If the "all" model was trained for 1 epoch while DEITA models received more epochs, the comparison conflates data efficiency with compute budget. This does not undermine the paper's main results (which compare to published baselines with their own training recipes), but it weakens the specific 100× claim.
+5. **Distribution shift in scorer training not analyzed.** The complexity and quality scorers (LLaMA-1-7B) are trained on 2K examples from Alpaca (evolved variants) but applied to data pools from very different distributions (ShareGPT, UltraChat, WizardLM). The paper does not analyze how well the scorers generalize out-of-distribution. While the downstream results suggest the scorers are reasonably robust, a basic validation (e.g., Spearman correlation between scorer predictions and ChatGPT judgments on a held-out set from the target pools) would strengthen this methodological component.
 
-- **Scorer generalization to different base models and data distributions is not analyzed.** The Evol Complexity and Evol Quality scorers are trained on LLaMA-1-7B using Alpaca seed data, then applied to score samples from ShareGPT, UltraChat, and WizardLM (ShareGPT) for selecting data to train LLaMA-2 and Mistral models. The paper provides no analysis (e.g., correlation with human judgments, or even score distributions across pools) to verify that the scorers generalize. The strong final results on Mistral suggest reasonable generalization, but an explicit check would strengthen the claim.
+6. **Data scaling curve (Figure 4) shows only the proposed method, with no baseline comparison.** The observed performance decline beyond 6K examples is interesting, but without a corresponding curve for random selection (or another baseline) on the same pool, it is unclear whether this decline is inherent to the data pool or specific to the DEITA selection strategy. This is relatively minor — the main claim about 3K matching 300K does not depend on this comparison — but it would improve the interpretation.
 
 ### Trivial
 
-- **Diversity threshold τ is cut off in the extracted text** (line 295: "We set threshold τ as $0."). The actual value needs to be provided for full reproducibility. If this is a parser artifact, the authors should verify it renders correctly.
+7. **The encoding input for diversity is underspecified.** The paper says "encode the sentence" using LLaMA-1-13B but does not specify whether this is the instruction only, the response only, or a concatenation of both. This should be clarified for reproducibility.
 
-- **No dedicated limitations section.** The paper does not discuss potential limitations such as the reliance on ChatGPT for seed data scoring, the narrow seed dataset (Alpaca-only), or the sensitivity of the diversity threshold.
+---
 
 ## Nice-to-Haves
 
-- Ablation comparing top-\(m\) scored samples with vs. without the Repr Filter (diversity-aware step) to isolate the contribution of diversity within the DEITA pipeline.
-- Report results with at least 2–3 random seeds or confidence intervals on MT-Bench, at least for the main comparisons.
-- Analysis of scorer generalization: a simple correlation plot between scorer predictions and human/intended rankings on a held-out sample from each data pool.
+- A sensitivity analysis of the threshold τ (e.g., varying τ and reporting downstream MT-Bench at a fixed budget of 6K) would demonstrate the method is not brittle.
+- Reporting results over 2–3 random seeds for the main comparisons would improve statistical grounding.
+- Including random selection in the data scaling curve (Figure 4) would clarify whether the peaking behavior is pool-inherent or method-specific.
+
+---
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **Complaint about threshold "0." being cut off / incomplete:** This is a PDF parser truncation artifact, not an author error. The removal of the specific "broken characters" complaint is per the hard rules. The *substantive* concern about how τ was chosen and its sensitivity (kept in Minor above) remains valid.
+- **"The improvement over Instag Complexity is modest (0.09 on X_sota)" framed as a core weakness:** This compares single-dimension controlled studies, not the full DEITA pipeline. The paper's strength is the combined method; a small gap in one dimension of a controlled study does not threaten the paper's main claims. Kept only in weakened form as part of point #4 (lack of variance estimates makes it hard to assess this gap).
+- **Claim that the paper should compare against reviewer-preferred methods or add more baselines:** Not applicable; the paper has reasonable baselines for its class.
 
-- **"Unfair comparison: Alpagasus limited to 50K while DEITA uses full 300K pool."** The paper transparently acknowledges this limitation in footnotes throughout all tables. The constraint is inherent to the baseline method (Alpagasus requires per-sample ChatGPT annotation, which is cost-prohibitive on 300K samples). This is not an unfair design choice by the authors — it is a practical limitation of the baseline that DEITA was designed to overcome. Comparisons are labelled accordingly.
-
-- **"Mistral random baseline (5.89) is considerably lower than LLaMA-1 random baseline (5.84)."** This is factually incorrect: 5.89 > 5.84. The reviewer's criticism that these numbers suggest noisy baselines is unsupported. If anything, the higher Mistral baseline makes DEITA's improvement (7.22 vs. 5.89) even more impressive.
-
-- **"Missing prompt details and scoring scale for Evol Complexity."** These details are standard content for appendices, and the parser strips appendix content. The prompt methodology is described in the main text (one prompt with 6 evolution variants per seed sample, scoring for relative differences). The paper states the seed dataset size (2K from Alpaca) and the base model (LLaMA-1-7B).
-
-- **"Missing training hyperparameters (batch size, learning rate, epochs)."** Training details are standard for appendix placement. The parser strips these sections.
+---
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews add methodological scrutiny but do not surface novel findings about the paper's subject matter.
+The intersection of the inverted-diversity notation issue and the missing ablation creates a genuine puzzle: if the diversity condition as written (`d < τ`) promotes similarity rather than diversity, why does Repr Filter empirically outperform random and Instag Diversity? The most likely resolution is a sign-flip typo (implementation uses `d > τ`). If so, the controlled studies in §3.4 and the main results are both valid but the paper's textual description is wrong. If, alternatively, the text reflects the actual implementation, then the method's success must come from the score-sorting alone — but this is testable with the suggested ablation. Either way, fixing this inconsistency is the single most important revision.
+
+A secondary observation: the paper's data-scaling result (3K selected samples matching 300K full data) is remarkably strong and, if robust, constitutes one of the most dramatic demonstrations of data efficiency in instruction tuning to date. The community would benefit from additional analysis of *what these 3K samples contain* — qualitative analysis or topic distributions could further inform the "what makes good data" question the paper sets out to answer.
+
+---
 
 ## Suggestions
 
-- Add variance estimates (at minimum, report the range or standard deviation across multiple evaluation runs on MT-Bench, or cite established variance figures from prior work to contextualize reported differences).
-- Add an ablation table comparing: (a) c-only + diversity, (b) q-only + diversity, (c) c×q without diversity filter, (d) c×q + diversity filter, and (e) c+q + diversity filter — to empirically justify each component of the pipeline.
-- In the data scaling discussion, clarify whether all points on the curve (including the "all 300K" point) were trained with the same number of total optimization steps / epochs; if not, note this as a caveat.
+1. **Fix the diversity condition**: change `d < τ` to `d > τ` (or clearly define distance such that smaller values indicate greater diversity), report the actual threshold value, and explain how it was chosen.
+2. **Add the missing ablation**: compare (a) top-6K by `c * q` score only vs. (b) full method with Repr Filter, on at least one backbone (e.g., LLaMA-1-13B on X_sota).
+3. **Provide variance estimates**: at minimum, report scores for 2–3 seeds or cite established variance ranges for MT-Bench to help readers assess the significance of observed gaps.
+4. **Clarify the encoding input**: specify exactly what text is fed to LLaMA-1-13B to obtain embeddings for diversity filtering.
 
-## Score and Decision
+---
 
-The paper makes a solid, practical contribution to automatic data selection for instruction tuning. The controlled studies are well-designed, the proposed method is cost-effective and consistently outperforms baselines, and the empirical results convincingly demonstrate that careful selection on 6K samples can match models trained on orders-of-magnitude more data. The weaknesses are real but evidential rather than structural — they concern missing ablations, variance reporting, and hyperparameter documentation that would strengthen rather than invalidate the claims. The core contribution is sound, and the paper is appropriate for a full-length publication.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

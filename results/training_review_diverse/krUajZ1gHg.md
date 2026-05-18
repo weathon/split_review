@@ -1,82 +1,87 @@
-Now I have all the information I need to produce a thorough, verified review. Let me write it.
+Now I have all the information I need. Let me write the consolidated review, carefully cross-referencing every claim against the paper.
+
+---
 
 ## Summary
 
-This paper presents MarineMaid, a large-scale dataset for marine visual understanding containing 14,645 images with 42,217 bounding boxes across 670 categories, paired with 12,873 domain-expert-refined instance captions (avg. 42 words) and 12,431 negative captions. The dataset supports close-set and open-vocabulary object detection, instance captioning, and visual grounding. The paper benchmarks 14 state-of-the-art models across these tasks, revealing significant gaps between current algorithms and the requirements of domain-specific marine understanding.
+MarineMaid is a dataset and benchmark for marine visual understanding, providing 14,645 images with 42,217 bounding boxes and 12,873 expert-refined instance captions (avg. 42 words) spanning 670 marine categories organized into a 6-level hierarchical taxonomy via the WoRMS database. The paper benchmarks 14 models across four tasks (close-set detection, open-vocabulary detection, instance captioning, visual grounding), finding that existing algorithms struggle significantly on marine-specific understanding.
 
 ## Strengths
 
-- **First region-level instance-caption dataset for marine creatures with long, expert-refined captions.** The paper constructs 12,873 instance-caption pairs averaging 42 words (Table 1 comparison), significantly longer than existing datasets like Visual Genome (12 words). This directly addresses the need for detailed biological trait descriptions beyond short image-level captions.
+- **First region-level instance-caption dataset for marine creatures with substantially longer and more domain-specific captions.** MarineMaid provides 12,873 instance-caption pairs averaging 42 words—over 3× the length of typical VLM training captions (12 words)—and explicitly covers biological traits (features, spatial info, activity, background) required for marine research. This directly fills the gap identified in the paper (Table 1, Section 3.3).
 
-- **Comprehensive multi-task benchmark evaluating 14 models across four tasks.** The paper systematically benchmarks close-set detection, open-vocabulary detection (Table 2), instance captioning (Table 3), and visual grounding (Table 4), revealing concrete limitations of current models on marine data — e.g., region-level VLMs describing the whole image instead of the instance, and GroundVLP mistaking a shark for a cow (Fig. 6).
+- **Large-scale, taxonomically rich annotation with 670 categories and hierarchical labels.** The dataset spans cephalopods, crustaceans, sharks, rays, reptiles, mammals, birds, corals, and invertebrates—10× larger in category coverage than WildFish++ and extending well beyond fish alone. The 6-level hierarchical taxonomy (Kingdom to Genus) is obtained by querying the WoRMS marine species database (Section 3.1).
 
-- **Hierarchical taxonomy with 6 granularity levels automatically queried from the WoRMS database.** Section 3.1 describes this structure (Kingdom–Genus), enabling fine-grained classification and analysis beyond flat category lists.
+- **Expert-in-the-loop annotation pipeline with both positive and hard negative captions.** Sixteen domain experts spent 624 hours refining MarineGPT-generated captions from four predefined aspects (features, spatial info, background, activity). The dataset includes 12,431 negative captions each tagged with one of 11 error properties (e.g., spatial, color, action, counting), going beyond the simple noun-replacement negatives in prior work (Section 3.1–3.2).
 
-- **Inclusion of 12,431 negative captions tagged with 11 predefined properties** (classification, background, spatial, action, color, shape, etc.) as hard negatives, going beyond simple noun-replacement strategies in prior work (Section 3.1).
-
-- **Rigorous annotation pipeline with 16 domain experts and 624 human hours.** Section 3.2 details the three-stage process (BBOX labeling, caption generation/refinement, cross-checking), demonstrating substantial annotation effort.
-
-- **Three systematic seen/unseen splits for open-vocabulary detection** (Class-level, Intra-Class, Inter-Class), allowing evaluation of generalization at different taxonomic granularities (Section 4.1).
+- **Comprehensive multi-task benchmark revealing concrete limitations of current algorithms.** The paper evaluates 14 models across four tasks, producing findings such as region-level VLMs describing the whole image instead of the prompted instance (Fig. 5) and GroundVLP misidentifying a shark as a cow (Fig. 6). These provide actionable insights for the community.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **Instance captioning evaluation protocol introduces an unquantified bias.** Image-level VLMs (LLAVA, MiniGPT-4, BLIP2, InstructBLIP) are evaluated on the full image using the prompt "describe the object in this figure," while the ground-truth captions describe a specific cropped instance. The paper acknowledges this limitation in passing (line 103: image-level VLMs "lacked the ability to understand specific object instances") but presents the quantitative comparison in Table 3 as if all models were evaluated under equivalent conditions. The very low CIDEr and BLEU-4 scores for image-level models partly reflect this input-target misalignment rather than pure captioning quality. This conflates two distinct error sources: grounding failure and captioning failure. The authors should either (a) crop the image for all models so visual input matches the target, or (b) explicitly frame the evaluation as measuring a combined task of detection + captioning and avoid ranking image-level vs. region-level models on the same metrics.
+- **LLM-generated category list lacks documented expert verification.** The pipeline (Fig. 2, Step 1) generates 670 marine category names via ChatGPT-3.5/GPT-4, then queries WoRMS for hierarchical taxonomy. However, the paper provides no audit of how many LLM-generated names were accepted, rejected, or corrected; no analysis of how many names successfully mapped to valid WoRMS entries; and no evidence that a marine biology expert verified the final category list. Since WoRMS querying *presupposes* the LLM produced recognizable scientific names, non-standard names (e.g., colloquial descriptions that do not correspond to any WoRMS taxon) would silently fail or produce incorrect hierarchy mappings. For a dataset intended to serve scientific marine monitoring, the taxonomic foundation of the category list needs greater rigor and transparency. This weakness cuts across all downstream annotations that reference these categories.
+
+- **Benchmark analysis lacks sufficient depth to support the paper's comparative claims.** Several issues compound:
+  - Table 2 shows only Class-level mAP50 results for close-set detectors, with Intra-Class and Inter-Class cells left blank ("−") without explanation. The paper states it reports "mAP50 of 24 seen categories under three settings," yet the Intra-Class and Inter-Class columns are empty even for seen categories. The likely reason (close-set models are trained only on Class-level labels and cannot predict the fine-grained categories used in Intra/Inter-Class splits) is never stated.
+  - Several captioning models achieve zero CIDEr and BLEU-4 (Table 3), yet the analysis merely notes this without probing deeper—e.g., whether models fail to detect the instance, hallucinate categories, or default to short generic responses.
+  - No human performance baseline is provided for any task, making it impossible to calibrate benchmark difficulty (e.g., is 10–15% grounding accuracy due to task ambiguity or model failure?).
+  - The negative captions (12,431 samples with 11 property tags) are introduced as a feature but never used in any downstream evaluation task beyond filtering; the property tags are not leveraged to analyze model error patterns, which would have been the most valuable contribution of these annotations.
 
 ### Minor
 
-- **Ambiguity in the "starting sentence" for captioning evaluation.** The paper states (line 103) that a starting sentence "This is a <Category Name>." is constructed, but does not clarify whether this is prepended to the model's output before scoring, appended to the reference, or used as a system prompt. Since this directly affects n-gram metrics (CIDEr, BLEU-4), the procedure must be specified.
+- **No inter-annotator agreement statistics reported for the caption pipeline.** Despite 16 domain experts spending 624 hours on refinement and cross-checking, the paper reports no agreement metrics (e.g., proportion of captions unchanged after refinement, proportion requiring major revision, Cohen's kappa for the 11 property tags). This makes it difficult to assess the reliability and consistency of the annotation quality.
 
-- **Caption statistics could be clearer.** The paper reports 12,873 refined captions (abstract, contributions, Section 3.1) and 22,321 total positive captions (Section 3.1). These are consistent (refined vs. refined+generated), but the three-level breakdown requested by the reviewer — total boxes (42,217) → boxes satisfying the 1024-pixel threshold → captions generated → captions refined — is not provided. Additionally, "For each image, we only select one to perform caption refinement" (line 52) implies ≤14,645 refined captions across 14,645 images, but 12,873 < 14,645; the paper should clarify why some images lack a refined caption (e.g., no box ≥1024 pixels).
+- **Dataset license and image provenance not addressed.** The paper states the dataset "will be released with the acceptance of this paper" but does not specify a license or address whether images crawled from Google and Flickr comply with fair use/copyright terms. This is a standard expectation for dataset papers.
 
-- **Size thresholds for bounding box categories undefined.** Section 3.1 reports "24,197 large, 10,555 medium, and 7,465 small bounding boxes" without defining what pixel or relative-image thresholds define these categories.
+- **Train/val/test split sizes not reported.** The paper repeatedly references "the same train/val data split" but never provides the exact number of images/instances in each partition for any of the three evaluation settings (Class-level, Intra-Class, Inter-Class). This hinders reproducibility.
 
-- **Dataset split ratios not specified.** The paper mentions a "train/val data split" (line 86) and a "validation set" (lines 120, 129) but does not report the number of images/instances in each split or whether the same split is used across all three tasks.
-
-- **Inter-annotator agreement not reported.** While the paper mentions cross-checking verification (Section 3.2), no quantitative consistency metrics (e.g., bounding box IoU agreement, caption similarity) are provided, which is a standard expectation for dataset papers.
-
-- **Proportion of excluded captions in grounding evaluation not reported.** Section 4.3 states that "captions that are negatives, empty, and with no noun phrases detected by nltk package are excluded," but the number/percentage affected by each criterion is not given.
-
-- **Negative captions are provided but not used in any benchmark.** The 12,431 negative captions with 11 property annotations are a novel resource (Section 3.1), but the paper does not benchmark them (grounding explicitly excludes them, line 120). While this is acceptable for a dataset paper, stating their intended future use more explicitly would set appropriate expectations.
-
-- **Dataset license not stated.** For a dataset intended for research release, this omission should be addressed.
+- **Fine-tuning details for OVOD models are underspecified.** For RegionCLIP and UniDetector, the paper states they are "fine-tuned on our MarineMaid dataset" but does not clarify whether unseen-category images are held out entirely during fine-tuning, which is critical for interpreting seen vs. unseen performance.
 
 ### Trivial
 
-- **"First marine dataset to support marine monitoring" is slightly overclaimed.** Existing datasets (WildFish, MAS3K, SUIM) already support monitoring via bounding boxes/masks. The unique contribution — and what should be foregrounded — is the combination of monitoring with detailed instance captions (as is done correctly in contribution 1).
+- The relationship between the "12,873 fine-grained instance-captioning pairs" (abstract/contributions) and "22,321 refined and generated positive captions" (Section 3.1) is stated but could be clearer. From context, the 12,873 are the refined subset of the 22,321 total. A brief clarifying sentence would help.
 
 ## Nice-to-Haves
 
-- **Crop images for all models in the captioning evaluation** to enable a cleaner comparison of pure captioning ability without the grounding confound. Alternatively, explicitly label the current evaluation as "open-world instance captioning" that measures combined detection+description ability.
-- **Use negative captions in at least one diagnostic benchmark** (e.g., measuring whether grounding models correctly reject negative prompts) to demonstrate their utility beyond release-as-future-work.
+- A human baseline on a held-out subset of 200–300 instances (e.g., asking domain experts to write captions directly without VLM candidates) would ground benchmark difficulty and validate the annotation pipeline's value.
+- Controlled analyses leveraging the 11 property tags on negative captions (e.g., comparing model error rates by property type) would more strongly demonstrate the dataset's utility for diagnosing model failures.
+- An analysis of detection/captioning performance broken down by environmental condition (deep-sea vs. aquarium vs. clutter) or by taxonomic group would deepen insight beyond aggregate scores.
 
 ## Removed Points
 
-These points were flagged by reviewers but are removed per policy:
+- **"12 models, not 14" (Harsh Critic, Issue 3).** The paper evaluates 3 close-set detectors + 3 OVOD detectors + 4 image-level VLMs (LLAVA, MiniGPT-4, BLIP2, InstructBLIP) + 2 region-level VLMs (GroundingLMM, GPT4RoI) + 2 grounding models = 14 models. The critic's count of "2 image-level VLMs" is factually incorrect; removed per hard rules.
 
-- **Table 1 showing "Yes(9,458)" for instance caption count.** This is a parser artifact from rendering the table image; the number "9,458" does not appear in the paper text. Per hard rules, formatting artifacts from parsing are not author errors.
-- **Missing appendix / supplementary material content.** Per policy, appendix content is stripped by the parser; the original submission contains it. Criticisms about missing details referred to supplementary are not valid as weaknesses.
-- **Any claim that cited models/tools/datasets do not exist or are not yet released.** All references cited in the paper are assumed to exist.
+- **Criticism that MarineGPT's availability is not stated (Harsh Critic, "Missing Parts").** MarineGPT is cited as prior work (Zheng et al., 2023). Per hard rules, questioning the existence or release status of a cited reference is removed.
+
+- **Criticism that "first" claims are over-broad (Harsh Critic, Other Observations).** The claim "first region-level instance-caption pair dataset specifically designed for marine creatures" is qualified by Table 1, which shows no existing marine dataset provides instance-level captions. WildFish++ provides image-level visual descriptions for fish only; the paper's claim is scoped to instance-level captions spanning multiple phyla. Removed as a strawman weakness.
+
+- **Criticism about inconsistent data counts (Harsh Critic, Other Observations).** The paper explains the relationship: 12,873 refined captions are a subset of the 22,321 total positive captions (Section 3.1). The numbers are not contradictory; removed.
 
 ## Novel Insights
 
-The most interesting insight from the reviews — and one the paper does not fully exploit — is that the evaluation gap between image-level and region-level VLMs reveals something deeper than a simple benchmark deficiency. When a full-image VLM is asked "describe the object in this figure," its failure on marine instances is simultaneously a failure of visual grounding (it does not know which object to attend to) and a failure of domain-specific captioning (even attending correctly, it lacks marine biological vocabulary). Disentangling these two failure modes would be a valuable research contribution in itself, and the MarineMaid dataset (with its paired instance captions and bounding boxes) is well-positioned to enable precisely this diagnosis.
+None beyond the paper's own contributions. The reviews raise valid transparency concerns but do not identify unsolved problems or novel connections that the paper itself misses.
 
 ## Suggestions
 
-1. **Clarify the caption evaluation protocol** — specify whether the "starting sentence" is prepended to the model output, appended to the reference, or used as a system prompt. Show one worked example.
-2. **Provide a clear statistics table** showing: total images → total boxes → boxes ≥ 1024 px → captions generated (unrefined) → captions refined, resolving the 12,873 vs. 22,321 vs. 42,217 relationship.
-3. **Acknowledge the evaluation confound in instance captioning explicitly** — either re-evaluate image-level VLMs on cropped inputs, or clearly state that the scores measure combined grounding+captioning and refrain from direct model-class comparisons.
-4. **Report dataset split sizes** (train/val image and instance counts) for all tasks.
-5. **Add inter-annotator agreement metrics** and state the dataset license.
+1. Provide an audit of the LLM-generated category list: how many names were accepted/rejected, how many successfully mapped to WoRMS IDs, and what fraction were verified by a marine biology expert. Even a table of 10–20 example LLM names alongside their final WoRMS mappings would substantially improve credibility.
+2. Report inter-annotator agreement statistics for the caption refinement step (e.g., % unchanged, % minor edit, % major revision) and for the 11 property tags.
+3. Fill in the blank cells in Table 2 for close-set detectors on Intra-Class/Inter-Class splits, or explicitly explain why they cannot be computed (e.g., "close-set detectors are trained only on 24 Class-level labels and cannot produce predictions at the fine-grained category level required for these splits").
+4. Specify the dataset license and address image provenance/copyright in the final version.
+5. Report train/validation/test partition sizes for all three evaluation settings.
+6. Clarify whether unseen-category images are held out during OVOD fine-tuning.
 
 ## Score and Decision
 
-The paper's core contribution — a carefully constructed marine dataset with expert-refined instance captions — is solid and fills a genuine gap. The benchmarking effort is substantial and revealing. The main structural concern is the evaluation confound in instance captioning, which is addressable through clearer framing or a simple experimental fix (evaluating all models on cropped inputs). No weaknesses undermine the dataset itself or the paper's primary contribution. The paper merits acceptance with minor revisions focused on clarity and transparency.
+This paper addresses a genuine gap with a large-scale, expert-annotated marine dataset that goes beyond existing resources in both breadth (670 categories across multiple phyla) and depth (instance-level captions with biological traits). The weaknesses are real but fixable: they center on transparency (category provenance, pipeline documentation, missing details) rather than on fundamental flaws in the data or methodology. With the suggested revisions, particularly the category list audit and pipeline transparency measures, the contribution would be solid and valuable to both the vision and marine research communities.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+**Score**: 6.0
+
+**Decision**: Accept
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

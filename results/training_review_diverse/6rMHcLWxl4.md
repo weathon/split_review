@@ -1,78 +1,71 @@
-Now I have a thorough understanding of the paper. Let me synthesize the final review.
+Now I have all the information needed to verify each claim against the actual paper. Let me compose the consolidated review.
 
 ## Summary
 
-This paper introduces PhyGenBench (160 prompts across 27 physical laws in 4 domains) and PhyGenEval, a three-tier hierarchical evaluation framework (single image → multiple images → full video) for assessing physical commonsense in text-to-video generation. The evaluation framework achieves a Spearman correlation of ρ=0.81 with human judgments, substantially outperforming prior metrics. The paper evaluates 8 T2V models and finds that even the best (Gen-3) scores only 0.51 PCA, revealing a large gap between current models and world-simulator capability.
+This paper introduces PhyGenBench, a benchmark of 160 text-to-video prompts spanning 27 physical laws across mechanics, optics, thermal, and material properties, along with PhyGenEval, a three-tier hierarchical evaluation framework (key-phenomena detection → order verification → overall naturalness) that uses GPT-4o and VLMs to assess physical commonsense in generated videos. PhyGenEval achieves a Spearman correlation of 0.81 with human judgments, far exceeding existing metrics (VideoScore: 0.19). Evaluating eight T2V models, the paper finds that even the best (Gen-3) scores only 0.51, demonstrating that current models fundamentally struggle with physical commonsense.
 
 ## Strengths
 
-- **Comprehensive, physically grounded benchmark design**: PhyGenBench covers 27 explicit physical laws across mechanics, optics, thermal, and material properties with 160 prompts. Each prompt is designed to correspond to a single physical law and clear observable phenomenon, enabling clean diagnostic evaluation of specific physics failures — a clear advance over prior benchmarks like VideoPhy that lack this structured coverage.
+1. **Systematic benchmark with rigorous construction across diverse physical domains.** PhyGenBench covers 27 physical laws in 4 fundamental categories, with a detailed five-step construction pipeline (conceptualization, prompt engineering, augmentation, diversity enhancement, quality control) that ensures one-to-one correspondence between prompts and physical laws. This methodological rigor is a genuine contribution — it gives the community a clean, interpretable benchmark rather than a noisy collection of prompts.
 
-- **Strong human correlation of the evaluation framework**: PhyGenEval achieves Spearman ρ=0.81 and Kendall's τ=0.78 with human ratings, far exceeding VideoScore (ρ=0.19), DEVIL (ρ=0.18), and VideoPhy (ρ=0.04). The hierarchical design — key phenomenon detection → order verification → overall naturalness — is a principled decomposition that addresses the causal and temporal nature of physical processes, which prior metrics ignore.
+2. **Hierarchical evaluation framework achieving high human alignment.** PhyGenEval's three-tier design (key phenomena detection, order verification, overall naturalness) is well-motivated by the need to decompose physical correctness into tractable sub-problems. The Spearman correlation of 0.81 (Table 1, lines 237–242) vastly exceeds competing metrics (VideoScore: 0.19, DEVIL: 0.18, VideoPhy: 0.04), providing strong evidence that the decomposition is effective. Per-category correlations (0.75–0.84) further demonstrate robustness.
 
-- **Clear evidence that current T2V models lack intuitive physics**: Even Gen-3, the best model tested, scores only 0.51 PCA. The paper provides concrete qualitative examples showing specific failure modes (eggs bouncing like rubber off rocks, glass balls floating, ice cream expanding during melting), which ground the quantitative scores in recognizable failures.
+3. **Clear empirical demonstration that current T2V models lack physical commonsense.** All eight evaluated models score ≤ 0.51 on PCA (Table 2, lines 258–273), with Gen-3 leading at 0.51 and CogVideoX-2B at 0.39. The per-category breakdown (optics highest, mechanics/material lowest) provides actionable insights — the paper's hypothesis that optical knowledge is more abundant in pretraining data is plausible and useful.
 
-- **Sound related-work positioning**: The paper correctly identifies gaps in existing benchmarks (VBench, EvalCrafter, T2V-CompBench, DEVIL, VideoPhy) and metrics (FVD, VideoScore), and makes a clear case for why physical commonsense evaluation requires dedicated treatment.
+4. **Qualitative analysis concretely showing failure modes of existing metrics.** Case studies (Figure 5, line 215) demonstrate that VideoScore, DEVIL, and VideoPhy misclassify physically implausible videos (e.g., egg bouncing like rubber, rock floating on water) as correct, while PhyGenEval correctly identifies these violations. This visual evidence directly supports the paper's motivation for a physics-specific evaluation framework.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **Unsupported claim about prompt engineering**: The abstract, introduction (line 49), and conclusion (line 307) repeatedly state that "simply scaling up models or employing prompt engineering techniques is insufficient to fully address the challenges presented by PhyGenBench." **No experiment in the paper tests any prompt engineering technique** — the paper never varies prompt wording, adds explicit physical constraints, or manipulates prompts in any way to assess whether this affects physics correctness. The scaling claim rests on a single comparison (CogVideoX 2B vs. 5B, +0.06 improvement), and cross-model comparisons show non-monotonic scaling (Open-Sora 1.1B at 0.44 outperforms CogVideoX 2B at 0.39). This claim as written goes well beyond the evidence presented and should be either removed or substantially weakened to reflect what was actually tested.
+1. **Claim about prompt engineering is entirely unsupported by any experiment.** The paper asserts in the abstract, contributions, and conclusion that "employing prompt engineering techniques is insufficient" (lines 5, 49, 307) to address the benchmark's challenges. However, the paper describes no experiments that systematically vary prompt wording, add physics descriptions, or otherwise test whether different prompting strategies change model outputs. The only "prompt engineering" discussed is step 2 of the benchmark's own construction (crafting initial prompts for clarity), which is not an experiment testing whether prompt engineering can improve model performance. The claim about scaling is partially supported by the CogVideoX 2B→5B comparison (0.39→0.45, line 261–262), which shows marginal improvement, but the prompt engineering claim has zero evidentiary basis. **This overclaim needs to be either removed entirely or substantiated with controlled experiments.** As written, it appears to be an unjustified extrapolation from the general observation that all models score low.
+
+2. **Ablation study lacks any quantitative results in the main paper.** The "Ablation Study" paragraph (line 286) consists of a single sentence: "Experimental results show that the key designs of PhyGenEval are essential." No numbers, no table, no comparison of correlation with and without each tier. Since the three-tier design is a core contribution of PhyGenEval, the reader cannot assess whether all three tiers are actually necessary or whether a simpler two-tier (or even single-tier) baseline would suffice. If these results exist in an appendix (stripped by the parser), the main paper should at minimum report a summary (e.g., "removing Stage 1 drops Spearman ρ from 0.81 to X").
 
 ### Minor
 
-- **Missing inter-annotator agreement for human study**: The paper reports that three annotators rated 512 videos (64 prompts × 8 models), but reports no agreement statistic (e.g., Fleiss' κ, Krippendorff's α). Without this, the reliability of the human ground truth — against which all metrics are compared — cannot be assessed. This is a standard expectation for any human evaluation study.
+1. **Scoring pipeline is under-specified.** The paper states it converts scores to a "four-point scale (0–3)" (line 115) and that the "final score" is the discretized average with floor rounding (line 194). Yet Table 2 reports decimal scores like 0.39 and 0.51, which are clearly not integers. The most natural interpretation is that per-video scores are integers on 0–3 and then averaged across prompts to yield the decimals shown — but this should be stated explicitly. A worked example walking through one prompt from video → per-stage scores → final score would eliminate ambiguity and improve reproducibility.
 
-- **Step 5 quality control may bias the benchmark**: The pipeline uses current T2V models to filter prompts, checking whether prompts are "simple enough for the model to generate semantically accurate videos" (line 104). This risks selecting prompts that are easier for *existing* models, potentially biasing the benchmark away from the most diagnostic physics challenges. The authors should justify or mitigate this concern.
+2. **No discussion of potential bias from GPT-4o-generated evaluation artifacts.** PhyGenEval uses GPT-4o to generate retrieval prompts, physics questions, and evaluation standards. Since GPT-4o (and the downstream evaluators VQAScore, GPT-4o itself, LLaVA-Interleave, InternVideo2) evaluate against these auto-generated artifacts, any systematic biases in GPT-4o's physics understanding could be inherited by the framework. The paper should at least acknowledge this limitation and describe any mitigation (e.g., manual verification of generated questions).
 
-- **No per-law or per-prompt breakdown of model performance**: The paper reports scores only at the category level (mechanics, optics, thermal, material properties). Given the effort to curate 27 separate physical laws, the diagnostic value would be substantially higher if results showed which specific laws models consistently violate and which they handle better. Currently, the only per-law insights come from anecdotal qualitative examples.
+3. **Human correlation computed on only 64 out of 160 prompts.** The 512-video human evaluation (line 210) covers 64 prompts (40% of the benchmark). While this is a reasonable sample, the paper does not discuss how representative these 64 prompts are of the full 160, nor does it note the assumption that PhyGenEval's high (0.81) correlation generalizes to the remaining 96 prompts.
 
-- **No analysis of how representative the 64 human-evaluated prompts are of the full 160-prompt benchmark**: The human correlation study uses 64/160 prompts (40%). The paper states these were "randomly selected" but provides no distribution analysis (e.g., coverage across the 27 physical laws, difficulty range). This makes it unclear whether the ρ=0.81 correlation generalizes to the full benchmark.
-
-- **Heavy reliance on GPT-4o for question/evaluation-standard generation without reproducibility discussion**: GPT-4o generates the physics questions, retrieval prompts, and evaluation standards used throughout PhyGenEval. The paper does not specify the GPT-4o version, temperature, number of samples, or whether the generation was repeated to check stability. Since GPT-4o outputs are non-deterministic and version-dependent, this raises reproducibility concerns.
+4. **Potential citation inaccuracy: Vchitect 2.0.** Vchitect 2.0 is cited as \citep{wang2023lavie} (lines 207, 265), which is the LaVie paper. If Vchitect is a distinct model, this citation may be incorrect. The authors should verify and correct this.
 
 ### Trivial
-
-- The S_key formula sums VLM scores over related questions and retrieval prompts (line 148-151). The rationale for summing vs. averaging and the normalization of VQAScore outputs are not explained. Similarly, the thresholds for discretizing scores into the 4-point scale are not specified.
+None.
 
 ## Nice-to-Haves
 
-- A minimal prompt-engineering experiment (e.g., 2-3 prompt variations for one model on a subset of prompts) would either support or refute the current claim about prompt engineering.
-- Reporting per-law "failure heatmaps" would significantly strengthen the diagnostic utility of the benchmark, showing the community which physics concepts are hardest.
-- Adding an analysis of whether the 64-prompt subset used for human evaluation is representative of the full benchmark across laws and difficulty would strengthen confidence in the reported correlations.
+- Report inter-annotator agreement (e.g., Fleiss' kappa) for the human evaluation to establish reliability of ground-truth judgments.
+- Include a table in the main paper or appendix listing all 27 physical laws, their prompt counts, and an example prompt for each.
+- Perform error analysis: in which categories does PhyGenEval disagree most with human annotators? This would guide future improvements to the evaluation framework.
+- Report per-law or per-category variance in model performance to identify which physical phenomena are hardest.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **Missing ablation results**: The harsh critic claims ablation results are missing. The paper states at line 286: "We conduct a detailed robustness analysis... Experimental results show that the key designs of PhyGenEval are essential." The actual ablation table/figure was very likely in the appendix, which the parser strips from all papers. Per the instructions: "REMOVE weaknesses about missing appendix... The parser strips those sections from all papers; they exist in the original submission."
-
-- **Multi-law prompt ambiguity concern**: The harsh critic's concern about the "egg hurled at rock" prompt involving both mechanics and material properties is partially addressed by the paper's explicit statement (line 97) that prompts were carefully curated for one-to-one correspondence. While a secondary annotation analysis would strengthen this, the paper acknowledges the concern and describes a curation process to address it. This is scope creep rather than a genuine flaw — the paper's own validation (ρ=0.81) suggests the design choices are reasonable.
-
-- **Criticisms about formatting, missing discussion section, or missing references**: These are parser artifacts, not author errors.
-
-- **Strength Finder strengths about the paper being "comprehensive" without specific evidence**: Generic praise ("this paper addressed an important problem") was dropped.
+- **Missing Discussion section content** (re: "Discussion section heading appears with no text"): Parser may have stripped this section. The hard rules require removing criticisms about content that the parser could have removed.
+- **Claim that scaling evidence is absent**: Kept as major weakness but rephrased — the paper does show that scaling CogVideoX 2B→5B gives only +0.06 improvement, which actually *supports* the insufficiency claim for scaling. The unsupported component is specifically the *prompt engineering* claim.
+- **Generic "missing related works"**: Not added (per instructions).
+- **Formatting/style nitpicks from reviews**: Not included.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a clear tension: the paper's core contribution (a benchmark + metric for physical commonsense) is well-motivated and shows promising human alignment, but its strongest claim about the inadequacy of prompt engineering and scaling is not actually tested. This overclaim, if corrected, would make the paper's actual contributions cleaner and more defensible.
+The most interesting observation emerging across the reviews is that this paper surfaces a fundamental tension in T2V evaluation: existing metrics (VideoScore, DEVIL, VideoPhy) excel at judging *perceptual quality* but are essentially orthogonal to *physical plausibility* — VideoPhy's Spearman ρ of 0.04 is effectively random. This means the community has been benchmarking models on visual fluency while remaining blind to whether generated videos make physical sense. The paper's three-tier decomposition (keyframe → order → overall) is a clever way to turn an intractable holistic judgment into tractable sub-tasks, and the 0.81 correlation suggests this decomposition is well-aligned with how humans assess physical correctness. The category-level finding that models perform best in optics (where visual patterns like reflection/refraction are abundant in training data) and worst in mechanics/material properties (which require causal reasoning about object interactions) provides a concrete roadmap for what the next generation of T2V models needs to improve.
 
 ## Suggestions
 
-1. **Remove or substantially weaken the claim about prompt engineering.** The paper's actual evidence supports only that "current T2V models struggle with physical commonsense, and model-scale improvements within a single family (CogVideoX 2B→5B) yield limited gains." The claim about prompt engineering has no experimental support and should be removed entirely, or scoped precisely to what was tested.
-
-2. **Report inter-annotator agreement** (e.g., Fleiss' κ or average pairwise agreement) for the three human raters. This is essential for establishing the reliability of the human ground truth.
-
-3. **Acknowledge the Step 5 quality-control bias** and justify why using current T2V models to filter prompts does not systematically remove the most challenging physics scenarios.
-
-4. **Add per-law performance breakdowns** (e.g., a table or heatmap of average PCA scores across the 27 physical laws) to maximize the benchmark's diagnostic value.
-
-5. **Specify GPT-4o parameters** (version, temperature, number of samples) and discuss reproducibility of the generated questions and evaluation standards.
+1. **Remove or substantiate the prompt engineering claim.** Either delete the claim entirely, or run a controlled experiment (e.g., take 10 prompts, add explicit physics descriptions, and compare PhyGenEval scores). A negative result would be informative even with a small sample.
+2. **Add quantitative ablation results to the main paper.** Report the Spearman correlation when removing each evaluation tier, so readers can verify that all three stages contribute.
+3. **Clarify the scoring pipeline with a worked example.** Walk through one prompt end-to-end: input prompt → per-stage raw scores → discretized scores → final PCA score → how the decimal in Table 2 is derived. This would resolve the scale ambiguity cleanly.
+4. **Acknowledge the GPT-4o-generated evaluation artifact limitation** and describe any manual verification performed.
 
 ## Score and Decision
 
-The paper addresses an important gap with a well-motivated benchmark and a promising evaluation framework that achieves strong human alignment. The major weakness — an overclaim about prompt engineering that has zero experimental support — does not undermine the core contributions (the benchmark and metric themselves) but does misrepresent the paper's findings. This is fixable in revision. The remaining issues (inter-annotator agreement, per-law analysis, reproducibility details) are standard minor concerns for a benchmark/metric paper of this type.
+The paper makes a solid contribution — a well-constructed physics commonsense benchmark and a novel evaluation framework with demonstrably high human alignment. The 0.81 correlation is impressive, the qualitative analyses are informative, and the finding that all current models score below 0.51 is a clear signal to the community. The major weaknesses (unsupported prompt-engineering claim, missing ablation numbers) are fixable and do not invalidate the core contributions. The paper is suitable for acceptance after these issues are addressed.
 
 MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

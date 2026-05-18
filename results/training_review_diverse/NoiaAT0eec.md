@@ -1,77 +1,84 @@
-Thank you for the clarity. Now I have all the information I need to produce the final consolidated review. Let me synthesize everything.
+Now I have a thorough understanding of the paper and all the claims. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces MI-MAE, which applies the information bottleneck (IB) principle to masked autoencoders. The authors define an information distortion for MAEs, present Theorem 2 as a generalization bound on mutual information, and derive (via Corollary 4) conditions that motivate two additional losses: an InfoNCE-based mutual information maximization loss across latent features from multiple masks, and a CLUB-based mutual information minimization loss between input and latent features. The paper claims a 400-epoch MI-MAE achieves 83.9% on ImageNet-1K, surpassing a 1600-epoch MAE by 0.5%.
+This paper proposes MI-MAE, which applies the information bottleneck (IB) principle to masked autoencoders (MAEs). The authors introduce two mutual information-based losses — a maximization loss (InfoNCE between latent features from multiple masks) and a minimization loss (CLUB-based upper bound between input and latent features) — intended to balance relevant and irrelevant information in the latent space. The paper claims that 400-epoch MI-MAE achieves 83.9% ImageNet-1K accuracy, surpassing the 1600-epoch MAE by 0.5%, and asserts improvements on detection and segmentation.
 
 ## Strengths
 
-- **Novel theoretical framing:** The paper is the first to explicitly connect the information bottleneck principle to masked autoencoders, providing a new perspective beyond contrastive-learning-based analyses. This framing is a genuine attempt at a more systematic understanding of MAE training, even if the execution falls short of rigorous.
+- **Novel application of the IB principle to MAEs with an explicit theoretical framework.** The paper formalizes MAE learning through information distortion (Definition 1), states a generalization bound (Theorem 2), and derives conditions for optimal latent features (Corollary 4). This goes beyond prior works that connected MAEs to contrastive learning only implicitly (e.g., Kong & Zhang 2023; Zhang et al. 2022).
 
-- **Strong headline empirical result:** The claim that a 400-epoch MI-MAE (83.9% on ImageNet-1K) surpasses a 1600-epoch MAE is striking and, if properly controlled, would represent a meaningful practical advance — a fourfold reduction in pre-training time with an accuracy gain.
+- **Two well-motivated loss terms connected to identifiable conditions in the theoretical analysis.** The InfoNCE-based maximization loss (Eq. 7, Eq. 8) is linked to condition (1) of Corollary 4, and the CLUB-based minimization loss (Eq. 10) is linked to condition (2). The use of established MI estimators (InfoNCE, MINE/CLUB) makes the approach computationally grounded rather than ad hoc.
 
-- **Actionable losses derived from analysis:** The paper translates the theoretical conditions into two concrete, implementable loss functions (InfoNCE for maximization, CLUB for minimization) and provides the full training algorithm. Practitioners could re-implement MI-MAE from the description.
-
-- **Acknowledges and bridges to prior contrastive-MAE connections:** The paper explicitly discusses prior work connecting MAEs to contrastive learning (Zhang et al., Kong & Zhang, etc.) and positions its IB analysis as extending rather than ignoring that line of work.
+- **Claimed practical efficiency gain.** A 400-epoch MI-MAE model is reported to outperform the 1600-epoch MAE by 0.5% on ImageNet-1K, suggesting a 4× training speedup while improving accuracy — a practically meaningful result if verified.
 
 ## Weaknesses
 
+### Fatal
+
+None. While the extracted text lacks visible experimental results for detection and segmentation, this appears to be a parser-truncation issue rather than an intentional omission by the authors. The single reported ImageNet number (83.9%) provides at least partial evidence that experiments were conducted.
+
 ### Major
 
-1. **The theoretical framework is presented as rigorous but is too informal to carry the paper's claimed analytical weight.** Definitions are unconventional and their connection to standard IB formulations is unclear (e.g., Definition 1's "information distortion" as conditional mutual information between visible and masked patches given the prediction). Theorem 2 is stated without proof or derivation, introducing quantities ($r$ as bias is defined but the conditional term $I(\hat{z}; X \!\cdot\! m \mid r)$ appears without justification). The metric for $|Z-\zeta| \le \epsilon_z$ is never specified (L2 norm? KL divergence?). Corollary 4's conditions are asserted rather than derived from the preceding theory. The paper claims a "rigorous analytical framework" (Introduction, Conclusion) but the mathematics does not meet the standards the paper sets for itself.
+- **The connection between the theoretical framework and the proposed losses is asserted rather than derived.** The paper states Corollary 4, then writes "From the first condition... we can adopt InfoNCE" (line 114) and "for the minimization of MI, we use the Mutual Information Neural Estimator" (line 128). These are leaps, not derivations. Why InfoNCE specifically follows from condition (1) rather than any other MI lower bound is not justified. Similarly, the claim that "optimizing Eq. 10, the third condition in Corollary 4 is also satisfied" (line 140) is stated with zero justification. The paper would benefit from a clean IB Lagrangian formulation (e.g., min I(Z;X) - β I(Z;Y) with Y = X·m) and explicit showing of how each loss term approximates a term in this Lagrangian.
 
-2. **The connection from Corollary 4 to the actual losses is asserted, not derived.** The paper states "From the first condition... we can adopt InfoNCE," but does not formally show that InfoNCE's lower-bound maximization satisfies the corollary's requirement $I(\hat{z}_k; \hat{z}_i)$ is maximized, nor why InfoNCE (a particular lower-bound estimator) is the correct or unique choice. Similarly, CLUB is adopted for MI minimization without deriving that optimizing Eq. 10 satisfies the second and third conditions of Corollary 4. The theoretical motivation therefore does not uniquely or tightly constrain the loss design — it serves as a post-hoc wrapper around standard contrastive and variational MI losses rather than a derivation.
+- **Key method details are underspecified, hindering reproducibility.**
+  - "Mutually orthogonal masks" (line 103): what does "orthogonal" mean here? Disjoint pixel sets? Masks with zero overlap? Uncorrelated masking patterns? This is never defined.
+  - The approximation network for the variational distribution q_θ(z_j|X_j) (line 128–134): its architecture (MLP? Transformer?), number of parameters, and whether it is trained jointly with the encoder or in alternating steps are not described. The loss L_approx (Eq. 9) is given but the training dynamics are absent.
+  - The paper mentions N masks per image but does not state how N relates to the training cost or how the masks are sampled (random? fixed?).
 
-3. **The experimental protocol does not isolate the effect of the proposed MI losses from the increased number of masked views per epoch.** The method samples four masks per image per epoch; the baseline uses one. The paper reduces epochs to one-quarter to match total masked views, which is standard practice. However, without a control — training MAE with four masks per image (summing reconstruction losses) but without the MI losses — any improvement cannot be attributed to the information bottleneck objectives. It could plausibly arise from processing more diverse masked views (a known benefit in MIM literature). This is the single most important missing control and directly affects the credibility of the central empirical claim.
+- **The experimental section in the extracted text is too sparse to verify the claimed results.** The only concrete number visible is "83.9% accuracy on ImageNet-1K" from the abstract. No tables of classification accuracy across epochs, no COCO detection mAP, no ADE20K segmentation mIoU appear in the extracted main text. The experiments section (5.1) describes pre-training setup and then cuts off. While this is likely a parser artifact (image-based tables may have been stripped), it means the review cannot assess whether the empirical claims are substantiated. The paper needs tabular results in the body.
 
 ### Minor
 
-1. **"Orthogonal masks" is not defined.** The method relies on generating "mutually orthogonal masks" (lines 16, 103) but never specifies what orthogonality means in this context. Non-overlapping masks would severely constrain the mask space and may affect feature diversity; the paper provides no justification for this choice over random masks.
+- **The mathematical presentation contains unclear notation and missing justification steps.**
+  - The overbrace notation (e.g., $\overbrace{X\cdot(1-m)}$) is used to denote the "simplest effective description" but is not clearly tied to standard IB notation. A reader unfamiliar with Tishby & Zaslavsky (2015) will struggle.
+  - Theorem 2's bound uses $K_x$ (complexity), $|Y|$ (output size), and $n_x$ (sample size), but how these concretely connect to an MAE's encoder architecture or mask ratio is not explained.
+  - The paper's central theoretical chain (Definition 1 → Theorem 2 → Assumption 3 → Corollary 4 → losses) is presented as a series of asserted results without derivations or even proof sketches. While full proofs likely belong in the appendix (stripped by the parser), the main text should at minimum sketch the reasoning.
 
-2. **Ablation of the two MI loss terms is absent from the extracted text.** The paper claims both $\mathcal{L}_{\mathrm{max-mi}}$ and $\mathcal{L}_{\mathrm{min.mi}}$ are needed but provides no ablation study separating their contributions. (Note: this may be present in the full paper's experimental section, which was truncated by the PDF parser.)
-
-3. **The claim that prior contrastive-MAE works "only perform on par with the original MAE" (line 46) is used to motivate the need for the IB perspective, but no comparison to those methods (e.g., U-MAE, iBoT-like approaches) is present in the extracted experimental section.** Without such comparisons, it is unclear whether MI-MAE offers advantages over existing methods that also use multi-view or contrastive objectives for MIM.
+- **No ablation study isolating the two losses.** The paper introduces two loss terms (max-mi and min-mi) but presents no experiments showing MI-MAE without one of them. This makes it impossible to know whether both terms are necessary or whether one dominates the improvement.
 
 ### Trivial
 
-- The notation in Theorem 2's bound mixes $K_x$, $|Y|$, and $n_x$ in the $O(\cdot)$ term in a way that makes the bound's tightness unclear without the missing proof.
-- The paper states Corollary 4's conditions, then line 140 adds a fourth point ("Additionally, we find that by optimizing Eq. 10, the third condition is also satisfied") which appears to be a commentary rather than a formal condition.
+- The conclusion (Section 6) largely paraphrases the abstract rather than discussing limitations, failure cases, or future work directions specific to the method.
+- The text contains "n;" (line 112) as an orphaned fragment, and the final loss formulation on line 142 ("our final loss becomes") is incomplete — though this may be a parser artifact.
 
 ## Nice-to-Haves
 
-- A control experiment training MAE with 4 masks per image (no MI losses) at 400 epochs would resolve the core confounding concern.
-- Ablations for each loss component ($\mathcal{L}_{\mathrm{max-mi}}$ only, $\mathcal{L}_{\mathrm{min.mi}}$ only, both) would strengthen the empirical claims.
-- Comparisons to other MIM variants that also use multiple masks or contrastive objectives (SimMIM, iBoT, U-MAE) would better contextualize the improvements.
+- An explicit Lagrangian formulation of the MAE information bottleneck: $\mathcal{L} = I(Z; X\cdot(1-m)) - \beta I(Z; X\cdot m)$ followed by an itemized derivation of how each proposed loss approximates a term, would resolve the core theoretical weakness.
+- Results reported at the same total iteration budget (not just "1/4 epochs" adjusted for 4 masks) to show true computational efficiency rather than merely scaling-adjusted comparisons.
+- Discussion of limitations: what types of images or tasks does MI-MAE not help? Is there a trade-off from the additional approximation network?
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **"r is undefined in Theorem 2":** Removed as factually incorrect — the paper explicitly states "where r is the bias" (line 81–82). However, the broader concern that $I(\hat{z}; X\!\cdot\!m \mid r)$ is introduced without motivation is kept above.
-- **Missing fine-tuning details, data splits, detection/segmentation protocols:** Removed — the experimental section is truncated by the PDF parser; these details likely exist in the original submission.
-- **No confidence intervals / number of runs:** Removed — cannot be verified from the truncated experimental section; typical for large-scale vision benchmarks.
-- **"The extraction truncates the experimental section":** Removed as a parser artifact, not an author error.
-- **Strength Finder claimed "multi-task validation across domains":** Removed — experimental results are truncated; this claim cannot be verified. It may be legitimate but cannot be confirmed from available text.
-- **Strength Finder claimed "derivation of actionable loss functions":** Weakened to "adopted" in the strengths above — the paper says "we can adopt InfoNCE," not derive it — but the overall point that the analysis motivates concrete losses is retained.
+- **"Theorem 2 is stated without proof"**: Proofs were likely in the appendix, which the parser strips. Removed per instructions.
+- **"The number of masks is implied to be 4 but never explicitly stated"**: Line 155 explicitly says "our method samples four masks for every image." This criticism is factually incorrect.
+- **"Corollary 4 references an equation number (l_i) that appears to be a typo"**: $l_i$ is defined on line 111 as $l_i = I(\hat{z}_i; X_0) + \sum ...$. It is a variable, not an equation-number typo. Removed as a misunderstanding.
+- **"The method is evaluated across multiple downstream tasks" (from Strength Finder)**: This claimed strength conflicts with the verified weakness that experimental results are not visible in the extracted text. Dropped.
+- **"The paper's connection of MAE to contrastive learning via the IB lens is not novel"**: This is an opinion, not a factual weakness. Prior works (Kong & Zhang, Zhang et al.) connected MAEs to contrastive learning; the paper's claim is to provide a *systematic* IB-based framework, which is a distinct contribution even if related.
+- **"The final loss formulation is cut off mid-sentence"**: Likely a parser truncation artifact.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface a useful meta-level insight: applying a formal theoretical framework (here, IB) to a well-understood empirical method (MAE) can produce actionable losses, but the credibility of the entire contribution collapses if the theory is presented as rigorous when it is not. The paper's central tension is that it wants the authority of "rigorous analytical framework" while the actual mathematics is incomplete (no proofs, undefined metrics, asserted connections). The reviews correctly identify that the paper would be more honest and no less useful if it presented the IB framing as a motivating analogy rather than a formal derivation. The missing four-mask control is a second instance of the same pattern — the paper claims a specific causal mechanism (IB losses help) but does not rule out the simplest alternative explanation (more masked views help).
+None beyond the paper's own contributions. The reviewers did not identify any insight that the paper itself does not already claim.
 
 ## Suggestions
 
-1. **Add the critical control experiment:** Train MAE with 4 random masks per image (summing reconstruction losses) at 400 epochs, without any MI losses. If MI-MAE beats this control, the IB losses are validated; if not, the core claim is unsupported.
-2. **Downgrade the theoretical claims from "rigorous framework" to "motivating perspective" throughout the paper.** Remove the term "rigorous" and present Theorem 2 and Corollary 4 as heuristic motivation with proof sketches deferred to an appendix, rather than as formal results that the paper does not actually prove.
-3. **Clarify the technical loose ends:** Define the metric for $|Z-\zeta|$, define "orthogonal masks," and state what "neighborhood" means in the latent space.
-4. **Run ablations for the two MI losses individually** to validate the claim that both maximization and minimization are needed.
+1. **Tighten the theory-to-loss connection.** Replace the current chain of loosely connected results with a clean IB Lagrangian: $\min I(Z; X\cdot(1-m)) - \beta I(Z; X\cdot m)$. Show explicitly how $\mathcal{L}_{\text{max-mi}}$ lower-bounds the positive term and $\mathcal{L}_{\text{min-mi}}$ upper-bounds the negative term, or vice versa. A one-paragraph derivation sketch in the main text would suffice.
+
+2. **Define "orthogonal masks" clearly.** If they are disjoint (non-overlapping) masks, say so. If they are merely random masks that are uncorrelated on average, say that instead. This is a one-sentence fix.
+
+3. **Describe the approximation network.** Even a single sentence — "a 2-layer MLP with hidden size 512, trained jointly with the encoder via the loss in Eq. 9" — would resolve the current gap.
+
+4. **Add a results table to the main text.** A single table with ImageNet accuracy at 100/200/400 epochs, COCO detection AP, and ADE20K mIoU, compared to the MAE baseline, would make the empirical claims verifiable.
+
+5. **Include a two-row ablation:** MAE baseline vs. MAE + $\mathcal{L}_{\text{max-mi}}$ only, vs. MAE + $\mathcal{L}_{\text{min-mi}}$ only, vs. full MI-MAE, on ImageNet at 400 epochs.
 
 ## Score and Decision
 
-The paper proposes a genuinely new perspective on MAEs via the information bottleneck and makes a strong headline empirical claim. However, the theoretical presentation is substantially less rigorous than claimed, the experimental design has a clear confounding factor (mask multiplicity vs. MI losses), and the missing control experiment prevents attribution of the reported improvements. These are major weaknesses that affect the paper's core credibility. The contribution could be salvaged with the suggested control and a more honest framing of the theory, but in its current form the paper does not deliver what it promises.
-
-**Score:** 4.5
-
-**Decision:** Reject
+The paper presents an interesting angle (IB for MAEs) but the theoretical development is not rigorous, key method details are missing, and the experimental evidence cannot be properly assessed from the extracted text. The connection between theory and the proposed losses is asserted rather than derived, which undermines the paper's central claim of providing a "systematic" understanding. These issues are addressable in revision but are too substantial for the current submission.
 
 MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

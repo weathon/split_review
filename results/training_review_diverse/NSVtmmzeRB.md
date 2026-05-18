@@ -1,82 +1,78 @@
-Now I have a thorough understanding of the paper and the reviewer claims. Let me compose the final consolidated review.
+Now I have a thorough understanding of the paper. Let me construct the final review.
 
 ## Summary
 
-This paper introduces Geometric Bayesian Flow Networks (GeoBFN), adapting Bayesian Flow Networks to 3D molecule generation. GeoBFN models coordinates, discretized charges, and categorical atom types in a unified parameter-space framework with SE(3)-invariant density modeling via equivariant networks. The method achieves competitive or state-of-the-art results on QM9 and GEOM-DRUG unconditional generation benchmarks and strong conditional generation results, with the additional practical advantage of any-step sampling enabling a quality-efficiency trade-off.
+GeoBFN adapts Bayesian Flow Networks (BFN)—a recent generative modeling framework operating in the differentiable parameter space of distributions—to 3D molecule generation. It unifies probabilistic modeling across continuous coordinates, discretized charges, and discrete atom types within a single SE(3)-invariant framework, and achieves competitive or state-of-the-art results on QM9 and GEOM-DRUG benchmarks while enabling any-step sampling for flexible efficiency-quality trade-offs.
 
 ## Strengths
 
-- **State-of-the-art or competitive generation quality across multiple benchmarks**: GeoBFN achieves 90.87% molecule stability on QM9 and 85.6% atom stability on GEOM-DRUG (Table 1), outperforming or matching prior diffusion-based models (EDM, EDM-Bridge, GeoLDM). In conditional generation it achieves the lowest MAE across all six QM9 properties (Table 2).
+1. **Strong empirical results on standard benchmarks.** GeoBFN achieves 90.87% molecule stability on QM9 and 85.6% atom stability on GEOM-DRUG (Table 1), exceeding prior diffusion-based models (EDM, GeoLDM) under comparable evaluation settings. The improvement is consistent across metrics (validity, uniqueness, novelty) and extends to conditional generation (Table 2), where GeoBFN obtains lower MAE on all six QM9 property prediction tasks.
 
-- **Any-step sampling with practical efficiency gains**: Training with continuous-time loss enables sampling with arbitrary step counts. With 50 steps GeoBFN already surpasses several strong baselines (Table 1), and Figure 4 shows monotonic improvement up to 4000 steps (94.25% stability), demonstrating a real efficiency–quality trade-off.
+2. **Principled SE(3)-invariant formulation of BFN for molecular geometry.** The paper formally derives conditions for SE(3) invariance of the likelihood (Theorem 3.1, Proposition 3.2) and implements them via an equivariant EGNN (Eq. 12), providing a theoretically grounded extension of BFN to 3D point clouds with physical symmetries.
 
-- **Principled SE(3) invariance guarantee**: Theorem 3.1 and Proposition 3.2 state formal conditions under which the likelihood and variational objective are SE(3) invariant, and Remark 3.3 confirms the GeoBFN parameterization satisfies these conditions — a property that some prior equivariant models enforce only empirically.
+3. **Any-step sampling enabling an efficiency-quality trade-off.** The continuous-time training objective (Eq. 19) allows sampling with arbitrary step counts without retraining. GeoBFN achieves competitive results at 50 steps (~20× fewer than EDM's 1000) and further improves to 94.25% molecule stability at 4000 steps (Figure 4), demonstrating practical flexibility.
 
-- **Unified probabilistic modeling of diverse modalities**: GeoBFN handles continuous coordinates, discretized charges, and categorical atom types within a single BFN framework (Section 3.2), avoiding the modality-specific noise scheduling that complicates diffusion-based approaches.
-
-- **Identification of and fix for mode-redundancy in discretized variable sampling**: Section 3.4 identifies a mismatch between training objective and sampling for discretized variables (Figure 5) and proposes a nearest-center correction that addresses the bias — a careful engineering contribution specific to BFN-based discrete generation.
+4. **Ablation shows charge-only representation is viable.** Table 3 demonstrates that GeoBFN can generate molecules using only coordinates and discretized charges (dropping atom types) without sacrificing quality—a noteworthy simplification that reduces model complexity and information redundancy.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **The charge variable (h_c) is not clearly defined, making the ablation study (Table 3, Section 4.4) difficult to interpret.**  
-  The paper states that atom types h_t and atomic charges h_c have a "one-to-one mapping" and uses the example "the charge value 4 could be uniquely determined as the Carbon atom." This claim does not align with standard chemistry: formal charges in neutral QM9 molecules range over small integer values (0, ±1) and do not have a one-to-one correspondence with atom types (e.g., both carbon and nitrogen can have formal charge 0). If h_c instead encodes atomic numbers or a custom discretization, the paper should state this explicitly. Since the ablation claims that using only coordinates + h_c outperforms using coordinates + h_t + h_c, the reader needs to know exactly what information h_c carries. The main results (Tables 1, 2) use all modalities and are unaffected by this ambiguity, but the secondary claim about being able to drop the atom-type modality rests on this experiment. The authors should clarify the exact feature used for h_c in each dataset.
+None.
 
 ### Minor
 
-- **No variance estimates or error bars for any main result.** All tables report point estimates without standard deviations, confidence intervals, or multiple-seed runs. Given that the improvement over GeoLDM on QM9 molecule stability is approximately one percentage point (90.87% vs. ~89.9%), readers cannot assess whether the difference is statistically reliable. This is standard practice in some parts of the generative-model literature, but the claim of state-of-the-art would be strengthened by variance reporting.
+1. **The 20× speedup claim is inferred from step count, not directly measured.** The paper states a "20× speedup" by comparing 50 GeoBFN steps against 1000 baseline steps, but no wall-clock timing is reported. While step-count reduction is standard in generative modeling and a reasonable proxy, the paper does not confirm whether each BFN step has comparable computational cost to each diffusion step (same network architecture, similar per-step operations). A direct runtime comparison would substantiate the claim on its own terms. *(The paper does show strong results at 50 steps vs. baselines at 1000 steps in Table 1; the speedup claim is not unsupported, merely imprecise.)*
 
-- **The "20× speedup without sacrificing performance" claim in the abstract is imprecise.** The model at 50 steps achieves 88.01% molecule stability vs. 90.87% at 1000 steps (Table 1) — performance relative to the model's own best does drop. The claim is accurate when comparing GeoBFN at 50 steps to baseline methods (it still outperforms them), but the abstract's phrasing could mislead readers into thinking 50-step GeoBFN matches 1000-step GeoBFN. The main text (Section 4.3) is clearer on this point.
+2. **The mode-redundancy fix (NEAREST_CENTER) lacks quantitative validation on real molecules.** Section 3.4 proposes a heuristic to address mode-redundancy in discretized charge sampling and illustrates it on a 2D synthetic example (Figure 5), but provides no ablation on QM9 or GEOM-DRUG measuring the impact of this fix on stability, validity, or diversity. The claim that it is "unbiased towards the training objective" is stated without formal justification. The paper's own Table 3 evaluates different modality configurations but does not isolate the effect of this specific heuristic.
 
-- **The noise sensitivity motivation (Section 3.3) is intuitive but lacks a formal definition or quantitative metric.** The paper argues that BFN's parameter-space formulation has lower variance than diffusion models, but Figure 3 provides only a qualitative visual comparison. A quantitative measure (e.g., mean distance of intermediate structures to the final structure) would strengthen this central motivation.
+3. **Main-text verification of SE(3) invariance is somewhat thin.** Theorem 3.1 states the invariance conditions, and Remark 3.3 asserts they are satisfied, but the main text does not explicitly walk through each component (coordinate update, charge/type update) to show how the conditions are met. The full proof is deferred to the appendix (standard practice), but a brief verification sketch in the main text would make the theoretical contribution more self-contained and convincing. The specific concern about scalar-valued parameters for charges/types (equivariance is trivially satisfied as invariance, since the EGNN output for these modalities is SE(3)-invariant by Eq. 12) could be clarified.
 
-- **Missing wall-clock runtime comparison.** The speedup claim is based on step-count ratios (50 vs. 1000 steps). If each GeoBFN step is computationally heavier than a diffusion step (due to the Bayesian update or EGNN forward pass), the actual speedup could differ substantially from 20×.
+4. **The noise sensitivity argument (Section 3.3) remains qualitative.** The paper argues that BFN's parameter-space updates have lower variance than diffusion models, making them naturally suited for noise-sensitive molecular geometry, but provides no quantitative comparison (e.g., variance of intermediate samples, signal-to-noise ratios). The claim is plausible and supported by visual evidence (Figure 3), but is presented as a motivation rather than a validated property.
 
-- **The any-step sampling analysis is shown only for QM9 (Figure 4); GEOM-DRUG results are omitted.** Extending this analysis would improve completeness, especially since GEOM-DRUG contains larger molecules where efficiency matters more.
+5. **Accuracy scheduler specifics are not reported.** The training objective (Eq. 19) uses accuracy schedulers α^x, α^{h_c}, α^{h_t}, but the paper does not specify their functional form (e.g., linear, cosine) or whether they differ across modalities, instead referring to Graves et al. (2023). Stating the schedules used in experiments is necessary for exact reproducibility.
 
-- **The independence assumption across modalities in the joint Bayesian flow distribution (Eq. 20) is stated without discussion or empirical validation.** The loss decomposes into separate terms for x, h_c, and h_t under the assumption that the flow distributions factorize. Whether this assumptions holds for molecule generation is not examined.
-
-- **No qualitative samples (generated molecules) are shown.** Including visual examples would help the reader assess the quality and diversity of generated geometries.
+6. **Limited discussion of failure cases and limitations.** The paper does not discuss scenarios where GeoBFN might underperform or why its any-step sampling property might degrade at very low step counts (Figure 4 shows stability increasing with steps, implying degradation at fewer steps, yet the framing in the abstract suggests "20× speedup without sacrificing performance" without noting this trade-off explicitly).
 
 ### Trivial
 
-None.
+- Table 3 (ablation) and some figures are embedded as images, slightly reducing readability.
 
 ## Nice-to-Haves
 
-- Hyperparameter sensitivity analysis for the accuracy schedulers (α^x, α^{h_c}, α^{h_t}) and the number of charge discretization bins.
-- Ablation of the mode-redundancy fix to quantify its contribution.
-- A proof sketch of Theorem 3.1 in the main text would make the theoretical contribution more self-contained.
+- A direct wall-clock comparison (GeoBFN vs. GeoLDM or EDM at matched quality) would strengthen the speedup claim.
+- A QM9 ablation with/without the NEAREST_CENTER fix would turn a plausible heuristic into a validated engineering contribution.
+- Reporting the accuracy scheduler functional forms would improve reproducibility.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+The following points from the reviews were removed with justification:
 
-- **Missing proofs of Theorem 3.1/Proposition 3.2 in main text.** The parser strips appendix sections from all papers; proofs likely exist in the original submission. The truncated sentence "We leave the formal proof of Theorem. 3.1 and Proposition. 3." is a parser artifact.
-- **Claims about formal charges being zero for every atom in QM9.** The reviewer's premise that atomic formal charges are uniformly zero in QM9 is itself inaccurate — individual atoms in neutral QM9 molecules can carry non-zero formal charges (e.g., in nitro groups). The broader issue about unclear feature definition is kept as a Major weakness above.
-- **Formatting and table-garbling complaints.** These are parser artifacts.
-- **Missing related work.** Cannot be verified without external sources.
-- **Criticisms about the paper not being self-contained on BFN preliminaries.** The paper appropriately references Graves et al. (2023) for the full derivation, which is standard practice.
+- **Missing recent baselines (2024–2025).** The rule prohibits mentioning missing related works that cannot be independently verified. Since I have no access to confirm whether relevant 2024–2025 works exist, this criticism cannot be evaluated and is removed.
+- **Complaints about missing appendix / deferred proofs.** The parser strips appendix content from all papers; the full proof of Theorem 3.1 exists in the original submission.
+- **Claims that the paper does not "explicitly verify" each SE(3) condition in the main text in exhaustive detail.** The paper states Theorem 3.1 conditions, shows the EGNN architecture satisfies Eq. 12, and defers the formal proof to the appendix. This level of detail is standard for conference papers; the criticism was downgraded to a minor presentation suggestion above.
+- **Assertion that the ablation study "is presented as an image and not discussed in detail."** The paper explicitly discusses Table 3 in Section 4.4: "With only discretised variable utilized, the performance is superior to including the discrete variable which implies powerful probabilistic modeling capacity and the benefits of applying similar modality."
+- **Request for the paper to confirm the pre-trained classifier is "appropriate" for conditional generation.** The paper explicitly states: "the same pre-trained classifier w is utilized to measure the property of generated molecule as ŝ" following prior work, which is standard practice and was not questioned in those prior works.
 
 ## Novel Insights
 
-The most interesting cross-perspective insight is the tension between the paper's narrative about noise sensitivity and the empirical evaluation. The paper convincingly argues that BFN's parameter-space formulation yields lower-variance trajectories than diffusion models, and Figure 3 provides a compelling qualitative illustration. However, the empirical protocol evaluates GeoBFN against diffusion baselines on standard metrics (stability, validity) that do not directly measure noise sensitivity or trajectory smoothness. This creates a gap between the claimed advantage and the evidence: the main results could plausibly stem from better architectural choices or training procedures rather than the fundamental BFN advantage. A direct comparison of intermediate-structure quality or trajectory variance would bridge this gap and make the paper's central narrative provably supported.
+The reviews converge on the observation that GeoBFN's key differentiator—operating in the differentiable parameter space of distributions rather than the sample space of diffusion models—is genuinely novel for molecular generation and offers two real, demonstrable advantages: (1) a natural unified treatment of continuous, discretized, and discrete modalities without bespoke noise schedulers per modality, and (2) any-step sampling from a single trained model. The reviews also surface a recurring gap: several of the paper's central claims (speedup, mode-redundancy fix, noise sensitivity advantage) are supported only by indirect or qualitative evidence. This pattern suggests the paper is strong on methodological novelty and initial empirical validation, but falls short of the thorough characterization expected for a paper making "state-of-the-art" claims.
 
 ## Suggestions
 
-1. **Clarify what h_c (the "charge" variable) represents in each dataset.** If it is formal charge, explain how the ablation works given the limited range of values. If it is atomic number or a custom discretization, call it by its proper name and adjust the "one-to-one mapping" claim accordingly. This is the single most important revision.
-2. Report main results with at least 3 random seeds and include standard deviations.
-3. Include a quantitative measure supporting the noise-sensitivity reduction claim (e.g., variance of intermediate embeddings or average structural distance to the final sample over the generation trajectory).
-4. Measure and report wall-clock sampling time to substantiate the speedup claim.
-5. Add generated molecule visualizations and any-step sampling results for GEOM-DRUG.
+1. Provide a wall-clock sampling time comparison at matched quality (e.g., GeoBFN at 50 steps vs. GeoLDM at 1000 steps) to substantiate the 20× speedup claim directly.
+2. Add a QM9 ablation with/without the NEAREST_CENTER fix, reporting stability and validity at fixed step counts.
+3. Include a brief (1–2 sentence per component) verification sketch in the main text showing how each condition of Theorem 3.1 is satisfied, clarifying that scalar parameters are SE(3)-invariant (not equivariant) by the EGNN design.
+4. Report the accuracy scheduler functional forms used in experiments.
+5. Add a limitations paragraph explicitly discussing performance degradation at very low step counts and the regimes where GeoBFN might not outperform alternative approaches.
 
 ## Score and Decision
 
-The paper introduces a novel adaptation of Bayesian Flow Networks to 3D molecule generation with a principled SE(3)-invariance treatment and any-step sampling. The main experimental results are competitive and often state-of-the-art. The primary weakness is the unclear definition of the charge variable in the ablation study, which undermines a secondary claim but not the core contribution. The other weaknesses are standard presentation gaps common in this area. The paper's core contribution is sound and the method is clearly differentiated from the diffusion-model family.
+Based on my assessment: the paper presents a methodologically novel and well-motivated extension of BFN to 3D molecular generation with strong empirical results on established benchmarks. The verified weaknesses are minor—they concern presentation precision and missing corroborating experiments, not the correctness of the core contribution. The paper would benefit from addressing these issues, but they do not undermine the central claims.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

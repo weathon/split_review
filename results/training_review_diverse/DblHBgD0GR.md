@@ -1,86 +1,75 @@
-Now I have all the information needed. Let me construct the final consolidated review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper investigates why protective perturbations degrade personalized diffusion model fine-tuning, attributing it to a latent-space image-prompt mismatch that causes shortcut learning. The authors propose a defense framework—CodeSR (purification via CodeFormer + super-resolution) and Contrastive Decoupling Learning (CDL)—to realign latent representations and decouple noise patterns from identity concepts. Experiments across seven perturbation methods and nine baselines show consistent improvements in identity similarity and image quality.
+This paper studies how adversarial "protective perturbations" degrade personalized diffusion model (PDM) fine-tuning. It hypothesizes that such perturbations cause a latent-space mismatch between images and text prompts in CLIP embedding space, leading to shortcut learning where the model associates noise patterns with the identifier token. Based on this analysis, the paper proposes a systematic defense combining: (1) **CodeSR** purification (CodeFormer + super-resolution), (2) **Contrastive Decoupling Learning (CDL)** with learned noise tokens, and (3) quality-enhanced sampling via classifier-free guidance. Experiments across 7 perturbation methods show the defense outperforms existing purification baselines (DiffPure, GrIDPure, IMPRESS) on face datasets, with 10× speedup over the prior best method.
 
 ## Strengths
 
-- **State-of-the-art results across diverse perturbations**: The proposed method achieves the highest IMS and quality (Q) scores under all seven protective perturbations in Table 1, with gains up to 0.67 in quality (AdvDM) and 0.51 in IMS (MetaCloak) over the next-best method. Improvements are statistically significant via the Wilcoxon signed-rank test (p ≤ 0.01).
+1. **Systematic defense achieving SOTA across 7 protective perturbations.** The proposed framework (CodeSR + CDL + quality-enhanced sampling) consistently outperforms all baselines (Gaussian, JPEG, TVM, DiffPure variants, DDSPure, GrIDPure, IMPRESS) on both identity similarity (IMS) and quality (Q) metrics. For example, under FSMG, IMS improves from -0.10 (best baseline GrIDPure) to 0.23, and Q from -0.20 to 0.65 (Table 1). Improvements are statistically significant (Wilcoxon p≤0.01) for most settings.
 
-- **Superior efficiency and faithfulness in purification**: The method achieves LPIPS of 0.271 (vs. next best 0.384) and takes 51 s per sample (vs. 63.25 s for the fastest diffusion-based baseline, Table 2). This combination of speed and fidelity is a genuine practical advantage over iterative methods like IMPRESS (675 s).
+2. **Efficiency and faithfulness gains.** CodeSR purification achieves 51s per sample, a 10× speedup over IMPRESS (675s), while producing the lowest LPIPS (0.271 vs. 0.384 for DDSPure), indicating both speed and perceptual fidelity improvements (Table 2). Visual results confirm that diffusion-based baselines introduce artifacts or change identity while the proposed method preserves structure (Fig. 3).
 
-- **Comprehensive ablation isolating each module**: Table 4 tests all eight combinations of CodeFormer, SR, and CDL. CDL is shown to be the most critical component: the full configuration yields Avg. 0.385, removing CDL drops it to −0.094, while CDL alone still achieves 0.099.
+3. **Clean ablation isolating module contributions.** The ablation study (Table 4) shows that removing CDL causes the largest performance drop (Avg. from 0.385 to -0.094), and the full CodeSR+CDL combination substantially outperforms any individual component. This cleanly demonstrates that each component contributes positively, with CDL being the most critical.
 
-- **Demonstration of generation quality recovery**: Figure 5 provides a clear visual comparison showing that the defense recovers near-clean generation quality, corroborating the quantitative results.
+4. **Novel analytical perspective.** The latent-space mismatch analysis (Fig. 2, Sec. 4.1) provides a mechanistic explanation — supported by 2D latent visualization and CLIP-based concept classification — that goes beyond prior work (Zhao et al. 2024) limited to text-encoder vulnerability. This framing offers a useful lens for future research on protective perturbations.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-1. **The negative IMS for clean training is unexplained.** Table 1 reports Clean IMS = −0.13. Since IMS measures cosine similarity between generated and reference face embeddings, a negative value for clean DreamBooth training is surprising and needs justification. While the paper's method achieves positive IMS values (0.09–0.38) that surpass the clean baseline—and the relative ordering Clean > Perturbed is consistent—the metric's behavior for the fundamental clean case is not discussed. The paper should clarify how IMS is computed (e.g., whether it averages over cross-identity pairs, which would explain a negative clean score) and provide a sanity check (e.g., same-identity vs. different-identity similarity distributions). Without this, the reader cannot assess whether the clean baseline itself is functioning correctly.
+1. **Generalization beyond faces is claimed but not quantitatively demonstrated.** The purification pipeline relies on CodeFormer, which is explicitly face-specific. The conclusion states "our framework can generalize to other domains beyond the facial domain," yet only qualitative results on three WikiArt paintings are provided (Fig. 3). No non-face quantitative experiments exist. Given that many protective perturbations target artistic styles (Glaze) and the method's core purification module has a face-domain bottleneck, this claim is unsupported. The paper should either provide quantitative non-face results using a domain-appropriate restoration model or temper the generalization claim to match the evidence.
 
-2. **The adaptive attack evaluation only tests a partial threat model.** The adaptive perturbation (Section "Resilience Against Adaptive Perturbations") is "crafted against the image purification part" (line 366), assuming the attacker has no knowledge of the CDL module. A fully adaptive attacker aware of the entire pipeline (CodeSR + CDL) could craft perturbations that survive both purification and the decoupling objective. The paper's claim of "stronger robustness against adaptive perturbation" (abstract, line 4) is therefore overstated relative to the evaluation. The paper partially acknowledges this framing, but presents the results as evidence of robustness without clearly qualifying the threat model's scope.
+2. **The evaluation metrics raise interpretive concerns.** Clean training produces IMS = -0.13 — a negative score indicating poor identity matching even without any perturbation. This suggests either the DreamBooth generations do not preserve identity well under this metric, or the face-recognition models used are poorly calibrated for DreamBooth outputs. The paper's claim that the defense achieves IMS "even higher than clean training case" (e.g., 0.09 vs. -0.13) is technically true, but a negative clean baseline undermines the interpretability of the absolute numbers. While relative improvements over baselines are consistent and meaningful, the paper would benefit from either a human evaluation, a face verification success rate metric, or a discussion of why clean IMS is negative.
+
+3. **The causal mechanism is suggested but not rigorously established.** The paper frames its analysis as "causal analysis" (Contribution 2) and presents an SCM-style causal graph (Fig. 2), but never performs actual causal interventions (do-calculus, counterfactual experiments). The evidence is entirely correlational: latent drift correlates with degradation, and CDL helps. The observation that random perturbations of the same magnitude do not hurt learning is actually *consistent* with the mismatch hypothesis (not contradictory, as the reviewer suggested — the paper's logic holds). However, the "causal" framing overreaches. A controlled intervention (e.g., artificially shifting images in CLIP space without pixel perturbation and checking whether DreamBooth degrades) would substantially strengthen the claim. As presented, the mechanism is a well-motivated hypothesis, not a verified causal explanation.
 
 ### Minor
 
-3. **The causal/shortcut-learning claim relies on correlational evidence.** The paper frames "uncovering the mechanism" as a contribution, but the support consists of: (a) 2D latent projections showing that perturbed images shift in CLIP space, and (b) the observation that models trained on perturbed data generate noisy images. These are correlational observations—no causal intervention (e.g., synthetically inducing a known misalignment, testing whether attention maps focus on noise patterns) is performed. While a method paper does not require a complete causal proof, the causal framing is stronger than the evidence justifies. The paper would be more accurate describing these as "empirical observations consistent with the shortcut learning hypothesis" rather than validated causal claims.
+1. **Adaptive attack evaluation is limited.** Only one adaptive attack is tested (AdvDM with CFG, budget 16/255, PGD-6). While the "once-for-all" claim refers to CDL providing robustness regardless of purification choice (not against all possible attacks), the evaluation would be stronger with a broader attack suite (e.g., different budgets, attacks that target the CDL objective directly). This is a common limitation and does not invalidate the results, but the robustness conclusions should be scoped accordingly.
 
-4. **The concept-classification experiment lacks numerical results.** The paper states that "perturbed images have a higher probability of being classified into the 'noise' region" (line 133) using a zero-shot CLIP classifier, but reports no quantitative classification accuracy or probability values in the main text. Providing these numbers would substantially strengthen the claim of a latent shift.
+2. **CDL mechanism is underspecified.** The paper does not verify that the noise token actually learns noise-related features. No attention maps, no embedding similarity analysis between the noise token and known noise distributions, and no comparison against a simpler baseline (e.g., a static "noise" prefix rather than a learned token). The ablation confirms CDL works, but the claimed mechanism ("decoupling") is not directly validated.
 
-5. **The CDL design assumes clean class-prior data.** The contrastive prompts use "without XX noisy pattern" for class-prior data. If the class-prior images were also perturbed (e.g., in a batch-wise contamination scenario), the contrastive signal could collapse. The paper does not discuss this limitation.
-
-6. **Some baseline quality scores are worse than "Perturbed."** In Table 1, several baselines show Q scores lower than the Perturbed row (e.g., Gaussian Filtering on FSMG: Q = −0.55 vs. Perturbed Q = −0.54). The paper mentions that "most of the quality scores after conducting GrIDPure purification are still negative" but does not explain why some active defenses degrade quality below doing nothing. This merits brief discussion.
-
-7. **The Q metric averaging is underspecified.** Q is the average of LIQE (re-normalized to [−1, +1]) and CLIP-IQAC (following Liu_2024_CVPR). The paper does not state whether CLIP-IQAC was also scaled to [−1, +1] or what its native range is. Mixing metrics with different ranges can produce misleading averages.
+3. **Algorithm label overselling.** Algorithm 1's output is described as "Personalized diffusion model with clean-level generation performance," but the defense does not achieve clean-level results uniformly — for example, under ASPL the IMS is 0.09 (clean is -0.13, but on an absolute scale this is still a low score). The framing is overly optimistic.
 
 ### Trivial
-
 None.
 
 ## Nice-to-Haves
 
-- **Test whether longer training on perturbed data recovers performance.** A simple baseline of training for more steps on perturbed data (without any defense) could reveal whether the defense is truly necessary or merely accelerates convergence.
-
-- **Per-identity breakdown or error bars.** The paper reports average results; showing variance across identities would help assess reliability and identify failure modes. (The paper notes that standard deviations are in the appendix.)
+- A human evaluation or verification success rate to complement the IMS metric, given the negative clean baseline.
+- An intervention experiment (e.g., applying CLIP-space adversarial shift without pixel perturbation) to directly test the mismatch hypothesis.
+- Visualization of noise token attention maps to validate the CDL mechanism.
+- Comparison against a static (non-learned) noise token baseline for CDL.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **"Figure 4 uses three projection methods but shows only one plot"** — Removed: The appendix contains the additional visualizations; showing one representative plot in the main paper is standard.
-
-- **"The 10× faster claim relies on default settings / unspecified IMPRESS iterations"** — Removed: The paper reports actual wall-clock times (675s vs. 51s ≈ 13×), which is a direct empirical comparison.
-
-- **"Missing related works"** — Removed per policy.
-
-- **"Missing appendix / appendix content"** — Removed per policy.
-
-- **"Formatting/presentation nitpicks"** — Removed per policy.
-
-- **"No comparison against training longer on perturbed data"** — Moved to Nice-to-Haves.
+- **"Random perturbations contradict the mismatch hypothesis"** (from Harsh Critic #1): The paper's logic is that adversarial perturbations cause a *directed latent shift* while random noise of the same magnitude does not, so the observation that random noise does not hurt learning supports — rather than contradicts — the hypothesis. This criticism reflects a misunderstanding.
+- **"Novelty is incremental relative to Zhao et al. 2024"** (Other Observations): The paper acknowledges Zhao et al. and explicitly differentiates its contribution (latent mismatch + shortcut learning across the full pipeline, not just text-encoder vulnerability). This is reasonable positioning, not overclaiming.
+- **"Weak baselines (Gaussian, TVM)"** (Other Observations): Including simple baselines is standard practice to establish a lower bound; the paper also compares against the strongest available baselines (IMPRESS, GrIDPure).
+- **Strength: "Generalization beyond faces demonstrated qualitatively"**: Conflicts with verified weakness #1; the qualitative WikiArt demo (3 images) is insufficient to support a generalization claim.
+- **Formatting/style nitpicks, missing appendix content, and reproducibility complaints about hyperparameters**: Per the rules, these are either parser artifacts or standard limitations.
 
 ## Novel Insights
 
-The most interesting observation from this paper is that the *type* of noise matters: random perturbation at the same strength does not degrade fine-tuning, but adversarially crafted perturbation does, because it creates a systematic latent-space misalignment. This distinction (random vs. adversarial noise in the fine-tuning context) is genuinely insightful and goes beyond the existing literature, which largely treats all perturbations as equivalent. The CDL design—using a dedicated noise token to absorb the spurious correlation during training and then suppressing it at inference—is a clever instantiation of the causal shortcut-viewpoint.
+None beyond the paper's own contributions. The key insight — that protective perturbations operate by inducing CLIP latent-space mismatch, enabling a defense built on restoration + contrastive decoupling — is well articulated by the paper itself.
 
 ## Suggestions
 
-1. **Clarify the IMS metric**: Explicitly state whether IMS is computed per-identity (comparing each generated image only to same-identity reference images) or averaged over all pairs. Provide a positive-control calibration (e.g., show the same-identity cosine similarity distribution for clean training).
-
-2. **Qualify the adaptive robustness claim**: Replace "stronger robustness against adaptive perturbation" with more precise language such as "stronger robustness against adaptive perturbations targeting the image purification stage," and note that a fully adaptive attacker aware of CDL remains an open challenge.
-
-3. **Add numerical results for the concept classification**: Report the classification accuracy or probability values for "person" vs. "noise" to make the latent-shift claim concrete.
-
-4. **Tone down the causal framing**: Replace "uncover the mechanism" with "empirically characterize" or "provide evidence consistent with" to better match the correlational nature of the evidence.
+1. Add quantitative non-face results (e.g., WikiArt or DreamBooth common subjects) using a non-face-specific restoration model, or clearly scope the claims to the face domain.
+2. Provide a controlled intervention experiment: take clean images, artificially shift them in CLIP embedding space (e.g., via an adversarial attack on the CLIP encoder *only*, leaving pixels untouched), and test whether DreamBooth fine-tuning degrades. This would directly test whether latent mismatch is sufficient for degradation.
+3. Expand the adaptive attack evaluation to include at least one additional attack budget (e.g., 32/255) and discuss the threat model more explicitly.
+4. Visualize noise token attention maps and compare against a static noise prefix to validate the CDL mechanism.
+5. Discuss the negative clean IMS baseline and provide an alternative metric (e.g., face verification rate) for calibration.
 
 ## Score and Decision
 
-This paper addresses a timely problem, proposes a well-motivated defense that achieves strong empirical results across many settings, and provides thorough ablations. The main weaknesses are (1) an unexplained negative IMS for the clean baseline and (2) an overstated adaptive robustness claim due to a partial threat model. Neither is fatal—the relative comparisons remain meaningful, and the method's improvements are large and consistent—but both need to be addressed in a revision.
+The paper makes a genuine empirical contribution: a defense framework that outperforms existing methods across 7 perturbation types with substantial speed gains. The ablations are thorough and the modular design is clean. However, the generalization claim is unsupported by quantitative evidence, the metric interpretation is complicated by a negative clean baseline, and the causal framing exceeds what the correlational evidence can support. These issues are addressable but nontrivial.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+**Score: 5.0** — A borderline paper with a solid empirical core and overclaimed scope. With tighter claims and additional experiments on generalization and the causal mechanism, this could be a strong contribution. As presented, it is a useful but somewhat oversold empirical study.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

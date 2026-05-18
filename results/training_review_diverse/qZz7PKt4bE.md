@@ -1,90 +1,75 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have all the information I need. Let me write the consolidated final review.
 
 ## Summary
 
-This paper proposes an autotuning framework for time series transformers by combining Low-Rank Adaptation (LoRA) with Limited Discrepancy Search (LDS). The method searches over LoRA hyperparameters (rank, alpha, dropout, etc.) using only 10 trials and applies it to the Chronos T5 Mini model. Experiments on 10 Monash benchmark datasets report an average MASE improvement of 5.21% over zero-shot inference, with the autotuned Mini model outperforming larger zero-shot Chronos models on several datasets.
+This paper proposes an autotuning framework that combines Low-Rank Adaptation (LoRA) with Limited Discrepancy Search (LDS) to automatically find good hyperparameter configurations for fine-tuning pre-trained time series transformers (specifically Chronos T5 Mini) on target domain datasets. The approach uses Ray Tune for parallelization, evaluates 10 trials per dataset with two discrepancy settings, and is demonstrated on 10 out-of-domain benchmark datasets from the Monash repository. The main findings are that autotuning achieves a 5.21% average MASE improvement over zero-shot, with a notable 20.59% improvement on the exchange-rate dataset, and that the autotuned Mini model (20M params) can match or exceed larger zero-shot models (up to 710M params) on several datasets.
 
 ## Strengths
 
-- **First work on autotuning time series transformers via PEFT + structured search.** The paper is the first to explicitly couple LoRA with an AutoML-style search (LDS) for time series foundation models, addressing a practical gap in the deployment literature. This is stated as a contribution and is well-motivated given the computational cost of full fine-tuning large transformers.
+- **First systematic application of LoRA-based autotuning to time series transformers.** The paper addresses a genuinely practical gap: pre-trained time series foundation models exist, but their hyperparameter sensitivity for fine-tuning is underexplored. The combination of LoRA (parameter-efficient fine-tuning) with an automated search strategy for time series is novel, and the work opens a useful direction for the community.
 
-- **Efficient search design with a clear rationale.** The choice of 10 trials for an 8-dimensional hyperparameter space is explicitly justified as a resource-constrained setting, and the paper experiments with two max-discrepancy values (4 and 8) to balance focused vs. broad exploration. This is a concrete, reproducible design choice rather than an arbitrary one.
+- **Demonstration that a small autotuned model can outperform much larger zero-shot models.** Table 4 and Figure 5 show that the autotuned Chronos Mini (20M) beats zero-shot Small (46M) on 6/10 datasets, zero-shot Base (200M) on 4/10, and zero-shot Large (710M) on 3/10. This finding has practical importance: it suggests that efficient fine-tuning can substitute for scaling up model size, reducing both training and inference cost.
 
-- **Autotuned small model is shown competitive with larger zero-shot models.** The autotuned Chronos T5 Mini (20M params) is reported to beat the zero-shot Small (46M) on 6/10 datasets and the zero-shot Large (710M) on 3/10 datasets (Table 4, Figure 5). If the numbers hold, this is a compelling demonstration of cost savings.
+- **Practical resource footprint.** The entire pipeline runs 10 trials per dataset on a single MacBook Pro M3 Max, making the approach accessible to researchers without large GPU clusters. The choice of LDS as a search strategy is motivated by keeping the trial budget small, which is a realistic constraint for many practitioners.
 
-- **Evaluation on 10 diverse, truly unseen datasets.** All datasets are from the Monash repository and explicitly stated to be excluded from Chronos pre-training. The diversity (energy, transport, weather, finance, retail) supports claims of real-world applicability.
+- **Diverse, out-of-domain evaluation setup.** The 10 datasets span energy, transport, retail, finance, weather, and web traffic domains, all held out from Chronos pre-training. This provides reasonably strong evidence that the approach generalizes across different forecasting problems rather than fitting to a narrow distribution.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **Potential inconsistency between Table 3 and Table 4.** The autotuned Chronos T5 Mini results should be identical across both tables (both report the same model under the same condition). The harsh reviewer reports large numerical discrepancies (e.g., Traffic: 0.49 vs. 0.24; Weather: 0.37 vs. 0.18; ERCOT: 92.50 vs. 27.07). Since the tables are embedded as images in the extracted text, these values cannot be independently verified from the available text alone. However, if the reported discrepancy is real, it constitutes a fatal error that invalidates every empirical claim in the paper. **This is the single most important issue to resolve.** The paper's own textual descriptions about which method wins on which datasets cannot be cross-checked without consistent tabular data.
+- **No comparison to alternative search strategies.** The paper's second stated contribution is "the adoption of LDS for exploring the LoRA hyper-parameter search space in autotuning to minimize computational overhead," yet LDS is never compared to any baseline search strategy — not random search, grid search, Bayesian optimization, or even simple greedy search. The only variable within LDS that is varied is `max_discrepancy` (4 vs. 8). Because the paper does not isolate the contribution of LDS, it is impossible to tell whether the observed improvements come from the search strategy itself or simply from trying 10 different LoRA configurations (which random search could also do). This is a structural gap: the paper's central methodological claim about LDS is entirely unevaluated. Adding a random-search or grid-search baseline with the same budget would directly address this.
 
-2. **No ablation isolating the contribution of LDS.** The method combines LoRA (a known PEFT technique) with LDS (a known search strategy). There is no comparison against:
-   - LoRA with *default* hyperparameters (no search at all) — this would isolate the benefit of any search.
-   - LoRA with *random search* at the same 10-trial budget — this would isolate the benefit of LDS specifically.
-   
-   Without these baselines, observed improvements cannot be attributed to the LDS search strategy. The improvement could come from LoRA itself or from the act of searching at all, rather than from LDS's structured discrepancy-based exploration. This weakens the core methodological claim.
+- **No measures of variability or statistical significance.** All MASE scores in Tables 3 and 4 are reported as single values averaged over 5 runs, with no standard deviations, confidence intervals, or individual trial outcomes. Many reported differences are very small (e.g., 0.063 vs. 0.062 for ERCOT Load, 0.030 vs. 0.029 for M5) and could easily fall within noise. Without error bars, the reader cannot assess which improvements are meaningful. This directly affects confidence in the headline 5.21% average improvement claim.
 
-3. **Headline performance claims are not verifiable from presented data.** The 5.21% average MASE improvement over zero-shot and the 4.76% out-of-domain improvement are stated without per-dataset percentage breakdowns (only Exchange Rate at 20.59% is shown). Additionally, the term "out-of-domain" is used inconsistently: the paper states all 10 datasets were not used in pre-training (p. 3, "we use these datasets as they have not been used in the pre-training phase"), yet later notes the model has "seen datasets from the aforementioned domains [traffic, weather, electricity]" during pre-training. It is unclear whether "out-of-domain" refers to datasets with no domain overlap with pre-training data or simply all held-out datasets. Without the per-dataset breakdown and a clear definition, the headline numbers are unverifiable.
+- **LDS application to the hyperparameter space is underspecified, affecting reproducibility.** The search space (Table 2) includes both categorical variables (`apply_to_attention`, `apply_to_mlp`) and numerical/ordinal variables (`rank` 4–32, `alpha` 8–32, `dropout` 0.0–0.5, `learning_rate`, `warmup_ratio`). LDS was originally designed for discrete constraint satisfaction problems. The paper never explains how discrepancies are defined for numerical variables — whether they are discretized (and at what granularity), how distance is measured for continuous values, or how the initial configuration is selected. Algorithm 1 is referenced but its pseudocode appears only in an extracted image that provides no textual detail. This makes the method impossible to reproduce without guessing these critical design choices.
 
 ### Minor
 
-4. **Only one base model (Chronos T5 Mini) is used for autotuning.** The paper claims generality but tests the full autotuning pipeline on only one model size. Results on at least one other model (e.g., Chronos Tiny, Small, or a non-Chronos architecture) would substantially strengthen claims of transferability.
+- **Only one model size (Chronos T5 Mini) is autotuned.** The paper evaluates zero-shot performance of larger models but never runs the autotune pipeline on Chronos Small (46M), Base (200M), or any other size. While the paper justifies this as a resource choice, the claim that "our approach can be easily extended to other time series foundation models" remains unvalidated. Showing results for at least one additional model size (e.g., Small) would significantly strengthen the claim of generality.
 
-5. **LDS search procedure is underspecified for reproducibility.** The paper states max discrepancy values of 4 and 8 and mentions initializing the search space, but does not specify:
-   - How the initial "reference" configuration is chosen.
-   - How discrepancies are calculated when the search space includes categorical variables (e.g., task type).
-   - How the 10 trials are distributed across discrepancy levels.
-   - How ties or search restarts are handled.
-   
-   These details are critical for a paper whose central contribution is a search procedure.
+- **Full fine-tuning baseline details are sparse.** The full fine-tuning is described only by a citation to Ansari et al. (2024), with no information about the optimization protocol used (learning rate schedule, number of epochs, early stopping, compute budget allocated). If the full fine-tuning baseline was not itself tuned or given a reasonable budget, the comparison may be unfair. Since the paper's autotune method is compared against full fine-tuning, baseline fidelity matters.
 
-6. **No standard deviations or confidence intervals reported.** The paper states MASE scores are "averaged across 5 runs" but reports only point estimates. Variance information is standard practice for stochastic fine-tuning and would help assess the reliability of the reported improvements.
+- **Computational efficiency claims lack quantitative support.** The paper motivates the approach by "minimizing computational overhead" but reports no wall-clock time, GPU-hours, or number of trainable parameters for the autotune pipeline vs. full fine-tuning. Providing these numbers — even approximate ones — would ground the efficiency claims.
 
-7. **Only one non-zero-shot baseline (full fine-tuning).** Other PEFT methods (adapters, prefix tuning, (IA)³) are mentioned in related work but never compared. While not fatal for a first exploration, this limits the ability to claim LoRA as the optimal PEFT choice.
+- **Overclaiming novelty (minor).** The abstract's claim that this is "the first paper to explore the potential of autotuning time series transformer models" is broader than what the paper actually demonstrates (autotuning one specific model with one specific PEFT method and one specific search strategy). There is substantial prior work on HPO for time series models cited in the paper's own AutoML section. The contribution is more accurately described as the first application of LoRA + LDS autotuning to time series transformers, which is already a worthwhile contribution without the stronger framing.
 
 ### Trivial
 
-8. The term "mean absolute squared error" (MASE) in the text (line 117) appears to be a typo — the metric used is Mean Absolute Scaled Error, not Mean Absolute Squared Error. (The abbreviation MASE is standard for Mean Absolute Scaled Error.)
-
-9. "out-of-domain" vs. "in-domain" distinction is drawn inconsistently between the results discussion (Section 5) and the conclusion, making it hard to track which datasets contribute to which claim.
+- Figure 4 (relative performance plot) uses bars that extend beyond the reference line for worse methods. A critical-difference diagram or radar plot might be more conventional, but this is a presentation preference, not a substantive flaw.
+- The paper uses "mean absolute squared error" as the definition of MASE in the implementation section, which appears to be a minor terminological inconsistency — MASE is the mean absolute scaled error, not mean absolute squared error.
 
 ## Nice-to-Haves
 
-- A random-search baseline over the same LoRA search space with the same 10-trial budget would directly substantiate the LDS contribution.
-- Runtime or FLOPs comparison between LDS search, random search, and full fine-tuning would support the efficiency motivation.
-- An ablation comparing max discrepancy 4 vs. 8, per dataset, would clarify sensitivity to this parameter.
-- A simple proof-of-concept on multivariate data would strengthen the claimed future direction.
+- An ablation isolating the contribution of LDS vs. LoRA: full fine-tuning vs. LoRA with fixed (default) hyperparameters vs. LoRA + random search vs. LoRA + LDS. This would separate the benefit of PEFT from the benefit of tuning PEFT hyperparameters.
+- Analysis of which hyperparameter values were selected across datasets (e.g., do out-of-domain datasets favor different rank/alpha settings than in-domain ones?). This could provide practical insights for practitioners.
+- A note on whether MASE was computed robustly for any edge cases where in-sample MAE approaches zero, as MASE can be undefined in such settings.
 
 ## Removed Points
 
-- **Criticism about the algorithm description breaking off mid-sentence (Algorithm 1):** This is a parser artifact from PDF extraction — the original submission contains the full algorithm.
-- **Criticism about missing related works (HPO for N-BEATS, DeepAR, etc.):** Cannot verify which works are relevant; "do not mention missing related works" rule applies.
-- **Formatting/style nitpicks and criticisms about missing appendix/proofs:** Parser artifacts and sections stripped during extraction.
-- **Criticism that the 5.21% claim is "contradicted by Table 3" showing autotune worse on 7/10 datasets:** The paper's text explicitly states "the autotuned model outperforms the zero shot model for most datasets" (Figure 3 discussion) and "our autotuned mini model outperforms the zero shot mini models for all the datasets with an exception of 2 datasets" (Table 4 discussion). The paper's textual claims support the 5.21% figure; the reviewer's claim about Table 3 cannot be independently verified because the tables are images. This point is noted as part of Weakness #1 (potential inconsistency) rather than a standalone contradiction.
-- **Strength Finder's "Clear relative performance visualisation" strength:** Generic; does not add substance beyond what the figures themselves provide.
-- **Criticism about only 10 trials being too few:** The paper explicitly justifies this as a deliberate choice for resource-constrained environments. This is a design decision, not a flaw.
-- **Criticism about "first paper" claim being hard to verify:** Speculative and not a substantive weakness of the paper's content.
+The following reviewer criticisms were evaluated against the paper and removed:
+
+- **"All datasets are univariate; should include multivariate."** Chronos is pre-trained for univariate forecasting. Demanding multivariate evaluation would require a fundamentally different experimental design and is clearly scoped as future work by the authors. This is scope creep.
+- **"Figure 4 is confusing; use radar/critical-difference diagram instead."** This is a presentation preference, not a weakness.
+- **"Missing related work."** Insufficient external basis to verify; also the paper does cite relevant AutoML and HPO literature.
+- **Several formatting/presentation nitpicks** that are parser artifacts, not author errors.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the need for better baselines and reproducibility but do not reveal structural insights about the method or domain that the paper itself does not already contain.
+Beyond the paper's own contributions, the most interesting synthesis from the reviews is that the paper's value may lie less in the specific search strategy (LDS) and more in the overall demonstration that systematic LoRA hyperparameter tuning for time series transformers yields significant practical gains. The finding that a 20M-parameter autotuned model beats a 710M-parameter zero-shot model on some datasets is the paper's strongest practical result, and it raises a broader question: how much of the benefit attributed to "larger foundation models" could instead be captured by smaller, well-tuned PEFT models? This is a direction worth exploring further and is the paper's most impactful insight, regardless of whether LDS is the optimal search strategy or merely a sufficient one.
 
 ## Suggestions
 
-1. **Resolve the Table 3 vs. Table 4 discrepancy** — if the numbers are consistent, show them explicitly in text or in a supplementary table; if there is an error, correct it and re-run all analyses. This is prerequisite for any further evaluation.
-2. **Add a random-search baseline** with the same 10-trial budget over the same search space. If LDS does not outperform random search, the contribution of LDS should be reassessed.
-3. **Add a "LoRA-default" baseline** (no search, e.g., rank=8, alpha=16 with standard settings) to separate the benefit of LoRA from the benefit of hyperparameter search.
-4. **Report per-dataset MASE improvements with standard errors** and clearly define which datasets are considered "out-of-domain" for each claim.
-5. **Run the autotuning pipeline on at least one additional model** (e.g., Chronos Tiny or Small) to demonstrate generality.
+1. **Add a search-strategy baseline.** Compare LDS against random search with the same 10-trial budget. If LDS matches or exceeds random search, the LDS claim is supported. If not, reframe the contribution as "autotuning with LoRA works" and treat LDS as a design choice rather than a core contribution.
+2. **Report standard deviations or empirical 95% intervals** for every MASE score. Even a simple "mean ± std" over 5 runs would dramatically increase confidence in the results.
+3. **Clarify how LDS handles numerical hyperparameters.** Specify the discretization scheme (if any), the initial configuration selection method, and how discrepancies are computed for each hyperparameter type.
+4. **Run autotune on at least one additional Chronos model size** (e.g., Small: 46M) to show the method is not specific to Mini.
+5. **Report wall-clock time or parameter counts** for the autotune pipeline vs. full fine-tuning to quantitatively support the efficiency claim.
+6. **Tone down the novelty claim** from "first paper to explore autotuning time series transformer models" to something more precise (e.g., "first to combine LoRA with LDS for autotuning time series transformers").
 
 ## Score and Decision
 
-The paper tackles a practical and timely problem — efficient adaptation of time series foundation models — and its core idea (autotuning LoRA hyperparameters via structured search) is well-motivated. However, the current manuscript has two serious issues: (1) a potential internal inconsistency between the two main results tables that cannot be verified from the text alone, and (2) the absence of baselines needed to attribute improvements to the claimed search method rather than to LoRA itself or random search. These are addressable in a revision but weaken the paper in its current form. The remaining weaknesses (single model, underspecified LDS details, missing variance estimates) are individually minor but collectively reduce confidence. The paper has real potential with revision.
+The paper addresses a genuine practical problem and produces interesting results, particularly the finding that a well-tuned small model can match larger zero-shot models. However, the evaluation has two structural gaps — the absence of any search-strategy baseline and the lack of variability measures — that prevent the reader from trusting the central claims about LDS and the precise magnitude of improvement. These are addressable with additional experiments. The paper would be strengthened considerably by a major revision incorporating the suggestions above.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

@@ -1,24 +1,18 @@
-Now I have all the information I need. Let me synthesize the final review.
+Now I have all the information I need. Let me produce the final consolidated review.
 
 ## Summary
 
-The paper proposes LT3P, a data-driven model for 72-hour typhoon trajectory prediction that uses real-time Unified Model (UM) NWP forecast data rather than ERA5 reanalysis data (which has 3–5 day latency). The core innovation is a two-phase training strategy: (1) pre-training a physics-conditioned encoder on ERA5 for a weather-forecasting objective, followed by (2) freezing that encoder and training a bias corrector (to adapt UM to the ERA5 distribution) plus a trajectory predictor on real-time UM data. The authors also release the PHYSICS TRACK dataset containing ERA5, best-track, and UM data.
-
----
+This paper proposes LT3P, a data-driven typhoon trajectory prediction model that uses real-time Unified Model (UM) NWP forecast fields instead of reanalysis data (ERA5), which has a 3-5 day latency. The key methodological innovation is a two-phase training strategy: (1) pre-training a physics-conditioned encoder on ERA5 for a weather forecasting task, then (2) fine-tuning with a bias correction module that adapts UM data to the ERA5 representation while training a trajectory predictor. The paper releases the PHYSICS TRACK dataset and reports 72-hour trajectory prediction results that are competitive with operational NWP centers.
 
 ## Strengths
 
-1. **Well-motivated and practical problem framing.** The paper correctly identifies that existing data-driven weather models (GraphCast, FourCastNet, ClimaX, etc.) rely on ERA5 reanalysis, which is unavailable in real time due to 3–5 day latency. Using real-time UM forecast data with a ~3-hour delay directly addresses an operational bottleneck. This motivation is clearly articulated in the Introduction and Table 1 (comparison of ERA5 vs. NWP datasets).
+1. **Addresses a real and well-motivated problem.** The paper correctly identifies that existing data-driven typhoon trajectory models rely on ERA5 reanalysis data (3-5 day latency), making them unsuitable for real-time forecasting. Using real-time UM forecast data (≈3-hour delay) is a practical and timely contribution.
 
-2. **Principled two-stage training strategy with clear ablation validation.** Pre-training on abundant ERA5 data (1950–present) and then bias-correcting the UM input is a sensible way to bridge the domain gap between reanalysis and real-time forecast data. The ablation study (Table 5) empirically validates this design: UM-only yields 390.92 km FDE at 72 h, while the full pipeline reduces this to 143.03 km. Joint training without pre-training yields 190.75 km, confirming that both pre-training and bias correction contribute meaningfully.
+2. **Novel two-phase training with bias correction.** The idea of pre-training on ERA5 and then adapting UM data to the ERA5 feature space via a learned bias corrector is well-motivated. The ablation study (Table 4) confirms that the full pipeline (joint training + pre-training + bias correction) substantially outperforms the UM-only baseline (FDE 143.03 km vs. 390.92 km at 72h), and that all backbone architectures (GAN, CVAE, diffusion) benefit from the LT3P framework (Table 5).
 
-3. **Strong performance on the data-driven baseline comparisons (where evaluation is controlled).** For the re-implemented baselines (SocialGAN, STGAT, PECNet, MID, MMSTN) trained and evaluated on the same best-track dataset and test set (2019–2021), LT3P (Bias-corrected UM) achieves 143.03 km FDE at 72 h versus the next best (PECNet: 518.46 km). While some of these baselines are human-trajectory methods that may not be designed for this task, the magnitude of improvement is substantial and consistent with the ablation story.
+3. **Comprehensive scope of evaluation.** The paper benchmarks against five operational NWP centers (JTWC, JMA, ECMWF, NCEP, UKMO) and six data-driven baselines, covering both ensemble-average and stochastic prediction settings. The stochastic results (Table 2) show LT3P outperforming all data-driven baselines by wide margins.
 
-4. **Release of dataset, code, and pretrained weights.** The authors commit to releasing the PHYSICS TRACK dataset and training/evaluation code, which supports reproducibility and follow-up research in a domain where data preprocessing is nontrivial.
-
-5. **Cross-attention fusion of physics features and trajectory data is well-motivated.** The architecture uses cross-attention between 3D physics-conditioned features (geopotential height, wind vectors) and 1D trajectory coordinates, which flexibly integrates multi-modal information regardless of feature shapes. The backbone ablation (Table 6) shows that GAN, CVAE, and diffusion predictors all improve significantly within the LT3P framework, attributing gains to the framework rather than the backbone.
-
----
+4. **Dataset and code release commitment.** The release of the preprocessed PHYSICS TRACK dataset (ERA5, UM, and best-track data aligned) is a genuine community resource that will enable future work.
 
 ## Weaknesses
 
@@ -27,80 +21,56 @@ None.
 
 ### Major
 
-1. **Uncontrolled comparison with operational NWP models undermines the claimed state-of-the-art result.** The paper's headline claim—that LT3P outperforms operational centers (JTWC, JMA, ECMWF-EPS, NCEP-GEFS, UKMO-EPS)—rests on NWP error numbers taken from a single external reference (chen2023evaluation). No operational NWP model is evaluated on the same test set (2019–2021 typhoons). The reference may cover different years, basins, or verification practices. For example, chen2023evaluation's 72 h ECMWF-EPS FDE is 210.71 km; LT3P reports 143.03 km. While the gap is large, the comparison is not controlled, and the paper provides no evidence that the NWP numbers are from the same evaluation pipeline. This is the paper's most prominent claim (listed as contribution 3 in the Introduction), and it is not adequately supported. At minimum, the authors should compare against a UM-based baseline that uses a simple deterministic tracker on the same UM fields, which would isolate the contribution of their learned method from the benefit of using NWP output.
+1. **Unspecified test period for the NWP comparison undermines the central "outperforming NWP" claim.** The operational NWP results (JTWC, JMA-GEPS, ECMWF-EPS, NCEP-GEFS, UKMO-EPS) in Table 1 are cited from Chen et al. (2023), but the paper never states what typhoon years or test period those results correspond to. Meanwhile, LT3P is evaluated on typhoons from 2019–2021. Without knowing whether the Chen et al. evaluation covers the same storms, the direct numerical comparison in the table is uncontrolled. The abstract and conclusion claim state-of-the-art results "outperforming NWP-based typhoon trajectory forecasting models by significant margins," but this rests on an apples-to-oranges comparison as presented. The data-driven baselines (SocialGAN, STGAT, etc.) appear to be evaluated on the same test set, so the comparison against *those* is valid — but the NWP comparison is the headlining result.
 
-2. **MMSTN and MGTCF results are from different test sets and not directly comparable.** The footnote in Table 1 acknowledges that MMSTN and MGTCF results are "evaluated only in 2019" (taken from their original papers), while LT3P averages over 2019–2021. The paper presents these numbers in the same table without correcting for this discrepancy. For MMSTN (1,300.59 km at 72 h), the gap to LT3P is so large that it likely sweeps the issue, but for MGTCF (655.48 km), the difference in evaluation years could matter. The paper should either re-implement these methods on the same test set or clearly separate these comparisons.
-
-3. **The bias corrector B(·) architecture is not specified.** This is the second key component in the pipeline (after the physics-conditioned encoder), yet the paper only provides its loss function (Eq. 3) and never describes what B(·) actually is. Is it a CNN? A lightweight MLP? A learned affine transformation? How many parameters does it have? Is it shared across pressure levels? This is a significant reproducibility gap that would prevent independent implementation.
-
-4. **No error bars, confidence intervals, or per-typhoon breakdowns.** The test set has 90 typhoons over 3 years, which is sufficient to report meaningful variance. Without any measure of uncertainty (standard deviation, IQR, min/max), the reader cannot assess whether LT3P's improvement is consistent or driven by a few favorable cases. This is especially important given the large baseline variance (e.g., MID-Ens 881.34 km vs. LT3P-Ens 143.03 km at 72 h — a 6× gap that suggests either fundamentally different capabilities or an evaluation artifact).
+2. **The stochastic evaluation protocol is ambiguously stated and inconsistently motivated.** Line 340 says "We report the results have the lowest error among 20 generated trajectories," which is minFDE over 20 samples. However, the table caption (line 288) says this is "consistent with the conventional approach in NWP-based GEPS, which employs 20 ensemble members for the final prediction" — but GEPS averages its 20 members, not takes the minimum. The paper does not clarify whether the same min-over-20 protocol was applied to the data-driven baselines or whether their numbers are taken from their original papers (which may use different evaluation conventions). This ambiguity needs resolution. (Note: minFDE over k samples *is* the standard metric in the trajectory prediction community; the issue is lack of clarity about consistent application, not the metric itself.)
 
 ### Minor
 
-1. **The stochastic evaluation (Table 2) uses best-of-20 while the NWP comparison uses ensemble average, but the paper does not clearly separate these protocols when discussing results.** Table 2 reports best-of-20 results and cites the GEPS convention (20 ensemble members) for justification. However, NWP GEPS averages its 20 members, not selecting the best. The 65.24 km stochastic result could be misinterpreted by readers as comparable to the 143.03 km ensemble average. The paper does not actively conflate them, but the GEPS justification in the caption is somewhat misleading. A clearer statement distinguishing the two protocols would prevent confusion.
+3. **Pre-training alone degrades performance compared to joint training from scratch, which is not discussed.** The ablation (Table 4) shows that adding pre-training to joint training *worsens* results (FDE increases from 190.75 km to 198.11 km). Only after adding bias correction does performance improve (to 143.03 km). The paper states "all components, barring the UM Only training, yield good results," but this glosses over the fact that pre-training alone is actively harmful. The paper should analyze why this happens and clarify whether the pre-training is actually necessary, or whether training the bias corrector and trajectory predictor from scratch (without pre-training) would achieve similar results. The current ablation does not include a "Joint Training + Bias Correction (no pre-training)" variant.
 
-2. **Ambiguous wording about training/evaluation split.** Section 4.1 states: "we evaluate the final performance of model using the entire dataset from 1950 to 2018." The actual test set is 2019–2021 (stated correctly earlier in the same paragraph). This phrase describes retraining on the full training set after hyperparameter tuning, but the wording is confusing and could be read as claiming the test set is 1950–2018. Clarify.
+4. **The paper does not specify which UM configuration or operational run is used.** The UM has multiple configurations (global vs. regional, different resolutions, different initialization cycles). The paper should state the specific UM product used, as results may be sensitive to this choice. The spatial resolution is given as 240×320 after bilinear interpolation (line 277), but the native UM resolution is not stated.
 
-3. **Ensemble formation for data-driven baselines is underspecified.** The paper states "data-driven models are evaluated using the ensemble average method" but does not specify how many samples are used for each baseline in the "Ens" version of Table 1. For LT3P, the 20-sample protocol from Table 2 is presumably applied, but it is unclear whether the same protocol was used for SocialGAN-Ens, STGAT-Ens, etc.
-
-4. **No discussion of UM temporal coverage limitations.** The UM dataset covers only 2010–present, and its forecast characteristics may change if the underlying NWP model is updated. The paper acknowledges UM errors but does not discuss how model degradation or configuration changes over time might affect the bias corrector's validity.
+5. **No analysis of failure cases or uncertainty quantification provided.** The qualitative results (Figure 4) show only favorable examples. Discussing cases where LT3P underperforms relative to NWP models or where uncertainty is high would strengthen credibility.
 
 ### Trivial
-- The phrase "without any need for an additional forecaster and algorithms" in the Conclusion is technically accurate (the model directly predicts coordinates) but could be read as diminishing the role of the UM data itself, which comes from a sophisticated NWP model.
-
----
+- The "Real-time" column in Table 1 is not a distinguishing factor between LT3P and NWP models (both are real-time); it primarily flags whether a method uses future reanalysis data. This could be clarified with a different column header.
+- The claim that LT3P "outperforms" NWP models (abstract, conclusion) is too strong given the uncontrolled test set; "shows competitive results" would be more accurate with the current evidence.
 
 ## Nice-to-Haves
-- **Per-typhoon and annual breakdowns of errors** (e.g., box plots or separate columns for 2019, 2020, 2021) to show consistency.
-- **A simple deterministic baseline using the UM data** (e.g., detecting the geopotential height minimum to derive a track) to isolate the contribution of the learned bias corrector and trajectory predictor from simply having access to UM forecast fields.
-- **Testing simple rotation augmentations** (which preserve physical relationships) to verify the model does not overfit to the 12×240×320 input window geometry — acknowledged by the authors as not done, but worth exploring.
-- **Benchmarking via GraphCast/FourCastNet + ECMWF Tracker** is acknowledged as infeasible due to unavailable code/weights; this is a reasonable limitation.
-
----
+- A direct comparison of computational cost (inference time, parameters, GPU hours) between LT3P and NWP baselines would help contextualize the practical advantage.
+- Reporting ensemble-average results alongside minFDE for the stochastic setting (Table 2) would improve transparency.
+- Adding a "Joint Training + Bias Correction (no pre-training)" ablation variant would isolate whether the pre-training phase provides a net benefit.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
 
-- **"The physics-conditioned encoder is said to follow ClimaX, yet ClimaX is ViT-based while the paper uses 3D conv + 3D transformer"** — The paper says the model is "trained for a weather forecasting task, similar to nguyen2023climax," which refers to the *pre-training objective*, not the architecture. This is a misreading by the reviewer. The paper clearly describes its own architecture (3D convolutions + 3D transformer + diagram in Figure 2). Removed.
+These points were flagged by the reviewer(s) but are removed after verification against the paper:
 
-- **"No diagram or specification of kernel sizes, number of layers, channel dimensions, or attention heads"** — The paper provides architectural details (encoder/decoder: 4 blocks each of Conv, LayerNorm, SiLU / Conv, LayerNorm, SiLU, PixelShuffle; 3 transformer blocks) and a diagram (Figure 2). Full kernel sizes and channel dimensions are implementation details standardly deferred to the code release (promised by the authors). Removed as hyper-nitpicky.
+- *"The numbers are suspicious: at 6h, LT3P gives 1.97 km while SocialGAN gives 17.59 km — an order-of-magnitude improvement is implausible."* — **Removed.** LT3P has access to UM forecast fields at short lead times where NWP error is small, making high accuracy at 6h expected. The baselines use only coordinate data. This is not implausible given the asymmetric information available to each method, and the hard rules state that weaknesses where the asymmetry favors the baseline (not the author's method) should be removed.
 
-- **"The paper could benchmark against GraphCast/FourCastNet by running the ECMWF Tracker on their own data"** — The paper explicitly states "code and weights are unavailable, and there are no access to the ECMWF-tracker." This is a valid justification; demanding the authors do something that requires unavailable resources is unreasonable. Removed.
+- *"The comparison against UKMO-EPS compares a learned post-processing of the same underlying model to its raw output — the 'outperforming NWP' framing is misleading."* — **Removed.** The paper is transparent about using UM data as input, and the comparison against independent operational centers (JTWC, JMA, ECMWF, NCEP) is still informative. This is an interesting methodological nuance, not a weakness.
 
-- **"The paper conflates whole-atmosphere forecasting with track-prediction in the Introduction"** — The paper clearly distinguishes these two categories (data-driven track prediction papers MMSTN/MGTCF vs. atmospheric-field prediction models GraphCast/FourCastNet). The discussion is adequately precise for the paper's scope. Removed.
+- *Criticism that minFDE is not standard practice.* — **Removed.** minADE/minFDE over k samples is the standard evaluation protocol in the stochastic trajectory prediction literature (SocialGAN, PECNet, MID, etc. all use it). The reviewer's claim about "standard practice" is incorrect for this community.
 
-- **Strength: "Significant performance improvements over operational NWP centers"** — This strength conflicts with verified weakness #1 (uncontrolled comparison). The NWP comparison numbers lack an apples-to-apples evaluation. Removed from strengths (but retained that the data-driven baselines are outperformed).
-
-- **Strength Finder's generic phrasing like "this paper addressed an important problem"** — These are too generic to retain as specific strengths.
-
----
+- *"Pre-training alone hurts performance... could one achieve similar results by training the bias corrector and trajectory predictor jointly from scratch?"* — **Downgraded from major to minor.** The concern is valid but the paper still shows the full pipeline works. This is a missing ablation that would strengthen the paper but does not invalidate the results.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews surface the same strengths and weaknesses that a careful reader would identify: the method is novel and well-motivated, the ablation study is convincing, but the evaluation lacks controlled comparison with operational NWP models and has reproducibility gaps in the bias corrector specification.
 
----
+The reviews reveal an interesting tension in the paper's contribution that is not explicitly addressed: LT3P's bias correction module is essentially learning to undo the systematic errors of one specific NWP model (the UK Met Office's UM) while comparing favorably against that same center's ensemble (UKMO-EPS). This raises a subtle but important question about whether the performance gain comes from correcting UM-specific biases (which would be less useful with other NWP inputs) or from learning a more general mapping from NWP fields to typhoon positions (which would generalize). The paper's framing leans toward the latter interpretation, but the experiments do not distinguish between these two cases.
 
 ## Suggestions
 
-1. **Provide a controlled NWP comparison.** Obtain operational track forecasts for the 2019–2021 test set from at least one center (e.g., UKMO, which produces the UM data the authors already use) and compute ADE/FDE on the same typhoons. Alternatively, implement a simple deterministic tracker that extracts pressure minima from the raw UM fields and compare against it — this would isolate the contribution of the learned bias corrector and trajectory predictor.
-
-2. **Specify the architecture of B(·).** Add a paragraph or a supplementary section describing the bias corrector's architecture, parameter count, whether it operates per pressure level or jointly, and its training procedure.
-
-3. **Report error bars.** Add standard deviations, interquartile ranges, or per-typhoon min/max for the main results. This is essential for a 90-typhoon test set and would significantly strengthen the paper's credibility.
-
-4. **Separate the MMSTN/MGTCF comparison.** Either re-implement these methods on the same 2019–2021 test set or clearly label them as results from original papers on different test sets, and avoid presenting them in the same column as LT3P without explicit disclaimers.
-
-5. **Clarify ensemble protocols.** Specify how many samples are averaged for each baseline's "Ens" results in Table 1, and add a sentence in the main text (not just a caption) distinguishing the ensemble-average protocol (Table 1) from the best-of-20 protocol (Table 2).
-
----
+1. **Clarify the test period for the Chen et al. (2023) NWP results.** If those results cover different years, either re-evaluate LT3P on that same period or clearly state that the NWP comparison is illustrative rather than strictly controlled.
+2. **Explicitly state the stochastic evaluation protocol** (minFDE over 20 samples, applied consistently to all methods) and ensure the table caption does not conflate it with GEPS averaging.
+3. **Add a discussion of why pre-training alone degrades performance** (Table 4, rows 2→3), and consider adding a "no pre-training + bias correction" ablation.
+4. **Specify the UM configuration** (operational run, resolution, initialization cycle) used in the paper.
+5. **Weaken the "outperforms" language** to "shows competitive or stronger results" given the uncontrolled NWP comparison.
 
 ## Score and Decision
 
-The paper addresses a genuine operational need — real-time typhoon trajectory prediction without relying on delayed reanalysis data — with a well-motivated two-stage training strategy. The ablation study convincingly validates the design choices, and the improvement over data-driven baselines on a shared test set is substantial. The release of the PHYSICS TRACK dataset is a tangible community contribution.
+This paper tackles a well-motivated problem with a novel and sensible architecture. The two-phase training with bias correction is a genuine contribution, and the dataset release is valuable to the community. However, the experimental evaluation has a significant uncontrolled element: the headline comparison against operational NWP centers does not state the test period for the baseline results, making the central claim of state-of-the-art performance unverifiable as presented. This is a major oversight that must be addressed before the paper can be accepted. The remaining concerns (ambiguity in the stochastic protocol, limited ablation analysis) are addressable in revision. Given the strength of the core idea but the severity of the empirical gap, the paper falls short of the bar for acceptance in its current form.
 
-However, the paper's most prominent claim (outperforming operational NWP centers) rests on an uncontrolled comparison using externally sourced numbers from an unknown test set. This is not a minor presentation issue — it directly affects whether Contribution 3 is supported. Additionally, the bias corrector architecture (a core component) is completely unspecified, and the evaluation lacks any measure of variance.
+**Score: 5.0** — Marginally below acceptance threshold due to a major experimental oversight that undermines the central claim. A revised version with properly controlled NWP comparison or appropriately weakened claims could reach acceptance.
 
-The paper has real contributions and a clear path to improvement, but in its current form the evidence does not fully support the stated claims. A major revision addressing the NWP comparison and the reproducibility gaps could make this a strong paper.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

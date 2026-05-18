@@ -1,18 +1,20 @@
-Now I have all the information I need. Let me produce the final consolidated review.
+Now I have sufficient evidence from the paper. Let me construct the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes DeepSPF, a rotation-equivariant encoder backbone for point cloud processing that combines Spherical Patch Fields (SPF) — a patch-wise representation based on Spherical Gaussians — with a Patch Gaussian Layer (PG-Layer) that learns adaptive patch sizes and enables deeper networks. The method is evaluated on Scan-to-CAD tasks (registration, retrieval, completion) on ModelNet40, ShapeNet, and Scan2CAD, showing consistent improvements when replacing standard encoders (e.g., PointNet) in existing pipelines.
+This paper introduces DeepSPF, a learnable backbone for point cloud processing that combines Spherical Patch Fields (SPF) — a patch-wise SO(3)-equivariant representation based on Spherical Gaussians — with a Patch Gaussian Layer (PG-Layer) that adaptively adjusts patch sizes and incorporates low-frequency information via Legendre polynomials. The authors demonstrate improvements across three Scan-to-CAD tasks (registration, retrieval, and completion) by integrating DeepSPF into existing pipelines such as DeepGMR and PCN, showing notable reductions in rotation error and Chamfer Distance.
 
 ## Strengths
 
-- **Novel patch-wise rotation-equivariant representation (SPF) that captures both local and global information.** Unlike prior global spherical representations (e.g., SGPCR), SPF maps a point cloud to multiple spherical patches with graph-based inter- and intra-relationships. The ablation in Table 1 validates this: the patch-graph component alone (condition E) reduces rotation RRMSE from 0.049 (SGPCR) to 0.039 on zero-intersection ModelNet40.
+- **Substantial empirical improvements across three tasks.** On registration (ModelNet40 zero-intersection noise), replacing PointNet with DeepSPF in DeepGMR reduces rotation error (RRMSE) from 17.5° to 5.3°. On retrieval (ShapeNet), Top-1 Chamfer Distance drops from 0.158 (SGConv) to 0.131 (~17% improvement). On completion (ShapeNet), seen-category Chamfer Distance decreases from 0.0037 (PCN) to 0.0025 (~32% reduction). These gains are consistently positive and the pattern of improvement across tasks is the paper's strongest evidence.
 
-- **PG-Layer enables adaptive patch sizes and deeper networks while preserving the SG mathematical form.** The differentiable radial component V(r) allows the network to automatically adjust spherical patch sizes, and the formulation preserves the original SG structure to support multiple successive convolutional layers (unlike prior SGConv which deformed the representation). The ablation confirms that adding V(r) (condition V) further reduces RRMSE from 0.036 to 0.028.
+- **Ablation study decomposes the contribution of each component.** Table 1 evaluates three conditions (E: patch-wise graph only, U: adding Legendre polynomials for low-frequency information, V: adding adaptive radial patches), showing monotonic improvement. This gives readers a clear picture of what each design choice contributes.
 
-- **Consistent improvements across three Scan-to-CAD tasks using a single backbone as a drop-in replacement.** DeepSPF is shown to improve registration (DeepGMR + DeepSPF RRMSE 0.031 vs. original DeepGMR 0.078 on zero-intersection data, Tables 1-2), retrieval (Top-1 error reduced from 0.081 to 0.067, Table 4), and completion (F-score from 0.582 to 0.641 for seen categories, Table 5) — all without increasing model parameters relative to comparable methods.
+- **Integration into multiple existing pipelines is demonstrated.** DeepSPF is shown to replace encoders in at least two distinct frameworks: DeepGMR (registration, Tables 1–2) and PCN (completion, Table 5). The ablation conditions (E, U, V) also use the SGPCR decoder, demonstrating compatibility with at least three decoder architectures. This supports the claimed integrability.
 
-- **Plug-and-play compatibility with existing decoder architectures.** The paper shows DeepSPF can replace PointNet in DeepGMR and PCN pipelines, improving results without modifying the decoder or loss functions, demonstrating practical utility.
+- **Evaluation on real-world Scan2CAD data confirms practical relevance.** Table 3 shows that DeepSPF improves the Scan2CAD benchmark metric (from 26.1% for SGConv to 27.8%) when used with VoteNet detections, demonstrating effectiveness beyond synthetic data.
 
 ## Weaknesses
 
@@ -21,58 +23,56 @@ None.
 
 ### Major
 
-- **Missing comparison to Vector Neurons (VN) on registration and retrieval tasks.** The Related Work section states "we show improvements over VN due to acquiring local and global information," but VN is only compared on point cloud completion (Table 5: VN-PCN). On the main tasks of registration (Tables 1-2) and retrieval (Table 4), VN-based methods are absent. Since VN is the most directly comparable SO(3)-equivariant point network, this omission undermines the claim of "significant improvements" over the equivariant state of the art. The paper either needs to include VN comparisons on these tasks or temper its claims.
+1. **Equivariance claim relies on an unquantified approximation with no error analysis.** The derivation in Section 3.2 invokes \(R_\nu \approx R_p\) — that the rotation applied to the spherical sampling approximately equals the rotation applied to the point cloud — in both Eq. (9) and Eq. (11). The paper explicitly writes "\(R_\nu \approx R_p\)" and "under the introduced assumptions," so it is transparent about the approximation. However, **no justification is given for why this approximation holds**, nor is there any discussion of when it might break down or what the equivariance error is. Since the spherical sampling \(\nu\) is fixed *a priori* and is not dynamically rotated with the input, the approximation \(R_\nu \approx R_p\) is not guaranteed to hold in general. The paper compares itself to exact SO(3)-equivariant methods (e.g., Vector Neurons) without characterizing the degree of equivariance violation. This is a structural gap: a central theoretical property of the representation is asserted on the basis of an unexamined approximation. At minimum, an empirical measure of equivariance error (e.g., rotation consistency of latent vectors under random rotations) is needed.
 
-- **The rotation-equivariance proof rests on an unsubstantiated approximation (R_ν ≈ R_p).** Section 3.2 attempts to prove that SPF is SO(3)-equivariant, but the central step (Eq. 9–11) assumes that the rotation applied to the spherical sampling grid approximates the rotation applied to the point cloud (R_ν ≈ R_p), and similarly μ(ν) ≈ μ(p). The paper provides no justification for why this approximation holds, how tight it is, or under what conditions it breaks. Since rotation-equivariance is the paper's central theoretical claim, this gap is significant. An empirical demonstration of equivariance (e.g., measuring feature consistency under random rotations) would partially remedy this, but the theoretical foundation as presented is incomplete.
+2. **The PG-Layer "convolution" is not rigorously derived, and the claim about enabling deeper networks is untested.** Equation (12) correctly observes that a true convolution of two SGs does not yield an SG. Equation (13) then defines an operation composed of pointwise multiplications of the SPF representation combined with edge functions (E), radial volume (V), and upscaling (U). This is **not a convolution in any standard sense** — it is a custom fusion of pointwise and graph operations. The derivation in Eqs. (13)–(14) then assumes \(\lambda_G \approx \lambda_H \approx 2\lambda_R\) without any justification, and concludes that the output matches the original SPF form. These are strong assumptions that are asserted rather than established. Furthermore, the paper claims this enables "deeper networks" without ever testing deeper architectures — the experiments use at most three Set Abstraction layers, each with a single PG-Layer. The practical benefit of the form-preserving property is therefore unsubstantiated.
 
 ### Minor
 
-- **No statistical significance or uncertainty estimates.** All quantitative results are reported as single numbers without error bars, confidence intervals, or multi-run statistics. Some claimed improvements are narrow (e.g., Scan2CAD recall 21.1%→22.0% in Table 3; Chamfer distance reductions of a few hundredths). Without variance information, it is unclear whether these gains are reproducible or within training noise.
+3. **Baseline comparisons are partially uncontrolled.** The paper compares DeepSPF+DeepGMR against standalone DeepUME and SGPCR in Table 1, but DeepUME and SGPCR do not use DeepSPF encoding — these are system-level comparisons, not controlled encoder swaps. The controlled comparison (same decoder, different encoder) is properly done for DeepGMR (DeepGMR+PointNet vs. DeepGMR+DeepSPF) and for PCN (PCN vs. PCN+DeepSPF vs. PCN+VN), and the ablation uses the SGPCR decoder, so integration is shown across multiple decoders. Nonetheless, the framing "a significant reduction in the rotation error of existing registration methods" overclaims by implying parity of comparison, as the DeepUME and SGPCR rows are not apples-to-apples encoder comparisons.
 
-- **Key implementation details omitted.** The number of PG-Layers per SA layer (m), the initial radii for each SA layer, the latent dimensionality A_n, and the number of spheres per sampled point (C, except in a figure caption) are not specified in the implementation section (4.2). These are necessary for reproducibility; the paper defers to the configurations of baseline works, but since the encoder changes, hyperparameters may not transfer directly.
+4. **Ablation results lack variance estimates.** The improvements in Table 1 appear monotonic across conditions E→U→V, but no error bars, confidence intervals, or multi-run statistics are reported. Without variance information, it is difficult to assess whether the differences between conditions are statistically robust or within the noise of a single run.
 
-- **The λ_G ≈ λ_H ≈ 2λ_R assumption in PG-Layer is stated without justification.** Section 3.3 (line 139) asserts this approximation to conclude that the PG-Layer output matches the SPF form. No analysis or experiment is provided to show this approximation holds during training or preserves the SG structure for deeper layers.
+5. **Parameter count and runtime claims are not explicitly verified in the text.** The conclusion states DeepSPF does this "without increasing the number of parameters compared to similar state-of-the-art methods," but no parameter counts are given in the prose. Inference time \(R\) is listed as an evaluated metric in Section 4.3, which suggests it appears in the tables, but the parameter claim specifically is unsubstantiated in the text body. The reviewer-imputed baseline retuning procedure ("re-trained with the preferred configurations") is standard practice and not a serious weakness; however, an explicit statement of how baseline hyperparameters were chosen would improve trust.
 
-- **Notation ambiguity and underspecification in SPF formulation.** The edge function (Eq. 3) uses "max_{j,i,o∈K}" without clarifying whether the max is over neighbor indices or feature dimensions. The notation |ν| as an index set for argmax (Eq. 5-6) is inconsistent with its earlier use as a cardinality. The architectural form of the learnable parameters θ and φ (e.g., MLP layers, dimensions) is not specified.
-
-- **Ablation is confined to the SGPCR decoder framework.** While Table 1's ablation (E, U, V conditions) isolates the contributions of the patch graph, Legendre polynomials, and adaptive radii, it is only tested within the SGPCR pipeline. It is unclear whether the same relative improvements transfer to other decoder architectures (e.g., DeepGMR, DeepUME).
-
-- **Limited completion baselines.** Table 5 compares against PCN (2018) and VN-PCN, but not against more recent completion methods (e.g., PointTr, SnowflakeNet, SeedFormer). The paper acknowledges this in passing (line 244), but the claim of a "30% reduction in Chamfer Distance" would be more impactful with comparison to modern baselines.
+6. **Limited discussion of the method's limitations.** The only limitation acknowledged is FPS complexity for large point clouds. Missing are: (a) the approximate nature of the equivariance and the \(R_\nu \approx R_p\) assumption, (b) reliance on the assumption \(\lambda_G \approx \lambda_H \approx 2\lambda_R\) in PG-Layer, and (c) the scope of evaluation (synthetic data with limited real-world validation beyond Scan2CAD). Self-critique of these points would strengthen the paper.
 
 ### Trivial
 
-- The notation |ν| is used inconsistently — both as a cardinality/line number and as an index set — which can confuse readers trying to follow the derivations.
+7. None.
 
 ## Nice-to-Haves
 
-- **Direct visualization of adaptive patch behavior.** The paper claims that PG-Layer automatically learns to adjust patch sizes based on information density, but provides no direct evidence. Showing learned radii overlaid on example point clouds before and after training would substantially strengthen this claim.
-- **Runtime/memory analysis.** The method uses FPS and k-NN graph construction per patch. The conclusion notes this as a limitation, but including actual runtime measurements would help practitioners assess trade-offs.
-- **Code release.** Given the complexity of the method, releasing an implementation would significantly improve reproducibility and adoption.
+- An empirical equivariance consistency test (e.g., \(\| \mathrm{DeepSPF}(R p) - R(\mathrm{DeepSPF}(p)) \|\) across random rotations) would directly address the main theoretical concern and could be a simple addition.
+- Reporting parameter counts and FLOPs for all compared methods would substantiate the parameter-efficiency claim.
+- A small experiment with 5–10 stacked PG-Layers (comparing against SGConv) would empirically test whether the form-preserving design actually enables deeper networks as claimed.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+The following criticisms from the reviewer input were removed or downgraded based on verification against the actual paper:
 
-- **"No release plan for code/models"** and any questioning of existence/availability of cited methods: Per the hard rules, criticisms about release status of the paper's own code or about the existence of any cited entity are removed. The paper appropriately cites all baselines.
-- **"Ambiguity in the scan-to-CAD pipeline"**: The paper describes the pipeline adequately in Section 4.5 — scans are encoded using the same DeepSPF encoder, and retrieval is performed by comparing latent vectors to pre-computed ShapeNet encodings via cross-covariance and SVD.
-- **"Strength: theoretical derivation of rotation-equivariance"**: Conflicts with the verified weakness that the proof relies on unsubstantiated assumptions. Per the rule that weakness wins when a strength and weakness disagree, this strength is removed.
-- **"PG-Layer is never ablated independently of SPF"**: The ablation in Table 1 tests conditions E (patch graph), U (Legendre), and V (adaptive radii), which collectively constitute the PG-Layer. The components are decoupled; what is not tested is the benefit of the PG-Layer _as a whole_ versus SPF without any convolution, but this is a fine-grained distinction beyond what is standard for ablation.
-- **Demand for newer completion baselines (PointTr, SnowflakeNet, SeedFormer) beyond what the paper's encoder-focused scope requires**: The paper explicitly scopes its completion evaluation to encoder comparisons ("to provide a fair comparison between encoder structures, we restrict ourselves to PointNet-based networks"). Criticizing the absence of specialized completion methods is scope creep; the paper frames this as a demonstration of the encoder, not a completion SOTA claim.
+- *"The paper uses images for all tables, making numerical values unavailable"* — Removed. This is a PDF-extraction artifact; the original submission has proper LaTeX tables.
+- *"Does not show that DeepSPF improves over stronger equivariant baselines (e.g., VN)"* — Removed. The paper does compare against VN-PointNet+PCN in Table 5 (completion) and explicitly states the comparison.
+- *"Integration is only shown for one specific decoder"* — Removed. DeepSPF is integrated with DeepGMR's decoder, SGPCR's decoder (ablation conditions), and PCN's decoder for completion.
+- *"No justification for approximation" / "approximate equivariance is treated as exact" (unqualified form)* — The paper does not treat it as exact; it uses \(\approx\) notation consistently and states "under the introduced assumptions." However, the lack of justification and error analysis remains a real weakness (kept in Major #1 with corrected framing).
+- From Strength Finder: *"SPF enables patch-wise SO(3)-equivariant representation with proven equivariance"* — Removed (moved here). Conflicts with verified weakness about the unquantified approximation; the weakness wins.
+- From Strength Finder: *"PG-Layer retains the original Spherical Gaussian form, allowing deeper networks"* — Removed (moved here). Conflicts with verified weakness about the unsupported derivation and lack of empirical testing.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews confirm the paper's core value — a patch-wise, adaptive spherical representation for rotation-equivariant point cloud processing — while identifying the main gaps (incomplete equivariance proof, missing VN comparisons on key tasks) that the authors would need to address in revision.
+None beyond the paper's own contributions. The reviews surface the gap between the theoretical equivariance framing and the empirical results, but this is a critique of the paper's argumentation, not a novel insight.
 
 ## Suggestions
 
-1. **Include VN-based encoders in registration and retrieval experiments.** VN-PointNet can be plugged into the same DeepGMR/SGPCR decoders used in Tables 1-2 and 4, providing a direct and fair comparison. This is the single most impactful addition the authors could make.
-2. **Strengthen the equivariance argument.** Either (a) replace the hand-wavy R_ν≈R_p approximation with a rigorous derivation, or (b) provide an empirical experiment showing that SPF features are approximately equivariant (e.g., by measuring feature consistency under random input rotations — a standard practice in equivariance papers).
-3. **Report error bars or multi-run statistics** for all main results, especially where margins are narrow.
-4. **Specify all architectural hyperparameters** in the main paper or supplement: m (PG-Layers per SA layer), initial radii per SA layer, A_n (latent dimensions), and C (sphere sampling count).
+1. **Quantify the equivariance error.** Add an empirical measure: apply random rotations to input point clouds and measure the rotation consistency of the latent vectors produced by DeepSPF. Report the distribution of equivariance errors and discuss regimes (e.g., sparse vs. dense point clouds) where the approximation \(R_\nu \approx R_p\) may break down.
+2. **Reformulate the PG-Layer derivation.** Drop the label "convolution" for the operation in Eq. (13) and describe it honestly as a pointwise fusion of SPF representations with learned graph and radial components. Either justify the \(\lambda_G \approx \lambda_H \approx 2\lambda_R\) assumption or remove it.
+3. **Empirically test the "deeper networks" claim.** Compare a DeepSPF variant with 5–10 stacked PG-Layers against a baseline where SGConv collapses, to show that the form-preserving design provides a concrete benefit.
+4. **Report parameter counts** for all compared methods in the main text and add error bars or multi-run statistics to the key ablation table.
+5. **Acknowledge limitations upfront** in a dedicated Limitations section, covering the approximate equivariance, the PG-Layer derivation assumptions, and evaluation scope.
 
 ## Score and Decision
 
-The paper proposes a technically interesting and empirically promising approach. The strengths — novel patch-wise spherical representation, adaptive radius learning, consistent task improvements — are genuine and supported by evidence. However, two major weaknesses prevent acceptance in this form: (1) the central theoretical claim of rotation-equivariance rests on an unjustified approximation, and (2) the strongest equivariant baseline (Vector Neurons) is omitted from the two main evaluation tasks, undercutting comparative claims. These are addressable with revision, but they are substantive gaps, not minor presentation issues.
+The paper presents a novel and practically effective approach — adaptive patch-wise spherical representations integrated into existing pipelines yield clear improvements on three tasks. The empirical evidence is the paper's strongest asset. However, the theoretical framing is materially weaker than claimed: the equivariance property is approximate and unquantified, the PG-Layer derivation rests on unjustified assumptions, and the "deeper networks" benefit is asserted without evidence. These issues do not invalidate the empirical results — the method clearly works — but they mean the paper overstates its theoretical contributions relative to what is actually demonstrated. The paper would benefit from major revision to align claims with evidence.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

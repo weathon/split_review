@@ -1,87 +1,68 @@
-Now I have a thorough understanding of the paper. Let me synthesize the review.
+Now I have a thorough understanding of the paper. Let me write the consolidated review.
 
 ## Summary
 
-The paper proposes TIGER, a time-frequency domain speech separation model that achieves dramatic parameter (94.3%) and MAC (95.3%) reductions relative to TF-GridNet while remaining competitive or superior on complex acoustic scenarios. It also introduces EchoSet, a reverberation/noise dataset built on SoundSpaces 2.0 and Matterport3D that models room geometry, materials, and occlusions. On EchoSet (the most challenging benchmark), TIGER large (0.82M params) surpasses TF-GridNet (14.43M params) by 0.49 dB SDRi; on cleaner benchmarks it trails by small margins (6% on Libri2Mix, 2% on LRS2-2Mix). Extensive ablations validate the contributions of the MSA and F³A modules.
+The paper introduces TIGER, a time-frequency domain speech separation model that achieves extreme parameter efficiency (0.82M parameters, 94.3% reduction vs TF-GridNet) through frequency band-split, multi-scale selective attention (MSA), and full-frequency-frame attention (F³A). It also contributes EchoSet, a dataset with realistic reverberation (including object occlusions and material properties from Matterport3D) and random overlap. On EchoSet, TIGER (large) reaches 14.22 dB SDRi, surpassing TF-GridNet's 13.73 dB. The paper demonstrates that models trained on EchoSet generalize better to real-world recordings than those trained on Libri2Mix or LRS2-2Mix.
 
 ## Strengths
 
-1. **Extreme efficiency with competitive performance on complex data.** TIGER large has only 0.82M parameters and 15.27 G/s MACs — a 94.3% parameter reduction and 95.3% MAC reduction versus TF-GridNet — yet achieves the best SDRi on EchoSet (14.22 vs. 13.73) and is within 2–6% on standard benchmarks (Table 2). This is genuinely the first sub-1M-parameter speech separation model competitive with SOTA.
+- **Extreme parameter and MAC reduction while exceeding SOTA on the most realistic dataset.** TIGER (large) achieves 14.22 dB SDRi on EchoSet, surpassing TF-GridNet's 13.73 dB, while reducing parameters by 94.3% (0.82M vs. 14.43M) and MACs by 95.3% (15.27 G/s vs. 323.75 G/s). This directly supports the core claim of a lightweight model that beats SOTA on complex, realistic data (Tables 1, 2).
 
-2. **EchoSet dataset addresses a genuine gap in simulation fidelity.** Unlike prior datasets (WHAMR!, Libri2Mix, LRS2-2Mix), EchoSet accounts for room shape, material properties, object occlusions within the same acoustic scene, and random overlap ratios (Table 1). The dataset construction using SoundSpaces 2.0 and Matterport3D is clearly described and methodologically sound.
+- **EchoSet demonstrably narrows the gap to real-world audio.** Models trained on EchoSet produce higher-quality separated speech on real-world recordings than those trained on Libri2Mix or LRS2-2Mix (Figure 2). The dataset's design—room/object materials, same-acoustic-scene mixing, random overlap—provides a more faithful training environment than prior benchmarks (Table 1 in paper).
 
-3. **Convincing ablation studies validate architectural contributions.** Tables 4–7 systematically isolate the value of band-split (LowFreqNarrowSplit beats EvenSplit and NonSplit), MSA (removing it drops SDRi from 13.15 to 7.58), and F³A (removing it drops to 12.34). Replacement experiments with LSTM, Mamba, and SRU show that MSA and F³A achieve the best efficiency-performance trade-off — alternatives use 2–3× more parameters and MACs.
+- **Band-split with low-frequency prioritization reduces computational load while improving performance** compared to no split (NonSplit) or even split. LowFreqNarrowSplit achieves SDRi 13.15 dB with 7.65 G/s MACs, versus NonSplit's 11.53 dB with 40.89 G/s MACs (Table 3), validating the prior-knowledge-guided compression strategy.
 
-4. **Generalization beyond speaker separation is demonstrated.** The paper reports that TIGER applied to cinematic sound separation achieves a 39.4% SDR improvement over BSRNN with 97.3% fewer parameters and 77.6% fewer MACs (Section 6.2), showing the architecture's versatility.
+- **The MSA and F³A modules are more efficient than alternative sequence-modeling structures (LSTM, Mamba, SRU) while maintaining competitive performance.** Ablations show removing either module degrades performance (Table 4), and replacing them with LSTM/Mamba/SRU substantially increases parameters and MACs without consistent performance gain (Tables 5, 6).
+
+- **First sub-1M parameter speech separation model to rival SOTA on challenging, reverberant conditions.** TIGER (small, 0.82M params) achieves only 0.6 dB SDRi below TF-GridNet on EchoSet (13.15 vs. 13.73 dB), while all other models have ≥2.3M parameters (Tables 1, 2). This is a genuinely novel efficiency result.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-1. **Real-world validation of EchoSet (Figure 1) lacks essential numerical support.** The paper's claim that "the gap between EchoSet and real-world audio is relatively small" and that TIGER "achieved the best separation performance" on real-world data rests entirely on a bar chart with no reported numerical values, no error bars, no specification of evaluation metrics (SDRi? SI-SDRi?), and no statistical significance assessment. The description of the real-world data collection ("10 real-world environments and 40 speakers...followed the same mixing method as LRS2-2Mix") is too vague to be reproducible. This is the central experiment validating the dataset contribution, yet it is presented at a level of rigor well below the rest of the paper. *(Verified: lines 170–172 describe the data; Figure 1 is a bare bar chart with no numbers.)*
-
-2. **Missing architectural hyperparameters impair reproducibility.** Several critical dimensions are not specified numerically: the feature channel dimension \(N\), the hidden dimension \(H\) in the MSA module, the number of downsampling scales \(D\), the number of attention heads \(A\), and the exact sub-band width boundaries \(G_k\) for the LowFreqNarrowSplit scheme. STFT parameters (window size, hop length, FFT size) are also omitted. Without these, the method cannot be faithfully re-implemented from the paper alone. *(Verified: the paper defines these symbols but never assigns concrete values.)*
+- **Weak empirical validation of EchoSet's generalization claim.** The paper argues that EchoSet-trained models generalize better to real-world conditions, but the real-world test set is described only as "10 real-world environments and recording audio from 40 speakers from the LibriSpeech test set" with no information about the number of test mixtures, acoustic properties of those environments, recording equipment, or statistical uncertainty. Results are shown only as a figure (Figure 2) without numerical values, standard deviations, or per-utterance distributions. With an uncharacterized test set, the claim that EchoSet-trained models "generalized better" is suggestive but not convincing. This weakens one of the paper's two main contributions, because the real-world generalization advantage of EchoSet over LRS2-2Mix and Libri2Mix is not reliably established. The paper would benefit from reporting exact numerical results, confidence intervals, and more detail about the test environment.
 
 ### Minor
 
-1. **The "~5% improvement" claim in the introduction is imprecise.** Line 31 states TIGER "improved the performance by about 5% compared with TF-GridNet" on EchoSet. The actual improvement is 3.6% for SDRi and 6.8% for SI-SDRi. While "about 5%" could be an approximate average, it is slightly misleading on the primary metric. *(Verified: (14.22−13.73)/13.73 ≈ 3.57%.)*
+- **Missing STFT parameters.** The paper does not state the STFT window size, hop size, or FFT size anywhere. While $F=321$ can be inferred from the NonSplit scheme (321 sub-bands = 321 frequency bins), the actual STFT configuration is essential for reproducibility and for interpreting the band-split design. This should be reported.
 
-2. **Cinematic sound separation results are reported but under-developed.** Section 6.2 gives percentage improvements (39.4% SDR gain, 97.3% parameter reduction) but provides no comparison table, no description of the evaluation dataset, no baseline protocol, and no experimental details. The reader is directed to a project page. This is a potentially strong result that deserves proper experimental exposition in the main paper. *(Verified: lines 253–254 contain the numbers but no table or evaluation details.)*
+- **No variance or multi-run statistics.** All performance numbers (Tables 1, 3, 4, 5, 6) appear to be single-run results. Speech separation models can exhibit non-trivial variance across runs. The key comparison on EchoSet (TIGER large 14.22 vs. TF-GridNet 13.73 SDRi) involves a margin where knowing statistical reliability matters. While single-run reporting is common in the field, the paper's claims about surpassing SOTA would be stronger with multi-run statistics.
 
-3. **The abstract's phrasing could inadvertently mislead about the breadth of superiority.** The abstract states TIGER achieves "performance surpassing SOTA model TF-GridNet" — but this is qualified by "On EchoSet and real-world data." However, a casual reader could miss the qualifier and assume TIGER uniformly surpasses TF-GridNet. The paper's own discussion (Section 6.2) honestly acknowledges the pattern (TIGER shines on complex data, trails slightly on clean benchmarks), and the abstract should more visibly reflect this nuance.
+- **Ambiguity about the real-world test mixing method.** The paper says the real-world test follows "the same mixing method as LRS2-2Mix" but does not clarify whether the mixing method (gain, overlap ratios) differs from EchoSet's generation pipeline. This matters for interpreting Figure 2, since the test data's resemblance to either EchoSet or LRS2-2Mix affects what the comparison actually shows.
 
-4. **The paper describes LRS2-2Mix as having "Full" overlap (Table 1)** but does not reconcile this with the original LRS2-2Mix mixing procedure. This is a factual claim about a prior dataset that should be verified against the original source.
+- **F³A module's scalability to longer utterances is not discussed.** The F³A module merges the time dimension $T$ into the channel dimension ($E \times T$) for self-attention over $K$ sub-bands. When $T$ is large (e.g., >300 frames for longer utterances), the attention map computation involves a matrix of size $K \times (E \times T)$, which could become computationally heavy. The paper should discuss how this scales to utterances beyond 6 seconds.
 
 ### Trivial
 
-- Line 171 says the real-world data "followed the same mixing method as LRS2-2Mix" — LRS2-2Mix is a dataset, not a mixing procedure. This phrasing is ambiguous; the intended meaning (the procedure described in the LRS2-2Mix paper) should be clarified.
-- Line 31: "EchoSet is more close to the real-world data" (grammar).
+- **Band-split ablation comparison between NormalSplit (47 sub-bands) and LowFreqNarrowSplit (67 sub-bands) is confounded by both $K$ and split design.** However, the key comparison that supports the paper's claim (LowFreqNarrowSplit vs. EvenSplit, both at 67 sub-bands) cleanly isolates the split strategy. This is a minor presentational issue, not a flaw in the conclusion.
 
 ## Nice-to-Haves
 
-- **Confidence intervals or standard deviations** on main results (Tables 2–3) are not standard in the speech separation literature for large-scale benchmark evaluations, but would strengthen the 0.49 dB EchoSet advantage over TF-GridNet.
-- **Explicit comparison of computational cost methodology** between MACs reported here and those in the TF-GridNet paper would help readers reconcile the numbers.
-- **Ablation controlling for parameter count** in the MSA/F³A replacement experiments (Tables 6–7) would rule out the confound that the comparison conflates architectural efficiency with capacity differences. The current comparison is still informative but not perfectly controlled.
+- Providing an acoustic analysis of EchoSet (RT60 distributions, direct-to-reverberant ratios) compared to WHAMR! and LRS2-2Mix would strengthen the "high-fidelity" claim beyond the single real-world test.
+- A brief survey of sub-1M parameter separation models (e.g., very small Conv-TasNet variants) in the related work would contextualize the claim of being the first sub-1M model to rival SOTA.
+- Reporting per-utterance SDRi distributions (box plots or histograms) for the key comparisons would help assess whether improvements are consistent or driven by a small subset of examples.
+- The overlap ratio distribution in EchoSet would be useful for understanding dataset characteristics.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **"Overclaiming of surpassing SOTA" — removed as partially a misreading.** The harsh critic states the abstract claims surpassing TF-GridNet without qualification. This is inaccurate: the abstract explicitly says "On EchoSet and real-world data." The claim is accurate for EchoSet and could be accurate for real-world data if Figure 1 supported it (it does not — see Major weakness #1). The critic's framing that TIGER is "clearly worse" on standard benchmarks ignores the paper's own nuanced discussion showing competitive (not "clearly worse") performance with 95% fewer resources. The core of this concern is better captured by Minor weakness #3 (phrasing clarity).
-
-- **"MACs for TF-GridNet seem excessively high" — removed.** The paper specifies MACs are "calculated for one second of audio at 16 kHz" (line 173). Different paper-to-paper MAC computations may not use identical counting methods. This is a methodological disagreement, not an error in the paper, and the paper transparently states its computation basis.
-
-- **"LRS2-2Mix mixing method confusion" — down from minor to removed/trivial.** The paper likely means "the mixing procedure described in the LRS2-2Mix work." This is a clarity issue, not a substantive error.
-
-- **"Baseline reproducibility — not stated whether baselines were tuned" — removed.** For standard benchmarks (Libri2Mix, LRS2-2Mix), published numbers are the norm. For EchoSet, the paper states "All the models were trained and tested on EchoSet" (line 257) with the same configuration. This concern is about a convention the paper follows.
-
-- **Strength Finder's generic strengths dropped.** Several claimed strengths are generic ("Ablation on band-split schemes confirms the value of prior-knowledge-driven frequency division" — this is just describing Table 4, not a standalone strength). These are subsumed under the core strengths.
+- **"Surpassing SOTA" framing criticism** — The reviewer claimed the abstract and introduction frame TIGER as "uniformly surpassing SOTA," but the abstract explicitly scopes the claim: *"On EchoSet and real-world data, TIGER significantly reduces... while achieving performance surpassing state-of-the-art (SOTA) model TF-GridNet."* The introduction similarly scopes it to EchoSet (line 31). The paper already qualifies this correctly; the body properly explains the regression on simpler benchmarks. This criticism misreads the paper.
 
 ## Novel Insights
 
-The reviews surface an interesting tension: the paper's strongest selling points (efficiency on complex data, realistic dataset) are also its weakest-supported claims (real-world validation is bare, the EchoSet advantage is a 0.49 dB single-dataset result without variance). This suggests the paper would benefit much more from investing in rigorous real-world evaluation than from further architectural refinement. The reviewers agree that the architectural and dataset contributions are sound; the disagreement is about whether the current level of evidence for the generalization claims meets the bar. An insightful observation is that the paper's own ablation methodology (Tables 5–7) is stronger than its evaluation methodology (Figure 1), creating an asymmetry where internal validity is high but external validity is asserted rather than demonstrated.
-
-None beyond the paper's own contributions.
+The reviews collectively highlight a pattern that is not explicit in the paper itself: TIGER's design philosophy — using prior knowledge about speech frequency distribution (band-split with narrower low-frequency bands) combined with interleaved frequency/time attention — creates a model whose *relative* advantage grows precisely where existing models struggle most (complex reverberation, real-world acoustics). On simple anechoic benchmarks, TIGER is merely competitive; on realistic data, it pulls ahead while being orders of magnitude cheaper than TF-GridNet. This suggests the community's standard evaluation protocol (Libri2Mix/WSJ0-2mix) may systematically underreward architectures designed for real-world deployment. The EchoSet dataset, even with its limited real-world validation, represents a step toward addressing this evaluation gap, and the weakness identified in the real-world validation points to exactly where future work should invest: larger, well-characterized real-room test sets.
 
 ## Suggestions
 
-1. **Add a table with numerical SDRi/SI-SDRi values for the real-world test (Figure 1),** including sample sizes, error bars, and a clear description of the recording setup (microphones, distances, room types). This single addition would address the most serious weakness.
-
-2. **Report the missing architectural hyperparameters** (\(N, H, D, A\)) and the exact sub-band boundaries for LowFreqNarrowSplit, along with STFT parameters (window size, hop, FFT size). This is essential for reproducibility.
-
-3. **Add a proper experimental section for the cinematic sound separation results** — at minimum a table comparing TIGER with BSRNN on a well-defined benchmark, with dataset and protocol described.
-
-4. **Rephrase the abstract** to more prominently reflect that TIGER's advantage over TF-GridNet is conditional on acoustic complexity, and that on clean benchmarks it is competitive (not superior) while using dramatically fewer resources.
-
-5. **Clarify the LRS2-2Mix overlap characterization** by verifying against the original source, or adding a citation-specific justification.
+1. **Strengthen the real-world validation**: Report exact numerical values from Figure 2, add error bars (or at least standard deviation across test utterances), and provide more detail about the 10 environments (room sizes, RT60 ranges, microphone placement). This is the single most impactful improvement.
+2. **Report STFT parameters** (window size, hop size, FFT size) explicitly in the experimental setup for reproducibility.
+3. **Add multi-run statistics** for the main comparisons (at minimum, TIGER vs. TF-GridNet on EchoSet) to establish that the 0.49 dB SDRi gap is statistically reliable.
+4. **Clarify the real-world test mixing protocol** — whether it follows EchoSet's or LRS2-2Mix's pipeline — to remove ambiguity about what Figure 2 actually compares.
+5. **Discuss F³A scalability** to longer utterances, or add a note about the typical frame count used in experiments.
 
 ## Score and Decision
-
-This paper makes two solid contributions — an efficient architecture with a well-motivated design and a carefully constructed dataset that addresses real limitations of prior benchmarks. The ablation studies are thorough and convincing. The weaknesses are primarily in presentation and evaluation rigor: the key real-world generalization experiment lacks numerical reporting, architectural details needed for reproduction are omitted, and some claims could be more precisely scoped. These are all fixable in revision. The core methodology and results are sound.
 
 MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

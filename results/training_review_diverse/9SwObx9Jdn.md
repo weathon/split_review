@@ -1,70 +1,67 @@
-Now I have all the information needed. Let me synthesize the final review.
+Now I have all the information I need. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper proposes a framework called **midpoint trees** for geodesic planning in manifolds where only an infinitesimal metric is available. Instead of generating waypoints sequentially (which suffers from sparse rewards and long horizons), the method recursively predicts midpoints between endpoint pairs. The authors provide theoretical results (Proposition 1–2) showing that if a learned actor and critic satisfy certain functional equations, they coincide with true midpoints and distances. They then propose a practical actor-critic algorithm (single network, gradually increasing depth) and demonstrate strong empirical results on five diverse tasks, including Finsler metrics (Matsumoto, car-like), obstacle-rich environments, a 7-DoF robotic arm, and multi-agent planning, outperforming sequential RL and policy-gradient baselines on the harder tasks.
+The paper proposes a "midpoint tree" framework for generating geodesics on manifolds where the metric is only known infinitesimally. It introduces an actor-critic RL method to learn midpoint prediction, with theoretical analysis showing that under ideal conditions (global midpoint property, convergence of iteration) the learned functions recover exact distances and midpoints. Empirically, the method is evaluated on five path planning tasks spanning local (Matsumoto, car-like) and global (2D obstacles, robotic arm, three agents) planning, demonstrating strong performance, particularly on high-dimensional and asymmetric tasks where baselines struggle.
 
 ## Strengths
 
-- **Novel and well-motivated problem formulation.** The paper clearly articulates why standard sub-goal methods (Jurgenson et al.) are insufficient when only an infinitesimal metric is known: waypoints must be *close* so that the local approximator C is accurate, making midpoint prediction necessary rather than arbitrary intermediate points. The theoretical distinction between midpoint loss (Eq. 4, squared sum) and intermediate-point loss (sum) in Remark 4.2 is a genuine insight, supported by Proposition 1 and demonstrated experimentally (Inter ablation decaying in performance).
+- **Novel midpoint tree framework that addresses a real limitation of prior sub-goal tree methods.** The paper identifies that predicting arbitrary intermediate points (as in Jurgenson et al., 2020) can converge to biased functions when only local metric approximations are available (Remark 3, Section 4.2). Replacing sub-goal prediction with midpoint prediction, justified by the algebraic identity that squared-distance minimization selects midpoints, is conceptually clean and well-motivated. The ablation experiments (Inter vs. Our-T/Our-C in Figure 6) directly validate this theoretical insight.
 
-- **Strong empirical results across diverse, challenging tasks.** The proposed methods (Our-T, Our-C) achieve the highest success rates in the car-like (~90%), 7-DoF robotic arm (~90%), and three-agent (~80%) environments, where Seq (PPO) plateaus below 20% and PG fails entirely. The ablation suite (Inter, 2:1, Cut) systematically tests the theoretical claims, and the winning-rate tables (Appendix B) provide supplementary path-quality comparisons. The visualizations (Figs. 3–5) qualitatively confirm that the learned paths are close to ground-truth geodesics.
+- **Theoretical characterization of the limiting behavior under idealized conditions.** Propositions 4.2 and 4.3 provide a formal characterization: if the iterative construction converges and the global midpoint property holds, the limit functions recover exact distances and midpoints. This provides conceptual grounding for why the approach is reasonable, even though the practical algorithm is a heuristic approximation of the idealized iteration.
 
-- **Rigorous theoretical analysis of the midpoint tree concept.** Proposition 1 proves that a globally accurate critic and midpoint actor can be bootstrapped from local accuracy under uniform continuity, and Proposition 2 shows that the iterative construction converges under equicontinuity and compactness. The theory correctly identifies why squared-sum minimization (Eq. 4) is essential while sum minimization (Eq. 7) can fail — a non-obvious point that drives the algorithm design. The Finsler case analysis (Proposition C) bridges abstract geometry to the computable setting.
+- **Strong empirical results on the harder planning tasks.** On the car-like (asymmetric, high-DoF), 7-DoF robotic arm, and three-agent tasks, the proposed method achieves the highest success rates by a large margin, while sequential RL (Seq) and policy gradient (PG) baselines fail on most trials (Figure 6, Section 5.5). These tasks are precisely where existing methods struggle due to reward sparsity and long horizons.
 
-- **Honest treatment of obstacles.** The modified quasi-metric (Eqs. 17–19) elegantly handles free-space constraints without requiring collision checks on straight-line segments, and the analysis of when midpoints stay in free space is principled.
+- **Ablation studies that support the theoretical reasoning.** The Inter variant (arbitrary intermediate points) shows degrading success rates over training on Matsumoto and 2D obstacles, matching the theoretical prediction of convergence to biased functions (Remark 3). The 2:1 variant produces uneven waypoints (Figure 8). Together these ablations isolate the midpoint property as the key to the method's success.
 
-- **Thorough implementation details.** Hyperparameters (Table 1), network architectures, training schedules, and the exact depth-scheduling formulas (lines 666–668) are clearly reported, making the approach reproducible.
+- **Principled extension to obstacle-aware planning.** Section 4.5 shows how to modify the metric with a penalty term so that midpoints of endpoint pairs in the free space remain in the free space, enabling global planning without explicit edge-collision checking.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Overclaim on "theoretical soundness" — the theory applies to an idealized iterative process, not the implemented algorithm.** Proposition 2 assumes a sequence of separate networks (V_i, π_i) trained iteratively with equicontinuity of the critics. The actual algorithm (Section 5.1) trains a *single* actor and critic while gradually increasing depth, uses a stochastic actor with reparameterization, and does not enforce equicontinuity or any of Proposition 2's assumptions. The paper acknowledges this gap (line 501: "For learning efficiency, we train only one actor and one critic, unlike in §4.3") and later notes that convergence conditions are future work (line 865). However, the abstract and conclusion still claim the method is "theoretically proved" sound. This mismatch is significant: the theory provides valuable intuition for *why* midpoint prediction works, but it does **not** constitute a proof that the single-network actor-critic algorithm converges to true geodesics. The paper would be strengthened by either (a) explicitly restricting the "soundness" claim to the midpoint tree *concept* and providing a separate heuristic justification for the practical algorithm, or (b) adding analysis (e.g., Lipschitz bounds, experiments tracking whether the learned V approaches V_i) that bridges the gap.
+- **The abstract and conclusion overclaim empirical superiority.** The abstract states that the proposed method "outperforms existing methods on both local and global path planning tasks." However, on the Matsumoto task (local) and the 2D obstacles task (global), the Seq baseline achieves the *highest* success rate, and the paper's own results section acknowledges this (Section 5.5: "While Seq achieved the best success rate in the Matsumoto and 2D obstacles environments"). The winning-rate analysis (Table 2) shows that Our-T/Our-C produce shorter paths when *both* methods succeed, but success rate is the headline metric and Seq leads on 2 of 5 tasks. The conclusion (Section 6) is more measured ("our method can solve path planning tasks that existing RL methods fail to solve"), but the abstract and some presentation claims need recalibration to match the actual result pattern. The introduction's phrasing "outperformed baseline methods for the difficult tasks" is more accurate and should be adopted throughout.
+
+- **The theoretical assumptions do not match the deployment conditions, and this gap is acknowledged but not bridged.** Proposition 4.2 requires the global midpoint property, but in the Finsler case the continuous midpoint property only holds *locally* (Section 3.2). The car-like environment explicitly lacks this property (Section 4.4). The paper notes this mismatch ("the continuous midpoint property may only be satisfied locally" in the conclusion) but does not analyze whether or when the learning objective remains well-behaved when midpoints do not exist or are non-unique. The actor loss (Equation 5.2) minimizes V(s,π)^2+V(π,g)^2, which is mathematically well-defined as a minimization problem, but the *theoretical guarantee* that this leads to geodesics depends on the midpoint property. Without bridging this gap, the theory serves as motivation rather than a formal proof of correctness.
 
 ### Minor
 
-- **PG comparison conflates structure and learning technique.** The PG baseline (adapted from Jurgenson et al.) differs from the proposed method in multiple ways: it trains separate policies per depth, uses a different architecture, and receives only one training tuple per path generation vs. the proposed method's O(2^D) tuples. The paper acknowledges the sample-efficiency difference (line 830) but does not ablate to isolate whether the improvement comes from the midpoint-tree *structure* or the actor-critic *learning technique*. A cleaner ablation (midpoint tree structure with a PG-style loss, no critic) is missing. This does not invalidate the results — the method clearly works — but it leaves the source of improvement underspecified.
+- **The connection between the idealized iteration (Section 4.3) and the practical algorithm (Section 5.1) is not established.** Proposition 4.3 shows that *if* the sequence of actors/critics converges pointwise, the limit is correct. But no convergence guarantee is given, and the algorithm uses a single actor and critic trained with increasing depth—which is *inspired by* the iteration but is not equivalent. The paper acknowledges this ("we were not able to discuss the conditions under which iterations converge," Section 6). This is a gap, but it is transparently disclosed and does not undermine the empirical contribution, which stands on its own.
 
-- **Success rate as primary metric, while reasonable, could be supplemented with more prominent path-length analysis.** The paper justifies using success rate (line 614) because metrics are only locally defined. The winning-rate tables (Appendix B, Table 1) partially address path quality, but they only compare pairs where *both* methods succeed, which can be a small subset (e.g., 21–77% overlap in Car-Like). The paper's claims about "outperform" rest mainly on success rate; path-length comparisons would strengthen the case, especially in environments where the metric is non-Euclidean.
+- **The smoothing term $L_{\text{sm}}$ in the actor loss (Equation 5.2) is not analyzed or ablated.** This term involves nested compositions of the actor, making gradient computation expensive. It is not included in any of the ablation comparisons (Inter, 2:1, Cut). The paper does not show whether this term is important, detrimental, or neutral to performance, nor whether a simpler regularization could achieve the same effect.
+
+- **The PG baseline comparison is weakened by limited hyperparameter tuning.** The paper uses the original paper's hyperparameters for PG (Section 5.3, Appendix B) without task-specific tuning, while noting that PG receives far less training signal per tree generation. Although the comparison is fair under equal timestep budgets, the PG baseline's near-zero success rates across all environments (Figure 6) likely reflect under-tuning as much as algorithmic weakness. The paper's conclusions do not depend on PG being strong (the main comparison is with Seq), but presenting PG as a serious baseline is somewhat misleading.
 
 ### Trivial
 
-- The remark about TD(λ) (line 588) is noted but not explored. This is fine for a remark, but a brief experiment or reference would make it more impactful.
+None beyond parser artifacts.
 
 ## Nice-to-Haves
 
-- An ablation that trains the midpoint tree structure with a PG-style loss (no critic) would disentangle the contribution of the actor-critic from the tree structure, and would better support the claim of sample-efficiency improvement.
-- Reporting wall-clock time and memory usage would help practitioners assess practical trade-offs.
-- A brief discussion of whether the equicontinuity assumption of Proposition 2 is remotely plausible for neural networks trained with gradient descent (even if the answer is "unlikely, but the theory serves as idealized motivation") would preempt concerns about the theory-practice gap.
+- A theoretical or empirical analysis of the smoothing term $L_{\text{sm}}$: is it necessary, and can it be computed more efficiently?
+- Discussion of failure cases: the Inter variant's degrading success rate on Matsumoto is attributed to biased generation (Remark 3), but a deeper analysis of critic approximation error as a source of actor drift would strengthen the reader's understanding of the algorithm's limitations.
+- Guidance on choosing between timestep-based (Our-T) and cycle-based (Our-C) depth scheduling for new tasks, informed by the observed performance differences (e.g., Our-T better on robotic arm, Our-C better on three agents).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"Depth scheduling rules are under-specified."** The paper explicitly gives the formulas: depth = ⌊t/t_d⌋ with t_d = ⌊T/D_max⌋+1 for timestep-based, and depth = ⌊c/c_d⌋ with c_d = ⌊T/(2^{D_max+1}−1)⌋+1 for cycle-based (lines 666–668). The reviewer likely missed these lines.
-- **"The paper does not report variance."** Standard errors are reported and error bars are shown (line 793, Table 1 caption).
-- **"No discussion of failure mode when policy predicts points outside coordinate chart preimage."** The paper explicitly discusses clamping for coordinates and normalization for the angular component (lines 996–999). The reviewer's speculation about instability is unfounded.
-- **"Missing discussion of whether equicontinuity holds."** The paper acknowledges convergence conditions are future work (line 865). The reviewer is correct that the paper does *not* verify equicontinuity, but this is a restatement of the major weakness above, not a separate issue. It is subsumed.
-- **"Seq reward engineering could improve it."** This is speculation, and the paper notes (line 797) that reward engineering might help but is not needed for the proposed method. Not a valid weakness.
+- **Criticism that the method's performance claim is unsupported (Point 3 of Harsh Critic in full generality):** The critic claimed "the experimental results do not support the claim that the proposed method outperforms existing methods on both local and global path planning tasks." This is partially kept above as a *Major* weakness regarding claim calibration, but the critic's framing that this invalidates the paper's contribution is removed. The method *does* outperform baselines on 3 of 5 tasks (including the most challenging ones), and the winning-rate analysis shows it produces shorter paths on Matsumoto when both succeed. The contribution is real; only the scope of the claim needs adjustment.
+- **Criticism that the learning objective "may be ill-posed" when midpoints don't exist:** Removed because the objective $\min V(s,\pi)^2+V(\pi,g)^2$ is mathematically well-defined as a minimization problem regardless of whether midpoints exist. The correct concern (kept above) is about the theoretical *guarantee* breaking down, not the objective being ill-posed.
+- **Criticism about PG being "likely under-tuned" (Point 4):** The comparison is under equal timestep budgets and is acknowledged in the paper. Moved to minor as a point about hyperparameter tuning, not a structural flaw.
+- **"Missing related works":** Removed per instructions — we cannot independently verify the existence of missing references.
+- **"Missing proofs in appendix":** Removed per instructions — appendix sections may be present in the original submission.
+- **Pure formatting/style nitpicks and typo concerns:** Removed per instructions.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a perspective that the paper itself does not already articulate.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Clarify the scope of the theoretical claim.** In the abstract and conclusion, replace "theoretically proved its soundness" with a more measured statement: e.g., "We prove the soundness of the midpoint tree framework and show that an idealized iterative construction converges to true geodesics; our practical actor-critic algorithm approximates this process and achieves strong empirical results."
-2. **Add an ablation that removes the critic.** Train the midpoint tree structure with a PG-style loss (no critic) to isolate the benefit of the actor-critic mechanism. This would strengthen the claim of sample-efficiency improvement.
-3. **Report average path lengths** (or ratios to true geodesic lengths where computable) as a secondary metric alongside success rate in the main paper, not just in the appendix.
-4. **Add a brief paragraph in Section 5.1** discussing which theoretical assumptions (equicontinuity, uniform continuity of π) are not enforced and why the algorithm might still work (e.g., continuity of neural networks, regularization effects of gradient descent).
+1. Recalibrate the abstract's claim from "outperforms existing methods on both local and global path planning tasks" to something like "achieves competitive or superior performance on challenging path planning tasks, especially in high-dimensional and asymmetric settings where existing RL methods struggle."
+2. Add an ablation experiment isolating the smoothing term $L_{\text{sm}}$ to show its effect on performance and training stability.
+3. Add a brief qualitative discussion of when the global midpoint property may fail in practice and what the algorithm does in those cases — the car-like environment is a natural example where the method works despite the property not holding.
 
 ## Score and Decision
 
-This paper makes a clear contribution: a novel framework for geodesic planning using midpoint trees, backed by nontrivial theoretical analysis and strong empirical validation on diverse, challenging tasks. The main weakness — the gap between the idealized theory and the practical algorithm — is acknowledged in the paper but the "theoretical soundness" claim in the abstract and conclusion overstates what is proven. This is a significant issue but not fatal; the experimental results convincingly demonstrate the method's effectiveness regardless of the theory's exact match to practice. With honest revision of the theoretical claims and a few additional ablations, the paper would make a strong contribution.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

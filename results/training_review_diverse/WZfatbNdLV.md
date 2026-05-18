@@ -1,85 +1,75 @@
-Now I have all the information needed. Let me synthesize the final review.
+Now I have a thorough understanding of the paper and can verify each claim against the actual text. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper presents TrASPr, a multi-Transformer architecture for tissue-specific splicing prediction (PSI/dPSI), and BOS, a Bayesian optimization algorithm for designing RNA sequences with desired splicing outcomes. TrASPr uses four pre-trained Transformers centered on each splice site of a cassette exon, combined with hand-crafted features, and is evaluated on GTEx, MGP, ENCODE RBP knockdown, and Daam1 minigene data. BOS uses TrASPr as an oracle within a latent-space Bayesian optimization framework to mutate sequences under edit-distance constraints.
+This paper proposes TrASPr, a multi-transformer architecture for tissue-specific splicing prediction, and BOS, a Bayesian optimization framework that uses TrASPr as an oracle to design RNA sequences with desired splicing outcomes. TrASPr centers four pretrained transformers on the four splice sites of a cassette exon, combines their representations with genomic features (intron/exon length, conservation, tissue type), and is trained on GTEx and mouse (MGP) data. The paper reports strong predictive performance (Pearson r=0.81 on GTEx PSI prediction), validates predictions against ENCODE RBP knockdown and Daam1 minigene reporter assays, and shows BOS achieves 30.3% valid candidate sequences under edit-distance constraints versus ~4% for baselines.
 
 ## Strengths
 
-1. **Well-motivated architecture with validated design choices.** The multi-Transformer design (four Transformers, one per splice site region) is a principled response to the biological structure of splicing regulation. The ablation study (Table 2) quantitatively confirms that removing pretraining (noPre), features (noFeat), or replacing Transformers with LSTMs (wLSTM) degrades performance, providing solid evidence that the architectural choices matter.
+- **TrASPr achieves strong predictive performance on tissue-specific splicing tasks.** On the MGP dPSI dataset, TrASPr consistently outperforms the AE+MLP feature-based model from Jha et al. (2017) on AUPRC across multiple tissue pairs (Table 1, Figure 3). The advantage is demonstrated under the same train/test splits used by prior work, providing a fair within-methodology comparison.
 
-2. **Strong performance on dPSI prediction against a relevant feature-based baseline.** On the MGP dataset, TrASPr significantly outperforms the AE+MLP model (Jha et al., 2017) in AUPRC for both differentially included and excluded events (Figure 3, Table 1), using the same train/test splits. This comparison is apples-to-apples and represents a genuine improvement over a curated-feature approach.
+- **Experimental validation against orthogonal biological data.** TrASPr is tested against ENCODE RBP knockdown experiments (3 RBPs, 2 cell lines), correctly predicting the direction of splicing change for over 50% of targets (p=0.0001, Figure 4c). It also correctly predicts 7/9 mutations in the Daam1 minigene reporter assay (p=0.0012, Figure 5a). These tests go beyond simple held-out metrics and probe whether the model captures real regulatory mechanisms.
 
-3. **Independent experimental validation on held-out perturbation data.** TrASPr correctly predicts the direction of splicing changes for RBP knockdowns in ENCODE data (>50% direction accuracy, p=0.0001) and 7/9 mutations in Daam1 minigene reporter assays (p=0.0012) — both independent, biologically grounded evaluations that go beyond simple held-out prediction.
+- **Ablation studies convincingly justify the architectural choices.** Table 2 shows that removing pretraining (noPre) severely degrades regression metrics, removing side features (noFeat) degrades prediction values, and replacing the transformers with bidirectional LSTMs (wLSTM) causes dramatic performance loss across all metrics. This substantiates the claim that each component — pretraining on splice sites, transformer attention, and side features — contributes meaningfully.
 
-4. **BOS generates biologically interpretable mutations.** The BOS algorithm preferentially mutates core splice sites and known RBP regulatory motifs (TIA1, PTBP1, QKI) rather than neutral regions (Section 4.4, Figures 5b–5c), suggesting the generated sequences are realistic and biologically plausible.
-
-5. **Formulation of a new constrained splicing design problem.** The paper explicitly defines the optimization task with Levenshtein distance and tissue-specific outcome constraints (Equation 1), framing a practical biomedical problem (ASO targeting, prime editing) that is novel and potentially impactful.
+- **Careful handling of data leakage and long-range context.** The paper hides entire chromosomes for testing and applies similarity filters to avoid leakage from paralogs/orthologs (Section 2). The four-transformer design allows the model to handle variable-length regulatory regions that can span far beyond the fixed 10 Kb window of prior CNN models like Pangolin and SpliceAI.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Pangolin comparison is uncharitable and likely not apples-to-apples.** The paper reports TrASPr achieving Pearson 0.81 vs. Pangolin's 0.17 on GTEx PSI prediction — an extraordinarily large gap that far exceeds any reasonable model improvement. The paper adapts Pangolin by feeding splice site predictions and averaging, but this adaptation is **not validated**. Pangolin was designed to predict splice usage at individual genomic positions from a 10kb window, not to quantify cassette exon inclusion. The paper's own explanation — that the large gap "might be because... relevant sequence context is outside the 10kb window" — acknowledges the mismatch. Without showing that Pangolin can be fairly applied to this task or comparing on Pangolin's own evaluation protocol (tissue-specific splice usage prediction), the claim that TrASPr achieves "state-of-the-art" PSI prediction is not convincingly supported. This weakness is partially mitigated by the paper's other evidence (MGP comparisons, RBP KD, Daam1) but the headline SOTA claim rests heavily on this comparison.
+- **The Pangolin comparison (Section 4.1, Figure 2) is unreliable and should not be used to support a state-of-the-art claim.** Pangolin was designed to predict "splice usage" from a 10 Kb window, not the PSI of a specific cassette exon. The paper feeds it only the splice sites of each cassette exon and averages two scores — a procedure validated nowhere in the Pangolin paper. The reported gap (0.81 vs 0.17) is so large that it demands a fair comparison, and the current one does not provide it. The paper is transparent about the adaptation, but the result is nonetheless misleading when presented as evidence of state-of-the-art performance. **The authors should either drop this comparison or replace it with a properly matched baseline (e.g., train a SpliceAI-style model on the same data and task).** The AE+MLP comparison (MGP data) provides independent support for TrASPr's value and should be foregrounded instead.
 
-2. **BOS evaluation is circular and does not demonstrate RNA design.** The paper acknowledges this limitation explicitly ("Note that here we assume the Oracle is correct and only assess the ability to efficiently generate candidate sequences," Section 4.4), which is commendable. However, this means BOS is evaluated entirely against the same model (TrASPr) that it uses as an oracle. The baselines (random mutation, genetic algorithm) are also evaluated against the same oracle, so the comparisons are internally consistent but tell us nothing about whether the designed sequences would produce the desired splicing outcome in vivo. The paper frames BOS as a sequence design method (abstract: "we demonstrate BOS can more effectively mutate a given sequence"), but the actual contribution is an algorithm that optimizes a model's predictions. Without wet-lab validation or at minimum validation against held-out experimental ground truth (e.g., the Daam1 data), the design claim is premature.
+- **Data leakage concern in the AE+MLP comparison (Section 4.1, Table 1).** When applying a stricter filtering criterion, TrASPr's performance degrades while AE+MLP's improves. The paper explains this by noting that filtered events had labels correlated with similar training samples, giving TrASPr an advantage that AE+MLP (using predefined features) could not exploit. This explanation is reasonable but the paper provides no quantitative support — no histogram of sequence identity between train and test, no characterization of the 2,354 additionally excluded events. Without this analysis, the concern that TrASPr is partially memorizing local sequence patterns rather than learning generalizable regulatory rules remains unresolved. **The authors should report the distribution of max sequence identity between train and test under both filter levels.**
 
 ### Minor
 
-1. **Data leakage concern on MGP under strict filtering.** When stricter filtering is applied to remove test exons similar to training exons, TrASPr's performance degrades while AE+MLP improves (Section 4.1). The paper explains this as TrASPr benefiting from correlated labels in similar samples while AE+MLP, using predefined features, does not. However, this pattern is consistent with TrASPr exploiting non-causal correlations rather than learning generalizable regulatory principles. The paper presents the standard filtering as primary and mentions the stricter result only in passing, but this pattern warrants deeper investigation and a clearer statement of what it implies about generalization.
+- **BOS evaluation is circular and provides no evidence of biological validity (Section 4.4).** As the paper acknowledges ("we assume the Oracle is correct and only assess the ability to efficiently generate candidate sequences"), BOS uses TrASPr as its oracle and then evaluates against TrASPr's own predictions. The comparison to random mutation and genetic algorithm measures only optimization efficiency against this oracle, not whether the designed sequences would produce the intended splicing changes in a biological system. The paper's framing of BOS as a co-equal contribution alongside TrASPr is overstated; it is an in silico proof-of-concept awaiting experimental validation. The authors should scale back BOS claims and explicitly call for experimental testing.
 
-2. **Missing implementation details hinder reproducibility.** Several architecture and training details are underspecified: (a) the value of k in "mask the surrounding k tokens" is never given; (b) whether the four Transformers T¹…T⁴ share weights or are separate is ambiguous from the phrase "matching pre-trained transformer"; (c) the VAE latent dimensionality and KL regularization are not specified; (d) how continuous PSI/dPSI targets are binned for cross-entropy loss is not described (the paper states cross-entropy "performed better than regression" without showing the comparison); (e) no code, model weights, or data are mentioned for release. These gaps make independent verification difficult.
+- **Unspecified weight sharing among the four transformers (Section 3.1.2).** The paper describes "a matching pre-trained transformer T^i" for each of the four splice-site regions but never states whether these four transformers share weights (same pretrained checkpoint, fine-tuned jointly) or are entirely separate instances. This affects both model size and the interpretation of fine-tuning dynamics. The notation T^i and the phrase "utilizing several Transformers each focused on a specific region" suggests separate instances, but this should be stated explicitly.
 
-3. **RBP KD results are modest.** The dPSI correlation of 0.34 (p=0.0192) is weak, and the model misses roughly half of negative-direction cases (Figure 4c). The paper reports "over 50%" direction accuracy — this is statistically significant but not strong. Precision and recall are not reported. The systematic failure on both negative-direction Daam1 mutations in region 11 (Figure 5a) suggests the model has a blind spot for repressive elements in that region that goes unexplained.
+- **BOS VAE training details are absent.** The paper states the VAE uses a "6 layer Transformer encoder and 6 layer Transformer decoder" (Section 3.2) but provides no information about latent dimensionality, training epochs, batch size, learning rate, tokenization scheme for the VAE, or how variable-length sequences are handled (the paper notes sequences can span "many kilo-bases" but each transformer processes 400-base windows). These details are necessary for reproducibility.
 
-4. **BOS baselines are weak.** The genetic algorithm baseline is taken from Sample et al. (2019), originally designed for 5' UTR design, not splicing. A more relevant baseline would be a simple VAE with random latent sampling, or direct evolutionary search on the sequence. Additionally, the success threshold (dPSI > 0.2) is arbitrary with no sensitivity analysis.
+- **ENCODE RBP KD correlation is modest.** The reported Pearson r for dPSI effects is 0.34 (p=0.0192), and approximately half of the negative-direction cases (decreased inclusion after KD) are predicted as "no change" (Figure 4c). The paper describes this as "performed well," which overstates the evidence. This does not undermine the contribution but should be characterized more accurately.
 
 ### Trivial
 
-- The paper states "over 50%" correctly called changes for RBP KD without reporting the exact number or precision/recall.
-- The constraint Ψ ≥ 0.05 for non-target tissues is stated without justification or sensitivity analysis; the paper's justification ("prevents destroying splicing") is reasonable but a sensitivity check would strengthen it.
+- **Daam1 region 11 blind spot.** Both minigene misses occur in the same region (region 11), suggesting a systematic blind spot rather than random noise. The paper notes this but does not offer a potential explanation. Worth investigating but does not affect the core results.
 
 ## Nice-to-Haves
 
-- Analysis of the VAE's reconstruction accuracy (perplexity, sequence-level reconstruction rate) and latent space quality, since BOS depends on the decoder's ability to produce meaningful sequences.
-- Quantitative comparison to MT-Splice or a discussion of why it is not comparable.
-- Sensitivity analysis on the BOS constraint parameters (Ψ ≥ 0.05, τ = 30).
-- Post-hoc in silico validation of BOS using the Daam1 minigene data: would BOS-designed mutations in region 11 produce the experimentally observed decreased inclusion?
+- An ablation comparing TrASPr's splice-site pretraining against a generic RNA language model pretrained on the same data would strengthen the claim that the pretraining strategy is specialized and beneficial.
+- For BOS, an analysis of which known RBP regulatory motifs (from ATtRACT or RBPDB) appear in the mutated regions would improve the biological plausibility of the designs without requiring wet-lab validation.
+- A histogram of max sequence identity between training and test sets under both filter levels would cleanly resolve the data leakage concern.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **Missing table values (Table 1, Table 2 content not visible):** Parser issue — figures/tables embedded as images in the PDF are not extracted in the plain text. The original submission contains them. Removed per "missing appendix/sections" rule.
-- **"Code and data not released" characterization as fatal flaw:** This is a valid concern but not fatal in isolation; moved to Minor #2.
-- **"Explicit comparison to MT-Splice" demand:** The paper compares against the most relevant baselines (Pangolin, AE+MLP) and discusses MT-Splice as related work. Demanding additional baselines beyond what the paper's scope warrants.
-- **"The 0.05 constraint is arbitrary and biologically unmotivated":** The paper provides a reasonable justification. This is a minor point, subsumed under Trivial.
-- **"The paper should analyze VAE reconstruction accuracy":** A reasonable suggestion but not a weakness — moved to Nice-to-Haves.
-- **Generic formatting/style nitpicks from the harsh critic:** Removed per formatting rules.
-- **"BOS should be compared to a simple VAE with random latent sampling":** A valid suggestion but the comparison to random mutation and GA is sufficient for a first presentation; moved to Nice-to-Haves.
+- The reviewer's concern that "the AE+MLP model's improvement under stricter filtering... is a red flag that the 'standard' filter may be too permissive" is noted but retained as a Major weakness (it is a legitimate concern, though the paper provides a reasonable explanation). What is removed: the framing of this as definitively indicating leakage, since the paper's counter-explanation is coherent.
+- The reviewer's framing that "the Pangolin benchmark inflates TrASPr's reported advantage and misleads readers about the field's baseline" is accurate and retained. However, the suggestion to "drop this comparison entirely" is softened to a Major weakness rather than a fatal flaw, since the AE+MLP comparison provides independent support.
+- The reviewer's request for "experimental validation of BOS-designed sequences (even a single minigene assay)" is moved to Nice-to-Haves; it would strengthen the paper but is a scope expansion, not a flaw in what was demonstrated.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews identify structural evaluation gaps (particularly the Pangolin comparison and BOS circularity) that are noted by the authors themselves to varying degrees, but do not introduce new technical insights about the method.
+None beyond the paper's own contributions. The reviews do not surface a perspective absent from the paper itself.
 
 ## Suggestions
 
-1. **Fix the Pangolin comparison.** Either validate the adaptation (e.g., show that Pangolin's averaged splice-site predictions correlate reasonably with ground-truth PSI on a subset), or drop the SOTA claim and instead use a fairer baseline (e.g., retrain SpliceAI or Pangolin on the same cassette-exon task). Alternatively, reframe the comparison as "TrASPr achieves stronger PSI prediction than the best available alternative adapted to this task, with caveats."
-
-2. **Reframe BOS explicitly.** Rename the contribution from "RNA sequence design" to "model-based optimization of splicing outcomes" or add a limitations subsection that prominently states that BOS optimizes TrASPr's predictions and has not been experimentally validated. The abstract and introduction should match this more cautious framing.
-
-3. **Address the strict-filtering MGP result.** Either show that TrASPr's advantage holds under stricter filtering with a different explanation, or add an explicit discussion of what the degradation implies about the model's learning biases.
-
-4. **Release code and pretrained models.** As a computational paper whose contributions are architectural, this is essential for community impact and verifiability.
-
-5. **Report confidence intervals / error bars** for main results (at minimum the PSI correlations and ablation metrics) based on multiple train/test splits or bootstrap resampling.
+1. **Replace or properly qualify the Pangolin comparison.** Either drop it entirely and rely on the AE+MLP comparison plus ablation studies, or add a properly trained SpliceAI-style model on the same task as a baseline.
+2. **Quantify the data leakage concern.** Report a histogram of max percent sequence identity between training and test events under both "standard" and "stringent" filtering to show whether the additionally excluded events are enriched for near-duplicates.
+3. **Clarify the TrASPr architecture.** State explicitly whether the four transformers share weights or are separate instances, and specify the actual genomic span of the four 400-base windows.
+4. **Add BOS VAE training details.** Report latent dimensionality, training epochs, batch size, and how variable-length sequences are handled.
+5. **Reframe BOS as an in silico proof-of-concept** rather than a co-equal contribution, and add an explicit call for experimental validation in the discussion.
+6. **Tone down the characterization of the ENCODE results** (r=0.34) to match the evidence.
 
 ## Score and Decision
 
-The paper introduces interesting methodology — the multi-Transformer architecture for splicing is well-motivated and the ablation study confirms its value. The independent validation on RBP KD and Daam1 data is a genuine strength. However, two structural issues prevent the paper from making its case convincingly. First, the headline claim of state-of-the-art PSI prediction rests on a Pangolin comparison that is likely not apples-to-apples, overstating the result. Second, the BOS "design" contribution is evaluated circularly and its framing exceeds what the evidence supports. These are not fatal — the underlying methodology has merit — but they require substantial revision to the claims and evaluation. The missing implementation details further weaken verifiability.
+The paper makes a genuine contribution with TrASPr — a well-motivated architecture for tissue-specific splicing prediction, supported by ablation studies and multiple validation datasets. The BOS component is interesting but preliminary and circularly evaluated. The Pangolin comparison is the main weakness that inflates the claimed contribution, but it is not the only evidence of TrASPr's value. The data leakage concern is plausible but the paper provides a reasonable (if unquantified) explanation. With revisions to the Pangolin comparison, BOS framing, and reproducibility details, this would be a solid contribution to the splicing code literature.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

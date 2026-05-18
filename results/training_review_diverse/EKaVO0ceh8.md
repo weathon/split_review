@@ -1,92 +1,88 @@
-Now I have all the information I need. Let me compile the final consolidated review by carefully cross-referencing each claim against the paper.
-
-**Verified facts from the paper:**
-
-1. **Line 117**: "The tree system produced by this construction has a chain-like tree structure" — the paper **does** acknowledge the chain structure.
-2. **Line 230**: "The splitting maps α will be selected either as a trainable constant vector or a random vector" — no ablation of α is presented.
-3. **Lines 247-249**: "Over 2500 timesteps, we evaluate the Wasserstein distance between source and target distributions" — "Wasserstein distance" is the generic name; the paper does not specify whether this is the true Wasserstein-2 or each method's own metric.
-4. **Line 263**: "We report the Wasserstein distances at the final time step along with the corresponding transferred images from various baselines Figure 5" — quantitative results ARE reported for color transfer.
-5. **Lines 269-270, 277-279**: GAN experiments use FID/IS (independent metrics); diffusion experiments use FID.
-6. **Line 230**: The paper explicitly states "focusing mainly on comparing TSW-SL with the original SW, without expecting TSW-SL to outperform more recent SW variant."
-
----
+Now I have all the information I need. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes Tree-Sliced Wasserstein distance on Systems of Lines (TSW-SL), which generalizes Sliced Wasserstein (SW) by replacing one-dimensional projection lines with tree-structured systems of lines. The authors define tree systems as connected collections of lines with a tree metric, develop a Radon transform on systems of lines, prove its injectivity, and derive a closed-form Wasserstein computation at SW-equivalent cost. Experiments on gradient flows, color transfer, GANs, and denoising diffusion models show consistent improvements over standard SW.
+The paper proposes Tree-Sliced Wasserstein on Systems of Lines (TSW-SL), a generalization of Sliced Wasserstein that replaces one-dimensional projection lines with tree-structured systems of intersecting lines. The key technical innovations are: (1) defining tree systems as metric spaces with tree metrics (enabling closed-form Wasserstein-1 computation), (2) introducing a Radon transform on systems of lines with provable injectivity, and (3) the TSW-SL distance itself with claimed matching complexity to SW. Experiments on gradient flows, color transfer, GANs, and diffusion models show consistent improvements over vanilla SW.
 
 ## Strengths
 
-- **Novel theoretical framework generalizing SW to tree-structured domains.** The paper formally defines tree systems (connected systems of lines with tree metrics — Theorem 3.2), introduces a Radon transform on systems of lines (Definition 4.1), and proves its injectivity (Theorem 4.2). This provides a principled generalization of the one-dimensional line in SW to richer geometric structures while preserving closed-form OT computation via the tree-metric Wasserstein formula (Equation 12).
+1. **Novel tree-structured projection domain enabling closed-form OT.** The paper replaces 1D lines with tree systems—connected sets of lines equipped with a tree metric. Theorem 3.2 proves each tree system is metrizable by a tree metric, and Equation (13) gives a closed-form Wasserstein-1 expression on that metric. This directly addresses a key limitation of SW (loss of topological information from 1D projection) while preserving computability.
 
-- **Closed-form Wasserstein computation at SW-equivalent cost.** The paper derives a closed-form expression for the Wasserstein distance on tree systems and shows the time complexity is O(L k n log n + L k d n), matching SW when using the same total number of projection directions (Remark after Equation 12). This is a concrete advantage over methods that sacrifice closed-form tractability.
+2. **Generalized Radon Transform with injectivity.** Definition 4.1 introduces a Radon transform on systems of lines, parameterized by splitting maps α. Theorem 4.2 proves injectivity of this transform, generalizing the classical Radon transform. This is a genuine theoretical contribution independent of the specific application.
 
-- **Consistent empirical outperformance in generative settings with independent metrics.** TSW-SL achieves substantially better FID/IS scores in GANs (Table 3: CelebA FID 12.84 vs. 17.97 for SW with 500 directions) and improves FID in denoising diffusion (Table 4: CIFAR-10 FID 9.23 vs. 12.66 for SW). These improvements are measured with standard independent metrics (FID, IS), not the proposed distance itself, providing credible evidence of practical value.
+3. **Consistent empirical improvement over SW across diverse tasks.** In gradient flows (Tables 1–2), the method reduces Wasserstein distance vs. SW; in GANs (Table 3) it improves FID/IS on CelebA and STL-10; in diffusion models (Table 4) it outperforms SW and several SW variants on CIFAR-10. The improvements appear consistent across settings.
 
-- **Theoretical properties: injectivity and reduction to SW.** Theorem 4.2 proves the Radon transform on systems of lines is injective for any splitting map — a fundamental property ensuring TSW-SL is a valid metric (Theorem 5.2). The framework reduces to standard SW when k=1 (Remark after Theorem 5.2), showing it is a natural generalization.
+4. **Explicit construction algorithm (Algorithm 1) and Monte Carlo estimation (Algorithm 2).** The paper provides concrete, implementable procedures for sampling tree systems and computing TSW-SL, making the method readily usable in existing SW-based pipelines.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **No ablation of the splitting map α.** The splitting map α ∈ C(R^d, Δ_{k-1}) determines how mass at each point is distributed across the k lines. In practice, α is either a trainable constant vector or a random vector (Section 6, first paragraph). This introduces a degree of freedom absent from SW baselines. Since no experiment compares TSW-SL with a fixed uniform α against TSW-SL with a learned α, the contribution of the tree structure per se is not disentangled from the tuning of α. The empirical improvements could partly stem from this additional flexibility rather than from the tree geometry. An ablation controlling for α is needed to attribute gains to the tree structure.
+1. **Underspecified splitting map α undermines interpretability of all experiments.** The paper states only that α is "selected either as a trainable constant vector or a random vector" (Section 6). It does not specify: which experiments use which variant, the distribution of the random vector, whether α is optimized per task, or how its parameters are chosen. Since α controls how mass is distributed across the k lines of each tree system, the source of empirical improvement over SW is ambiguous. TSW-SL could outperform SW because the tree structure captures more topological information, or because α provides additional degrees of freedom that are optimized per task (effectively an unfair advantage over fixed-projection SW). This ambiguity is the single largest obstacle to evaluating the paper's empirical claims. *Impact: Without specifying α per experiment, the core empirical results cannot be properly interpreted.*
 
-- **Uncertainty estimates are missing across all experiments.** Tables 1–2 report averages over 10 runs but no standard deviations. Table 3 reports averages over 3 runs but no standard deviations. Given the known variance of GAN and diffusion training, this omission makes it difficult to assess whether the reported improvements are statistically significant.
+2. **Gap between the injectivity theorem and the metric property of TSW-SL.** Theorem 4.2 proves injectivity of the full Radon transform R^α over *all* systems of lines L∈L_k^d. However, TSW-SL integrates only over tree systems sampled from a specific distribution σ (which the paper acknowledges produces only chain-like trees). For TSW-SL to be a metric, one needs that the *restricted* map μ → E_{L∼σ}[δ_μ^L] is injective — i.e., that equality of the projected measures for σ-almost every sampled tree system implies equality of the original measures. The paper does not address whether injectivity for all L∈L_k^d implies injectivity for the expectation under σ, nor does it provide additional arguments for the restricted domain. Theorem 5.2's claim that TSW-SL is a metric therefore rests on incomplete justification. *Impact: A central theoretical claim is not fully supported.*
+
+3. **Mismatch between claimed generality (tree systems) and actual implementation (chain-like trees).** The paper's title, abstract, and theoretical development (Sections 3–4) discuss general tree systems with arbitrary topology. However, the construction in Section 3.3 and Algorithm 1 explicitly produces only *chain-like* trees where line i intersects line i+1 sequentially — no branching or non-chain topology is sampled. All experiments use this chain construction (k=3–5). While the paper acknowledges this ("chain-like tree structure," line 117), the framing throughout claims generality to "tree systems." The theoretical framework genuinely supports arbitrary trees, but the paper's practical contribution is a chain-of-lines projection. This discrepancy means the claimed advantage over using multiple independent 1D lines is not clearly separated from simply using more projection directions. *Impact: The paper's scope is narrower than advertised; the reader cannot evaluate whether the tree metric itself or merely having more projection directions drives improvement.*
 
 ### Minor
 
-- **Gap between the general theoretical framework and the restricted practical construction.** The paper's theory (Sections 3–5) discusses general tree systems with arbitrary topologies, but Algorithm 1 generates only chain-like tree systems (line 117: "chain-like tree structure"). While the paper acknowledges this explicitly, it does not discuss whether the metric property (Theorem 5.2) — which depends on the distribution σ over tree systems — is guaranteed to hold for this restricted class. The injectivity of the Radon transform (Theorem 4.2) concerns the operator over ALL systems of lines (L_k^d), but the metric claim for TSW-SL depends on whether the sampled space T (chain systems only) has sufficient support to separate measures. The paper should either (i) prove that chain systems suffice for the metric property, (ii) provide a more general sampling algorithm, or (iii) qualify the metric claim for the implemented subclass.
+4. **Computational complexity analysis omits tree Wasserstein computation cost.** The paper claims O(L k n log n + L k d n) complexity (Section 5.2 Remark), asserting it matches SW. This counts projection and per-line sorting. However, computing the tree Wasserstein (Equation 13) requires mapping projected points onto the tree Ω_L and summing weighted differences over edges. For a chain of k lines, this adds overhead that is modest for k=3–5 but not accounted for in the asymptotic analysis. The claim of equivalent complexity to SW is slightly overstated as presented. *Impact: Minor — the practical difference for small k is small, but the analysis should be honest about what is included.*
 
-- **Ambiguity about the evaluation metric in gradient flow experiments.** Tables 1–2 report "Average Wasserstein distance" but do not specify whether this is the true Euclidean Wasserstein-2 distance (an independent evaluation metric) or each method's own loss. If each method is evaluated on its own loss, the comparison is circular — each method would naturally achieve the lowest value on its own metric. Given standard practice, it is likely the true W_2 is reported, but the paper should clarify this explicitly.
-
-- **No wall-clock runtime comparison.** The paper claims equivalent complexity to SW but does not report actual wall-clock times. Given the additional steps (mass splitting, tree-metric summation), a practical runtime comparison would confirm that the theoretical complexity bound translates to practice.
+5. **Notation ambiguity between measure and density views.** The paper defines "probability distributions on L" as functions f∈L^1(L̅) with ||f||_L=1 (a density), but then works with discrete measures and uses the same notation for both views. The paper acknowledges this (line 177) but the switch can confuse readers, especially around Equation (13) where ℛ_ℒ^α μ(Γ(v_e)) requires integrating the projected density over a subtree but is applied to discrete measures. *Impact: Minor — does not affect correctness but harms readability.*
 
 ### Trivial
-- The paper uses "Wasserstein distance" generically without specifying the exponent (p=1 or p=2) in the gradient flow evaluation, which would help reproducibility.
+
+6. **No comparison with a simple "independent multiple lines" baseline.** The paper compares TSW-SL (e.g., 25 trees × 4 lines = 100 lines) against SW (100 lines). A more controlled baseline would be SW on 100 independent lines plus a post-hoc merging step without tree structure. This would isolate whether the tree metric itself drives gains. The critic's suggestion for this comparison is well-taken but the omission is not fatal.
+
+7. **Missing ablation on k (number of lines per tree).** The paper uses k=3–5 in experiments but never studies how performance changes with k at a fixed total line count. Understanding the trade-off between tree complexity (k) and number of Monte Carlo samples (L) would strengthen the paper.
 
 ## Nice-to-Haves
 
-- **Ablation with uniform α.** Fix α(x)_l = 1/k for all x and repeat the main experiments to isolate the effect of the tree structure from the effect of the learnable α.
-- **Comparison against tree Wasserstein on a single fixed tree.** This would isolate whether the benefit comes from using multiple tree systems versus the tree structure itself.
-- **Sensitivity analysis for k** (number of lines per tree system). The experiments use k=4 or k=5 without justification; a sweep over different k values would illuminate the role of tree system size.
-- **Proving injectivity or metric property for chain-like tree systems specifically**, if not already done in the deferred appendix.
+- A controlled experiment with *fixed uniform* α (α(x)_l = 1/k) would isolate the benefit of the tree structure from the benefit of optimizing α. This is the most informative single experiment the authors could run.
+- An ablation varying k (lines per tree) while keeping total lines L×k constant would help understand the role of tree complexity.
+- A comparison against independent multiple lines (SW with L×k projections, no tree structure) would test whether the tree metric itself provides benefit over just having more projection directions.
+- Brief qualitative comparison with tree-based Wasserstein approaches (Le et al., 2019, already cited as background) would help position the contribution relative to tree OT literature.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviewers were identified as not valid weaknesses and are listed here only for completeness:
 
-1. **"The paper never acknowledges this gap [chain vs. tree]."** — Removed. The paper explicitly states at line 117: "The tree system produced by this construction has a chain-like tree structure." The paper does acknowledge the limitation. The deeper concern about the metric property is preserved in Minor above.
-
-2. **"The metric property is unlikely to hold for the restricted set of tree systems used in practice."** — Removed as stated. This is a speculative claim made without proof. The paper's proof is deferred to the appendix (Theorem B.1), which we cannot evaluate. The critic does not demonstrate that the claim is false. The legitimate concern about the theory-practice gap is preserved in Minor.
-
-3. **"No quantitative metric [for color transfer]."** — Removed. The paper states at line 263: "We report the Wasserstein distances at the final time step." Quantitative results are reported, contradicting this criticism.
-
-4. **"Gradient flow evaluation uses the loss value itself (circular)."** — Removed as stated. The paper says "evaluate the Wasserstein distance" (line 247) without specifying which Wasserstein distance, but standard practice in the SW literature is to evaluate the true Euclidean Wasserstein-2 as an independent metric. The ambiguity concern is preserved in Minor.
-
-5. **"GAN comparison incomplete — missing MaxSW, SWGG, LCVSW baselines."** — Weakened to a Nice-to-Have. The paper explicitly scopes itself (line 230): "focusing mainly on comparing TSW-SL with the original SW, without expecting TSW-SL to outperform more recent SW variant." This is a defensible scope choice, not a methodological gap.
-
-6. **"Diffusion baselines comparison is vague."** — Removed. The paper references "baselines in (Nguyen et al., 2024b)" which is standard citation practice.
-
-7. Various formatting/style/strawman nitpicks from the critic's section-by-section notes that do not affect the core contribution.
+- **"Caveat vs. results contradiction"** — The critic claimed the paper's modest caveat ("without expecting TSW-SL to outperform more recent SW variants") is undercut by the strong results. This is not a weakness; the paper is simply being cautious, and the fact that results exceed expectations is a positive. *Removed as not a weakness.*
+- **"Probability distribution definition conflates densities and measures"** — The definition (f∈L^1(L̅), f≥0, ||f||_L=1) is standard notation for densities representing absolutely continuous measures. The paper separately handles discrete measures, which is standard practice. *Removed as a non-issue.*
+- **Generic strengths from Strength Finder that conflict with verified weaknesses** — The claim that "TSW-SL is a metric with the same computational complexity as SW" is partially undermined by the injectivity gap (Weakness 2) and the complexity omission (Weakness 4). These caveats are reflected in the weaknesses above.
+- **"Missing related work on tree-based Wasserstein"** — The paper already cites Le et al. (2019) for tree Wasserstein. The critic's suggestion for broader comparison is moved to Nice-to-Haves. *Removed per instruction not to mention missing related works.*
 
 ## Novel Insights
 
-The most interesting observation emerging from the reviews is that the theory-practice gap in this paper is the reverse of the usual direction: the theory is genuinely general (arbitrary tree topologies, arbitrary k lines), but the implemented sampling algorithm (Algorithm 1) only generates chain-like structures. This raises the question of whether the chain subclass is already sufficient for the metric property — a question the paper does not address but which, if answered affirmatively, would make the paper's contribution more impactful (because it would show that a very simple construction suffices for the full theoretical benefit). Conversely, if chain systems are insufficient, the paper needs a new algorithm. This tension, and the missing α ablation, are the paper's two most actionable improvement points.
+The most novel observation from synthesizing the reviews is that the paper's theoretical contribution (general tree systems) and practical contribution (chain-like trees) are decoupled to an unusual degree. The Radon transform and injectivity proof work for arbitrary tree topologies, but the actual algorithm and experiments only use linear chains. This suggests a two-tier publication strategy: the theoretical framework (Sections 3–4) could stand as a separate contribution, while the empirical method (Section 5–6) is properly a "Chain-Sliced Wasserstein" that happens to use tree metric computation as a subroutine. Connecting these tiers more honestly would strengthen the paper.
 
 ## Suggestions
 
-1. **Ablate the splitting map:** Run the main experiments with α fixed to uniform (1/k) and compare against the trainable/random α version. Report both in the same table.
-2. **Clarify the evaluation metric in gradient flows:** State explicitly that the reported "Wasserstein distance" is the Euclidean Wasserstein-2 distance, computed independently of the loss.
-3. **Add standard deviations** to all tables reporting averages over multiple runs (Tables 1–3).
-4. **Discuss the chain limitation directly** in the main text (currently it is mentioned only in passing at line 117). Specifically, address whether the metric property (Theorem 5.2) is proven for T as defined (chain systems from Algorithm 1) or only for the unrestricted space L_k^d.
-5. **Report wall-clock times** for TSW-SL vs. SW to verify the complexity claim empirically.
+1. **Specify α for every experiment.** For each table/figure, state whether α is fixed uniform, fixed other, random (and its distribution), or trainable (and how it is optimized). This is the single most critical missing piece.
+
+2. **Run an ablation with fixed uniform α (α_l = 1/k).** This isolates the tree structure benefit from the α optimization benefit and provides a fair comparison to standard SW.
+
+3. **Address the injectivity → metric gap.** Either provide additional arguments showing that the restricted Radon transform over the sampled distribution σ is injective, or note this as a limitation of Theorem 5.2 and reframe the metric claim conditionally.
+
+4. **Rename or reframe to match scope.** Either extend the sampling algorithm to support branching tree topologies, or retitle the method to something like "Chain-Sliced Wasserstein" and adjust the theoretical framing to match the chain construction.
+
+5. **Revise the complexity analysis** to account for tree Wasserstein computation, and include empirical runtime comparisons that scale with k and n.
+
+6. **Add a baseline with independent multiple lines** (SW with L×k projections, no tree structure) to better isolate the benefit of the connected tree structure.
 
 ## Score and Decision
 
-This paper makes a genuinely novel theoretical contribution — generalizing SW to tree-structured systems of lines with an injective Radon transform and closed-form computation — and provides empirical validation across multiple tasks. The GAN and diffusion results (using standard independent metrics FID/IS) are credible evidence of practical value. However, two issues prevent stronger confidence: (1) the splitting map α is not ablated, leaving the source of empirical gains unclear, and (2) the evaluation metric in gradient flows needs clarification to rule out circularity. The theory-practice gap (chain-only construction vs. general tree theory) is acknowledged but its implications for the metric property are not discussed. These are all addressable in revision.
+**Originality:** 7/10 — The tree-structured projection domain is a genuinely novel generalization of SW. The Radon transform variant is new.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Importance of research question:** 7/10 — Improving SW's topological capture is an important direction given SW's widespread use.
+
+**Claims support:** 4/10 — The α underspecification and the injectivity gap mean central empirical and theoretical claims are not fully supported.
+
+**Soundness:** 5/10 — The theoretical framework is sound in its general form, but the connection to the practical method has gaps. The empirical methodology has an unresolved ambiguity.
+
+**Clarity:** 6/10 — The paper is generally well-structured but the α specification is critically unclear.
+
+**Value to community:** 6/10 — The core idea is valuable, but the paper needs tightening before the community can rely on its claims.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

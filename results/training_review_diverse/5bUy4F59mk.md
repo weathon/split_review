@@ -1,18 +1,18 @@
-Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes **Tool Decoding**, a training-free decoding-time method for improving LLM tool usage. It combines **constrained decoding** (to enforce format correctness and valid tool/parameter-key selection) with **order consistency** (multiple parameter-order samples aggregated via majority voting to improve parameter-value accuracy). The method is motivated by a fine-grained error analysis decomposing tool usage into awareness, selection, and call stages. Evaluated on API-Bank and BFCL V2 Live across 10+ models, the method reports substantial gains over greedy and beam search baselines.
+This paper identifies mismatches between standard language generation and the precise demands of tool calling in LLMs. Through a fine-grained error analysis across three stages (tool awareness, selection, call), it shows that selection errors, format violations, and parameter mis-assignments dominate failures. The authors propose **Tool Decoding**, a training-free method combining (1) constrained decoding that restricts token generation to valid tool names, formats, and parameter keys, and (2) order consistency that samples tool calls with shuffled parameter orders and applies majority voting to reduce value errors. Experiments across 10+ models on API-Bank and BFCL V2 Live show consistent large gains (often >70% relative improvement), with several 7B-level open models surpassing GPT-3.5 and two exceeding GPT-4.
 
 ## Strengths
 
-- **Training-free plug-and-play design validated across diverse models.** The method requires no fine-tuning, uses only tool documentation to extract constraints, and is demonstrated on more than 10 models spanning generalist, code, long-context, and tool-finetuned variants (Figure 5). This is a genuine practical advantage over approaches requiring tool-specific training.
+1. **Novel, well-motivated, training-free framework.** The paper grounds its method in a systematic error analysis (Section 2) that reveals three dominant error types — selection, format, and value errors — each directly addressed by a specific decoding strategy. The training-free, plug-and-play nature is a clear practical advantage over fine-tuning approaches, demonstrated across a diverse set of >10 models including generalist, code, and tool-finetuned models (Figure 5).
 
-- **Fine-grained error analysis that systematically identifies failure bottlenecks.** The paper decomposes tool usage into three stages (awareness, selection, call) and further splits call errors into format, key, and value errors (Table 1, Figure 3). This breakdown — and the finding that selection, format, and value errors dominate — directly motivates the two components of Tool Decoding. The analysis goes beyond the coarse error categories in prior benchmark papers.
+2. **Consistent and large performance improvements across all models, including very weak ones.** On API-Bank, models like deepseek-coder-6.7b-base and xLAM-7b-r surpass GPT-4 with Tool Decoding; on BFCL V2 Live, five 7B-level models outperform GPT-3.5 (two approach GPT-4). The gains are not cherry-picked — the paper reports improvements exceeding 70% for nearly all models on both benchmarks (Sections 1, 4.2). Notably, models like Yi-1.5-6b and Yi-Coder-1.5b, which achieve near-zero accuracy with standard decoding, improve substantially with Tool Decoding, demonstrating robustness for resource-constrained settings.
 
-- **Order consistency component is validated by a clear ablation.** Table 4 shows that increasing the order-consistency sampling budget (oc limit) monotonically reduces value errors across four models. Table 2 further confirms that majority voting across multiple parameter orders outperforms the best single order. This isolates the incremental contribution of order consistency over constrained decoding alone.
+3. **Constrained decoding effectively eliminates format and key errors; order consistency demonstrably reduces value errors.** The error decomposition (Figure 6) shows format and key errors drop to near zero for all tested models, while selection errors are substantially reduced. The ablation (Table 4) shows a clear positive correlation between the number of sampled parameter orders (oc limit) and value error reduction — e.g., xLAM-7b-r reduces value errors by 30.3% at oc≤12 vs. baseline without order consistency. This provides a principled mechanism for the previously underexplored value-error problem.
 
-- **Compatibility with existing approaches.** Table 3 shows Tool Decoding can be combined with in-context learning to further boost performance, and Figure 5 shows it layers on top of tool-finetuned models (xLAM-7b-r). This demonstrates the method is complementary, not a replacement for other techniques.
+4. **Seamless integration with prompt engineering methods.** Table 3 shows that Tool Decoding combined with varying numbers of in-context examples further boosts accuracy, enabling deepseek-coder-6.7b to surpass GPT-4 under the same prompt settings, showing the method is complementary to prompting approaches.
 
 ## Weaknesses
 
@@ -20,58 +20,52 @@ This paper proposes **Tool Decoding**, a training-free decoding-time method for 
 None.
 
 ### Major
-
-- **"Total accuracy" metric is never defined.** The paper reports "total accuracy" on API-Bank and BFCL V2 Live throughout, but never states what constitutes a correct prediction. Is it exact match of the generated tool call string? Is it whether the tool server returns a valid response? Does it follow the benchmarks' own evaluation protocols? Without this definition, the results cannot be independently interpreted or reproduced. This is a basic evidential gap.
-
-- **No numeric results table; key claims unverifiable.** Figure 5 presents only bar charts without raw accuracy numbers. The abstract's headline claim that "almost all models demonstrate performance gains exceeding 70% on both benchmarks" cannot be verified from bar charts alone. Relative gains from near-zero baselines (e.g., Yi-1.5-6b on BFCL) can be arbitrarily large in percentage terms while being trivially small in absolute terms. The paper should provide a table with raw accuracies for all models and conditions, along with absolute and relative gains. Without this, the central empirical claims are not properly substantiated.
-
-- **Missing comparison against prior constrained-decoding methods for tool usage.** The related work section (line 146) cites Zhang et al. (2023) and Wang et al. (2023a) as directly introducing "constrained decoding to enforce tool syntax in LLMs." Yet the experimental baselines include only greedy search and beam search — not these prior methods. The paper's own ablation (Table 4, oc ≤ 1 condition) isolates constrained decoding from order consistency, but this does not substitute for comparison against existing published implementations. Without such comparison, it is unclear whether the gains come from constrained decoding per se (already established in prior work) or from the order-consistency novelty. This gap prevents proper assessment of the incremental contribution.
+None.
 
 ### Minor
 
-- **Evaluation protocol not specified for main results.** The paper does not state whether the main evaluation (Figure 5) uses zero-shot or few-shot prompting, what prompt format was used, or how many in-context examples (if any) were provided. Table 3 demonstrates that ICL example count affects results, making this omission consequential. Beam width for the beam search baseline is also not reported.
+1. **Main results lack a table with exact numerical values.** Figure 5 presents accuracy as bar charts without an accompanying table of exact numbers. The y-axis labels are hard to read (exacerbated by the PDF extraction), and the paper's strong claims — e.g., "performance gains exceeding 70%," several 7B models surpassing GPT-3.5/GPT-4 — would be better supported by a supplementary table with exact accuracy values for every model×decoding combination on both benchmarks. While the visual trend is clear enough to support the paper's conclusions, exact numbers would improve precision and trust.
 
-- **No variance or confidence intervals.** Order consistency involves sampling (oc ≤ 12), which introduces randomness. No standard deviations, confidence intervals, or multi-run statistics are reported anywhere in the paper. This is a gap for a method whose core mechanism involves stochastic sampling.
+2. **The order-consistency transition detection mechanism is underspecified for reproducibility.** The paper states: "the transition between two parameters is triggered when the previous value is detected as fully generated" (Section 3.2) but does not specify how this detection works — is it a heuristic (e.g., detecting a closing quote/brace/keyword), a grammar-based parser, a separator token, or something else? This is a nontrivial detail: if the detection is imperfect, it could introduce errors that interact with the majority-voting step. The authors should specify the exact rule or algorithm, ideally with pseudocode or an example.
 
-- **Unsupported claim about awareness errors.** The paper states (line 58) that "Awareness errors account for only a small proportion and are almost impossible to improve through non-training methods." The first part is supported by Figure 3; the second part — that they are impossible to improve without training — is asserted without evidence or citation and seems to go beyond what the data can show.
-
-- **Value-error net effect not clearly reconciled.** Figure 6 shows that the full Tool Decoding *increases* value errors relative to greedy search (though "slightly"). The paper explains this as "uncovering underlying value errors that were previously masked." Table 4 then shows order consistency reduces value errors relative to the no-order-consistency baseline. However, the paper never states the net effect: does the full method have more or fewer value errors than the greedy baseline? The reader is left uncertain about whether value errors are ultimately reduced or increased, which weakens the completeness of the error analysis.
-
-- **Beam search configuration unspecified.** The paper compares against beam search but does not report beam width or whether any hyperparameter tuning was performed for baselines.
+3. **The decoding method for GPT-3.5/GPT-4 baselines is not stated for the main results (Figure 5).** The paper repeatedly claims that certain 7B models "surpass GPT-4" and "outperform GPT-3.5" based on Figure 5, but does not specify whether these proprietary models were evaluated with greedy search, beam search, sampling, or some other decoding strategy. While Table 3 clarifies the setting for ICL experiments ("under the same prompt settings"), the main comparison in Figure 5 lacks this information. The paper should explicitly state the decoding method used for the proprietary baselines and discuss whether applying Tool Decoding to GPT-3.5/GPT-4 would further improve them — even if the API does not allow constrained decoding, acknowledging this asymmetry would strengthen the comparison.
 
 ### Trivial
-- "non-compliant format ," (line 155) has an extra space before the comma — a minor formatting glitch in the extracted text (likely a parser artifact).
+None.
 
 ## Nice-to-Haves
 
-- **Computational cost discussion.** Order consistency with oc ≤ 12 is up to 12× the decoding cost of greedy search. This trade-off should be discussed; results could be shown as a function of sampling budget.
-- **Failure case analysis.** The paper does not discuss scenarios where order consistency might fail (e.g., parameters with dependencies like start/end dates, or free-form string values where majority voting may be less effective).
-- **Handling of parameter-type constraints.** The paper mentions "type requirements" for parameter values but does not clarify what filtering is done for free-form vs. categorical values.
+- **Report absolute error counts alongside proportions for the error analysis (Figure 6).** The paper shows that value error *proportions* increase with Tool Decoding, explained as "unmasking" of previously hidden errors. Reporting absolute counts would let readers judge the net effect directly. The ablation (Table 4) already shows order consistency reduces value errors *relative* to no order consistency, so this is mainly a completeness request.
+
+- **Acknowledge the computational cost of order-consistency sampling.** The paper sets oc≤12 as the upper limit on sampled parameter orders but does not discuss inference latency or FLOPs overhead. A brief paragraph comparing per-tool-call runtime would clarify the practical trade-off.
+
+- **A brief qualitative failure analysis of the majority-voting mechanism.** While the ablation (Table 4) shows a positive trend, a discussion of cases where majority voting fails (e.g., when the model is consistently wrong) or a per-parameter analysis of voting outcomes would further strengthen the argument.
+
+- **Explicit comparison with prior constrained-decoding baselines.** The paper cites Zhang et al., 2023 and Wang et al., 2023a in related work but does not compare against them experimentally. While these methods only address format/syntax errors (not value errors), a direct comparison on the same benchmarks would help isolate the additive value of order consistency.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were considered but removed per review guidelines:
 
-- **"Missing appendix / missing proofs in appendix"** — Removed per instructions: the parser strips these sections from all papers; they exist in the original submission.
-- **"Formatting/style nitpicks"** (the harsh critic's section-by-section notes about how figures are labeled, etc.) — Removed per instructions: these are parser artifacts or style preferences, not substantive issues.
-- **"Different benchmarks used for stage analysis vs. error distribution"** (Figure 2 on UltraTool vs. Figure 3 on API-Bank) — Removed as scope-creep: the paper explains that stage analysis requires the UltraTool benchmark's capabilities (Figure 2) while error-type analysis uses API-Bank for its detailed annotations. Using different benchmarks for different analyses is standard practice and not a weakness.
-- **"Prior constrained decoding methods already solve the problem" implication** — The harsh critic implies that prior work makes this contribution small. This is refuted by the paper's explicit discussion that prior constrained decoding methods "do not address issues such as incorrect parameter values" (line 146). The paper acknowledges prior work and positions its contribution as going beyond syntax correction to address value errors via order consistency.
-- **Strength Finder's Strength #3 about "consistent large-magnitude gains"** — Tempered/qualified rather than fully removed, but the strength should be read in light of the verified weakness that raw numeric data is not provided in a table to substantiate the "70%" claim.
+- *"The plug-and-play nature and the claim of generalization to new tools are not tested."* The paper evaluates on two major benchmarks (API-Bank, BFCL V2 Live) spanning many tools. Demanding evaluation on an entirely unseen tool set beyond these benchmarks is scope creep for a paper already covering 10+ models and two benchmarks. A single case study would strengthen the paper but its absence is not a weakness.
+- *"Comparison with alternative constrained-decoding baselines is missing."* Moved to Nice-to-Haves since this is a reasonable but non-critical suggestion.
+- *"Bar chart tick marks are not legible in extracted version."* This is a PDF extraction artifact, not a paper error.
+- Some generic strengths from the Strength Finder (e.g., "this paper addressed an important problem") were removed as they lack specific content.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the review process reveals that the key tension in this paper is between a genuinely useful, well-motivated method and an evaluation that lacks sufficient rigor to support the strong claims made. The error decomposition is the paper's most robust contribution—it is well-defined and reproducible regardless of implementation details. The method's core intuition (leveraging tool-structure at decoding time) is sound and the ablation cleanly demonstrates the additive value of order consistency. However, the decision to present results only as bar charts without a numeric table, combined with the undefined metric, undercuts what would otherwise be a strong empirical demonstration. The missing comparison against prior constrained-decoding baselines is the most consequential gap: it prevents the community from assessing whether the paper's main novelty (order consistency) actually provides additional value over existing approaches that already use constrained decoding for tool syntax.
+The most noteworthy insight from the reviews — which goes beyond the paper's own analysis — is that the order-consistency mechanism offers a template for a broader class of *decoding-time structured consistency* methods. The paper demonstrates that shuffling functionally irrelevant but syntactically significant elements (parameter order in tool calls) and aggregating via majority voting reduces value errors. This principle could extend to other structured generation tasks where the model must produce content in a specific format but where some internal ordering is semantically irrelevant (e.g., key-value pairs in JSON, field order in structured forms). The reviews collectively highlight that the method's main weakness is not conceptual but presentational — the empirical reporting is sufficient to be convincing but not sufficiently precise for full verification without reconstructing numbers from figures.
 
 ## Suggestions
 
-1. Add a table with raw accuracy numbers for all models and all conditions in Figure 5, along with absolute and relative gains clearly defined (absolute improvement in percentage points, not relative percentages from near-zero baselines).
-2. Explicitly define the "total accuracy" metric — clarify whether it follows the evaluation protocol of each benchmark (API-Bank, BFCL) and what constitutes a correct tool-call prediction.
-3. Implement and compare against the constrained-decoding methods of Zhang et al. (2023) and/or Wang et al. (2023a) on the same benchmarks. This directly addresses whether order consistency adds value beyond existing techniques.
-4. Specify the evaluation protocol for the main results: zero-shot or few-shot, prompt format, number of in-context examples (if any), beam width for beam search.
-5. Report the net effect on value errors: after both constrained decoding and order consistency, is the absolute count of value errors higher or lower than the greedy baseline? Decompose the error changes across components.
-6. Add variance estimates for the order-consistency experiments, since sampling is involved.
+1. **Add a table** of exact accuracy values for every model×decoding combination (including GPT-3.5/GPT-4 with their decoding conditions stated) as a supplement to Figure 5.
+2. **Provide pseudocode or an algorithmic description** of the transition detection mechanism for order-consistency sampling, clarifying how the model determines when a parameter value has been "fully generated."
+3. **State the decoding method used for GPT-3.5 and GPT-4** in the main results and discuss whether applying Tool Decoding to these models is feasible or would yield further gains.
+4. **Add a paragraph on inference cost** (latency, number of forward passes for oc≤12) to enable practitioners to assess the trade-off.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+The paper makes a solid contribution: a well-motivated, training-free method that consistently and substantially improves tool-use performance across a diverse set of models, grounded in a principled error analysis. The weaknesses are all about reporting clarity and specification — none threaten the core claims. All are addressable in a camera-ready version. The paper is clearly written, the experiments are comprehensive (10+ models, 2 benchmarks), and the results are impressive.
+
+MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

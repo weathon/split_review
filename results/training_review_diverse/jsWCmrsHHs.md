@@ -1,20 +1,20 @@
-Now I have a thorough understanding of the paper and all the reviewer claims. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes a DRL-guided improvement heuristic for the Job-shop Scheduling Problem (JSSP). The key technical contributions are: (1) a two-module GNN architecture — TPM (GIN-based) for capturing topological differences between disjunctive graphs and CAM (GAT-based) for encoding heterogeneous neighbor contexts (precedence vs. machine-sequence); (2) a learned policy that directly selects operation pairs from the N₅ neighborhood, avoiding the costly full-neighborhood evaluation required by traditional improvement heuristics; and (3) a message-passing evaluator that computes schedules in batch on GPU. Experiments on seven classic benchmarks show large optimality-gap reductions compared to prior DRL-based construction heuristics and hand-crafted improvement rules, and the method generalizes to extremely large instances (up to 1000×40) where it outperforms CP-SAT.
+This paper proposes a deep reinforcement learning (DRL) guided improvement heuristic for job-shop scheduling (JSSP), departing from prior DRL-based construction heuristics. The method formulates JSSP as learning to search over complete solutions represented as disjunctive graphs, using a GNN policy network with two complementary modules — a Topological Embedding Module (TPM, based on GIN) and a Context-aware Embedding Module (CAM, based on GAT) — to select local moves from the N₅ neighbourhood. A message-passing evaluator is designed for batch GPU computation of schedules. Empirical results on seven classic benchmarks show that the learned policy substantially outperforms prior DRL-based methods and hand-crafted improvement rules, and generalizes well to very large instances and longer search horizons.
 
 ## Strengths
 
-1. **Novel GNN representation for complete JSSP solutions.** The dual-module design (TPM using GIN for graph-isomorphism discrimination, CAM using GAT for heterogeneous neighbor contexts) is well-motivated by the structure of disjunctive graphs in the improvement setting. The paper validates through ablation (Figure 6) that the combination converges to a better reward than either module alone, supporting the design choice.
+- **Novel DRL-based improvement heuristic that circumvents partial-solution limitations of construction heuristics**: Unlike prior DRL approaches that operate on incomplete schedules, this paper formulates JSSP as learning to search over complete solutions (disjunctive graphs). This directly addresses the bias issues arising from missing disjunctive arcs in partial solution representations (Section 1, Paragraph 3), which is a well-motivated and original framing.
 
-2. **Strong and consistent empirical performance.** The results in Table 1 are substantive and reproducible from the paper's data. Ours-5000 achieves gaps of 6.2% (Taillard 15×15), 8.3% (20×15), and 9.0% (20×20), while the best DRL baseline (ScheduleNet) achieves 15.3%, 19.4%, and 17.2% respectively. The method also beats CP-SAT on Taillard 100×20 (3.0% vs. 3.9%) — a notable result. These improvements are consistent across nearly all 7 benchmark families and all problem sizes.
+- **GNN architecture with two complementary modules validated by ablation**: The dual-module design (TPM for topology, CAM for node heterogeneity) is structurally principled and the ablation study (Section 5.5) confirms that the combination converges faster and achieves lower gaps than either module alone, providing clear evidence of their complementary value.
 
-3. **Efficient move selection.** The learned policy directly outputs an operation pair, avoiding the full neighborhood evaluation that makes traditional improvement heuristics computationally expensive. The runtime data confirm this: Ours-500 on Taillard 15×15 takes 9.3s vs. 48.2s for GD-500, while achieving a better gap. This is a genuine practical advantage.
+- **Strong and consistent empirical performance**: With only 500 improvement steps, Ours-500 achieves substantially smaller gaps than all DRL baselines across nearly all problem sizes (e.g., 9.3% vs. 15.3% for ScheduleNet on Taillard 15×15; 2.8% vs. 6.1% on ABZ 10×10). With 5000 steps, Ours-5000 beats CP-SAT on Taillard 100×20 (3.0% vs. 3.9%) and outperforms it by double-digit percentages on extremely large instances (e.g., −24.31% on 200×40).
 
-4. **Generalization to larger scales.** The policy trained with 500 steps continues to improve when run for 5000 steps (Table 1, lower rows), and generalizes zero-shot to extremely large instances (200×40, 500×60, 1000×40) where it outperforms CP-SAT by large margins (Table 5). This demonstrates that the learned heuristic captures reusable structure rather than overfitting to training sizes.
+- **Message-passing evaluator enables efficient batch computation**: The proposed evaluator (Section 4.4, Theorem 2) is equivalent to CPM but processes multiple graphs in parallel on GPU. This is practically valuable for training and is used to accelerate baseline improvement heuristics as well.
 
-5. **Message-passing evaluator for batch computation.** The proposed GPU-compatible alternative to CPM is a practical engineering contribution that enables efficient batch training and inference, though its standalone benefit is not separately benchmarked.
+- **Zero-shot generalization to much larger instances and longer search horizons**: Models trained on 20×15 instances generalize to problems up to 1000×40 (40,000 operations) and to 5000-step search horizons, demonstrating that the learned policy captures transferable knowledge beyond the training distribution.
 
 ## Weaknesses
 
@@ -22,59 +22,47 @@ This paper proposes a DRL-guided improvement heuristic for the Job-shop Scheduli
 None.
 
 ### Major
+- **The n-step REINFORCE training algorithm is not described (Section 4.3)**. The section consists of a single sentence: "We propose an n-step REINFORCE algorithm for training the policy network." No details are provided about the number of steps *n*, whether a baseline is used and how it is estimated, the learning rate or its schedule, the batch size, the discount factor, the use of any entropy regularization or exploration strategy, or even the objective function. For a DRL methods paper, the training procedure is a core part of the contribution. This omission makes the method irreproducible as described and constitutes a significant technical gap. This is the single most important issue to fix.
 
-- **The claim of linear computational complexity is unsubstantiated for the action-selection step.** Theorem 1 states linear time complexity w.r.t. |𝒥| and |ℳ|. However, the action-selection mechanism (Section 4.2.2) computes a pairwise score matrix SC = h' h'ᵀ, where h' is |𝒪|×q and |𝒪| = |𝒥|·|ℳ| + 2. This matrix multiplication is O(|𝒪|²·q) = O(|𝒥|²·|ℳ|²), which is **quadratic** in the product of the problem dimensions, not linear. The paper does not discuss exploiting sparsity (the feasible action space is at most 2N(s)−2 ≪ |𝒪|²). The practical runtime in Table 1 grows sub-quadratically, which suggests the linear claim may hold in practice due to constant factors, but the theoretical claim as stated is incorrect. This needs either a corrected complexity analysis, a sparse action-scoring mechanism, or a restriction of the linearity claim to the embedding phase only.
+- **The claim of linear time complexity (Theorem 1) is contradicted by the described action-scoring mechanism**. The action selection (Section 4.2.2) computes a score matrix *SC* of size |𝒪|×|𝒪| by multiplying the embedding matrix *h′* (size |𝒪|×q) by its transpose, which is an O(|𝒪|²·q) operation. Since |𝒪| = |𝒥|·|ℳ| + 2, this step is quadratic in the product of jobs and machines. The paper states the *policy network* has linear time complexity w.r.t. |𝒥| and |ℳ|, but the described forward pass includes a quadratic component. No proof or analysis is provided to justify the linearity claim, and no qualification distinguishes the GNN embedding phase (which is linear) from the action scoring (which is not). This claim should be retracted or carefully qualified with an honest complexity analysis.
 
 ### Minor
+- **Reward sparsity is not discussed or ablated**. The reward (Eq. 1) is nonzero only when the new solution beats the incumbent, making most steps yield zero reward. The paper does not discuss how the REINFORCE algorithm handles this sparsity, nor whether alternative dense rewards (e.g., raw makespan difference) were considered. While the cumulative reward property (total improvement against initial solution) is a nice motivation, the absence of any discussion or ablation of this design choice leaves an open question about training efficiency.
 
-- **The training procedure is underspecified.** Section 4.3 (the n-step REINFORCE algorithm) contains only a single sentence. Critical details — number of training instances per size, batch size, learning rate schedule, number of episodes/steps, discount factor (if any), baseline for variance reduction, entropy bonus (if any), and the value of "n" in n-step — are absent from the extracted paper. While some of these may have appeared in a stripped "Model and configuration" subsection (line 216–217 is clearly a parser artifact), the REINFORCE section itself is genuinely sparse. This hinders reproducibility.
-
-- **The ablation study is too narrow to fully support the two-module design.** The ablation (Section 5.5) shows training curves only on 10×10 instances. No test-set performance (gaps on benchmarks) is reported for the ablated variants (TPM-only, CAM-only), and no analysis is provided for how the two-module design behaves across different problem sizes. While the training curves support the combination's benefit, the evidence is preliminary.
-
-- **The initial solution generation is unspecified.** The paper states "basic dispatching rules" (line 66) without naming which rule(s) are used (e.g., Most Work Remaining, Shortest Processing Time, or a specific composite rule). Since the initial solution quality affects the improvement process, this should be specified for reproducibility.
-
-- **No statistical variance is reported.** Table 1 reports only point estimates (average gaps). Given the stochastic nature of both the policy and the training, reporting standard deviations or confidence intervals across multiple runs/r trials would strengthen confidence in the results.
+- **Tabu search comparison could be interpreted more transparently**. At equal steps (5000), tabu search (TSN5) beats Ours by 1.9% relative gap; at equal time (90s), Ours wins. The paper attributes the step-equality gap to "the simplicity of our approach as a local search method without complex specialized mechanisms," which is a reasonable defense, but it does not discuss what this asymmetry implies: the learned policy is less effective *per move* than hand-crafted rules with tabu memory, and only wins on speed. A more balanced discussion would strengthen the paper.
 
 ### Trivial
-None.
+- **Framing of computational efficiency relative to construction heuristics**: The paper describes itself as "computationally efficient" in the same paragraph where Ours-500 takes 9.3s on 15×15 Taillard while L2D takes 0.4s. While the claim is defensible in the broader context (the comparison includes slower improvement heuristics), the phrasing could mislead. The paper would benefit from explicitly distinguishing "efficient relative to other improvement heuristics" from "efficient relative to construction heuristics."
 
 ## Nice-to-Haves
 
-- The tabu search comparison (Section 5.4) references Tables 3 and 4 which are not present in the extracted text (parser artifact). The paper should ensure these are accessible and include a clear description of the tabu search setup (tabu tenure, aspiration criteria, iterations).
-- An analysis comparing the standalone benefit of the message-passing evaluator vs. CPM (e.g., speedup on batch vs. single-instance) would help contextualize this contribution.
-- Expanding the ablation study to include test-set performance on a range of benchmark sizes would more convincingly demonstrate the necessity of the two-module design.
+- On the extremely large instances (Section 5.4), CP-SAT is given a 1-hour limit. Reporting CP-SAT's remaining gap (if estimable) or showing that its gap continues to shrink with longer runs would strengthen the claim that Ours finds genuinely better solutions, though the negative gap is already a strong result as presented.
+- A brief discussion of how the critical path is selected when multiple exist (the paper mentions random selection at line 59, which is sufficient, but this could be elaborated).
+- An analysis of the memory cost of the |𝒪|×|𝒪| score matrix for very large instances (e.g., 1000×40 → ~40k nodes → ~1.6B entries), since this could become a practical concern.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **"Comparison to DRL construction methods is fundamentally unfair."** The paper compares against the best available DRL methods for JSSP, which happen to be construction heuristics. This is a valid comparison of two paradigms. Crucially, the paper *also* includes fair comparisons against hand-crafted improvement heuristics (GD, FI, BI) with the same initial solutions and same step budgets, which directly supports the central claim about *learned* improvement policies. The critic's framing ignores these baselines.
-
-- **"Tables 3, 4 are missing."** These table references in Section 5.4 are parser artifacts — the tables exist in the original submission. Per the review rules, parser-stripped content is not a valid weakness.
-
-- **"Hardware details missing."** Hardware/software details were likely in the stripped "Model and configuration" subsection (line 216). Additionally, this is a standard detail easily provided and not a structural flaw.
-
-- **Various formatting, style, and missing-appendix criticisms.** All are either parser artifacts or matters of taste that do not affect the paper's scientific contribution.
+- *Criticism that the paper does not report CP-SAT's gap to optimality on large instances*: For extremely large instances (200×40, 500×60, 1000×40), best-known solutions may not exist. CP-SAT with 1 hour is a standard and strong baseline; the negative gap vs. CP-SAT is already a valid and impressive result. This is a nice-to-have, not a weakness.
+- *Criticism that the paper does not discuss how the critical path is chosen when multiple exist*: The paper explicitly states at line 59 ("randomly selects one if more than one exist"), so this criticism is factually incorrect.
+- *Criticism about "missing appendix" or "missing proofs in appendix"*: The instructions forbid penalizing missing appendix content, as the parser may have stripped these sections.
+- *Strength Finder's claim #3 about "provably linear computational complexity"*: This conflicts with a verified weakness (the action scoring is quadratic in |𝒪|), so it is removed per the conflict rule.
+- *Criticisms about missing related works*: The instructions forbid introducing missing related works.
 
 ## Novel Insights
 
-The reviews surface an interesting tension: the action-selection mechanism computes a full |𝒪|×|𝒪| score matrix, which is theoretically quadratic, yet the empirical runtime scales sub-quadratically. This suggests that either the matrix multiplication is dominated by other linear-time components in practice, or constant-factor GPU parallelism masks the asymptotic behavior at the tested scales. Understanding this gap between the stated theoretical complexity and the practical implementation would be valuable — either the paper should correct its theoretical claim or the community should recognize that the quadratic step is empirically negligible for problem sizes up to 1000×40. This is a genuine methodological ambiguity worth resolving.
+The most interesting observation emerging from the reviews is the tension between the paper's claimed linear complexity and the described quadratic action-scoring mechanism. If the quadratic scoring is retained, the paper should provide an empirical wall-time justification showing it does not dominate in practice (the runtime data in Table 1 suggests it grows sub-quadratically for the sizes tested, likely due to GPU-accelerated matrix multiplication with a small latent dimension q). Conversely, if the scoring can be made linear (e.g., by only scoring feasible N₅ pairs rather than all |𝒪|² pairs), that would make the theoretical claim match the architecture and strengthen the paper considerably. The missing training algorithm details also highlight a broader pattern: DRL-for-combinatorial-optimization papers often focus heavily on architecture design while treating the learning algorithm as a standard off-the-shelf component, but REINFORCE with sparse rewards is far from plug-and-play — the sparsity issue and the choice of n in n-step returns deserve serious discussion.
 
 ## Suggestions
 
-1. **Clarify or correct the complexity claim.** Either (a) provide a sparse action-scoring mechanism that achieves true linear complexity, or (b) explicitly note that the action-selection step is O(|𝒪|²) and explain why it is dominated by the linear embedding step in practice, or (c) restrict the linearity claim to the GNN embedding phase and characterize the full pipeline's complexity honestly.
-
-2. **Expand Section 4.3 with full training details.** Specify the REINFORCE variant (baseline, discounting, n-step value), learning rate, batch size, training instances (number per size), episode horizon, and any entropy bonus or regularization. This is essential for reproducibility.
-
-3. **Report statistical variance.** Add standard deviations or confidence intervals to Table 1's results. Also specify the number of random seeds/runs used.
-
-4. **Strengthen the ablation study.** Report test-set performance (gaps on benchmarks) for TPM-only and CAM-only variants across multiple problem sizes, not just training curves on 10×10.
-
-5. **Specify the initial dispatching rule(s) used.**
+1. **Fully specify the n-step REINFORCE algorithm**: Provide the exact update rule, the value of n, whether a baseline or critic is used, the learning rate and schedule, batch size, discount factor, entropy regularization (if any), and the number of training episodes/epochs. If the method uses a "customized" variant, explain what is customized and why.
+2. **Clarify or retract the linear complexity claim**: Distinguish between the GNN embedding phase (linear in edge count) and the action scoring (quadratic in |𝒪|). Provide a rigorous complexity analysis or replace Theorem 1 with a more careful statement.
+3. **Ablate the reward formulation**: Compare the incumbent-based sparse reward against a dense alternative (e.g., negative makespan or raw makespan improvement) to demonstrate whether sparsity helps or hinders learning.
+4. **Reframe the tabu search discussion**: Acknowledge more directly that the per-step move quality of the learned policy is lower than tabu search, and position the computational advantage as the learned policy's main strength rather than an afterthought.
+5. **Add practical guidance on the |𝒪|×|𝒪| score matrix**: Clarify whether full matrix multiplication is used or whether sparse/block approximations are employed for large instances, and discuss the memory footprint.
 
 ## Score and Decision
 
-This paper makes a solid contribution — a novel GNN architecture purpose-built for encoding complete JSSP solutions in an improvement setting, a learning-based policy that avoids costly full-neighborhood evaluation, and strong empirical results across seven benchmarks. The weaknesses are real but addressable: the complexity claim needs correction, the training details need expansion, and the ablation needs deepening. None of these are fatal — the core claims (the architecture works, performance beats baselines) are well-supported by the data. With the revisions suggested above, this would be a strong paper.
+This paper makes a genuinely novel contribution — the DRL-guided improvement heuristic for JSSP is well-motivated, the GNN architecture is principled and validated by ablation, and the empirical results are strong and consistent across multiple benchmarks and problem sizes. However, two major issues prevent acceptance in the current form: (i) the training algorithm (Section 4.3) is completely underspecified, making the method irreproducible, and (ii) the linear complexity claim is unsupported and contradicted by the architecture. Both issues are addressable in a revision. The paper would be a solid contribution after these gaps are closed.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

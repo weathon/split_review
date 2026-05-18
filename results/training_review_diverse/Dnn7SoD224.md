@@ -1,22 +1,24 @@
-Now I have all the information needed. Let me cross-reference the claims against the paper and write the final review.
+Now I have all the information needed. Let me compile the final review.
 
 ---
 
 ## Summary
 
-This paper introduces a novel formulation for continuous disparity prediction in stereo matching by replacing the standard expectation over a discrete probability distribution with L1 risk minimization. The authors show that expectation is a special case of L2 risk in their framework, interpolate the discrete distribution using a Laplacian kernel to obtain a continuous density, find the L1 risk minimizer via binary search during forward inference, and compute gradients through this non-differentiable operation using the implicit function theorem for end-to-end training. Experiments across SceneFlow, KITTI 2012/2015, Middlebury, and ETH3D show strong in-domain performance and particularly notable cross-domain generalization improvements.
+This paper proposes reformulating disparity prediction in stereo matching as risk minimization under an L1 loss, rather than the standard expectation (L2) over a discretized distribution. The authors interpolate the discrete categorical distribution using a Laplacian kernel to obtain a continuous density, solve the L1 minimization via binary search on the forward pass, and derive gradients through the implicit function theorem for end-to-end training. Extensive experiments on SceneFlow, KITTI, Middlebury, and ETH3D show consistent in-domain improvements and substantially stronger cross-domain generalization compared to prior state-of-the-art methods, while requiring no additional learnable parameters.
 
 ## Strengths
 
-- **Novel and theoretically grounded formulation**: The paper reframes disparity prediction as risk minimization over an interpolated continuous density, formally showing that the standard expectation is an L2 special case. Switching to L1 risk is motivated by well-known robustness properties against multi-modal distributions (Section 3.2, Figure 2). This is a clean, principled departure from existing practice.
+1. **Novel risk-minimization formulation that generalizes expectation-based disparity**: The paper reframes the standard weighted-average (expectation) prediction as a special case of L2 risk minimization, and introduces L1 risk minimization which demonstrably handles multi-modal distributions more robustly (Section 3.2, Fig. 2). This is a conceptually clean shift that directly addresses a known weakness of classification-based stereo matching.
 
-- **Strong empirical results, especially in cross-domain generalization**: When trained only on SceneFlow and tested on unseen real datasets, the method achieves best or near-best error rates across all four benchmarks (Tables 4–7). On ETH3D the >1px error drops substantially (from 4.05 to 2.71) and on Middlebury the >1px error drops from 13.76 to 12.63. These are large relative improvements that indicate genuinely better robustness.
+2. **Differentiable L1 risk optimization via the implicit function theorem**: Because the L1 risk has no closed-form solution, the paper derives a closed-form gradient dy/dp^m (Eq. 7) using the implicit function theorem, enabling end-to-end training despite the non-differentiable forward binary search. This theoretical contribution makes the practical deployment of L1 formulation feasible.
 
-- **Ablation cleanly isolates the contribution**: Table 8 compares three conditions within the same network — expectation (train+test), L1 risk at test only, and L1 risk at train+test — showing that the full gain requires end-to-end training (EPE 2.03 → 1.88 → 1.73). This provides clear evidence that the proposed training scheme, not just the post-hoc change, is responsible for the improvement.
+3. **State-of-the-art cross-domain generalization**: The method demonstrates clear and substantial improvements in generalization from synthetic (SceneFlow) to real-world datasets without fine-tuning. For example, on ETH3D the >1px error drops from 4.05 to 2.71 (Table 5), and on Middlebury from 13.76 to 12.63 (Table 4). This is a critical practical strength, as cross-domain robustness is a known bottleneck for stereo matching.
 
-- **Practical plug-and-play utility**: L1 risk minimization applied at test time to existing networks (ACVNet, PCWNet) improves accuracy without retraining (Table 8), demonstrating that the benefit is not architecture-specific and can be adopted incrementally.
+4. **Competitive or best in-domain results**: On SceneFlow the method achieves the lowest EPE, >1px error, and >0.5px error among all published methods (Table 1). On KITTI 2012 and 2015 it ranks first in non-occluded regions for >2px error (Tables 2–3), confirming that L1 risk does not sacrifice accuracy on in-domain benchmarks.
 
-- **Efficient with no extra parameters**: The binary search forward pass has O(log N) complexity, the backward gradient (Eq. 7) avoids unrolling iterative loops, and the module introduces only marginal runtime overhead with zero additional learnable parameters (Table 8, Section 4.4).
+5. **Ablations verify the core mechanism and transferability**: Table 8 shows that switching from expectation to L1 risk at test time (without retraining) already improves accuracy, and training with L1 risk yields further gains. Plugging L1 risk into existing networks (ACVNet, PCWNet) also improves their cross-domain accuracy, demonstrating generality independent of the backbone.
+
+6. **Efficient inference with negligible parameter overhead**: The risk-minimization module adds no learnable parameters and only slightly increases running time (Table 8). The overall network has fewer parameters than competing methods like IGEV and DLNR (Section 4.4).
 
 ## Weaknesses
 
@@ -24,55 +26,51 @@ This paper introduces a novel formulation for continuous disparity prediction in
 None.
 
 ### Major
-
-- **Backward gradient implementation is not validated, weakening the causal claim about training.** The paper derives the backward gradient via the implicit function theorem (Eq. 7), but there is no empirical validation that this gradient correctly minimizes L1 risk during training rather than acting as an approximate or regularizing signal. Three specific concerns are unaddressed: (1) the forward pass uses binary search with tolerance τ=0.1, but there is no analysis of gradient error introduced by this approximate solution; (2) the denominator clipping (≥0.1) is a heuristic to avoid large gradients but could introduce bias, and its impact on training is not analyzed; (3) the sign function in Eq. 5 is non-differentiable at y=d_i, and the implicit function theorem requires a continuously differentiable optimality condition — the paper glosses over this. Because the loss function (Eq. 8, smooth L1) is identical for both expectation and L1 risk training, the backward gradient through the risk module is the *only* difference during training. Without validation that this gradient faithfully implements L1 risk minimization, the observed improvement from end-to-end training (Table 8) could stem from the gradient approximation acting as a useful auxiliary signal rather than from the theoretically argued robustness of the L1 median. **This is the paper's most significant evidential gap.**
+None. The core claims are well-supported by the experimental results, and no identified issue invalidates the central contribution.
 
 ### Minor
 
-- **No discussion of limitations or failure cases.** The paper does not discuss when the method might underperform — e.g., when the discrete distribution is near-uniform (making the interpolated density flat and L1 risk similar to expectation), or when the Laplacian bandwidth σ is poorly calibrated for the disparity range. A brief limitations paragraph would improve credibility and guide future work.
+1. **Imprecise time complexity claim (Section 3.2)**: The paper states "the binary search algorithm can find the optimal solution with time complexity of O(log N)" (line 115). This is incorrect. Each binary search iteration evaluates G(y, p^m) which sums over all N disparity hypotheses, costing O(N). The number of iterations depends on the tolerance τ (set to 0.1), not N. The correct complexity is O(N log(1/τ)). For N=192 and τ=0.1 this is O(192 × ~3.3) ≈ 634 operations, which is negligible in practice, but the claim as stated is technically wrong and should be corrected.
+
+2. **Missing baseline: discrete L1 minimizer (median) without interpolation**: The paper argues that L1 risk minimization is more robust than L2 expectation, but the ablation study (Table 8) compares only interpolated L1 vs expectation. It does not compare against the discrete L1 minimizer — i.e., the median of the discrete PMF, computed as argmin_y Σ |y-d_i| p_i without interpolation. Such a comparison would disentangle how much of the gain comes from the switch from L2 to L1 versus from the continuous interpolation itself. Without it, the attribution of the improvement is partially confounded.
+
+3. **Laplacian kernel choice not justified or ablated**: The paper uses a Laplacian kernel for interpolation (Eq. 1) without discussing why this choice was made over alternatives (e.g., Gaussian). The kernel choice affects both the shape of the interpolated density and the analytic form of G(y, p^m). An ablation comparing Laplacian vs. Gaussian (or other kernels) on the downstream disparity accuracy would strengthen the paper.
+
+4. **Gradient clipping threshold not analyzed**: The denominator in Eq. (7) is clipped to be no less than 0.1 (line 129) to avoid large gradients. Since this denominator equals ∂G/∂y, clipping introduces a biased gradient. The paper does not discuss the sensitivity of results to this threshold, alternatives (e.g., adding a small epsilon), or the impact on training stability. While common practice, this omission is worth noting.
+
+5. **Overstated theoretical framing**: The paper invokes Vapnik's principle of risk minimization (lines 19, 256), but the risk is defined over the network's estimated posterior p(x; p^m), not the true data-generating distribution. This is a standard minimum-Bayes-risk / plugin decision rule (Berger, 1983; Lehmann & Casella, 1998). The framing is somewhat misleading; the paper would benefit from acknowledging this explicitly to avoid overclaiming the theoretical connection to statistical learning theory.
 
 ### Trivial
-
-- The second-order derivative condition ∂²F/∂²y ≥ 0 is stated but strict positivity (required for the implicit function theorem to apply) is not guaranteed; for regions where the density is constant, ∂²F/∂²y = 0 and the binary search may find a valid point but backward propagation would be ill-defined. In practice this is unlikely to occur, but noting it would be precise.
-- The hyperparameter σ=1.1 appears without justification or sensitivity analysis.
+- The paper does not explicitly state the convergence guarantee of binary search (G is monotonic because ∂²F/∂²y ≥ 0, so a unique root exists and binary search is guaranteed to find it). Including this would improve clarity.
+- The derivation from Eq. (4) to Eq. (5) could include an intermediate step showing the Leibniz rule application under the Laplacian kernel; the final result is correct but the reader must infer the intermediate calculus.
 
 ## Nice-to-Haves
-
-- **Validate the backward gradient on a small synthetic example** where the true gradient can be computed via finite differences or enumeration on a fine grid. This would directly address the core training concern.
-- **Report whether the test-time L1 risk swap benefits ACVNet/PCWNet on other cross-domain datasets** (ETH3D, KITTI) beyond Middlebury, to strengthen the generality claim.
-- **Analyze sensitivity to σ and the clipping threshold** over a reasonable range.
+- **Code release**: The gradient computation via implicit differentiation is non-trivial; releasing code would aid reproducibility and adoption.
+- **Discrete median baseline** (elaborated above as a minor weakness; even a quick experiment would strengthen the ablation).
+- **Multi-modal distribution analysis**: Quantify how often multi-modal distributions occur and how much L1 risk improves on such pixels, beyond the single qualitative example in Fig. 2.
+- **Visualization of the derivative-based gradient** (∂y/∂p^m) compared to the trivial gradient of expectation (dy/dp_i = d_i), to illustrate why implicit differentiation matters during training.
+- **Kernel ablation**: Compare Laplacian vs. Gaussian interpolation to assess sensitivity to this choice.
+- **Gradient clipping sensitivity**: Ablate the 0.1 threshold to validate the choice.
 
 ## Removed Points
-
-These points are flagged for removal from the main evaluation; treat with caution.
-
-- **"The binary search algorithm (Alg. 1) is not provided in the main text"** — Algorithm pseudocode was in the appendix, which is a standard place for it; the parser strips appendix content. Not an author error.
-- **"The paper does not compare to offset-based regression methods like Garg et al. or SMD-Net"** — The paper compares to IGEV and DLNR, which are among the most relevant and recent SOTA methods in this space. SMD-Net (2021) and Garg et al. are discussed in Related Work. Demanding every possible baseline is scope creep.
-- **"The relationship to the implicit function theorem is under-explained"** — The derivation from dG=0 to Eq. 7 is standard and sufficiently clear for the target audience.
-- **"No confidence intervals / significance tests"** — Single-run evaluation without CI is standard practice on stereo matching leaderboards; this is not a weakness unique to this paper.
-- **"The paper should report whether improvements hold on other cross-domain datasets for ACVNet/PCWNet"** — This is moved to Nice-to-Haves as a suggestion, not a flaw.
+These points were flagged by reviewers or the strength finder but are removed or downgraded for the reasons given:
+- **"Network architecture heavily borrowed from CasMVSNet/PSMNet"** → The paper explicitly states its architecture is "inspired by CasMVSNet" (Section 2.1) and describes all components transparently. The novelty is correctly identified as the risk-minimization head. This is a neutral observation, not a weakness.
+- **"No code release mentioned"** → This is a practical suggestion, not a weakness of the submission. Moved to Nice-to-Haves.
+- **Strengths about addressing an important problem / targeted an interesting question** → These generic phrasings from the strength finder are not included; only specific, citation-backed strengths are retained.
 
 ## Novel Insights
-
-Beyond the paper's own contributions, the reviews surface a useful observation: the framing of disparity prediction as risk minimization creates a unified view in which expectation (L2) and median (L1) are two points on a continuum defined by the choice of error function. The practical gap identified — that the backward gradient may only approximately implement L1 minimization — suggests a broader methodological point: many end-to-end learning pipelines that differentiate through optimization procedures (e.g., implicit differentiation, unrolled optimization) would benefit from explicit validation of the backward pass against ground-truth gradients, especially when the forward pass involves non-differentiable operations or approximation tolerances.
+None beyond the paper's own contributions. The reviews surface several constructive suggestions (discrete median baseline, kernel ablation, gradient clipping analysis) that would strengthen the ablation story, but do not contribute new scientific insights beyond what the paper already provides.
 
 ## Suggestions
-
-- Add an experiment comparing the implicit-differentiation gradient to a finite-difference approximation on a small synthetic distribution (e.g., a two-spike mixture) to validate that the backward pass correctly minimizes L1 risk during training.
-- Include a brief limitations paragraph discussing when the L1 risk minimizer may behave similarly to expectation (e.g., near-uniform distributions) and the role of the Laplacian bandwidth σ.
-- Report the sensitivity of results to the binary search tolerance τ and the denominator clipping threshold.
+1. Correct the time complexity claim in Section 3.2 to O(N log(1/τ)).
+2. Add a discrete L1 minimizer (median) baseline to Table 8 to disentangle the effect of interpolation from the L1 switch.
+3. Include a brief justification for the Laplacian kernel choice, or an ablation comparing Laplacian vs. Gaussian.
+4. Acknowledge that the risk is defined over the estimated posterior (minimum Bayes risk) rather than the true data distribution, to align the theoretical framing with standard decision theory terminology.
+5. Add a sentence noting that G(y, p^m) is monotonic, guaranteeing that binary search converges to the unique root.
 
 ## Score and Decision
 
-This paper presents a novel, well-motivated formulation for continuous disparity prediction. The core idea — replacing expectation with L1 risk minimization — is clean and principled, and the empirical results (especially in cross-domain generalization) are strong and consistently positive across multiple benchmarks. The ablation study cleanly isolates the contribution of end-to-end L1 training.
+This paper makes a genuine contribution — a well-motivated reformulation of disparity prediction as L1 risk minimization, backed by a clean theoretical apparatus (implicit differentiation) and strong empirical results across five benchmarks. The weaknesses are bounded: the complexity claim is wrong but inconsequential for practice, the missing discrete median baseline is a genuine gap but does not invalidate the overall finding, and the remaining issues are presentation/analysis depth. The paper delivers on its central claims.
 
-The paper's main weakness is the lack of validation for the backward gradient. This is a genuine evidential gap: because the training loss is identical for both L1 and expectation training, the gradient through the risk module is the sole differentiating factor during training, and its correctness is not verified. However, this is a fixable issue — the paper's contribution does not depend on a perfect gradient, only on a demonstrably correct one — and the test-time-only improvements already demonstrate practical value independent of the gradient question.
-
-The paper offers real novelty (the risk minimization framing is new to stereo matching), strong experimental support for its claims, and practical utility (test-time plug-and-play). The weaknesses are significant but addressable and do not invalidate the core contribution.
-
-**Score**: 7.0
-
-**Decision**: Accept
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

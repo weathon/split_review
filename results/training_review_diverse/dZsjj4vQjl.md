@@ -1,79 +1,69 @@
-Now I have a thorough understanding of the paper. Let me produce the consolidated review.
+Now I have all the information needed. Let me compose the consolidated review.
 
 ## Summary
 
-This paper introduces MMGIC, a multimodal dataset with multi-grained concept annotations (captions, labels, label descriptions, and object region crops) constructed from four public object detection datasets (3.5M images, 23.9M regions, 61.8M label–description pairs). Using a standard autoregressive MLLM framework (LLaMA-2-7B), the authors systematically ablate data recipes, compare and combine MMGIC with large-scale image–caption data (52M images), and evaluate across 12 comprehension and generation benchmarks in both pre-training and SFT stages. The core finding is that multi-grained annotations help MLLMs locate and learn concepts at multiple granularities, and that combining MMGIC with coarse-grained image–caption data via curriculum learning yields complementary depth and breadth improvements.
+This paper introduces MMGiC, a new multimodal dataset (3.5M images, 23.9M object regions, 61.8M label-description pairs) that integrates coarse-grained captions, fine-grained category labels, label descriptions, and object regions into a single image-text interleaved document via a structured template. Through systematic experiments under a general autoregressive MLLM framework (with frozen visual modules and partial LoRA tuning), the paper demonstrates that multi-grained concept annotations integrate and complement each other, outperforming a 15× larger caption-only dataset, and that appropriate curriculum learning combining both granularities yields the best results across 12 comprehension and generation benchmarks.
 
 ## Strengths
 
-- **Novel multi-grained dataset construction.** MMGIC fills a genuine gap in MLLM training by providing both textual (captions, labels, descriptions) and visual (object region crops) annotations integrated into interleaved documents. The collection from four object-detection datasets (Open Images, Objects365, V3Det, Visual Genome) with BLIP-2 synthesized captions and GPT-4-generated label descriptions is clearly described (Section 2).
+1. **Well-motivated dataset with structured multi-grained integration.** The paper introduces a novel dataset construction methodology that integrates coarse-grained captions, fine-grained category labels, label descriptions, and object regions into a single image-text interleaved document via a structured template (Section 3.3, Figure 1). This design leverages MLLMs' autoregressive context processing to align vision and language across granularities simultaneously, unlike prior VLM work that uses separate components and losses.
 
-- **Systematic data recipe analysis reveals complementarity among components.** Table 1 and the corresponding qualitative analysis (Figures 2–3) convincingly disentangle the contribution of each annotation component. The progression from captions-only → captions+labels → captions+labels+descriptions → full MMGIC shows that descriptions mitigate label confusion and regions further ground concepts spatially. This is the cleanest evidence for the paper's central thesis.
+2. **Systematic ablation isolating each annotation component.** Table 1 and Section 5.1 carefully decompose the contribution of each annotation component: appending only category labels hurts performance, label descriptions mitigate the drop by strengthening concept association, and object regions further boost results. Qualitative examples (Figures 2, 3) concretely ground these findings.
 
-- **Demonstrated complementary strengths with coarse-grained data and effective collaboration.** Tables 2–4 show that MMGIC alone excels on depth-oriented tasks (POPE: +3.95%, SEED-Bench: +2.34% over IC alone), coarse-grained IC excels on breadth-oriented tasks, and curriculum learning strategies (IC-then-MMGIC; joint-then-MMGIC) combine both strengths to improve average performance across 12 benchmarks.
+3. **Demonstrated advantage over 15× larger caption data and effective collaboration.** Table 2 shows that MMGiC (3.5M images) significantly outperforms a 52M-image caption dataset on both image captioning and generation tasks. The curriculum learning exploration (pre-training on caption data → MMGiC; joint → MMGiC) provides actionable findings, with the best strategy achieving the highest average performance.
 
-- **Fine-grained meso analysis of dimension-level benefits.** Section 4.4 and Figure 5 provide a controlled comparison of coarse-grained (CG), fine-grained (FG), and multi-grained (MG) settings within MMGIC across 8 SEED-Bench-IMG dimensions. FG improves instance identity, spatial relation, counting, and interaction; CG improves scene understanding; and MG integrates both. The quantitative (+1.4 points overall) and qualitative evidence supports the depth-vs-breadth framing.
+4. **Fine-grained per-dimension analysis on SEED-Bench-IMG.** Figure 5 quantifies how coarse-, fine-, and multi-grained annotations affect 8 evaluation dimensions, showing that fine-grained annotations improve "Instance Identity" (+2.5 pts) and "Spatial Relation" (+3.1 pts) over coarse-grained, while multi-grained further boosts "Scene Understanding" (+2.8 pts) and "Visual Reasoning" (+3.2 pts). The qualitative analysis clearly illustrates the complementary strengths.
 
-- **General framework ensures applicability.** The paper uses a standard autoregressive discrete MLLM (LaVIT-style visual modules, LLaMA-2-7B, single next-token-prediction loss) without task-specific modules or losses, ensuring the findings transfer to other MLLM architectures. The paper is appropriately upfront that the framework itself is not a novel contribution (Section 3).
-
-- **Strong empirical results despite limited data scale.** Even with <4M pre-training images vs. 52M for the IC baseline, MMGIC achieves competitive or superior performance on multiple benchmarks, and combined MMGIC+IC matches or exceeds some SOTA MLLMs trained with far more resources (stated as "well over 10×").
+5. **Broad and honest evaluation.** The paper evaluates on 12 multimodal benchmarks across comprehension and generation, appropriately distinguishes its baselines from SOTA MLLMs (noting unfair comparisons due to different resources), and shows emergent abilities like image editing and in-context synthesis not present in the training data.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None.
+
+1. **Potential data contamination between training images and evaluation benchmarks (COCO-based).** The MMGiC dataset is built from four detection datasets including Visual Genome, which is known to contain images that overlap with COCO. The paper evaluates on COCO Captions, VQAv2, GQA, and POPE (all COCO-based), yet reports no deduplication analysis or overlap statistics. If overlapping images exist in the training set, performance on these benchmarks could be inflated by memorization rather than improved concept learning. This is a significant methodological oversight. **However**, this concern does not invalidate the paper's entire contribution: (a) within-MMGiC ablations (Table 1) compare different data recipes on the same images, so any leakage would affect all rows equally and the relative comparisons remain valid; (b) results on non-COCO benchmarks (SEED-Bench, NoCaps, VizWiz, MME, MMBench, ScienceQA) are unaffected; (c) the core thesis is supported across multiple analyses spanning both affected and unaffected benchmarks. Still, the authors must report overlap statistics and either show results hold after removing leaked images or explicitly acknowledge and bound the impact.
+
+2. **Uncontrolled confound between annotation granularity and data source in the MMGiC vs. IC comparison.** The main comparison showing MMGiC outperforming IC (Table 2) conflates annotation granularity with data source and dataset size (3.5M MMGiC vs. 52M IC). MMGiC images come from detection datasets with complex multi-object scenes, while IC images come from web-crawled caption datasets. The paper lacks a size-matched baseline where a 3.5M random subset of IC (or a comparable caption dataset) is used to isolate the effect of annotation granularity from dataset provenance. This weakens the claim that the performance advantage is specifically attributable to multi-grained annotations rather than to differences in image selection or annotation quality.
 
 ### Minor
 
-1. **The MMGIC-vs-IC comparison conflates annotation granularity with increased visual input.** MMGIC provides not only multi-grained *textual* annotations but also 23.9M visual object-region crops per 3.5M images, meaning the model sees substantially more visual tokens per image than the IC baseline (52M images, no regions). The data-recipe ablations (Table 1) and meso analysis (Section 4.4) partially address this by isolating region effects *within* MMGIC, but the primary MMGIC-vs-IC comparison (Tables 2–4) attributes the outperformance broadly to "multi-grained concept annotations" without explicitly discussing how much the additional visual input (region crops) versus the textual annotation structure drives the gains. Since regions are a *designed component* of the multi-grained approach, this is not a fatal confound—but the paper would benefit from a clearer disclaimer disentangling these factors, or a simple control experiment adding random crops to the IC baseline.
+1. **Single-run experiments without variance estimates.** All experiments report a single run without confidence intervals or standard deviations. While this is common practice in large-scale MLLM training due to computational cost, several key comparisons (e.g., Table 1 recipe variants, Table 2 curriculum strategies) differ by 1–2 points, and the reader cannot assess whether these differences are significant. Reporting at least 2–3 runs for the most critical comparisons (e.g., the best recipe vs. IC vs. the combined strategy) would substantially strengthen the reliability of the claims.
 
-2. **No ablation of the structured template.** The template design (Figure 1) that integrates captions, labels, descriptions, and regions into interleaved documents is highlighted as a key element that "leverage[s] MLLMs' complex context processing capability." However, the paper never tests whether a simpler format (e.g., linear concatenation: "Caption: … Labels: … Description: … Region: …") would yield similar results. Without this control, it is unclear whether the observed gains depend on the specific template structure.
-
-3. **Lack of statistical rigor for key comparisons.** All results are reported as single numbers without confidence intervals, error bars, or significance tests. While large-scale pre-training experiments with single runs are standard in this field, the absence of variance estimates makes it difficult to assess whether small-margin differences (e.g., <0.5% on VQAv2, GQA in SFT) are robust. At minimum, bootstrap confidence intervals or significance tests for the central comparisons (Tables 1–2) would strengthen the evidence.
-
-4. **Dataset quality metrics and statistics are under-reported.** The paper states 3.5M images, 23.9M regions, and 61.8M label–description pairs, but provides no distribution of objects per image, region sizes, class frequencies, or quantification of the manual quality check of GPT-4-generated descriptions (e.g., "we checked N samples with X% accuracy"). These are standard expectations for a dataset paper.
+2. **The "for the first time" framing is slightly overstated.** Earlier VLM work (Oscar, X-VLM, etc.) clearly explored multi-grained concept annotations. The paper correctly distinguishes itself by operating under a unified autoregressive MLLM framework without task-specific heads — this distinction is valid and sufficient. The phrasing could be softened to "first systematic exploration in the MLLM autoregressive setting" to avoid the appearance of overclaiming.
 
 ### Trivial
-None.
+
+None beyond what is addressed in Removed Points.
 
 ## Nice-to-Haves
 
-- Adding object-region crops to the IC baseline (random crops in the same template, without fine-grained labels/descriptions) to directly quantify the visual-input confound.
-- An ablation of the SFT "playback" data (1M MMGIC samples): comparing SFT with vs. without playback for each baseline would clarify whether playback asymmetrically benefits the MMGIC-pretrained model.
-- Reporting training cost (GPU-hours) to help readers gauge practical significance.
+- A size-controlled ablation training on a random 3.5M subset of IC (matching MMGiC's cardinality) would help disentangle annotation granularity from dataset size/source effects in the MMGiC-vs-IC comparison.
+- Reporting the average and range over 2–3 seeds for the central comparisons (best recipe, IC baseline, best collaboration strategy) on a few key benchmarks would increase confidence in the findings.
+- A brief discussion of potential limitations of the label descriptions (generated by GPT-4) — e.g., hallucination risk or bias — would strengthen the dataset documentation.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **"Data leakage threatens the validity of the entire experimental comparison" (from harsh critic).** The critic frames this as a fatal flaw invalidating all results. In reality, within-MMGiC ablations (Table 1) are unaffected by this concern, non-COCO benchmark results are unaffected, and the core thesis is supported across multiple analyses. The concern is real and significant (kept as Major #1), but the critic's characterization as a "structural threat to the validity of the entire experimental comparison" is an overstatement.
 
-1. **"The main benefit is from object regions, not from label descriptions per se"** — The reviewer claims this "nuances the paper's emphasis on 'multi-grained concept annotations' if regions are the dominant driver." However, the paper explicitly includes object regions as a *component* of multi-grained concept annotations (Section 2.3: "multimodal annotations for images, including both textual forms and visual form (object regions)"). The paper's conclusion that all components together work best is fully consistent with the data. This is not a weakness—it is the paper's own finding.
-
-2. **"Framing issue: MLLMs vs VLMs not directly tested"** — The reviewer argues the paper claims MLLMs are "uniquely suited" but only tests the autoregressive setting, not the multitask VLM setting. However, the paper's contribution is exploring multi-grained annotations *within* the MLLM paradigm, not comparing MLLMs to VLMs. The paper states it reuses existing LLM training regimes to "ensure generality and applicability" (Section 1), not that MLLMs are provably better than VLMs. This is a framing disagreement, not a methodological flaw.
-
-3. **"Row 1 in Table 1: appending labels hurts. The paper attributes this to confusion. This is plausible."** — The paper and reviewer agree on the interpretation here. The reviewer presents this as a potential weakness but does not identify any actual error or gap; it merely restates the paper's own analysis.
-
-4. **"Curriculum results pattern is noisy / interpretation is post-hoc"** — The three-stage strategy giving best average performance is a genuine finding. The interpretation (high-quality data later is beneficial) is consistent with recent literature cited by the paper. Dismissing this as "post-hoc" is an unfair standard that would invalidate most empirical findings in this field.
+- **"Single-run results are especially problematic for small-margin comparisons" – harsh critic calls this nearly fatal when combined with data leakage.** The critic's framing that "combined with the data leakage concern it makes the empirical contribution difficult to trust" is too harsh. Single-run evaluation is standard practice in this subfield for large-scale training runs, and the critic acknowledges it "might not be fatal on its own." The concern is valid but minor (kept as Minor #1).
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews primarily reinforce the paper's stated findings rather than surfacing unanticipated insights.
+The synthetic analysis reveals a pattern not immediately obvious from the paper alone: the harsh critic identifies a genuine methodological concern (potential COCO overlap via Visual Genome), but the critic over-extrapolates this into a fatal flaw that would invalidate all claims. In practice, the paper's strongest evidence — the within-dataset ablation (Table 1) and the SEED-Bench per-dimension analysis (Figure 5) — survives this concern completely, since these comparisons control for data source. The critic's framing error is instructive: it conflates a genuine limitation in a subset of evaluations (COCO-based benchmarks) with a wholesale invalidation of the paper's contribution, which is much broader than those benchmarks alone.
 
 ## Suggestions
 
-1. **Explicitly qualify the MMGIC-vs-IC comparison.** Add a sentence or paragraph in Section 4.2 stating that MMGIC differs from IC in both annotation granularity and the presence of visual region crops, and that the data-recipe ablations (Table 1) and meso analysis (Section 4.4) are designed to isolate the role of each component. This would preempt the confound concern without requiring new experiments.
-
-2. **Add bootstrap confidence intervals** for the key results in Tables 1 and 2 (or at minimum for the headline MMGIC-vs-IC and curriculum comparisons). Even a brief statement about observed variance across evaluation seeds would help.
-
-3. **Include a dataset statistics table** showing object-count-per-image histograms, region size distributions, and a quantified quality check of GPT-4 descriptions.
-
-4. **In a revision, add a template ablation** (even a simple one: linear concatenation vs. the structured template) to validate the template design choice.
+- **Conduct deduplication analysis:** Identify which MMGiC images (especially from Visual Genome) overlap with COCO, VQAv2, GQA, and POPE evaluation sets. Report overlap statistics. If overlap exists, remove those images and re-run the key comparisons on COCO-based benchmarks to verify that the core trends hold.
+- **Add a size-matched ablation:** Train on a random 3.5M subset of IC to control for dataset size when comparing MMGiC vs. IC. This would strengthen the claim that annotation granularity (not just data source or size) drives the observed improvements.
+- **Soften the "for the first time" claim** to "first systematic exploration of multi-grained annotations in the autoregressive MLLM setting."
+- **Report variance for key comparisons** where margins are small (Table 1 recipe differences, Table 2 curriculum strategies), even if only 2–3 seeds on a subset of benchmarks.
 
 ## Score and Decision
 
-This is a solid dataset+empirical-analysis paper. The core contributions—MMGIC dataset, data-recipe ablations, and the demonstrated complementarity between fine-grained and coarse-grained data—are well-supported. The weaknesses (confound in the primary comparison, unablated template, missing variance estimates, under-reported dataset stats) are real but addressable and do not undermine the paper's central findings. The paper is a meaningful addition to the MLLM training data literature.
+The paper presents a clearly motivated dataset, a systematic and well-designed exploration, and useful empirical findings. The potential data contamination from Visual Genome into COCO-based evaluation benchmarks is a real oversight that must be addressed, but it does not fatally undermine the paper's core claims — the within-dataset ablations, SEED-Bench analysis, and non-COCO benchmark results remain valid and informative. The contribution (the MMGiC dataset + the empirical findings about multi-grained annotations) is solid and timely for the MLLM community. The weaknesses are addressable and do not warrant rejection.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

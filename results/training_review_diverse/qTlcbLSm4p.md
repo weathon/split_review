@@ -1,18 +1,24 @@
-Now I have all the information I need. Let me compose the final consolidated review.
+Here is my consolidated meta-review after cross-checking every claim against the paper.
+
+---
 
 ## Summary
 
-The paper presents the Relay Diffusion Model (RDM), a cascaded framework for high-resolution image generation. RDM's core idea is to continue the diffusion process from low-resolution results to high-resolution by using blurring diffusion and block noise, rather than the standard approach of conditioning on low-resolution outputs and restarting from pure Gaussian noise. The key technical innovations are: (1) a frequency-domain analysis showing that the same noise level produces higher SNR at higher resolutions, motivating "block noise" as an equivalent perturbation; (2) a relay mechanism combining patch-wise blurring diffusion with block noise to connect stages; and (3) an adapted stochastic sampler. RDM achieves competitive results on ImageNet 256×256 (best sFID 3.97 with CFG) and CelebA-HQ 256×256 (FID 3.15), with notable sampling efficiency.
+This paper proposes Relay Diffusion Model (RDM), a cascaded framework for high-resolution image synthesis that uses **(1)** a frequency-domain analysis showing that the same noise level on higher resolutions produces higher SNR in low-frequency components, **(2)** *block noise* — spatially correlated noise that mimics the spectrum of upsampled low-resolution noise — to bridge the noise distribution across resolutions, and **(3)** patch-wise blurring diffusion to let the high-resolution stage "continue" the diffusion process from the upsampled low-resolution output rather than restarting from pure noise or using conditioning. RDM achieves **FID 3.15 on CelebA-HQ 256×256** (SOTA among compared methods) and **sFID 3.97 on ImageNet 256×256** (SOTA), with fewer training iterations and robust performance at low sampling steps.
 
 ## Strengths
 
-- **Novel frequency-domain analysis of resolution-dependent noise.** The paper identifies via DCT that the same noise level on higher resolutions produces higher SNR in low frequencies (Section 3.1, Fig. 3a-b). This provides a principled explanation for why standard noise schedules fail at high resolution and motivates block noise as an equivalence operation — this goes beyond prior empirical schedule-tuning approaches (Chen et al., Hoogeboom et al.) and is a genuine analytical contribution.
+1. **Frequency-domain explanation of the resolution-SNR problem.** The paper identifies a specific, testable reason why standard noise schedules underperform at high resolution: upsampling shifts the SNR curve upward in low-frequency components (Figure 2(a)–(b)), making early diffusion steps too easy for the model. This goes beyond prior work that only noted the phenomenon (Chen et al. 2023, Hoogeboom et al. 2023) without the frequency lens.
 
-- **Competitive results on ImageNet with best reported sFID.** RDM achieves sFID 3.97 with CFG on class-conditional ImageNet 256×256 (Table 2), outperforming all baselines including ADM (6.02), DiT-XL/2 (4.60), and MDT-XL/2 (4.28–4.57). The FID of 1.87 with class-balance trick is competitive with MDT's dynamic CFG (1.79) and outperforms DiT (2.27).
+2. **Block noise with principled cross-resolution motivation.** The block noise construction (Eq. 3) with kernel size \(s=4\) on 256×256 images produces a frequency spectrum nearly identical to independent Gaussian noise on 64×64 images (Figure 2(c)). This directly connects the proposed noise to the stated SNR-matching problem, and the ablation study (Figure 4) confirms significant gains from including block noise.
 
-- **Demonstrated sampling efficiency.** RDM maintains FID ~5.5 with NFE=100 on ImageNet, while DiT-XL/2 and MDT-XL/2 degrade to FID >10 at the same budget (Figure 6). Even at NFE=60, RDM achieves FID <6, outperforming baselines at NFE=250. This practical advantage for low-latency generation is well-supported.
+3. **State-of-the-art results on key benchmarks.** RDM achieves FID 3.15 on CelebA-HQ 256×256 (beating StyleSwin's 3.25) and sFID 3.97 on ImageNet 256×256 (best among all compared methods, Table 2). The sFID result notably improves upon the previous best (MDT-XL/2-G at 4.28–4.57) by a meaningful margin.
 
-- **Ablation experiments validate key design choices.** The block noise ablation (Figure 5) shows consistent FID improvement after sufficient training on both ImageNet (~0.5 FID) and CelebA-HQ. The stochasticity parameter sweep (Table 4) identifies η=0.2 as optimal with clear improvement over the ODE baseline (5.65→5.27 on ImageNet, 4.11→3.15 on CelebA-HQ).
+4. **Simplified cascaded pipeline without conditioning augmentation.** By continuing the diffusion process from the upsampled low-resolution result (rather than conditioning on it), RDM avoids the distribution mismatch problem that forces CDM to use conditioning augmentation. This is a clean conceptual advance over prior cascaded approaches.
+
+5. **Robust sampling efficiency.** RDM maintains competitive FID even below 200 NFE, while single-stage baselines (DiT, MDT) degrade sharply (Figure 5). The training efficiency (1.2B images vs. 1.7B for MDT-XL/2, Section 4.2) is also notable.
+
+6. **Well-adapted stochastic sampler.** The derivation of a second-order stochastic sampler for blurring diffusion (Algorithm 1, Eq. 8–10) and the systematic ablation of stochasticity \(\eta\) (Table 3) add technical depth.
 
 ## Weaknesses
 
@@ -21,62 +27,64 @@ None.
 
 ### Major
 
-- **The evaluation does not isolate the relay mechanism's contribution from the pre-trained low-resolution backbone.** On ImageNet, RDM uses the released EDM checkpoint for the 64×64 stage and trains only the 256×256 stage (line 237). The comparison against CDM (FID 4.88 without CFG) is the most relevant baseline, but CDM used its own low-resolution model (likely weaker). Meanwhile, RDM's FID without CFG (5.27) is actually *worse* than CDM (4.88). A controlled ablation — RDM vs. a standard cascaded diffusion model using the *same* first-stage EDM checkpoint with conditioning augmentation — is absent. Without it, the paper's claim that the relay mechanism is superior to conditioning-based cascading conflates two factors: (a) the benefit of a strong pre-trained backbone and (b) the specific relay design. The claimed advantages in simplicity and efficiency are conceptually valid, but the *quality* advantage of the relay mechanism over conditioning is not convincingly separated from the backbone effect.
+1. **Patch-wise blurring specification is ambiguous.** The paper states that heat dissipation is applied "on each \(4\times 4\) patch independently" (Section 3.2), yet Equation (6) uses a *global* DCT projection matrix \(\mathbf{V}^\mathsf{T}\) and a diagonal matrix \(\mathbf{D}^p_t\) without clarifying how patch-wise blurring is expressed in that global basis. A patch-wise blur applied independently to non-overlapping \(4\times 4\) blocks is not diagonal in the *global* DCT basis (it would be block-diagonal in a block-DCT basis). The paper states that \(\mathbf{D}^p_T\) is "chosen" so that each \(4\times 4\) patch ends up with the same pixel value, but never specifies the construction of \(\mathbf{D}^p_t\) for intermediate \(t\), whether a global or block DCT is used, or what boundary conditions apply. This makes the core forward process of the high-resolution stage not fully reproducible and is the most significant specification gap.
+
+2. **Theoretical gap between training corruption and sampler derivation.** The training objective (Equation 7) corrupts data with a mixture of blur + isotropic Gaussian noise + block noise simultaneously at each step. The sampler (Algorithm 1, Eqs. 8–9), however, is derived from a forward process \(q(\mathbf{v}_t|\mathbf{v}_0)=\mathcal{N}(\mathbf{v}_t|\mathbf{D}^p_t\mathbf{v}_0,\sigma_t^2\mathbf{I})\) that assumes *only* isotropic Gaussian noise. The block noise is then substituted ad-hoc into the isotropic noise term (text after Eq. 10). The paper does not discuss whether the mixture noise training is consistent with the blurring-diffusion-based sampler, or under what conditions the reverse process remains valid. While the EDM-style training loss (denoising score matching) does not strictly require a Markovian forward process per se, the fact that the sampler is derived from a different forward model than the one used in training is a genuine theoretical gap. This weakens the formal grounding of the framework, even if the empirical results are strong.
 
 ### Minor
 
-- **The CelebA-HQ comparison table is limited, making the "state-of-the-art FID" claim less conclusive.** The CelebA-HQ table (Table 1) includes only 4 baselines (LSGM, WaveDiff, LDM-4, StyleSwin), all from 2022 or earlier. The paper cites StyleGAN-XL in the ImageNet table but does not include it (or other recent methods) for CelebA-HQ. While the specific FID numbers claimed by the reviewer for StyleGAN-XL on CelebA-HQ cannot be independently verified here, the comparison set is undeniably sparse, and the SOTA claim should be qualified or expanded.
+1. **Sampling-efficiency comparison conflates two-stage vs. single-stage advantage.** The sampling-steps ablation (Figure 5) compares RDM (two-stage, with a pre-trained 64×64 EDM first stage) against DiT-XL/2 and MDT-XL/2 (single-stage, generating 256×256 from pure noise). The FLOP-weighted NFE adjustment (1/10 of first-stage NFE) partially addresses this, but the fundamental comparison is asymmetric: the first stage provides a structural head start that any two-stage method would enjoy. The paper would benefit from a comparison against a cascaded baseline (e.g., CDM) under the same NFE-weighting scheme, or a variant that removes the pre-trained first stage.
 
-- **The sampler algorithm pseudocode is inconsistent with the text regarding block noise.** The text explicitly states (line 189): "The adaptation is just to replace isotropic Gaussian noise $\bm{\epsilon}$ with $\Tilde{\bm{\epsilon}}$, which is a weighted sum of the block noise and isotropic Gaussian noise." However, Algorithm 1 (lines 206, 218) uses $\delta_n\bm{\epsilon}$ (pure Gaussian) without showing the substitution. While the text description is clear enough that a reader would infer the intended behavior, the algorithm as written does not match the described method, creating an unnecessary presentation inconsistency.
+2. **Core motivation lacks quantitative validation.** The claim that block noise with \(s=4\) matches the SNR spectrum of upsampled 64×64 noise is supported only by a qualitative figure (Figure 2(c)). A quantitative metric (e.g., KL divergence between SNR curves, or correlation between the two noise spectra) would substantially strengthen the motivation and ground the choice of \(s=4\).
 
-- **Key hyperparameters are selected without documented justification or sensitivity analysis.** The block noise weighting α=0.15 and kernel size s=4 are used throughout (line 315) without reporting a sweep or explaining how they were chosen. The paper acknowledges that an "optimal noise schedule" derivation did not work (Conclusion), but the fixed mixture of block noise and Gaussian noise is similarly heuristic. A sensitivity study for these parameters would strengthen confidence in the design.
+3. **Artifact-correction claim is unsupported.** The paper states that "any artifacts in the low-resolution images can be corrected in the high-resolution stage" (Section 3.2) as an advantage over CDM. No experiments or qualitative examples demonstrate this. A simple comparison where the low-resolution stage produces a visibly flawed image and the high-resolution stage recovers structure (vs. a CDM baseline that would replicate the artifact) would validate this claimed advantage.
 
-- **The class-balance trick is mentioned but not described.** The paper reports RDM + class-balance achieving FID 1.87 on ImageNet (Table 2, line 292) but never defines what this trick entails. This makes the result hard to reproduce or compare against.
+4. **Missing ablation of the blurring component.** The paper ablates block noise (Figure 4) and stochasticity \(\eta\) (Table 3), but never ablates the blurring diffusion itself. A variant that uses only block noise and isotropic noise without blurring would quantify the contribution of the blurring term.
 
-- **The block noise improvement, while real, is modest in absolute terms.** On ImageNet, the ablation shows roughly ~0.5 FID improvement from block noise after 1.2B images (Figure 5). This is statistically meaningful but not transformative, and without block noise, RDM already converges faster initially — somewhat undercutting the claim that block noise is essential to the framework.
+5. **Incomplete reporting of training hyperparameters.** The paper states that architecture "largely follow[s] ADM" and that the EDM checkpoint is used for the first stage, but does not report learning rate, batch size, optimizer, total iterations, or number of parameters for the high-resolution stage. This information is essential for reproducibility.
 
 ### Trivial
-- The algorithm uses a yellow-highlighted box for the second-order correction step but does not indicate whether this part was used in the reported results; a brief note would help.
-- The paper uses "summaries" instead of "summarized" in the algorithm caption (line 191).
+
+- In Table 2, the no-guidance RDM FID (5.27) is slightly worse than CDM (4.88). This is not a weakness per se — with CFG RDM surpasses CDM — but the no-guidance comparison could be noted for completeness.
+- The horizontal axis of Figure 5 is not fully legible in the description (NFE allocation notation could be clarified).
 
 ## Nice-to-Haves
-- A controlled cascaded baseline using the same first-stage EDM checkpoint with standard conditioning (and conditioning augmentation) would directly validate whether the relay mechanism itself, rather than the backbone, drives the quality results.
-- A sweep or theoretical discussion of how kernel size s should scale for other upsampling factors (e.g., 2×, 8×) would broaden the method's applicability beyond the 4× case demonstrated.
-- The paper could discuss failure modes — what happens when the low-resolution generation is poor, or whether the relay can correct for low-resolution artifacts.
+
+- A comparison of RDM's sampling efficiency against *cascaded* baselines (e.g., CDM) rather than only single-stage methods.
+- A quantitative KL-divergence or spectrum-matching metric between block noise and upsampled low-resolution noise to ground the choice of kernel size \(s=4\).
+- A figure showing RDM correcting a deliberately degraded low-resolution input to demonstrate the claimed artifact-correction capability.
+- Ablation of the blurring component (e.g., RDM minus blurring, keeping only block noise).
+- Full training hyperparameters (batch size, learning rate, optimizer, iterations) in the main text or supplementary.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+- **Algorithm 1 error claim** — The reviewer states that the correction step "overwrites u_{n-1} ... but the first-order u_{n-1} is not used anywhere." This is incorrect. The first-order u_{n-1} (line 206) is used as input to the second model evaluation at line 212: \(\tilde{\mathbf{u}}'_0 = \mathbf{u}_\theta(\mathbf{u}_{n-1}, \sigma_{t_{n-1}})\). The algorithm correctly implements standard Heun's method. **Removed as factually wrong.**
 
-1. **"The sampling algorithm is inconsistent with the training forward process regarding block noise — the block noise is absent during inference."** — This overstates the issue. The text (line 189) clearly states the block noise substitution. The algorithm pseudocode is missing the notation, but the text is unambiguous. Downgraded from "structural issue" to minor presentation inconsistency.
+- **Abstract precision claim** — The reviewer says the abstract's "state-of-the-art FID … and sFID on ImageNet" is imprecise. The abstract actually reads: "state-of-the-art FID on CelebA-HQ and sFID on ImageNet 256×256" — FID on CelebA-HQ (3.15) is SOTA among compared methods, and sFID on ImageNet (3.97) is similarly SOTA. The abstract is accurate and does not claim SOTA FID on ImageNet. **Removed as factually wrong (misreading).**
 
-2. **"StyleGAN-XL achieves FID 1.85 on unconditional CelebA-HQ 256×256 — selective reporting inflates the claimed contribution."** — The specific numerical claim about StyleGAN-XL's performance on CelebA-HQ cannot be independently verified from the paper alone. The general point about limited comparison breadth is kept as a minor weakness, but the specific FID claim and accusation of deliberate omission are removed.
-
-3. **"The paper does not discuss how generally this equivalence holds, or how kernel size should scale for other upsampling factors."** — This is scope creep; the paper focuses on the 4× case (64→256) and does not claim generality across all factors. Moved to Nice-to-Haves.
-
-4. **"The simplicity claim is a wash because RDM's forward process is itself more complicated."** — Subjective interpretation; RDM removes conditioning augmentation and cross-attention, which is genuinely simpler in the cascaded pipeline design, even if the forward noise process is more complex.
-
-5. **Various formatting/style nitpicks** — Removed per hard rules.
+- **Critique of end-to-end vs. single-stage comparison as "fatal"** — The efficiency comparison against single-stage baselines is a limitation, but the paper is fundamentally proposing a cascaded method; comparing against single-stage methods is standard practice in the cascaded literature. The paper also includes FLOP-weighted NFE to partially adjust. This is a minor weakness, not a fatal flaw. **Downgraded from fatal framing to minor.**
 
 ## Novel Insights
 
-The reviews collectively surface an important tension in evaluating cascaded generative models: when the first stage of a cascaded system uses a pretrained backbone (EDM), and the second stage introduces a new mechanism (relay), improvements in overall metrics conflate the pre-trained model quality with the mechanism's own contribution. This is not unique to RDM — it applies broadly to most cascaded generative frameworks — but it means the paper's central claim (relay > conditioning) requires a controlled experiment that isolates only the inter-stage connection method while holding the backbone fixed. The frequency-domain motivation for block noise is the most distinctive and least confounded contribution; whether block noise specifically (vs. the blurring diffusion alone) drives the improvement is partially addressed by the ablation but not fully disentangled from the backbone advantage.
+Beyond the paper's own contributions, the reviews surface a notable tension: RDM achieves strong empirical results despite an incompletely specified forward process and a training-sampler consistency that is not formally established. This suggests that either (a) the theoretical gaps are less consequential in practice than they appear (e.g., EDM-style denoising score matching is robust to these discrepancies), or (b) the empirical results mask a real issue that would surface under more rigorous stress-testing (e.g., out-of-distribution resolutions, adversarial prompts, or greater upsampling ratios). A deeper investigation into *when* the mismatch matters and *why* it does not seem to hurt RDM's ImageNet/CelebA-HQ results would be a valuable follow-up.
 
 ## Suggestions
 
-1. **Add a controlled cascaded baseline**: Use the same EDM 64×64 checkpoint to train a standard super-resolution diffusion model (with conditioning augmentation) and compare its FID/sFID against RDM under identical training budgets. This would directly validate whether the relay mechanism itself improves over conditioning.
+1. **Specify the DCT basis and the construction of \(\mathbf{D}^p_t\).** Clarify whether a global DCT, a block DCT, or a specially constructed diagonal matrix in the global DCT basis is used. Provide the exact formula for \(\mathbf{D}^p_t\) entries and how they ensure that at \(t=T\) each \(4\times4\) patch has uniform pixel values. This is the single highest-impact revision.
 
-2. **Fix the sampler algorithm** to use $\Tilde{\bm{\epsilon}}$ (block noise mixture) instead of $\bm{\epsilon}$, or add a note that the substitution from Eq. (19) applies.
+2. **Address the training-sampler consistency gap.** Either show that the mixture-noise training loss and the blurring-diffusion sampler are consistent under some known relaxation (e.g., by noting that EDM's denoising objective learns \(\nabla_{\mathbf{x}}\log p(\mathbf{x})\) regardless of the noise family, with the sampler being a separate design choice), or reconcile the mismatch directly. This would substantially strengthen the theoretical grounding.
 
-3. **Describe the class-balance trick** in the main text or appendix — without it, the FID 1.87 result cannot be reproduced or fairly compared.
+3. **Add a cascaded baseline to the sampling-efficiency comparison.** Compare RDM's NFE-FID trade-off against CDM (or a similar two-stage pipeline) under the same FLOP-weighting scheme to isolate RDM's specific advantage over the two-stage approach itself.
 
-4. **Add a sensitivity analysis for α and kernel size s**, or at minimum state how they were chosen (e.g., grid search over [0.05, 0.1, 0.15, 0.2] and s ∈ {2, 3, 4, 5}).
+4. **Quantify the spectrum-matching claim.** Add a metric (e.g., KL divergence or cosine similarity between SNR-per-frequency curves) comparing block noise on 256×256 to independent Gaussian on 64×64 for several kernel sizes, showing \(s=4\) is optimal.
 
-5. **Qualify the CelebA-HQ SOTA claim** by noting which baselines are included, or expand the comparison to include more recent work.
+5. **Provide training hyperparameters.** Report batch size, learning rate, optimizer, total iterations, and parameter count for the high-resolution stage.
+
+6. **Demonstrate artifact correction.** Include a qualitative failure-mode example where low-resolution artifacts exist and RDM's high-resolution stage corrects them, contrasted with a CDM baseline.
 
 ## Score and Decision
 
-This paper presents a genuinely novel framework with a principled frequency-domain motivation and competitive results, particularly in sampling efficiency and sFID. The core idea — continuing diffusion across resolutions via matched noise characteristics — is interesting and well-motivated. However, the experimental design has a significant gap: the lack of a controlled comparison against a standard cascaded baseline using the same backbone prevents isolating the relay mechanism's contribution from the pre-trained model quality. Additional minor issues (limited CelebA-HQ comparison, undocumented class-balance trick, underspecified hyperparameters) further limit the paper's strength. The paper would benefit from a revision addressing these gaps. In its current form, the paper's evidence is suggestive but not fully convincing.
+The paper presents a genuinely novel idea (continuing diffusion across resolutions via spectrum-matched noise and blurring) with strong empirical support (SOTA sFID on ImageNet, SOTA FID on CelebA-HQ, training efficiency, sampling efficiency). The core weaknesses — an ambiguous DCT specification and a theoretical gap between training and sampling — are addressable in revision and do not invalidate the results. The empirical contribution and clean motivation outweigh the specification issues.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

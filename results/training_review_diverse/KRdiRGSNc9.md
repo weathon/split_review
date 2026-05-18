@@ -1,22 +1,20 @@
-I have verified all claims against the paper. Here is the consolidated review.
-
----
+Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
 
 ## Summary
 
-HumanEval-V is a benchmark of 108 Python coding tasks designed to evaluate large multimodal models (LMMs) on visual reasoning through code generation. Each task requires a model to complete a Python function based on a single image, a function signature, and a minimal textual description. The paper evaluates 19 LMMs and finds that even the best proprietary models score only 13–18.5% pass@1, while open-weight models all score below 4% pass@1. Ablation studies reveal that providing human-annotated image descriptions dramatically improves performance (GPT-4o +32.4% pass@1), and that open-weight LMMs suffer coding ability degradation compared to their LLM backbones.
+The paper introduces HumanEval-V, a benchmark of 108 Python coding tasks designed to evaluate Large Multimodal Models (LMMs) where visual context is essential for solving each task. Each task provides a single diagram, a function signature, and minimal textual description; models must generate correct code. The authors evaluate 19 LMMs and find very low performance — GPT-4o achieves only 13.0% pass@1, Claude 3.5 Sonnet 18.5%, and open-weight models stay below 4% pass@1. Ablation studies reveal that providing human-annotated image descriptions dramatically improves results (e.g., GPT-4o jumps to 45.4% pass@1), and that open-weight LMMs underperform their own LLM decoders on text-only coding benchmarks. The paper identifies visual perception and vision-encoder integration as key bottlenecks.
 
 ## Strengths
 
-- **Reveals previously undetected LMM limitations**: Correlation analysis (Figure 2) shows models that score highly on MMMU, MathVista, and MMVet often score near zero on HumanEval-V, demonstrating the benchmark exposes weaknesses overlooked by existing multimodal evaluations. This is a genuine contribution to understanding LMM capability gaps.
+1. **First benchmark to make visual context genuinely necessary for coding tasks.** Unlike prior work (e.g., MMCode) where visual information is non-essential, HumanEval-V is designed so that textual descriptions are minimized and the image is required. The paper explicitly verifies that GPT-4o cannot solve any task without the image (Section 3.3), and the empirical results show that even the best proprietary models score very low, validating that the benchmark captures a genuinely hard, under-explored capability.
 
-- **Identifies coding ability degradation in open-weight LMMs**: The ablation in Table 3 quantifies how open-weight LMMs consistently underperform their own LLM decoders on coding benchmarks (e.g., InternVL-2 40.1B drops 28.1% on HumanEval+), providing concrete evidence that current multimodal training strategies harm coding proficiency. The model names in the table confirm these are the actual backbone decoders, making the comparison appropriate.
+2. **Benchmark reveals large, previously undetected performance gaps in state-of-the-art LMMs.** On 108 entry-level Python tasks, GPT-4o achieves only 13.0% pass@1 and 36.4% pass@10, while open-weight 70B+ models stay below 4% pass@1 (Table 1). The correlation analysis (Figure 2) shows many models that score competitively on MMMU/MathVista/MMVet cluster near zero on HumanEval-V, confirming the benchmark exposes weaknesses that existing multimodal benchmarks miss (Section 4.1). This is a striking and actionable finding.
 
-- **Well-designed ablation isolating vision as bottleneck**: The "Desc. Only" experiment (Table 2), where human-annotated textual descriptions replace images, shows substantial gains for all models (GPT-4o: 13.0% → 45.4% pass@1). This cleanly separates vision-understanding failures from coding-ability failures and is a strong methodological contribution.
+3. **Ablation studies isolate specific, actionable limitations.** When models receive human-annotated image descriptions instead of the actual images, GPT-4o pass@1 jumps from 13.0% to 45.4% (+32.4 points), and large open-weight models improve similarly (Table 2). Table 3 demonstrates that open-weight LMMs consistently degrade on HumanEval+ and MBPP+ compared to their own LLM decoders (e.g., InternVL-2 40.1B drops 28.1 points on HumanEval+). These controlled experiments directly attribute underperformance to inadequate visual perception and coding degradation from multimodal training.
 
-- **Rigorous data leakage prevention with documented evidence**: The adaptation pipeline modifies original problem contexts, algorithmic patterns, and redraws visual elements. The observed hallucination errors (e.g., GPT-4o and Claude 3.5 Sonnet incorrectly assuming clockwise ordering from CodeForces origins) provide concrete evidence that the adaptation successfully prevents memorized solutions from working.
+4. **Rigorous construction pipeline with quality assurance.** The collect-adapt-mutate process (Section 2.2) modifies both context and visual elements from CodeForces/Stack Overflow sources, and cross-validation among three expert annotators (200+ hours each) with statement/branch coverage on test cases (Section 2.3) yields high-integrity data. The 108 tasks are demonstrably distinct from their origins, and the identification of "hallucination due to overfitting" (models applying original problem patterns) validates the need for this pipeline.
 
-- **Thorough evaluation coverage**: 19 models across proprietary and open-weight families, using both greedy decoding (pass@1) and sampling (pass@10, n=20), with a post-processing pipeline and parsing success rate metric to separate syntax from functional errors.
+5. **Lightweight and easy to adopt.** Each task uses only standard Python libraries, has a median of 10 test cases, and follows a prompt template akin to HumanEval (Section 2.4). This lowers the barrier for researchers to reproduce or extend the benchmark.
 
 ## Weaknesses
 
@@ -25,54 +23,49 @@ None.
 
 ### Major
 
-1. **Central claim (visual necessity) is stated but not supported by data**: The paper asserts that "GPT-4o cannot solve any of the coding tasks without access to the images" (Section 2.3) but provides **no experimental data** — no table, no pass@1 scores, no protocol description for this ablation. This is the single most important verification experiment for the benchmark. If even a few tasks can be solved from the function signature and minimal comment (~111 tokens average) alone, the claim that visual information is essential is weakened. The "Desc. Only" experiment is not a substitute: it uses rich human-annotated descriptions, not the original minimal text. **This is a structural evidential gap** because it underpins the entire contribution. The fix is straightforward — report the text-only ablation results — but the paper as submitted does not validate its core premise.
-
-2. **No correlation coefficients reported for the cross-benchmark analysis**: Figure 2 visually shows the relationship between HumanEval-V and MMMU/MathVista/MMVet, but the paper only states "a rough positive correlation" qualitatively. Given that many models near zero on HumanEval-V while spread on other benchmarks, the floor effect is evident, but reporting Pearson/Spearman coefficients would give readers a precise, reproducible measure. This weakens the argument that HumanEval-V measures something "different" from existing benchmarks — a quantitative claim that deserves quantitative support.
+1. **The LMM vs. LLM decoder comparison (Table 3) lacks specification of how LMMs were evaluated on text-only benchmarks.** The paper argues that open-weight LMMs suffer from "deteriorated coding performance after integrating the vision encoder" (finding 4). However, the evaluation protocol for LMMs on HumanEval+ and MBPP+ is not described: were the LMMs given a blank/placeholder image, or were they run in text-only mode? Many LMMs handle missing visual input differently, and a confounded protocol could produce the observed degradation without reflecting genuine coding ability loss. The paper's exact wording — "Given that open-weight LMMs typically employ a vision-encoder and language-decoder architecture, we also evaluate their LLM decoders separately" (Section 4.2) — does not clarify the multimodal input format. This is a non-trivial methodological gap that weakens one of the paper's four key findings. The authors should specify the exact input format used and justify why it constitutes a fair comparison.
 
 ### Minor
 
-1. **No confidence intervals or variance estimates for pass@k scores**: With 108 tasks, pass@1 is measured in discrete steps of ~0.93%, and pass@10 (n=20) has non-trivial sampling variance. While single-run evaluation without CIs is standard practice in code generation benchmarking, the paper makes fine-grained comparative claims (e.g., "larger parameter size does not guarantee better performance") that would benefit from bootstrap intervals or similar to establish whether observed differences are meaningful.
+2. **Text-only baseline for the raw benchmark tasks is stated but not shown as experimental evidence.** The paper asserts in Section 3.3 that "GPT-4o cannot solve any of the coding tasks without access to the images" as part of quality assurance. This is a central claim — the benchmark is repeatedly described as "unsolvable without the visual context" — but it is reported as a single sentence rather than presented with experimental detail. Adding a row to Table 1 showing GPT-4o (text-only, no image, no description) with actual pass@1 and pass@10 numbers would provide clean validation of the benchmark's core design principle. While the Desc. Only ablation in Table 2 is related, it uses human-annotated descriptions rather than the original minimal textual context, so it does not substitute for this baseline.
 
-2. **The mutation process is described only through one example**: The paper states that "for each suitable task, we create one or two mutations, resulting in a total of 108 coding tasks," and gives one example (changing intersection rules). While the released dataset makes exact replication possible, the lack of a more detailed description of mutation criteria makes it hard to assess how diverse the mutated tasks are from their parents and from each other.
+3. **No uncertainty estimates for pass@k scores.** With only 108 tasks, pass@1 estimates — especially for models achieving 0–4% — have wide confidence intervals. The paper reports no bootstrap confidence intervals, standard errors, or any variance measure, making it difficult to assess whether differences between low-performing models (e.g., Phi-3-Vision at 2.6% vs. InternVL-2 40.1B at 1.6% pass@10) are meaningful. Given the precedent set by HumanEval (164 tasks without CIs), this is standard practice in code generation papers, but the authors should at minimum acknowledge the limitation.
 
-3. **LLM decoder comparison, while valid, has a minor confound**: The paper compares LMMs against their LLM decoders (named explicitly in Table 3) and finds coding degradation. The comparison is valid — these are the actual backbone models. However, the paper states "similar parameter sizes" without noting that the LMM versions include vision encoder parameters (e.g., 40.1B vs 34.4B), which could account for small differences. The degradation is large enough that this doesn't change the conclusion, but the framing should be more precise.
+4. **Correlation analysis lacks numerical coefficients.** Figure 2 presents a regression plot comparing HumanEval-V to MMMU, MathVista, and MMVet, but the paper only states a "rough positive correlation" without reporting Spearman or Pearson correlation coefficients (Section 4.1). The argument that HumanEval-V captures a distinct capability from these benchmarks would be substantially strengthened by quantitative correlations. As presented, the scatter plot is suggestive but not rigorous.
+
+5. **Mutation process may overstate task diversity.** The 108 tasks are derived from 40 base tasks through a mutation process described in one paragraph (Section 2.2). The example ("changing the rule to consider line segments intersecting within the circle, regardless of outside") suggests some mutations keep the same visual layout while altering algorithmic rules. The paper does not quantify how many tasks are near-duplicates versus truly independent visual reasoning challenges. This does not invalidate the benchmark but warrants transparent discussion of the effective number of independent visual scenarios.
 
 ### Trivial
-
-- The list of visual element types (trees, graphs, matrices, etc.) appears in the body text but without frequency counts; a simple table would help users understand benchmark coverage.
-- Figure 2 scatter plots have many points overlapping at zero; a jitter or violin plot would make the distribution clearer.
+None.
 
 ## Nice-to-Haves
-
-- A qualitative error taxonomy (vision misinterpretation vs. algorithm error vs. syntax error) across the 19 models would strengthen the analysis beyond the single overfitting example.
-- An analysis of pass rates by task difficulty (e.g., GT code statement count, visual element complexity) would help identify where LMMs fail most.
+- **Quantitative breakdown of hallucination/overfitting failures.** The paper identifies this phenomenon qualitatively (Section 4.1) but does not estimate its prevalence across models or tasks. A manual categorization of failure modes for a few representative models (e.g., GPT-4o, Qwen2-VL 73B) would make the analysis more concrete.
+- **Prompt format sensitivity analysis.** The paper uses a specific Markdown prompt template. Since the benchmark is small, a sensitivity check on a subset of tasks (image placement, instruction phrasing) would add confidence that results are robust.
 
 ## Removed Points
+These are claims from the reviews that are not included as weaknesses in the main assessment:
 
-- **Criticism about dataset not being available to reviewers / reproducibility concerns** (Harsh Critic): Removed per Hard Rules — the paper states the dataset will be released; questioning its existence or availability is not permitted.
-- **"Formatting with wrapped text and multi-row models is a bit hard to parse"**: Removed as a pure formatting/style nitpick.
-- **Criticism that "Table 4 mentions trees, graphs, matrices... but no breakdown is given"**: This information is presented in the body text (line 86), not a table; the critic's reference appears hallucinated. The underlying suggestion (a breakdown table) is retained in Nice-to-Haves.
-- **Criticism that the rate of discarding tasks (40 from thousands) is "very low" and screening criteria are unclear**: The paper describes the criteria ("high-quality visual elements and moderate difficulty"). A low retention rate is compatible with careful curation; this reads as suspicion of curation rigor without evidence of a problem.
-- **Strength Finder's claim that visual necessity is "validated by the finding that GPT-4o scores... 45.4% pass@1 when provided with textual descriptions alone"**: This conflates two different experiments. The 45.4% comes from the "Desc. Only" setting (human-annotated descriptions), not from the original minimal text. The strength about the design goal is kept, but the cited evidence is corrected.
-- **Criticism that "the Desc. Only experiment does not prove visual necessity"**: This is correct but the point is already covered in Weakness #1 (Major). The Desc. Only experiment is a different (and valid) contribution showing vision is a bottleneck; it does not and should not have to prove the text-only case.
+- **"Text-only baseline not reported at all"** — The paper DOES state in Section 3.3 that GPT-4o cannot solve any tasks without images. The result exists but is presented as a validation statement rather than experimental evidence. The concern is retained as Minor #2 with modified framing.
+- **"Full dataset release details missing"** — The paper explicitly states plans for an online data viewer after the review period (Section 3.3). This is a minor presentation point, not a weakness.
+- **"Overfitting hallucination not systematically analyzed"** — Moved to Nice-to-Haves; this is an enhancement, not a flaw.
+- **"Prompt format sensitivity not analyzed"** — Moved to Nice-to-Haves; this is beyond what is expected for a first benchmark paper.
+- **Criticisms about missing appendix content** — Removed per hard rules; the parser strips appendix sections from all papers.
 
 ## Novel Insights
 
-The single most insightful observation from the reviews is the **asymmetry between the rigor of the paper's ablations and the lack of evidence for its most fundamental claim**. The paper carefully designs a "Desc. Only" condition to isolate vision as a bottleneck and an LLM-decoder comparison to isolate coding degradation, yet fails to provide any data for the simpler and more essential validation: that the original minimal text alone cannot solve the tasks. This is not a deep methodological flaw — it is an omission that can be fixed — but it is striking because the rest of the experimental design shows the authors are clearly capable of running this check. The reviews also surface that the cross-benchmark correlation claim would benefit from a reported coefficient, which would turn a qualitative observation into a quantitative contribution.
+The most striking finding is the asymmetry between open-weight LMMs and their LLM decoders (Table 3): adding a vision encoder consistently degrades text-only coding ability. This suggests a fundamental challenge in multimodal training — the vision encoder may disrupt the pretrained language model's internal representations rather than simply augmenting them with visual grounding. Combined with the ablation showing that human-annotated image descriptions boost performance by 20–32 points (Table 2), the paper suggests that current LMMs fail at two distinct levels: (1) they cannot extract sufficient information from images, and (2) the integration mechanism itself harms their pre-existing coding ability. This dual failure — perceptual AND representational — is a more nuanced diagnosis than "LMMs are weak at vision."
 
 ## Suggestions
 
-1. **Run and report the text-only ablation**: GPT-4o (or the best model) on all 108 tasks using only the function signature and comment (no image, no human-annotated description). Report per-task pass@1 and aggregate pass@1. If any task is solved above 0%, either exclude those tasks or further strip their textual cues. This single addition would close the evidential gap that currently undermines the paper's core thesis.
-
-2. **Add correlation coefficients** (Pearson or Spearman) to the regression analysis in Figure 2 to quantify the relationship between HumanEval-V and MMMU/MathVista/MMVet.
-
-3. **Report confidence intervals** (e.g., via bootstrap) for pass@10 estimates to help readers assess whether observed differences between models are statistically meaningful.
+1. Add a row to Table 1 showing GPT-4o (and ideally Claude 3.5 Sonnet) text-only pass@1/pass@10 on the raw tasks (no image, no human description) to validate the "unsolvable without visual context" claim.
+2. Specify the exact multimodal input format used for LMMs on HumanEval+ and MBPP+ in Table 3, and discuss any potential confounds.
+3. Report bootstrap confidence intervals (or at minimum acknowledge the limitation) for pass@k estimates given the 108-task benchmark size.
+4. Add Spearman/Pearson correlation coefficients to Figure 2's regression analysis.
+5. Discuss the effective diversity of the 108 tasks given the 40-base + mutation construction pipeline.
 
 ## Score and Decision
 
-**Score: 6.5 / 10**
+The paper presents a well-motivated, carefully constructed benchmark that fills a genuine evaluation gap. The construction pipeline is rigorous, the ablation studies are insightful, and the main finding — that even the best LMMs perform very poorly on visual coding tasks — is important for the community. The two substantial concerns (unclear LMM vs. LLM comparison methodology, and text-only baseline needing fuller experimental presentation) are addressable. The paper makes a real contribution and the core claims are supported.
 
-The paper introduces a well-motivated and carefully constructed benchmark that fills a genuine gap in LMM evaluation. The ablation studies are insightful, the overfitting evidence is compelling, and the main findings (vision bottleneck, coding degradation) are novel and important. However, the paper's central claim — that all 108 tasks are unsolvable without visual input — is asserted without supporting data. This is a fixable omission but it is not minor; it directly affects whether the benchmark measures what it claims to measure. A revision that provides the text-only ablation results and correlation coefficients would substantially strengthen the contribution.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

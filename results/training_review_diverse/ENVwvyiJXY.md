@@ -1,18 +1,20 @@
-Now I have a comprehensive understanding of both the paper and the reviews. Let me produce the final consolidated review.
+Now I have thoroughly verified every claim against the paper. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces a new task — Dataset Distillation for Domain Generalization (DD for DG) — which aims to produce compact synthetic datasets that preserve robustness to unseen domains. The authors first benchmark two straightforward baselines (DD across domains and DD per domain) using existing DD methods (SRe2L, G-VBSM, RDED) on DomainBed, revealing a trade-off between generalization performance and distillation efficiency. They then propose a method that connects dataset distillation loss to style-transfer loss, learning a domain transfer network (Domain Transfer Learning, DTL) to map synthetic images to per-domain styles, plus a Domain Style Mixing (DSM) process to mix learned styles for additional generalization. Experiments show the method consistently and substantially outperforms SRe2L and G-VBSM, and is competitive with RDED (better on average across settings).
+This paper introduces the task of Dataset Distillation for Domain Generalization (DD for DG), aiming to distill synthetic datasets that can train models robust to unseen domains. The authors evaluate existing DD methods (SRe2L, G-VBSM, RDED) and find they suffer degraded unseen-domain performance. They propose a novel approach consisting of Domain Transfer Learning (DTL)—interpreting DD loss as style loss and learning a domain transfer network—and Domain Style Mixing (DSM)—mixing learned domain styles during relabeling. Experiments on four DomainBed datasets show consistent improvements over baseline DD methods, particularly at low IPC settings.
 
 ## Strengths
 
-1. **Well-motivated task formulation.** The paper identifies a gap — existing DD methods do not evaluate or optimize for unseen-domain robustness — and formalizes the DD for DG task. Table 1 provides useful evidence of the trade-off between performance and efficiency, clearly motivating the need for a dedicated approach.
+1. **Novel task formulation with clear motivation.** The paper identifies an underexplored gap in DD research—unseen domain robustness—and formalizes the DD for DG task. Table 1 demonstrates that models trained on standard distilled datasets suffer degraded domain generalization, while the DD-per-domain approach incurs linearly scaling costs. This trade-off provides a clear motivation for the proposed approach.
 
-2. **Novel connection between DD loss and style transfer.** Drawing the formal equivalence between batch-normalization statistics used in DD (e.g., SRe2L) and the style matching loss in neural style transfer (Section 3.2) is a genuinely insightful contribution. This connection provides a principled foundation for the DTL process and helps explain why style transfer can improve distilled datasets for DG.
+2. **Genuine theoretical insight connecting DD loss to style transfer.** Section 3.2 provides a clear argument that the batch-normalization statistics matching used in DD methods (e.g., SRe2L) is a form of style loss from the style-transfer literature (Gatys et al., 2016; Dumoulin et al., 2017). While the underlying math is not new, the explicit connection is a valuable framing that directly motivates the DTL/DSM design.
 
-3. **Strong empirical gains over SRe2L and G-VBSM.** Across all IPC settings and datasets in Table 2, the proposed method substantially outperforms SRe2L and G-VBSM (e.g., from ~30% to ~52% on VLCS at IPC 10 with R-50). Against RDED, the method wins on average across all six IPC/architecture configurations (e.g., 62.17% vs 61.57% at IPC 100, R-50; 56.94% vs 54.05% at IPC 100, R-18), as reported in the paper's text.
+3. **Consistent empirical improvements, especially at low IPC.** In Table 2 (R-50 validation model, IPC 50), the proposed method achieves 52.58% average accuracy vs. SRe2L (42.03%), G-VBSM (43.94%), and RDED (47.03%)—a meaningful gap. Improvements hold across both R-18 and R-50 validation models and both IPC settings.
 
-4. **Ablation study isolates the core design choices.** Table 4 traces performance from per-domain baselines through averaged-style baselines to the full DTL process, providing clear evidence that the domain transfer network is the key enabler. The paper is transparent about DSM's marginal contribution, which is a mark of honest reporting.
+4. **Cross-architecture generalization and ablation studies.** Table 3 shows the distilled dataset generalizes to six unseen architectures (MobileNet, EfficientNet, ConvNeXt, DeiT, Swin, etc.). Table 4 and Figure 3 systematically ablate the DTL losses and DSM component, confirming that each contributes to final performance.
 
 ## Weaknesses
 
@@ -20,66 +22,53 @@ This paper introduces a new task — Dataset Distillation for Domain Generalizat
 None.
 
 ### Major
-None.
+
+1. **Underspecified DTL method impairs reproducibility.** Algorithm 1 is vacuous: it states "Compute the loss ℒ_DTL(S_{k,m}, ψ)" without defining what ℒ_DTL is, how ψ is parameterized, initialized, or how the gradient update operates on both S and ψ jointly. The main text (Section 3.3) describes the conceptual goal of minimizing MSE to domain styles, but never provides an explicit training objective for ψ. Figure 1 indicates ψ uses conditional instance normalization with shift/scale parameters (θ_A, θ_B), but the architecture (number of layers, normalization scheme, how the shift/scale is applied) is unspecified. This is a fundamental gap for a method paper—the core technical contribution cannot be reproduced from the description.
+
+2. **Ambiguous evaluation protocol that deviates from standard DG practice.** The paper describes "random splits of 8:2 per domain" for training/testing on seen/unseen domains (Section 4.1), which departs from the standard DomainBed leave-one-domain-out protocol. The description is unclear about whether evaluation is truly on unseen domains (i.e., training on all source domains, testing on a completely held-out target domain) or on held-out portions of seen domains. Additionally, Table 2 reports only averages across four datasets without per-dataset breakdowns, making it impossible to assess whether improvements are consistent or dataset-specific. Combined, these issues make direct comparison with existing DG literature difficult.
 
 ### Minor
 
-1. **Overly broad claim about outperforming all state-of-the-art DD methods.** The abstract and contributions state that the approach "outperforms state-of-the-art DD methods." While the method wins on average across all settings (as shown in the paper's reported averages), RDED beats the proposed method on individual datasets (e.g., PACS R-50 IPC 50, Office-Home R-50 IPC 50, Terra Incognita at IPC 50 for both backbones), as the paper's own Table 2 shows. The paper should qualify this claim to acknowledge that the method is competitive with RDED (winning on average but losing on some individual datasets), while clearly superior to SRe2L and G-VBSM. The "marginal improvements" language in Section 4.2 partially addresses this, but the abstract and contributions list remain overstated.
+3. **Marginal improvement over strongest baseline at high IPC.** At IPC 200, the proposed method achieves 62.17% vs. RDED's 61.57% (Table 2)—a 0.6% absolute difference. No confidence intervals are provided. The paper acknowledges this ("marginal improvements"), but the claimed "outperforms state-of-the-art DD methods" is substantially weaker for the most competitive baseline than for SRe2L and G-VBSM.
 
-2. **Cross-architecture experiment lacks baseline comparisons.** Table 3 reports the proposed method's performance across multiple architectures (VGG, ResNet, MobileNet, EfficientNet, ConvNeXt, DeiT, Swin) but provides no corresponding results for SRe2L, G-VBSM, or RDED. Without this comparison, the reader cannot determine whether the proposed method's cross-architecture generalization is better, worse, or comparable to alternatives. This experiment as presented does not support any comparative claim.
+4. **DSM contribution is acknowledged as marginal by the paper itself.** The ablation study (Table 4, row 4 vs. row 5) shows DSM adds only a small boost. The paper states this directly ("marginal performance boost of the DSM process"). This is not a fatal flaw—the main gains come from DTL—but it means the second named process contributes little.
 
-3. **Computational cost not reported despite being a stated motivation.** The paper motivates the DD for DG task partly through efficiency (DD across domains is cheap but poor; DD per domain is expensive but better; the proposed method should offer a middle ground). However, no wall-clock time, GPU hours, storage costs, or parameter counts are provided for any method. This gap undermines one of the paper's stated value propositions.
+5. **No statistical significance or variance reporting.** None of the tables include confidence intervals, standard deviations, or multi-seed results. Given the small margins in several comparisons, the stability of the results is unclear.
 
-4. **No statistical significance or variance reporting.** Domain generalization evaluations are known to have high variance (as documented in the original DomainBed paper). The paper reports single-run results without standard deviations or multiple seeds, making it impossible to assess whether observed differences (especially the small margins vs RDED at high IPC) are meaningful.
-
-5. **Method specification is incomplete in several places.** Algorithm 1 references $\mathcal{L}_{\mathrm{DTL}}$ without a closed-form equation defining it. The domain transfer network $\psi$ (a core component) is not described architecturally beyond "conditional instance normalization" in Figure 1's caption. The update rule for jointly optimizing $S_{k,m}$ and $\psi$ is not specified. While the conceptual framework is clear, these missing details make reproduction difficult for a method paper.
+6. **No computational cost comparison.** The paper motivates DD for DG by efficiency (avoiding DD-per-domain's linear cost), but provides no wall-clock time, memory usage, or optimizer step comparisons. This undermines the practical argument.
 
 ### Trivial
 
-- Line 24 in the contribution list mistakenly writes "Domain Transfer Learning (DSM)" where it should be "Domain Transfer Learning (DTL)." This is a minor authoring slip.
-- Algorithm 1's title reads "Domain Transfer Leaning" (typo: missing 'r').
+7. **Acronym error in contributions bullet.** Line 24 reads "Domain Transfer Learning (DSM) and Domain Style Mixing (DSM)"—both are labeled DSM; the first should be DTL. (Elsewhere in the paper the acronyms are used correctly.)
 
 ## Nice-to-Haves
 
-- A comparison against standard DG methods (e.g., ERM, MixStyle) applied to the distilled datasets would help contextualize how the proposed method compares to the broader DG literature.
-- The DSM process is conceptually related to MixStyle (Zhou et al., 2021b). The paper briefly acknowledges this connection but could discuss it more explicitly to position the contribution.
-- A limitations section discussing when the method underperforms (e.g., on Terra Incognita at IPC 50) would strengthen the paper.
+- A comparison to a simple DG-aware baseline applied on top of standard DD synthetic data (e.g., applying MixStyle or domain-adversarial training during validation model training) would strengthen the claim that the proposed generative approach adds value beyond post-hoc DG techniques.
+- Quantitative metrics for style transfer quality or diversity in Figure 2 (e.g., FID, style loss values) would strengthen the qualitative visualizations.
+- Computational cost reporting (wall-clock time, memory) would support the efficiency motivation.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"DSM/MixStyle connection not acknowledged"**: The paper explicitly discusses this connection in Section 3.4, noting the similarity and the difference (style mixing in the style transfer network vs. in the feature extractor). The reviewer's claim is incorrect.
-
-- **"The paper should compare against DD per domain with style loss in isolation"**: Table 4 row 2 (per-domain with normalized style loss) appears to be exactly this baseline. The reviewer missed this.
-
-- **"Acronym confusion makes the paper unreadable"**: The single instance where DTL is incorrectly written as DSM (line 24) is a minor typo, not a structural issue. The rest of the paper correctly distinguishes DTL and DSM.
-
-- **"The method is under-specified because batch norm training status is unclear for the proposed method"**: The paper states (line 139) that batch normalization is frozen except in DD per domain, and clarifies that DTL is applied during the recover process and DSM during relabel. The reviewer misread this section.
-
-- **"Missing related works about style augmentation methods"**: The paper cites Zhou et al. (2021b) and discusses the connection. Per instructions, missing related works should not be raised without external confirmation.
-
-- **Strength Finder's claimed strength that "DSM contributes to performance gain" conflicts with the paper's own admission of marginality**: While the paper is transparent about the marginality, DSM's contribution is real (even if small). Where a strength and weakness disagree, the weakness wins. This strength is moved here to maintain honesty.
+- **"Baselines applied naively without adaptation for DG":** The paper explicitly defines two reasonable baseline approaches (DD across domains, DD per domain) for the *new* task it introduces. Demanding DG-specific baselines or extensions of DD methods is reasonable as a suggestion but not a weakness given this is the first paper on this task. Moved to Nice-to-Haves.
+- **"Connection between DD loss and style loss is not novel":** This claim is factually incorrect. While SRe2L and G-VBSM use BN statistics matching, they do not make or leverage the connection to style transfer. The paper's insight is a genuine contribution.
+- **"Cross-architecture results don't compare to baselines":** The cross-architecture study is a standalone demonstration of generalization for the proposed method, not a comparative evaluation. It is reasonable as presented.
+- **"DSM description is too vague / only three sentences":** Section 3.4 clearly describes the mixing operation (ψ(S; λθ_e + (1-λ)θ_{e'}), λ∼Beta(0.1,0.1)) and relates it to prior work. The description is proportional to the complexity of the process.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The most interesting observation from these reviews is that the paper's two named processes have sharply different levels of contribution: DTL carries the empirical weight, while DSM is acknowledged as marginal. This asymmetry is not unusual in ML papers, but the paper presents both as co-equal contributions in the abstract and introduction. The reviews correctly identify this mismatch. The paper would benefit from reframing DTL as the primary contribution and DSM as a small add-on augmentation.
 
 ## Suggestions
 
-1. **Reframe the abstract and contributions** to accurately characterize the comparison with RDED: "Our method substantially outperforms SRe2L and G-VBSM, and is competitive with RDED, achieving higher average accuracy across all settings while requiring only a single cross-domain synthetic dataset."
-
-2. **Add baseline results to the cross-architecture experiment** (Table 3) or remove it if those experiments cannot be run. Without baselines, the table adds no comparative evidence.
-
-3. **Report computational costs** (GPU hours, storage) for all methods to substantiate the efficiency motivation in the introduction.
-
-4. **Report standard deviations across multiple seeds** for key results, especially given the known variance in DomainBed evaluations.
-
-5. **Provide a clear definition of $\mathcal{L}_{\mathrm{DTL}}$** and a brief description of the domain transfer network $\psi$ architecture (number of layers, channels, normalization type) in the main paper or appendix.
+1. **Provide a complete method specification:** Define ℒ_DTL explicitly (in equation form, not just prose), specify ψ's architecture (number of layers, normalization scheme, how conditional instance normalization integrates), and describe the initialization and joint optimization of S and ψ.
+2. **Clarify the evaluation protocol:** State whether the evaluation follows the standard DomainBed leave-one-domain-out protocol or a different protocol, and justify any deviation. Report per-dataset and per-domain results, not just averages.
+3. **Add statistical rigor:** Include confidence intervals or standard deviations over multiple seeds, especially for the RDED comparison at IPC 200.
+4. **Report computational costs:** Add wall-clock time and memory usage for the proposed method vs. baselines.
+5. **Fix the acronym typo** in the contributions bullet (line 24).
 
 ## Score and Decision
 
-The paper proposes a novel and well-motivated task (DD for DG), draws an insightful connection between DD loss and style transfer, and provides a method that clearly beats two of three SOTA DD baselines by large margins while being competitive with the third. The main weaknesses (overbroad claims, missing baselines in one experiment, no variance reporting) are fixable with revision and do not undermine the core contribution. This is a solid paper with honest reporting (the paper transparently admits DSM's marginality and RDED's competitiveness) and a real technical contribution.
+The paper identifies a genuine gap and proposes a reasonable approach with a nice theoretical insight. The empirical results are promising, especially at low IPC. However, the method is underspecified to the point of being non-reproducible (the core loss and network architecture are not defined), and the evaluation protocol is ambiguous. These are major issues that cannot be fully resolved in a rebuttal. The paper needs substantial revision before it meets publication standards.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

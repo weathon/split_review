@@ -1,72 +1,76 @@
-Now I have a thorough understanding of all the evidence. Let me synthesize the final review.
+Now I have all the information I need. Let me draft the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces rRCM (Robust Representation Consistency Model), a certified robustness method that reformulates denoising along diffusion PF ODE trajectories as a discriminative task in latent space. Through a two-stage training process (contrastive pre-training along temporal trajectories + supervised fine-tuning with consistency regularization), the method enables one-step denoising-then-classification — dramatically reducing inference costs compared to prior diffusion-based smoothing methods while matching or improving certified accuracy. On ImageNet, rRCM achieves a 5.3% average certified accuracy improvement over DDS with an 85× reduction in inference latency (53 seconds vs. 52 minutes for DensePure at comparable accuracy).
+This paper proposes rRCM (Robust Representation Consistency Model), a two-stage training approach for certified robustness against ℓ₂-norm adversarial perturbations. In pre-training, the model aligns representations of temporally adjacent points along noise-perturbed trajectories via contrastive learning on pairs constructed from the same clean image with identical noise at different noise levels. During fine-tuning, a classification head is trained with additional consistency regularization across independently-noised samples. The method achieves state-of-the-art certified accuracy (5.3% average improvement over diffusion-based methods on ImageNet) while reducing inference cost by 85× compared to purification-based diffusion approaches.
 
 ## Strengths
 
-1. **Major improvement in the efficiency–robustness trade-off.** On ImageNet, rRCM-B-Deep achieves 67.3% certified accuracy at radius 0.5 with 53 seconds inference latency, while DensePure requires 52+ minutes for comparable accuracy (Table 1). This is a qualitative leap that directly addresses a known limitation of diffusion-based smoothing. The 85× average inference cost reduction is well-documented with latency numbers.
+1. **State-of-the-art certified accuracy with a wide margin.** Table 1 shows rRCM-B-Deep surpasses the best diffusion-based method (DDS) by 5.3% on average across radii on ImageNet, with gains up to 11.6% at larger radii (r=1.0: 26.6% vs. 15.0%). On CIFAR-10 (Table 2), rRCM-B outperforms DDS at every radius (e.g., +6.4% at r=0.5). These results are clearly documented and the evaluation follows standard certification protocols (500 images, 99.9% confidence, 100k smoothing noises).
 
-2. **Novel reformulation of denoising as discriminative representation learning.** The paper's core idea — viewing PF ODE trajectories as providing structured connections between clean and noisy samples, then using instance discrimination to align temporally adjacent points in latent space (Eq. 7) — is genuinely novel. Unlike prior work that uses diffusion models as a separate purification module, rRCM integrates denoising and classification into a single model for one-step prediction (Figure 2b).
+2. **Dramatic inference cost reduction while improving accuracy.** The paper reports an average 85× reduction in inference latency over diffusion-based methods. Concrete numbers in Table 1 show rRCM-B certifies a sample in 53s versus 52min 20s for DensePure and 28min 4s for DiffSmooth — a genuine and practically meaningful improvement.
 
-3. **Strong scalability with model size and training budget.** The paper demonstrates consistent certified accuracy gains scaling from rRCM-S → rRCM-B → rRCM-B-Deep, and with larger batch sizes (Figures 3, 4). Performance has not yet plateaued, indicating further gains are likely with more resources.
+3. **Novel training paradigm unifying denoising and classification.** The method reformulates the generative denoising task into a discriminative consistency-alignment problem in latent space (Section 3), enabling one-step denoising-then-classification. This eliminates the separate purification + majority-voting pipeline required by prior diffusion-based approaches, which is architecturally non-trivial.
 
-4. **Competitive or state-of-the-art certified accuracy on both ImageNet and CIFAR-10.** On ImageNet, rRCM-B-Deep surpasses all classical and diffusion-based baselines at every reported radius. On CIFAR-10, rRCM-B improves over DDS by up to 6.4% at r=0.5 and is competitive with ensemble methods (Boosting with 10 classifiers) using a single model.
+4. **Strong scalability.** Section 4.3 and Figures 3-4 demonstrate consistent certified accuracy improvements with increasing model parameters (rRCM-S → rRCM-B → rRCM-B-Deep) and training batch size, with no signs of saturation — suggesting further gains are possible with more resources.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None.
+
+1. **PF ODE trajectory framing does not match the implementation.** The paper's core narrative (Sections 1, 3.1) claims to leverage the *deterministic PF ODE trajectories* of diffusion models, repeatedly emphasizing that points on the same PF ODE trajectory share unique semantics. However, the actual positive pair construction (Section 3.3) uses the approximation $x_{t_{n-1}} = x_{t_n} + (t_{n-1} - t_n)\epsilon$, which yields $x_0 + t_{n-1}\epsilon$ — simply a noisier version of the same image with the same noise direction. These points lie on the same *forward SDE* path (a straight line in noise direction), not on the PF ODE trajectory (which requires the score function for reverse steps and is curved for non-Gaussian data). While the paper acknowledges this approximation ("leaving further exploration of pre-trained score models to future research"), the surrounding narrative consistently presents the method as exploiting PF ODE structure. This disconnect means the claimed theoretical grounding (contribution item 1: "first to exploit the advantages of the structured noise schedule of diffusion models") is materially overstated. The method itself is a reasonable empirical approach — aligning representations of correlated-noise pairs at different noise levels — but it is not what the paper advertises it to be theoretically. This weakens the claimed novelty relative to methods that train on noisy samples (e.g., Jeong & Shin 2020), which also use multiple noise levels but without the contrastive pre-training framework.
+
+2. **Experimental comparisons do not isolate the pre-training contribution.** The paper compares rRCM against diffusion-based methods (DDS, DensePure, DiffSmooth) using a ViT classifier with 81.35% clean accuracy trained via standard supervised learning. However, rRCM receives extensive contrastive pre-training (600k steps, batch size 4096 on ImageNet) before fine-tuning. Without a baseline that uses the same compute budget with standard contrastive pre-training (e.g., MoCo-v3 followed by the same fine-tuning), it is impossible to tell whether the gains come from the noise-specific pair construction or simply from having a better base representation after heavy pre-training. The paper mentions a comparison with MoCo-v3 in Figure 5 but does not provide quantitative certified accuracy results from that ablation. This confound is the primary barrier to attributing the method's strong results to the proposed mechanism rather than to increased training compute.
 
 ### Minor
 
-1. **Clean (unperturbed) accuracy of rRCM models is not reported.** The paper reports that the baseline ViT classifier used for DDS/DensePure achieves 81.35% validation accuracy on ImageNet, but never reports rRCM's own clean accuracy. Without this, the reader cannot fully disentangle whether some of the certified accuracy gains come from having a stronger underlying classifier versus from the robustness-specific training. While the main results (certified accuracy vs. radius) remain valid comparisons, this information would help contextualize the contributions.
+3. **Correlated noise in pre-training vs. independent noise in certification.** During pre-training, positive pairs use the *same* noise vector $\epsilon$, learning invariance to noise magnitude but not noise direction. During certification, each sample receives *independently* drawn noise (per the randomized smoothing protocol). The fine-tuning stage (Equation 9) partially addresses this by enforcing consistency between two independent noisy versions at the same noise level, but the pre-training may provide a suboptimal inductive bias. The paper acknowledges the discrepancy (Section 3.3) but provides no analysis (e.g., ablating same-$\epsilon$ vs. independent-$\epsilon$ pre-training) to justify the design choice or demonstrate its impact.
 
-2. **The paper mentions a MoCov3 comparison but does not show the quantitative results.** Section 3.3 states "we conduct further experiments and compare the effectiveness of our method with MoCov3" in reference to Figure 5, but the text only presents a conceptual diagram — no quantitative comparison (e.g., certified accuracy of an MoCo-v3 pre-trained model fine-tuned with the same objective) appears in the main text. Given that the paper argues its pre-training differs from standard contrastive learning, showing these results would significantly strengthen that claim.
+4. **Clean accuracy not reported.** The paper reports only certified accuracy at various radii $r$. While $r=0$ certified accuracy captures performance on unperturbed images under the smoothing procedure, standard (non-smoothed) clean accuracy of rRCM models is not stated. This makes it difficult to assess whether robustness gains come at a cost to standard performance, and is a standard omission in the certified robustness literature that the paper could easily address.
 
-3. **Training compute is not reported or controlled for.** The pre-training uses 600k steps at batch size 4096 on ImageNet — substantial compute that is not accounted for when comparing with classical methods trained with far fewer iterations. While the paper's primary selling point is inference efficiency (which is well-supported), the "state-of-the-art" claim is somewhat asymmetrical when baselines have not received comparable training budgets. Reporting total GPU-hours for pre-training and fine-tuning separately would enable proper context.
-
-4. **No ablation of the individual loss terms in the pre-training objective.** The pre-training loss (Eq. 7) combines a consistency loss and a contrastive loss, computed on different network outputs (encoder vs. projector). The paper explains the design rationale (training instabilities with the alternative) but provides no quantitative ablation showing the contribution of each term, the effect of the projector head, or the choice of where to compute each loss.
+5. **Missing ablation studies.** Key design choices are not ablated: (a) the consistency loss vs. contrastive loss terms in Equation 7, (b) the effect of the EMA rate choices (0 vs. 0.99), (c) placement of losses on encoder vs. projector outputs (the paper mentions training instability but provides no evidence), and (d) fine-tuning regularization coefficients ($\eta_1$, $\eta_2$). While early experiments are mentioned, systematic ablation would strengthen confidence in the design.
 
 ### Trivial
 
-- The specific discretization step count `N` for the PF ODE is not stated (only `T=80` is given, which is the maximum diffusion time). While the paper follows the EDM/consistency model schedule where this is specified, stating `N` explicitly in the main text would improve clarity.
+None.
 
 ## Nice-to-Haves
 
-- **PF ODE approximation quality analysis.** The paper uses a crude approximation for constructing temporal pairs during pre-training (x_{t_{n-1}} ≈ x_{t_n} + (t_{n-1} - t_n)ϵ) and honestly acknowledges this limitation. An analysis of how this approximation affects representation quality (e.g., comparing against pairs from a pre-trained score model on a small validation set) would strengthen the methodology section but is not necessary for the core claims.
-
-- **Hyperparameter sensitivity.** Reporting results for at least one alternative value of τ, η₁, η₂ or the number of time steps N would help assess robustness of the method.
-
-- **t-SNE visualization of representations.** A qualitative visualization comparing encoder outputs of clean/noisy/perturbed samples from rRCM vs. a standard classifier would make the "consistent representations" claim more vivid.
+- Using a pre-trained score model to generate proper PF ODE trajectory points during pre-training (acknowledged as future work in Section 3.3) would align the implementation with the claimed theoretical framing.
+- Reframing the method as using forward-SDE pairs rather than PF ODE trajectories, with a simpler justification centered on the value of same-noise-different-magnitude positive pairs for downstream robustness, would more honestly represent what is done.
+- Confidence intervals or variance estimates for certified accuracy across multiple certification runs would quantify the stability of the reported numbers.
+- Comparison against newer certified defenses from 2024–2025 (if applicable given the submission timeline) would help position the work.
 
 ## Removed Points
 
-- **"No variance or confidence intervals for certified accuracy"**: This criticism reflects a misunderstanding of standard practice in the randomized smoothing literature. Cohen et al. (2019), Carlini et al. (2022), and essentially all RS papers report point estimates on a 500-image test subset. The certification procedure itself provides statistical guarantees (99.9% confidence) for each individual sample's radius. Requesting bootstrap CIs or subset variance goes beyond what is standard or expected in this line of work.
+These points are flagged to be removed; treat them with caution:
 
-- **"PF ODE approximation is crude / not analyzed"**: The paper explicitly acknowledges the approximation (Section 3.3: "We adopt this method (Song et al., 2023) in our work, leaving further exploration of pre-trained score models to future research") and justifies it by avoiding reliance on a separate pre-trained score model. This is an honest design choice, not a hidden flaw.
-
-- **"Training a ViT from scratch with fine-tuning objective proves challenging — this is speculation"**: The paper reports this as an empirical observation from early experiments. It is a valid qualitative observation supporting the need for pre-training, not a speculative claim.
+- **Novelty over existing work (Jeong & Shin 2020, Zhai et al. 2020).** The reviewer claimed training on multiple noise levels is not new. However, the paper's claim is about using a *structured noise schedule* (the full diffusion noise schedule with many time steps from EDM, not just one or two certification noise levels) combined with contrastive learning on same-noise-direction pairs. The paper cites these works and acknowledges the similarity of the fine-tuning consistency term (Equation 9) to Jeong & Shin (2020). The criticism conflates multi-level training with the paper's specific design.
+- **Statistical uncertainty (missing confidence intervals).** Certified accuracy in randomized smoothing is standardly reported as a single number following the Cohen et al. (2019) protocol. Each individual certification already involves statistical testing at 99.9% confidence. Requesting confidence intervals for the aggregate accuracy over the 500-image subset is not standard practice in this literature.
+- **Comparison with more recent work (2024–2025).** Without knowing the paper's submission date, this is an unfair ask. The paper cites works up to Li et al. (2024) and Jeong & Shin (2024).
+- **General formatting/style nitpicks and suggestions about adding appendix proofs or missing references** — these reflect parser artifacts, not author errors.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one interesting observation: the paper's two-stage approach (contrastive pre-training along PF ODE trajectories + supervised fine-tuning with consistency) can be seen as a way to *factorize* the learning problem — representations learned through temporal alignment in step 1, then class-boundary refinement in step 2. This factorization explains why the method scales well (the pre-training objective is class-agnostic and can benefit from more data/compute) and why it avoids the training difficulties of learning from scratch with the combined objective. The reviews also highlight that the paper's central conceptual contribution (using PF ODE structure for robust representation learning) is separable from the specific implementation choices, suggesting that future work could improve the approximation used for temporal pairs or integrate stronger pre-trained score models.
+None beyond the paper's own contributions. The reviews do not surface a genuinely novel perspective that the paper itself does not already articulate. The key tension between the PF ODE framing and the forward-SDE implementation is well-identified by the Harsh Critic but is fundamentally a mismatch between the paper's narrative and its execution rather than an insight that opens a new research direction.
 
 ## Suggestions
 
-1. **Add clean accuracy to the main tables.** Report each rRCM model's top-1 accuracy on clean ImageNet/CIFAR-10 validation sets alongside the baseline classifier's accuracy. This allows readers to properly contextualize the certified accuracy gains.
+1. **Correct the PF ODE narrative.** Either (a) use a pre-trained score model to generate actual PF ODE trajectory points (and demonstrate this improves results), or (b) drop the PF ODE framing entirely and reframe the pre-training as aligning representations of forward-SDE pairs (same-image, same-noise-direction, different-magnitude). Option (b) is more practical and honest — the justification would be: "correlated-noise pairs at different noise levels provide a useful inductive bias for downstream certified robustness." If choosing (b), provide a clear comparison showing that same-$\epsilon$ pairs outperform independent-$\epsilon$ and single-level baselines.
 
-2. **Include the MoCov3 comparison results.** The text already mentions this comparison was performed — report the actual certified accuracy numbers. This is the cleanest ablation for isolating the effect of the consistency-tracking pre-training versus standard contrastive pre-training.
+2. **Add a controlled ablation for pre-training.** Compare rRCM pre-training against standard contrastive pre-training (MoCo-v3) using the same batch size, steps, and data augmentation, followed by the identical fine-tuning procedure. Report certified accuracy for both. This is the single most important experiment to substantiate the claimed contribution.
 
-3. **Report total training GPU-hours** for pre-training and fine-tuning separately. This enables fair comparison of the overall cost of the method versus alternatives.
+3. **Report clean accuracy** of rRCM models and baseline classifiers to contextualize robustness-accuracy trade-offs.
 
-4. **Add a brief ablation table** showing (a) pre-training + fine-tuning (full method), (b) fine-tuning only from scratch, (c) MoCo-v3 pre-training + same fine-tuning, to directly demonstrate the value of each component.
+4. **Add ablation studies** for the two loss terms in Equation 7, EMA rates, and fine-tuning hyperparameters ($\eta_1$, $\eta_2$) to substantiate design choices.
+
+5. **Analyze the same-$\epsilon$ vs. independent-$\epsilon$ design choice** in pre-training by including a comparison between these two variants while keeping all other factors constant.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+The paper presents a genuinely effective two-stage training method for certified robustness with strong empirical results and practically meaningful inference speedups. However, the central theoretical claim is overstated (the PF ODE trajectory motivation does not match the implementation), and the experimental evaluation lacks a controlled ablation that isolates the contribution of the noise-specific pre-treatment from the effect of additional compute. These are substantial weaknesses, but they primarily affect attribution and framing rather than invalidating the empirical findings. With honest reframing and targeted ablation experiments, the paper's contributions would be clearly valuable to the community.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

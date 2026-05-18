@@ -1,88 +1,91 @@
-Now I have a thorough understanding of the paper. Let me write the consolidated review.
+Now I have thoroughly read the paper and verified the reviewer claims against the source text. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-The paper tackles the important and underexplored problem of continual LLM unlearning without retained data. It proposes the O³ framework combining (1) orthogonal LoRA adapters that regularize successive unlearning requests to have orthogonal parameter spaces, and (2) an OOD detector (trained via contrastive entropy + MLM losses with a glocal-aware scoring mechanism) that measures whether an input resembles previously unlearned data. During inference, the OOD similarity score governs a soft weight that determines how strongly the unlearning LoRA is applied. Experiments across ScienceQA, TOFU, and CLINC150 show O³ consistently achieves the best balance between unlearning effectiveness and utility preservation compared to baselines that all use retained data.
+This paper proposes O³, a framework for continual machine unlearning on LLMs that operates *without access to retained data*. The framework combines (1) orthogonal-regularized LoRA adapters that disentangle parameters across sequential unlearning requests, and (2) an OOD detector (contrastive entropy representation learning + glocal-aware scoring + OCSVM) that measures input similarity to each unlearning distribution, enabling soft-weighted loading of unlearning adapters at inference. Experiments on question answering (ScienceQA), fictitious knowledge generation (TOFU), and intent classification (CLINC150) show O³ outperforms baselines that *are* given retained data, on both unlearning effectiveness and utility preservation.
 
 ## Strengths
 
-- **Novel problem framing and practical motivation.** The paper identifies a genuine gap in existing unlearning work — continual streams of requests and no retained data — and proposes a coherent framework that addresses both challenges. This is a meaningful contribution to the LLM safety literature.
+1. **First framework for LLM continual unlearning without retained data.** The paper identifies and directly tackles a practical gap: existing LLM unlearning methods assume access to retained data (often the original training set), which is unrealistic due to privacy and copyright expiration. O³'s two-module design (orthogonal LoRA + OOD detector) uses only the unlearning data for each request. This claim is supported across three tasks (Figures 2–4, Tables 2–3) where O³ achieves the best Unlearning-Utility Ratio (U²R) while baselines that require retained data either fail in utility or unlearning.
 
-- **Orthogonal LoRA design is effective.** The orthogonal regularization loss (Eq. 5–6) provides a principled way to reduce interference between successive unlearning tasks in LoRA parameter space. The ablation (Table 5) confirms that adding the orthogonal loss (\(\lambda>0\)) improves both unlearning effectiveness and retained-distribution utility. The argument that regularizing A suffices (since outputs of AB lie in col(A)) is mathematically sound.
+2. **Orthogonal regularization across sequential LoRA adapters is validated by ablation.** The orthogonal loss (Eq. 6, \(\mathcal{L}_{\mathrm{Orth}}^t = \|(A^{t-1})^\top A^t\|^2\)) is a clean mechanism for reducing interference between requests. Table 5 shows that removing this loss (\(\lambda=0\)) degrades both unlearning effectiveness (S.U. degrades from 27.00 to 29.60 on ScienceQA) and utility preservation (R.D. drops from 57.80 to 55.50), confirming the design's necessity.
 
-- **Strong and consistent empirical results.** The U²R metric (Figure 2) shows O³ achieves the highest balance across all three tasks, often by a wide margin, despite using zero retained data while all baselines use retained data. This is the most important evidence that the framework works.
+3. **Extensive empirical validation across diverse tasks and metrics.** The paper evaluates on three substantively different tasks (multiple-choice QA, generative QA, intent classification) using sample-level unlearning, distribution-level unlearning, retained distribution, and two utility benchmarks per task. O³ consistently achieves the highest U²R across all settings (Figure 2), often by a large margin (e.g., U²R of 4.70 vs. next best 2.86 in QA).
 
-- **OOD detector works without labels or retained data.** The detection system (contrastive entropy + Mahalanobis/cosine scoring + OCSVM) achieves AUROC of 0.84–0.99 (Table 4), substantially outperforming prior OOD methods (MDF, Agg). Each component contributes meaningfully, as shown by ablation.
+4. **High data and parameter efficiency.** Table 1 shows O³ uses approximately half the training data of baselines (no retained data needed) and only 20M trainable parameters (LoRA) versus 6,758M for full-parameter baselines. This is a practical strength for deployment.
 
-- **Thorough ablation studies.** Tables 4, 5, and 6 systematically isolate contributions of individual components (contrastive entropy loss, scoring terms, orthogonal loss, soft-weighting factor), confirming that each piece is necessary.
+5. **Systematic ablation study validates design choices.** Tables 4–6 ablate the contrastive entropy loss (vs. SimCLR/MoCo), scoring mechanism (Mahalanobis vs. cosine vs. both), layer aggregation, orthogonal loss coefficient, and soft-weighted inference. Each component is shown to contribute positively, providing clear evidence for the proposed design.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Orthogonal regularization only enforces pairwise consecutive disentanglement, not cumulative separation across all requests.**  
-   The loss in Eq. 6 (\(\mathcal{L}_{\text{Orth}}^t = \|(A^{t-1})^\top A^t\|^2\)) only requires \(A^t\) to be orthogonal to the immediately preceding \(A^{t-1}\). Because orthogonality is not transitive, a later task (e.g., \(t=3\)) could overlap with an earlier one (\(t=1\)) even if it is orthogonal to \(t=2\). The paper claims "disentanglement of parameter space across different unlearning requests" and "unlearning effectiveness of different requests does not interfere with each other" (Section 1, line 14), which implies all-pairs non-interference. No argument or experiment is provided to justify that pairwise consecutive orthogonality suffices for cumulative separation. This is a structural gap between the claimed guarantee and what the loss actually enforces. **(This weakness is reflected in the paper at lines 70–82 — the orthogonal loss definition only references \(A^{t-1}\) and \(A^t\), with no mechanism for earlier requests.)**
-
-2. **Parameter-efficiency claim is overstated.**  
-   Table 1 reports 20 M trainable parameters for O³ vs. 6,758 M for baselines. However, this 20 M figure counts only the LoRA parameters and excludes the OOD detector backbone (RoBERTa-large, ~355 M parameters), which is also trained at each request using \(\mathcal{L}_{\text{CEL}} + \mathcal{L}_{\text{MLM}}\) (Section 3.2, lines 103–104). While the detector is a separate module and its total is still far smaller than full-model fine-tuning, omitting it from the headline number creates a misleading comparison. The paper should either report total trainable parameters across both modules or clearly state what is included in the count. **(This is evident from line 170 — "The used OOD detector backbone is Roberta-large" — and lines 103–104 where the backbone is trained per request.)**
+None.
 
 ### Minor
 
-1. **No variance or statistical significance reported for main results.**  
-   The paper states "All experiments are run repeatedly with three random seeds" (line 170), yet Tables 2 and 3 report single numbers without standard deviations or confidence intervals, and Figures 2–4 show no error bars. Several comparisons are close (e.g., Table 2, S.U. for request 3: O³ 2.95 vs. PO 3.45), making it impossible to assess whether differences are reliable. This is the most readily fixable weakness and would substantially strengthen the paper's evidentiary weight.
+1. **Orthogonal regularization only enforces pairwise orthogonality with the immediate previous request.** The loss \(\mathcal{L}_{\mathrm{Orth}}^t = \|(A^{t-1})^\top A^t\|^2\) does not explicitly enforce orthogonality with requests \(t-2, t-3, \dots\). While the experiments span up to 3–4 requests and show good results, the paper overclaims "disentanglement among different unlearning requests" without addressing whether performance degrades with longer request sequences (e.g., 10+ requests). This is a scope limitation that should be acknowledged and ideally tested.
 
-2. **Missing baselines that address continual learning in the unlearning context.**  
-   The compared baselines (GradAsc, GradDif, EUL, PO, NPO, SOGD, SOPO) are all single-request unlearning methods applied sequentially. They are not designed to handle task interference or catastrophic forgetting of prior unlearning. Including approaches that explicitly address continual learning — e.g., elastic weight consolidation (EWC), memory-aware synapses, or replay of previous unlearning data — would make the comparison fairer and better isolate the source of O³'s advantage.
+2. **The "5.1% additional computation overhead" claim is unsupported.** The paper asserts "additional inference computation overhead is only 5.1%" (line 181) but provides no derivation, wall-clock time measurements, or breakdown of time spent on the LLM forward pass versus OOD detector forward passes versus OCSVM scoring. Given that each OOD detector uses a RoBERTa-large backbone, and inference requires running \(T\) such detectors per input, this number seems suspect without supporting evidence. The authors should provide a detailed latency/memory analysis.
 
-3. **Privacy implications of the OOD detector are not discussed.**  
-   The OOD detector is trained directly on the data to be unlearned and stores score vectors from that data (line 130–131: "store all these vectors as we cannot access the unlearning data after the unlearning"). This means the detector retains information about the unlearning distribution, potentially creating a new privacy channel. The paper highlights "without using any retained data" as an advantage but never addresses whether the detector itself leaks information about the forgotten data. This should be acknowledged and argued away.
+3. **The OOD detector evaluation is narrow for the claimed role.** Table 4 only evaluates AUROC on the two unlearning tasks themselves (ScienceQA and TOFU), with ID being the unlearning distribution and OOD being the retained/utility distributions. While this is sufficient for the paper's specific use case, it leaves open the question of whether the detector would generalize to truly unrelated inputs (e.g., random web text). For a component that determines whether to apply unlearning adapters at inference, more adverse testing (what happens with out-of-domain inputs not close to any training distribution?) would strengthen confidence.
 
-4. **Some design choices lack rigorous justification.**  
-   - The contrastive entropy loss (Eq. 7) is an unusual formulation; the paper claims it "converges much faster" (line 92) but provides no evidence.  
-   - The soft-weighting formula (Eq. 13) is a complex function of two cumulative probabilities from a mixed Gaussian; the rationale for this specific form (vs. using OCSVM distance directly) is not given.  
-   - The OOD scoring pipeline combines Mahalanobis distance, cosine similarity, and OCSVM with a scaling factor \(\gamma=1000\) whose sensitivity is not analyzed.  
+4. **Unaddressed failure modes of the OOD gating mechanism.** The paper does not discuss what happens when the OOD detector produces false positives (applies unlearning LoRA to normal inputs, degrading utility) or false negatives (fails to apply LoRA to unlearning inputs, defeating the purpose). The soft-weighted mechanism mitigates this somewhat, but quantitative bounds or analysis of detector calibration would be helpful.
 
-   These do not invalidate the results (the ablation shows they work), but they make the framework feel over-engineered and harder to reproduce or build upon.
+5. **Several claims are asserted without evidence.** (a) The claim that token-level SSL tasks like MLM and SimCSE are "far less effective" for OOD detection (Section 3.2) is never empirically supported—this is precisely what the ablation in Table 4 should compare (the paper compares its contrastive entropy against SimCLR and MoCo, not against MLM or SimCSE directly). (b) GradAsc is omitted from Figure 3 because it "failed to generate meaningful answers" without defining what constitutes "meaningful." These are small but avoidable presentation gaps.
 
 ### Trivial
 
-- The mutual-information formulation in the problem definition (Eq. 1–2) is not used by the method (which uses cross-entropy loss). This is standard practice (CE is a surrogate for MI minimization) but the connection is not explained, and the formal notation is garbled by parser artifacts.
+- The preliminary problem formulation (Section 2) presents the traditional continual unlearning objectives as two comma-separated expressions (min and max of mutual information terms) without explicit conjunction, making the notation slightly ambiguous.
+- \(\mathcal{P}_{\mathcal{X}}^{\mathrm{O}}\) in Eq. 2 is described only as "other distributions" without formal definition; this is fine for a background section but could be clearer.
 
 ## Nice-to-Haves
 
-- **Scalability to more requests.** The experiments use at most 4 requests. A simple experiment with more requests (e.g., 10 on CLINC150) would demonstrate that the method does not degrade catastrophically as the number of requests grows.
-- **Evaluation on paraphrased/adversarial queries.** The OOD detector is tested on data from the same distribution as the unlearning data. Testing on paraphrased or adversarial variants would probe robustness in realistic deployment.
-- **Simplification of the OOD pipeline.** The current detector stacks contrastive entropy + MLM + Mahalanobis + cosine + OCSVM + Gaussian mixture + sigmoid weighting. Showing that a simpler variant (e.g., just OCSVM on fine-tuned representations) performs significantly worse would justify the complexity.
+- Evaluate with 5–10 sequential unlearning requests (even on a synthetic setup) to test whether the orthogonal regularization holds over longer sequences.
+- Compare O₃ against baselines *without* retained data (currently baselines get retained data and O₃ doesn't), to further isolate the source of O₃'s advantage.
+- Include an OOD detection baseline using the LoRA's own prediction confidence/logit difference as a lightweight alternative to the RoBERTa-based detector.
+- Provide a formal derivation or measured breakdown of the claimed 5.1% inference overhead.
 
 ## Removed Points
 
 These points are flagged to be removed; treat them with caution:
 
-- **"The product AB can still cause interference because B is not regularized"** (Section 3.1 note in harsh critic): Factually wrong. The column space of \(AB\) is a subset of the column space of \(A\); regularizing \(A\) to be orthogonal to previous \(A\) ensures the output space of \(AB\) is orthogonal to the previous output space regardless of \(B\). The paper's argument is mathematically sound. **(Hard Rule 2)**
-- **"5.1 claim for inference overhead has no units or context"**: The "5.1" missing a "%" sign is a parser artifact stripping formatting from the original submission. **(Hard Rule 6)**
-- **"The paper repeatedly cites Appendix sections — cannot evaluate those claims"**: The appendix is stripped by the submission system, not missing from the original paper. **(Hard Rule 9)**
-- **"Parameter efficiency: only 20M trainable params vs 6.7B"** (Strength Finder Supporting Strength 2): Conflicts with verified Weakness #2 (parameter-efficiency claim is overstated). **(Strength/Weakness conflict rule)**
-- **Criticisms about equation formatting issues, garbled text, broken symbols**: These are parser artifacts, not author errors. **(Hard Rule 6)**
-- **Missing related works / should cite X**: I do not have external sources to confirm their existence. **(Hard Rule 4)**
+- *Harsh Critic Issue 1 (problem definition is "garbled" and "nearly unintelligible")* — The garbled text ("continueaesnsttds...") is a PDF extraction artifact, not an author error. Per hard rules, such parser artifacts must be removed. The reviewer also misreads the retained distribution discussion: the paper clearly frames it as describing *traditional* approaches before stating that O³ departs from them. The mathematical expression, while awkwardly formatted (comma-separated min/max terms), is decipherable as two standard sub-objectives.
+- *Harsh Critic statement about OOD detector novelty being lacking* — While the contrastive entropy loss shares structural similarity with existing contrastive losses, the paper's contribution is the overall *framework* (orthogonal LoRA + OOD gating + soft-weighted inference), not a claimed breakthrough in representation learning. Critiquing the loss for not being "fundamentally new" evaluates a component against an unrealistically high bar. The ablation shows it outperforms SimCLR/MoCo alternatives, which is sufficient.
+- *Harsh Critic claim about unfair experimental setup ("hard to attribute O³'s success to its core ideas")* — The reviewer acknowledges this comparison "is a legitimate comparison for demonstrating that O³ works without retained data." The asymmetry favors baselines (they get retained data) and the paper still beats them, which is a valid and intentionally strong demonstration. The ablation studies (Tables 4–6) already isolate the contributions of individual components. The reviewer's suggestion to drop retained data for baselines would only make baselines perform worse, adding no new information.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface genuine methodological gaps (non-consecutive interference, overstated efficiency claim) but do not produce a new synthesis or insight beyond what the paper already presents.
+The most interesting observation that emerges across the reviews is the tension between the paper's framing ("continual unlearning without retained data") and the potential failure mode where the OOD detector itself requires unlearning data for training. This creates a subtle circularity: the method claims independence from retained data, but the OOD detector's ability to discriminate unlearning distributions from other distributions depends on the diversity of the unlearning data it was trained on. If the unlearning data for a given request is highly homogeneous, the detector's Gaussian + cosine similarity scoring may not generalize well to real-world inputs that fall between distributions. The paper does not explore this failure regime, which would be an interesting direction for follow-up work. None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Address the non-consecutive interference gap explicitly.** Either (a) prove that pairwise consecutive orthogonality yields cumulative orthogonality under the sequential initialization scheme (if true), or (b) extend the orthogonal loss to penalize overlap with all previous requests (\( \sum_{i=1}^{t-1} \| (A^i)^\top A^t \|^2 \)) at negligible additional cost, or (c) add an experiment that explicitly measures interference between request 1 and request 4 (e.g., test unlearning effectiveness on request 1 after processing requests 2–4).
-2. **Report the total trainable parameters of the full O³ system** (LoRA + OOD detector backbone) and clarify what the 20 M figure covers. This corrects the misleading framing without changing any experimental result.
-3. **Add standard deviations or confidence intervals to Tables 2 and 3 and Figures 2–4.** With three seeds, this is straightforward and would significantly strengthen the reliability of the empirical claims.
-4. **Add at least one continual-learning-aware baseline** (e.g., EWC applied to the unlearning objective) to isolate whether O³'s advantage is due to its continual-learning design or its individual components.
-5. **Acknowledge the privacy implications of the OOD detector** and discuss whether the stored score vectors could leak information about the unlearning data.
+1. Add a latency/memory breakdown table to substantiate the 5.1% overhead claim. Measure wall-clock time for: (a) LLM forward pass, (b) T OOD detector forward passes, (c) OCSVM distance computation, and (d) soft-weight calculation.
+2. Add a brief discussion of when orthogonal regularization might fail (long request sequences, highly similar unlearning distributions) and how the current design mitigates or does not mitigate these cases.
+3. Include an adverse evaluation of the OOD detector on truly unrelated text (e.g., news articles, general web text) to demonstrate that it does not falsely trigger on inputs far from all training distributions.
+4. Define "meaningful" when omitting a baseline from a plot (e.g., GradAsc in Figure 3) and justify the exclusion with a quantitative threshold.
 
 ## Score and Decision
 
-The paper addresses an important and timely problem with a thoughtful framework and strong empirical results. The two major weaknesses — the gap between claimed cumulative disentanglement and what the pairwise loss guarantees, and the overstated parameter-efficiency claim — are real but fixable. They do not invalidate the core contribution (the method works well empirically even if the theoretical guarantee is weaker than claimed). With revisions addressing these points, the paper would be a solid contribution. I recommend acceptance with the expectation that the authors address the major and minor concerns.
+**Originality**: The paper addresses an underexplored problem formulation (continual unlearning without retained data) and proposes a novel combination of existing techniques (LoRA + orthogonal regularization + OOD detection). The individual components are not groundbreaking, but the synthesis into a working framework for this specific setting is original.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+**Importance**: High. Real-world LLM unlearning faces exactly the constraints the paper identifies: sequential requests and no access to original training data. A solution to this problem would have practical value.
+
+**Claims support**: The core claims are supported by experiments across three tasks. The "best U²R" claim is consistently supported. The "works without retained data" claim is supported. Some secondary claims lack full evidence (e.g., OOD detector generalization, 5.1% overhead).
+
+**Soundness**: The experimental design is sound. The evaluation metrics are appropriate (S.U., D.U., R.D., U.1., U.2., U²R). Baselines are reasonable state-of-the-art methods. Ablations are thorough. The main limitation is the narrow evaluation of the OOD detector and the unsupported 5.1% overhead claim.
+
+**Clarity**: The paper is generally readable but has notation issues in the preliminaries and some vague claims. The main methodology (Sections 3.1–3.3) is clearly explained.
+
+**Value**: The paper makes a solid empirical contribution that would be useful to practitioners working on LLM safety and unlearning.
+
+The weaknesses identified are all minor — none threaten the paper's core claims. The orthogonal regularization limitation (only pairwise) is acknowledged by the experiments covering up to 4 requests. The 5.1% overhead claim needs verification but does not invalidate the contribution. The paper makes a genuine contribution to a timely and practical problem with clean empirical validation.
+
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

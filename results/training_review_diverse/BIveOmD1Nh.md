@@ -1,84 +1,82 @@
-Now I have a thorough understanding of the paper. Let me synthesize the final review, carefully verifying each claim against the paper text.
+Here is my final consolidated review after carefully verifying all claims against the paper.
+
+---
 
 ## Summary
 
-The paper proposes learning equivariant scalar fields for proteins and ligands whose cross-correlation defines a scoring function, enabling FFT-based optimization over rigid-body degrees of freedom (translation and rotation). The scalar fields are parameterized by E3NN-based equivariant scalar field networks (ESFs), and the training uses conditional log-likelihoods whose marginal integrals are tractable via FFTs. The method is evaluated on decoy pose scoring and rigid conformer docking, showing competitive accuracy with faster runtime, particularly when amortized across many ligands against a common pocket (up to ~45× speedup on PDE10A).
+This paper proposes a novel learned scoring function for molecular docking defined as the cross-correlation of SE(3)-equivariant scalar fields (parameterized by E3NNs) independently computed for the protein and ligand. Because the score takes the form of a cross-correlation, it can be optimized over rigid-body translations and rotations using fast Fourier transforms, yielding substantial speedups — particularly when precomputations are amortized across multiple ligands binding to the same protein pocket. The method is evaluated on decoy pose scoring and rigid conformer docking, showing competitive accuracy to Vina/Gnina on crystal structures and significantly better robustness on ESMFold predicted structures, with up to 45× total runtime reduction in a virtual screening scenario.
 
 ## Strengths
 
-1. **First learned scoring function compatible with FFT-based pose optimization**: The paper is the first to *learn* scalar fields whose cross-correlation defines the docking score, enabling FFT-based evaluation over both translation (ℝ³) and rotation (SO(3)). This is a genuine departure from prior work — previous FFT docking methods used hand-crafted potentials, and the paper explicitly notes that "no prior works have explored the possibility of overcoming this limitation by *learning* cross-correlation based scoring functions" (Sec. 2, last paragraph). The equivariance properties (Proposition 1) provide theoretical grounding.
+1. **Novel and principled formulation.** The paper is the first to propose *learning* a protein–ligand scoring function whose functional form is explicitly a cross-correlation of scalar fields, directly enabling FFT-based optimization. This departs from both physics-inspired scoring functions and pose-wise deep learning models. The theoretical derivation connecting E3NN-equivariant fields, spherical harmonic expansions, and closed-form Fourier-space expressions (Eq. 4–10) is clean and rigorous.
 
-2. **Demonstrated runtime advantage with amortization**: On the PDE10A dataset (77 ligands docked to a common pocket), the RF workflow achieves a ~45× speedup in total inference time (67 s → 1.5 s, Sec. 4.2) relative to non-amortized execution, while maintaining competitive accuracy (Table 3). Per-pose FFT evaluation takes 160 μs (translational) or 650 μs (rotational) as reported in Table 1. The paper provides a clear breakdown of what can be amortized at each level (protein-level, ligand-level, pose-level).
+2. **Strong empirical demonstration of the accuracy–speed tradeoff, especially on predicted structures.** On ESMFold structures, ESF-N achieves nearly double the success rate of Vina/Gnina in rigid conformer docking (47% vs 24%/28% <2 Å RMSD, Table 2) and substantially lower top-ranked RMSD in decoy scoring (1.38 Å vs 2.43 Å/2.19 Å, Table 1). On the PDE10A dataset with a common pocket, ESF-N-RF achieves comparable accuracy to Vina (70% vs 74% <2 Å) while reducing total inference time from 67 s to 1.5 s — a 45× speedup through amortization (Table 2).
 
-3. **Robustness on predicted protein structures**: On ESMFold structures (Table 2), ESF/ESF-N methods achieve substantially higher top-ranked pose success (47–57% for TS mode) compared to Vina (24–43%) and Gnina (28–46%), with much lower median RMSD (1.38–1.75 Å vs 2.19–6.1 Å). This is a meaningful improvement because traditional scoring functions rely on sidechain atoms that are poorly predicted by ESMFold, while the scalar fields depend on residue-level coefficients (Sec. 4.1).
+3. **Systematic characterization of amortization opportunities.** Table 1 breaks down computation frequencies and runtimes across four inference modes (TF, RF, TS, RS), making it concrete where and how precomputation is reused (e.g., 65 ms per protein structure, 4.3 ms per ligand conformer, 1.0 μs per pose for TS). This level of detail grounds the amortization claims and informs practitioners where the method fits workflow-wise.
 
-4. **Complete and modular inference framework**: The paper defines four inference modes (TF, RF, TS, RS) and explicitly characterizes their computational costs and amortization opportunities in Table 1. The analysis of what must be computed per-protein, per-conformer, per-rotation, and per-pose provides readers with a concrete understanding of when each mode is advantageous.
+4. **Tractable training via conditional log-likelihoods with FFT marginalization.** The training objective (Eq. 11–12) leverages the FFT cross-correlation to compute the otherwise intractable marginal likelihoods over translations and rotations in closed form, enabling direct optimization of an energy-based model without MCMC. This is a clever algorithmic insight specific to the proposed architecture.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-None. The paper's core claims — that a learned cross-correlation scoring function can be optimized via FFTs and achieves competitive accuracy on simplified tasks with runtime benefits under amortization — are supported by the evidence. The weaknesses below are real but addressable.
+1. **The rotational FFT pipeline relies on an uncontrolled approximation whose effect on docking accuracy is unquantified.** The conversion from atom-centered local expansions (Eq. 3) to a global spherical harmonic expansion (Eq. 7) uses a least-squares projection (Eq. 11). The authors correctly note that "it is generally not possible to express the ligand or protein scalar field as defined in Equation 3 using the form in Equation 7" and attribute the worse performance of RS vs TS to "the spatially coarser representation." However, the paper never directly measures the projection error (e.g., RMSD between exact and projected fields on held-out grid points, or correlation between exact and projected scores on decoy poses). Since the rotational FFT (RF) pipeline — which is the key to the amortization advantage on the PDE10A dataset — depends on this approximation, its severity matters. If the projection error shifts the scoring function maximum by >1 Å RMSD, RF may be fundamentally unreliable as an optimization procedure. The TS vs RS comparison is evidence that the approximation has a cost, but it does not quantify how large that cost is or whether it affects the ranked-ordering of poses. **Why it matters:** Without this characterization, readers cannot assess whether the rotational FFT is a genuine contribution or an expedient whose drawbacks are hidden.
 
 ### Minor
 
-1. **Training objective is heuristic without ablation or theoretical justification**: The paper optimizes the sum of two conditional log-likelihoods (translation given rotation, rotation given translation) and acknowledges that "neither technically corresponds to the joint log-likelihood" (Sec. 3.4). While following DiffDock's approach provides some precedent, no ablation compares this objective to alternatives (e.g., direct score maximization, contrastive loss, or the full joint likelihood approximated via sampling). Without such analysis, it is unclear whether the specific FFT-tractable formulation is necessary for good performance or whether a simpler loss would suffice, which weakens the methodological contribution.
+1. **The training objective is a heuristic, and the paper's validation of it is indirect.** The authors optimize the sum of two conditional log-likelihoods (Eq. 11–12) and explicitly state that "neither technically corresponds to the joint log-likelihood of the pose." The paper claims the objective "works well in practice," but the only evidence is the downstream docking/scoring metrics. What is missing is a direct check: does the learned scoring function actually rank the true pose first on training examples? Are the conditional densities peaked at the correct values? An ablation comparing against a simpler contrastive loss (e.g., hinge loss pushing true pose scores above perturbed pose scores by a margin) would demonstrate whether the complexity of the conditional likelihood formulation is necessary. **Why it matters:** If the scoring function is not properly concentrated around true poses, the FFT optimization — however fast — optimizes a misaligned target. The downstream results suggest this is not catastrophic, but a targeted validation would eliminate the concern.
 
-2. **Unquantified approximation error in the rotational FFT**: The conversion from local to global spherical harmonic coefficients (Eq. 12) is a least-squares projection onto a truncated basis, introducing an uncontrolled approximation. The experimental results confirm that RS mode systematically underperforms TS mode (e.g., Top RMSD 0.63 vs 0.59 on crystal structures, Table 2), attributed to "spatially coarser representation." However, the paper does not measure the projection error or show that it converges with more basis functions, making it difficult to assess whether the rotational FFT is a reliable optimization method or only useful with the Cartesian fallback.
+2. **No error bars or dispersion measures on any reported metric.** All results are medians over test complexes without interquartile ranges, bootstrap confidence intervals, or any measure of variability. Given the moderate test set sizes (PDBBind test split, 77 PDE10A complexes), readers cannot gauge the reliability of the observed improvements or whether differences between methods are meaningful. **Why it matters:** This is a standard expectation for comparative benchmarking; its absence weakens the quantitative claims.
 
-3. **Abstract claims "50x speedup" while experiments report ~45×**: The abstract states "our method obtains a 50x speedup in total inference time at no loss of accuracy" (line 21), but the experimental section reports "a 45x speedup in the overall runtime (67 s → 1.5 s)" (line 234). 67/1.5 ≈ 44.7×, not 50×. While this is a small numerical discrepancy, it appears in the abstract's headline claim and should be corrected for accuracy.
+3. **The ESMFold structure quality is not characterized.** The paper uses ESMFold structures from the DiffDock dataset but never reports the RMSD between the ESMFold and crystal structures. The "robustness" claim is anchored to a single predictor at an unknown accuracy level. Reporting the distribution of backbone RMSD between ESMFold and crystal would contextualize the robustness results and let readers judge at what level of structure degradation the method's advantage kicks in.
 
-4. **No error bars or uncertainty estimates**: All metrics are reported as medians over test complexes without any variance or confidence intervals. For datasets of 77 (PDE10A) or ~360 (PDBBind) complexes, small differences (e.g., 73% vs 74% success rate) may not be statistically significant. This limits the reader's ability to judge which differences are meaningful.
-
-5. **The method's practical scope is narrower than the framing suggests**: The paper's title ("Molecular Docking") and introduction ("accelerating... ligand poses for high-throughput molecular docking") frame the work broadly, yet the evaluation is limited to rigid conformer docking with ground-truth conformers provided. The paper is transparent about this simplification, stating "we consider two simplified settings" (Sec. 4), but the broader framing risks misleading readers about the method's current capabilities. A dedicated limitations paragraph or clearer scope statement early in the paper would improve transparency.
-
-6. **TANKBind adaptation produces a weak baseline**: The adaptation of TANKBind — using L_generation with ground-truth distances as a score — is ad-hoc and yields poor results (AUROC 0.69 on crystal structures, Table 2). Including such a baseline does not strengthen the paper's case, as the poor performance likely reflects an unfaithful adaptation rather than any real limitation of TANKBind. The paper acknowledges this is an adaptation, but should more explicitly note that this comparison is not informative.
+4. **The alpha-carbon-only protein representation is a significant design choice with limited justification.** The protein scalar field is built from alpha-carbon coordinates only (Section 3.1), which is a departure from all-atom baselines like Vina and Gnina. The paper explains that "our scalar fields only indirectly depend on the sidechains via residue-level coefficients" — but this is a post-hoc explanation, not an ablation. An experiment adding sidechain atoms (or at least sidechain centroids) to the protein scalar field would clarify whether the robustness on predicted structures is a feature of the scalar-field approach or merely a consequence of ignoring noisy sidechains. **Why it matters:** The comparison to Vina/Gnina on crystal structures is asymmetric: baselines use all atoms while ESF uses only alpha-carbons. An ablation would show whether this gap is intrinsic to the method or fixable.
 
 ### Trivial
-
-- The decoy generation description has a truncated sentence ("1.6% of all poses ($n=526") that appears to be a parser artifact — this should be clarified.
-- Grid resolution and numerical discretization parameters for the FFT procedure are not reported, which affects reproducibility.
+None.
 
 ## Nice-to-Haves
 
-- **Ablation of the training objective**: Comparing the conditional log-likelihood sum to alternatives (e.g., a contrastive loss or direct score maximization with negative sampling) would demonstrate whether the FFT-based tractability is actually critical or whether a simpler approach works as well.
-- **Quantification of the projection error**: Reporting reconstruction error of the local-to-global basis projection (e.g., relative Frobenius norm) as a function of global basis size would allow readers to assess the trade-off between speed and accuracy in the RS mode.
-- **Path to flexible ligand docking**: The paper mentions conformer flexibility as future work. A brief discussion or preliminary experiment (e.g., using a small set of pre-generated conformers) would strengthen the claim that this method can be integrated into a full docking pipeline.
+- A direct measurement of the local-to-global projection error (e.g., field reconstruction error on a held-out grid) would resolve the main uncertainty about the rotational FFT.
+- Reporting the number of angular/radial basis functions ($\ell_{\max}$, $N_{\text{global}}$, $N_{\text{local}}$, $N_{\text{grid}}$) and the rotational sampling resolution would aid reproducibility.
+- A harder decoy set (e.g., generated by docking other ligands or systematic scanning) would provide a more stringent test of discriminative power.
 
 ## Removed Points
 
 These points are flagged to be removed; treat them with caution.
 
-- **"Evaluation assumes known ligand conformers (structural flaw)"** — The paper explicitly states it evaluates on "rigid conformer docking" and "simplified docking-related tasks" (abstract, Sec. 4). All baselines (Vina, Gnina) receive the same conformer with torsions deactivated (line 228), making the comparison fair. The paper is transparent about this scope. The strength of this criticism is downgraded: what the reviewer frames as a structural flaw is better characterized as a scope limitation that is clearly disclosed. Moved to Minor (item 5 above) with reduced severity.
-- **"Decoy generation description is unclear (broken sentence)"** — The line about "1.6% of all poses ($n=526" is a PDF parser artifact. The original submission almost certainly has the full sentence. Removed per formatting artifact rule.
-- **"Missing appendix/proofs"** — The parser strips these sections; they exist in the original submission. Removed.
-- **"Weaknesses about reproducibility (hyperparameters, training logs)"** — The paper provides sufficient architectural and training details for a methods paper. Removed per hard rules about trivial reproducibility nitpicks.
-- **"FFT methods have been less studied for protein-ligand docking" (reviewer notes this as a strength but also as a counterpoint)** — The Strength Finder correctly identifies this as supporting the novelty claim. No conflict.
-- **Strength Finder item 4 (tractable training objective)** — While partially correct, the paper itself acknowledges the objective is not the joint log-likelihood. The strength is retained in Strengths above but the associated weakness (#1) is also listed.
-- **Various generic strength finder filler statements** were filtered (generic statements lacking specific substance or citation).
+1. **Criticism that the decoy set is too easy (median closest decoy 0.4 Å).** Removed because the reviewer misunderstands the task: having decoys very close to native (0.4 Å median) makes fine-grained pose discrimination harder, not easier. The AUROC threshold at 2 Å measures the ability to separate near-native from clearly wrong poses, not coarse ranking.
+
+2. **Criticism about TF vs RF being "inconsistent."** Removed because similar performance across two different optimization modes is evidence of robustness, not inconsistency. The paper transparently reports both and notes TS outperforms RS for a known reason (coarser global expansion).
+
+3. **Criticism about the "amortized" terminology being non-standard.** Removed because the paper's usage — precomputations done once per protein and reused across ligands — is standard and clearly defined. The paper describes exactly what is being amortized and at what levels.
+
+4. **Criticism about missing grid resolutions, RBF details, and hyperparameters.** Removed per rule: the appendix (which the parser strips from these review materials) likely contains these details. The parser-stripped content cannot be verified as absent from the original submission.
+
+5. **Criticism about the training objective lacking any empirical check.** Weakened from "there is no empirical check" to the more accurate statement above. The paper's entire experimental section (Tables 1–2) is an empirical check of the scoring function, which implicitly validates the training objective. The remaining concern is that a more targeted ablation is missing.
+
+6. **Portion of the alpha-carbon criticism claiming "unfair comparison."** Removed per rule: the asymmetry in this comparison favors the baselines (Vina/Gnina use all atoms), not the author's method. The authors are intentionally operating at a disadvantage to prove a stronger point about robustness. The underlying concern about the design choice not being ablated is retained as a minor weakness.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+Beyond the paper's own contributions, the reviews surface one insight not fully developed in the paper: the relationship between the spatial resolution of the scalar field representation and the tradeoff between accuracy and speed is the central lever of the method. The paper shows that TS (Cartesian grid) outperforms RS (global spherical harmonic expansion) on all metrics, confirming that the local-to-global projection sacrifices fidelity. But this same projection is what enables the rotational FFT and the major amortization gains. A systematic characterization of this resolution–speed Pareto frontier — varying the number of global basis functions and measuring both projection error and runtime — would be a natural extension that could turn the rotational FFT from a "plausible but uncharacterized" component into a principled one.
 
 ## Suggestions
 
-1. Correct the numerical discrepancy in the abstract (50× → ~45× or provide the correct computation).
-2. Add an ablation comparing the conditional log-likelihood training objective to a simpler alternative (e.g., contrastive loss with random/perturbed poses) to demonstrate whether the FFT-based tractability is essential.
-3. Quantify the least-squares projection error for the rotational FFT (Eq. 12) as a function of global basis size, to establish when the RS mode is trustworthy.
-4. Add confidence intervals (e.g., bootstrap estimates) to the main result tables, especially for metrics where differences between methods are small.
-5. Add a brief "Limitations" paragraph or earlier scope clarification, clearly stating that the method currently handles only rigid-body docking of given conformers and that conformer search is left to future work.
-6. Report the grid resolution / discretization parameters used for the FFT so that results are reproducible.
+1. **Characterize the projection error.** Compute the RMSD between the exact scalar field (Eq. 3) and the projected field (Eq. 7) on a held-out grid of points as a function of $N_{\text{global}}$ and $\ell_{\max}$. Correlate this error with the gap between TF and RF/RF docking performance to establish whether the projection is the bottleneck.
+
+2. **Add an ablation of the training objective.** Train the same architecture with a hinge loss that directly maximizes the score margin between the true pose and random perturbations. If performance matches the conditional-likelihood objective, the simpler loss suffices; if not, the complexity is justified.
+
+3. **Report error bars.** Add interquartile ranges or bootstrap confidence intervals for the main metrics in Tables 1 and 2. This would allow readers to assess the significance of the differences between methods.
+
+4. **Report ESMFold vs crystal backbone RMSD.** This simple statistic would contextualize the robustness claims and help readers understand at what level of structure degradation the method's advantage manifests.
 
 ## Score and Decision
 
-The paper presents a genuinely novel approach — the first learned scoring function expressible as a cross-correlation of scalar fields and optimizable via FFTs. The technical formulation is sound, the runtime analysis is insightful, and the robustness on predicted structures is practically relevant. The experimental evaluation is on simplified tasks that are clearly scoped, and the weaknesses (heuristic training objective without ablation, unquantified projection error, missing confidence intervals) are real but addressable in revision. The contribution is a solid step forward for the ML-for-docking community.
+The paper presents a genuinely novel approach to ML-accelerated molecular docking, with a clean theoretical foundation, strong empirical results on predicted structures, and a clear runtime advantage demonstrated through amortization. The three weaknesses identified are real but none are fatal: the rotational FFT approximation is acknowledged by the authors and partially evidenced by TS vs RS comparisons; the training objective is validated by the overall experimental results; and the alpha-carbon design choice is defensible with the provided rationale. The paper would benefit from additional quantification and ablations, but its core contribution — learning cross-correlation-based scoring functions for FFT-accelerated docking — is sound and valuable.
 
-I rate this paper as **strong accept with minor revisions**. The novelty and technical contribution are clear; the weaknesses are minor and do not undermine the core claims.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

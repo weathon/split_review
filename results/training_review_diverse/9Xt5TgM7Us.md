@@ -1,71 +1,80 @@
-Now I have all the information needed. Let me produce the final consolidated review.
+Now I have thoroughly verified every claim against the paper. Let me produce the final review.
 
 ## Summary
 
-This paper proposes **Predictive Prior** — a loss function that encourages object-centric models to assign image features to the same slot when those features can predict each other through a learned prediction network operating on self-supervised features. The idea is motivated by gestalt completion (humans inferring occluded object parts from visible parts). The method is evaluated on object discovery, compositional generation, and VQA across MOVi-C, Super-CLEVR, and PTR, showing large improvements over prior OCL methods.
+This paper proposes Predictive Prior, a novel objectness criterion for object-centric learning (OCL): image features that can predict each other likely belong to the same object. The authors implement this as an external loss that supervises slot masks, trained via a separate prediction network on self-supervised features (DINO or MAE). Experiments on MOVi-C, Super-CLEVR, and PTR show substantial SOTA improvements across object discovery (+14.42 mIoU on MOVi-C, +16.58 ARI-FG on Super-CLEVR), compositional generation, and VQA tasks.
 
 ## Strengths
 
-- **Novel, psychologically-motivated prior that outperforms existing feature-similarity heuristics.** The Predictive Prior is grounded in gestalt completion and implemented via a learned prediction network, giving a more general object definition than color bias or cosine similarity. Table 4 shows it outperforms STEGO and SmooSeg priors across all datasets using the same feature backbone, and Figure 5 demonstrates that Predictive Prior better separates same-object vs. different-object feature pairs than cosine similarity, especially in the low-similarity regime (black dashed box).
+- **Predictive Prior provides a more discriminative object criterion than cosine similarity.** Fig. 5(a) directly demonstrates that on 3000 sampled DINO feature pairs from MOVi-C, Predictive Prior separates same-object from different-object pairs more cleanly, especially in the low-cosine-similarity regime (0–0.4) where fixed similarity metrics fail. Fig. 5(b) shows concrete examples (edge features, a complex patterned box) where cosine similarity is low but Predictive Prior correctly signals same-object membership.
 
-- **Consistent and substantial improvements on unsupervised object discovery in complex scenes.** On MOVi-C, the model surpasses the previous best by +14.42 mIoU; on Super-CLEVR, the gain in ARI-FG is +16.58 (Table 1). Visualizations (Figure 3) confirm that the model discovers holistic objects where baselines split objects into parts or are distracted by shadows, directly addressing the paper's central failure mode.
+- **Significant and consistent quantitative gains across three complex datasets.** Table 1 shows the method exceeds all prior SOTA models (BO-QSA, DINOSAUR, LSD, InvariantSA) by large margins: on MOVi-C (+6.98 ARI-FG, +14.42 mIoU, +13.80 mBO), PTR (+4.42, +7.26, +6.22), and Super-CLEVR (+16.58 ARI-FG, +3.57 mIoU, +3.58 mBO). These gains are beyond typical variance and hold across datasets with different object types (realistic scans, vehicles, furniture).
 
-- **Generalization across multiple tasks and architectures.** The framework improves not only object discovery but also compositional generation (Table 2, Figure 4) and VQA accuracy (Table 3, especially attribute questions). It works with both CNN (ResNet-34) and ViT backbones, BO-QSA slot encoder, and mixture/transformer decoders, indicating robustness to design choices.
+- **Generalizability to different self-supervised backbones.** The paper successfully adapts the feature encoder to the data: DINO for MOVi-C (in-distribution) and a MAE trained from scratch on Super-CLEVR and PTR (large domain gap from DINO). SOTA results on all three datasets demonstrate the Predictive Prior idea is not tied to a specific pre-trained model or feature space.
 
-- **Principled threshold selection with demonstrated robustness.** The paper identifies that Predictive Prior has a bimodal distribution (Figure 6a) and selects the trough as a heuristic (τ=0.3). Varying τ between 0.2 and 0.4 causes only ~2% fluctuation in ARI-FG/mIoU, and even extreme values (0.1 or 0.5) still greatly exceed the baseline without Predictive Prior (Figure 6b).
+- **Principled, data-driven threshold selection with robustness verification.** Fig. 6(a) shows Predictive Prior values exhibit a clean bimodal distribution; the trough heuristic yields τ ≈ 0.3. Fig. 6(b) verifies that performance varies by only ~2% ARI-FG/mIoU for τ ∈ [0.2, 0.4] and remains far above the no-prior baseline even at extreme values (0.1 or 0.5).
+
+- **Ablation confirms Predictive Prior outperforms other self-supervised priors.** Table 4 compares against STEGO and SmooSeg priors within the same OCL framework; Predictive Prior achieves the highest ARI-FG, mIoU, and mBO on all three datasets, with the largest gap on Super-CLEVR (mIoU +6.07 over SmooSeg) and MOVi-C (mIoU +5.32 over STEGO).
+
+- **Qualitative results visually confirm holistic object segmentation.** Fig. 3 shows prior methods (BO-QSA, DINOSAUR, LSD) frequently split objects into parts (e.g., dividing a vehicle's roof from its body on Super-CLEVR, or breaking large objects on MOVi-C), while the proposed method consistently assigns one slot per whole object with accurate background demarcation.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **Dataset-specific MAE pretraining confounds interpretation of Super-CLEVR and PTR results.** For Super-CLEVR and PTR, the paper trains an MAE *from scratch* on the target datasets to obtain self-supervised features (line 103). The baselines (BO-QSA, InvariantSA, DINOSAUR, LSD) receive no such dataset-specific feature learning. This means the large gains on these datasets (+16.58 ARI-FG on Super-CLEVR, +7.26 mIoU on PTR) could partly arise from the extra data exposure rather than from the predictive relationship itself. **Why this is major (not fatal):** (a) On MOVi-C, the method uses off-the-shelf DINO features and still shows large improvements (+14.42 mIoU), demonstrating the prior works without dataset-specific pretraining. (b) Table 4 ablations compare Predictive Prior vs. other priors (STEGO, SmooSeg) on the *same* feature backbone, isolating the prior's contribution among feature-based methods. However, the paper does not include a controlled baseline for Super-CLEVR/PTR that uses the same MAE features with a simpler auxiliary objective (e.g., feature reconstruction, cosine-similarity consistency) to show that Predictive Prior specifically adds value beyond any generic signal from the features. This gap makes the *main* Table 1 comparison on these two datasets difficult to interpret cleanly.
+None.
 
 ### Minor
 
-- **Segmentation branch M is introduced without ablation.** The paper states that applying the Predictive Prior constraint directly to α "may make α hard to optimize" (line 84), motivating a separate segmentation branch M whose output is distilled to α. No evidence or ablation supports this design choice. Since the branch adds parameters, its contribution to the reported gains is unclear.
+- **The specific loss formulation (×10 scaling and clamping to [-1,1]) is not ablated or justified.** Equation (9) uses `((P_pred − τ) × 10).clamp(−1, 1)` as a weighting factor. While the conceptual motivation is clear (positive weight pushes masks together, negative weight pulls them apart), the paper does not explain why ×10 and clamping were chosen, whether performance is sensitive to these choices, or whether a simpler margin-based or binary cross-entropy loss would work as well. An ablation on the loss functional form would strengthen the paper's claims about the core idea's robustness.
 
-- **Baseline configurations are underspecified for reproducibility.** The paper states "the rest components remain consistent" (line 114) for compared methods but does not provide a detailed hyperparameter/config table (e.g., exact backbone used for each baseline, number of slots, optimizer settings). A table detailing these choices per baseline would improve trust in the fairness claim.
+- **Computational cost of the multi-stage pipeline is not quantified.** The method requires: (a) obtaining a self-supervised feature extractor (DINO or training MAE from scratch on datasets with domain shift), (b) training a 6-layer MLP prediction network, and (c) training the full OCL model with the frozen predictor. Training MAE from scratch for Super-CLEVR and PTR is a non-trivial prerequisite. The paper does not report training times, model sizes, or total GPU-hours. While this does not invalidate the contribution, quantifying the overhead would help readers assess practical deployability.
 
-- **VQA evidence is correlational.** The paper notes a correlation between object-discovery accuracy and VQA accuracy (Table 3) but does not establish that cleaner slots *cause* the VQA improvement. The claim that "slots contain high-level semantics" is supported only indirectly.
+- **Integration details for STEGO/SmooSeg ablation baselines are sparse.** The paper states it "combine[s] object-centric models with priors proposed in previous segmentation research" (Table 4) but does not describe how these priors were adapted to the OCL setting (e.g., used as direct constraints on masks, feature pre-processing, or via contrastive losses). Without these details, the fairness of the comparison is harder to assess, though the main experimental claims (Table 1) do not depend on these ablations.
 
-- **Computational cost not discussed.** The method requires training a prediction network per dataset when domain gap is large (Super-CLEVR, PTR). The paper does not discuss this overhead or its implications for practical applicability.
+- **The number N of spatially sampled pairs per image is not specified or ablated.** The paper mentions "randomly sample N pairs of spatial positions" but omits the value of N and any analysis of sensitivity to this hyperparameter. Since the prior loss is computed over these sampled pairs, the robustness of results to N is important for reproducibility.
+
+- **No explicit analysis of failure cases.** While Fig. 6 suggests false merges are rare (the bimodal distribution separates well), the paper does not discuss or visualize scenarios where Predictive Prior might fail (e.g., objects with very similar appearance/texture that would be predictable across boundaries, or heavily occluded objects). A failure-mode analysis would provide a more complete characterization.
 
 ### Trivial
-None.
+
+- Some training hyperparameters (learning rates, optimizer settings, training iterations) are not fully enumerated in the main text, though code release mitigates reproducibility concerns.
 
 ## Nice-to-Haves
 
-- An ablation that applies the Predictive Prior loss directly to α (without the segmentation branch M) to verify that the branch is necessary.
-- A controlled baseline for Super-CLEVR/PTR that uses the same MAE features with a simpler auxiliary loss (e.g., feature reconstruction or cosine-similarity consistency from the MAE features) to isolate the benefit of the predictive relationship itself.
-- Distribution plots for Super-CLEVR and PTR thresholds (analogous to Figure 6a for MOVi-C) to verify the heuristic generalizes.
+- Deeper analysis of *why* the prediction network learns to predict across object parts but not across objects, e.g., by ablating the prediction network's reliance on source features vs. coordinates, or by visualizing prediction error patterns.
+- Breakdown of mIoU gains by object size percentile on MOVi-C to directly confirm the claim that large-object segmentation drives improvement.
+- Ablation on the number N of spatial pairs sampled per image.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **VQA not shown to be solely due to better slot quality (Critical Issue 4 from harsh critic).** Removed because: (1) the paper's claim is measured — it states a *correlation* between object-discovery quality and VQA accuracy ("we see a link"), not a causal claim that Predictive Prior's loss form uniquely causes VQA gains; (2) the proposed control experiment (comparing VQA with ground-truth masks) is infeasible since ALOE takes slots as input, not masks, and ground-truth masks are not available during training; (3) the VQA task is presented as downstream validation, not as proof of a causal mechanism. The paper's actual claims are appropriate.
 
-1. **Threshold selection criticism** (harsh reviewer: "implicitly uses the ground-truth object labels"): Removed because this misreads the paper. The threshold is selected from the bimodal distribution *trough* — a purely unsupervised heuristic (line 187–188: "select the point with the lowest Predictive Prior distribution density between the two peaks"). Ground-truth labels are used only for visualization/analysis in Figure 6a (coloring which peak corresponds to same vs. different objects), not for threshold selection. The robustness analysis in Figure 6b further shows performance is stable across a wide range, making the point moot.
+- **"The loss may be unstable" (from Critical Issue 1).** Removed as speculative. The paper reports no training instability, and the loss is well-defined and yields converging models across all datasets. The valid part about missing ablation is kept above.
 
-2. **"Prediction network is a learned function, not a fixed prior" semantics**: Removed. The paper transparently describes the prediction network as trained (Section 3.2). Whether one calls it a "prior" or a "learned regularizer" is a terminological preference that does not affect the technical contribution.
+- **"Training MAE from scratch is a non-trivial prerequisite" framed as a critical weakness.** Kept the factual observation (overhead not quantified) but downgraded from "critical" to minor, as multi-stage pipelines are standard in OCL and the code is publicly available.
 
-3. **"The claim that base components are kept consistent is not verified"** (as a standalone criticism): Folded into the Minor weakness about baseline underspecification. The paper does make an explicit claim about consistency (line 114), but lacks sufficient detail to fully verify it — this is already captured.
+- **Reviewer's suggestions to "verify individual sentences" or "fixate on sentence-level pedantry."** None such found in the review.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the central tension (dataset-specific features vs. fair comparison) but do not add a genuinely novel analytical perspective beyond what the paper already discusses.
+None beyond the paper's own contributions. The reviewers' observations largely recapitulate the paper's evidence rather than synthesizing new insights.
 
 ## Suggestions
 
-- **Add a controlled baseline for Super-CLEVR/PTR** that takes a strong baseline (e.g., BO-QSA or the base model without Predictive Prior) and augments it with the same MAE features as an auxiliary reconstruction or consistency loss. This would directly address the confound and show that Predictive Prior adds value beyond the features themselves.
-- **Ablate the segmentation branch M** by comparing against a variant that applies the Predictive Prior loss directly to the slot mask α, even if harder to optimize.
-- **Provide a detailed configuration table** listing backbones, slot counts, optimizer hyperparameters, and training schedules for each compared method to substantiate the "fair comparison" claim.
-- **Discuss limitations** including the computational cost of training per-dataset prediction networks and the reliance on domain-appropriate self-supervised features.
+1. Add an ablation study comparing the current loss formulation against simpler alternatives (e.g., binary cross-entropy on the mask assignment conditioned on P_pred, or a margin-based cosine loss) to demonstrate that the core idea, not the specific engineering of the weighting factor, drives improvement.
+2. Report training time (GPU-hours) for each stage (feature encoder training, prediction network training, OCL model training) and total model parameter counts.
+3. Specify the value of N (number of sampled spatial pairs) and include an ablation showing sensitivity to this hyperparameter.
+4. Provide a brief discussion of failure cases — scenarios where Predictive Prior might be ambiguous (e.g., objects with nearly identical appearance/texture, or severe occlusion) — to help readers understand the method's limitations.
+5. Include a few more training details (learning rate schedule, optimizer, number of training iterations) in the main text or point readers to the code where these are specified.
 
 ## Score and Decision
 
-The paper makes a genuine contribution: the Predictive Prior is well-motivated, the method is clearly described, and the results on MOVi-C (where features are off-the-shelf DINO) are clean and compelling. The major concern about dataset-specific MAE pretraining on Super-CLEVR and PTR is significant but addressable — it does not invalidate the core contribution because the MOVi-C results and Table 4 ablation provide convergent evidence. With controlled experiments to isolate the prior from the feature source, the paper would be notably stronger. I recommend **acceptance** with the expectation that the authors address the controlled baseline concern.
+This paper makes a strong, well-motivated contribution to object-centric learning. The Predictive Prior concept is novel and grounded in an intuitive gestalt principle. The empirical evidence is robust: consistent SOTA results across three challenging datasets and three tasks, with thorough ablation and analysis. The weaknesses are minor — they concern the absence of ablations on design choices and incomplete specification of implementation details, none of which undermine the core claims. The paper is clearly written and the code is available.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

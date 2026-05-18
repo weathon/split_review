@@ -1,76 +1,76 @@
-Now I have all the information needed. Let me compose the final consolidated review.
+Now I have all the evidence needed. Let me synthesize the final review.
+
+---
 
 ## Summary
 
-This paper tackles two problem settings for training object detectors that generalize to unseen domains: semi-supervised DGOD (SS-DGOD) and weakly-supervised DGOD (WS-DGOD), where labeled data is available from only one source domain and unlabeled or weakly-labeled data from additional domains. The authors show that a Mean Teacher learning framework works effectively for both settings, provide an interpretation of this effectiveness in terms of flat minima in parameter space, and propose a simple output-consistency regularization that empirically leads to flatter minima and improves performance. The WS-DGOD variant reaches mAP50 of 62.9, comparable to fully-supervised upper bounds (DGOD: 62.6, Oracle: 62.2).
+This paper tackles semi-supervised and weakly-supervised domain generalization for object detection (SS-DGOD and WS-DGOD) by applying the Mean Teacher learning framework. The authors show that training with EMA updates and pseudo-labels leads to flatter minima in parameter space, which theoretically supports better generalization to unseen domains. Based on this interpretation, they introduce a simple output-level regularization that further improves flatness and detection performance. Experiments on an artistic-style dataset demonstrate that the framework approaches fully-supervised DGOD performance, and the paper is the first to formulate the WS-DGOD setting.
 
 ## Strengths
 
-- **First formalization of WS-DGOD**: The paper introduces and explicitly defines the weakly-supervised domain generalization for object detection setting (Table 1, abstract, Section 4), expanding the problem space beyond existing SS-DGOD and DGOD formulations.
+1. **Clear empirical demonstration that Mean Teacher works for SS-DGOD and WS-DGOD.** Table 1 is the paper's strongest evidence: WS-DGOD with regularization reaches 62.9 mAP50 on the watercolor target, closely approaching the fully-supervised Oracle upper bound of 62.6. The ablation isolating EMA, pseudo-labeling (PL), and regularization shows each component adds non-trivial gains (e.g., EMA alone lifts Single-DGOD from 50.5 to 55.5).
 
-- **Clear ablation isolating each component's contribution**: Table 1 breaks down the method step-by-step: Gaussian FasterRCNN → +EMA → +EMA+PL → +EMA+PL+Regul. Each component adds measurable improvement, and Figure 2 empirically validates that each component independently reduces the flatness metric (loss change under parameter perturbation), directly supporting the paper's central claim.
+2. **First formulation of WS-DGOD as a distinct problem setting.** The paper introduces a new, practically motivated setting where only image-level labels are available for additional domains, and proposes a principled refinement step (Eq. 3) that zeros out class predictions inconsistent with the weak labels. This creates a foundation for future work.
 
-- **Simple regularization that demonstrably flattens minima and improves performance**: The proposed regularization (training student to match raw teacher outputs on weakly-augmented inputs) yields consistent gains across settings (SS-DGOD: 56.6→58.2 mAP50; WS-DGOD: 59.7→62.9 on watercolor). Figure 2 provides direct empirical evidence that this regularization reduces flatness on both training and test domains.
+3. **Simple, well-motivated regularization that improves flatness and accuracy.** The proposed regularization (Eqs. 7–9) is clean: it adds a loss term using weak augmentation and raw teacher outputs (no post-processing) to force the student to mimic the teacher on the same input. Table 1 shows consistent gains across SS-DGOD, WS-DGOD, and UDA-OD (e.g., watercolor: 58.2→58.2 for SS-DGOD, 59.7→62.9 for WS-DGOD). Figure 2 directly verifies that the regularized model has lower loss change under parameter perturbation—i.e., flatter minima.
 
-- **Strong absolute performance relative to upper bounds**: On watercolor, the WS-DGOD method (62.9 mAP50) matches the fully-supervised DGOD upper bound (62.6) and Oracle (62.2) that use full ground-truth labels from multiple domains, validating the practical viability of the weakly-supervised setting.
-
-- **Transferability to UDA-OD**: The regularization also improves UDA-OD performance (54.9→58.8 on watercolor), suggesting the flat-minima interpretation transfers across related problem settings.
+4. **Quantitative flatness evaluation supporting the interpretation.** Figure 2 measures loss change under random parameter perturbations for both training and test losses, showing that EMA, pseudo-labeling, and regularization each contribute to flatter minima. This evidence connects the proposed method to the well-established finding that flat minima improve domain generalization.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-- **No variance or statistical significance reporting**: All results are from single runs. The improvements of +1.6 mAP (SS-DGOD, watercolor) and +3.5 mAP (clipart) could fall within run-to-run noise of SGD training. Without standard deviations or multi-seed averages, readers cannot assess whether the reported gains are reliable. This is the most significant methodological gap, as the small deltas between some settings overlap with typical run-to-run variation.
 
-### Minor
-- **Limited experimental scope in the main paper**: The main table reports results for only one target domain pattern (target=watercolor). Two additional domain patterns (target=clipart, target=comic) and a second dataset are deferred to the supplementary material. While this is common for page-limited submissions, it means the main body does not provide the breadth of evidence needed to fully substantiate the claims of generalizability.
-
-- **Theoretical interpretation is suggestive but not rigorous**: The paper's "novel interpretations" link Mean Teacher components to flat minima, but the argument chain has several leaps. The teacher updated by EMA is equated to a "robust risk minimizer" (line 289) without addressing how EMA solves the maximization in the RRM objective (max_{||Δ||≤γ} E(θ+Δ)). The proposition about monotonic loss functions (lines 298–301) trivially connects output similarity to loss similarity but does not connect to parameter-space flatness. The interpretation is better characterized as a plausible intuitive analogy than a rigorous theoretical contribution; the paper would benefit from directly measuring whether student-teacher loss gap correlates with flatness across training.
-
-- **Comparison with CDDMSL is across different backbones**: The only existing SS-DGOD method (CDDMSL) achieves 46.1 mAP with Res50+RegionCLIP vs. 58.2 for the proposed method with Res101. While the paper fairly reports both backbone variants of CDDMSL, the comparison would be cleaner if both methods used the same backbone architecture. That said, the margin is large enough (58.2 vs. 46.1) that the core conclusion is unlikely to change.
-
-- **The regularization design weakens the flatness-mediator claim**: The regularization uses weak augmentation for both student and teacher and omits post-processing, both differing from the standard Mean Teacher pipeline (which uses strong augmentation for the student). The authors motivate this (lines 336–337) as ensuring input alignment, but the design change also alters pseudo-label quality and augmentation diversity, making it difficult to isolate whether the improvement comes from flatter minima specifically or from better pseudo-labels. A controlled ablation (e.g., strong augmentation with raw outputs, or weak augmentation with sharpened outputs) would strengthen the causal claim.
-
-### Trivial
 None.
 
+### Minor
+
+1. **The theoretical link between pseudo-labeling and flat minima has logical gaps.** Section 5.4 argues that (a) the teacher has flat minima via EMA, (b) pseudo-label training aligns student outputs with teacher outputs, (c) similar outputs → similar loss values (Proposition 1), therefore (d) the student reaches flat minima. Step (d) does not follow directly from the argument presented. Proposition 1 establishes that *loss values at two different points* are close when the outputs are close—but this does not imply that the *loss landscape around a single point* has low curvature. The paper would need to show that pseudo-label training pulls the student toward the teacher in *parameter space* (not just output space) or that the training dynamics introduce a regularizing noise that biases toward flat regions. The paper acknowledges some of these limitations (Section 7), but the interpretation section still claims a causal link it does not fully substantiate.
+
+2. **Experimental validation is limited to one dataset type in the main paper.** All main-paper experiments use artistic-style images (natural, clipart, comic, watercolor) from a single dataset. The introduction cites weather and time-of-day domain shifts (Li et al.) as motivating examples, but no experiments on those shift types are presented in the main paper (supplementary results on another dataset are mentioned but not accessible in this review). For a paper whose interpretive claims about flat minima are meant to carry across diverse domain gaps, this scope is narrow. The conclusions would be considerably strengthened by demonstrating the same effects on qualitatively different domain shifts (e.g., synthetic→real, daytime→nighttime).
+
+3. **No statistical significance or variance reported.** Results are single-run with no error bars. Given that the improvements over baselines are in the 1–3 mAP range and test set sizes are modest (1,000–2,000 images), it is difficult to assess whether the gains are reliable. This is a standard expectation for empirical papers, even analysis-oriented ones.
+
+4. **Absence of SWA/SWAD comparison weakens the "EMA → flat minima" claim.** The paper acknowledges that SWA and SWAD establish weight averaging → flat minima, then claims "we found that a simple EMA also leads to flat minima." But EMA is a form of weight averaging, so this is consistent with existing knowledge rather than a new discovery. Without comparing EMA to SWA/SWAD under the same conditions, the paper cannot show whether EMA has any distinctive advantage or whether any averaging scheme would suffice. This undercuts the novelty of the "interpretation" component.
+
+5. **No non-trivial baseline for WS-DGOD.** Since the paper introduces WS-DGOD, the only comparisons are to its own ablations and to Single-DGOD/DGOD/Oracle upper bounds. While Single-DGOD is a reasonable point of comparison, the paper would benefit from at least one adapted baseline—for example, applying an existing weakly-supervised object detection method to each domain independently, or a simple two-stage approach that trains a classifier on weak labels and uses it to filter detector outputs.
+
+### Trivial
+
+- The flatness measurement in Figure 2 (line 446) uses a perturbation radius γ in the formula but does not report the actual numeric γ value used in the experiment, making the result harder to reproduce.
+- No sensitivity analysis is provided for the regularization strength β=0.5 or the EMA decay α=0.9996, though both are fixed across all experiments.
+
 ## Nice-to-Haves
-- Adapting standard semi-supervised object detection methods (SoftTeacher, STAC) or weakly-supervised detection methods as baselines for SS-DGOD and WS-DGOD respectively, though this is a significant implementation effort for settings with no existing published methods.
-- Measuring pseudo-label accuracy (precision/recall against ground truth on s₂, s₃) to directly test the assumption that pseudo-labels approximate supervised losses.
+
+- An analysis of whether the same effects hold with hard pseudo-labels (e.g., standard Faster R-CNN) rather than the Gaussian Faster R-CNN architecture would clarify whether the flatness benefits are tied to the soft-labeling design.
+- A discussion of failure cases (which object classes or domain pairs see the smallest gains) would improve the paper's practical value, as the authors note this is left for future work.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-> "The regularization is described as 'knowledge distillation,' but the connection to prior knowledge distillation methods is superficial. The real question is whether this is simply a better way to generate pseudo-labels rather than a genuine flatness-promoting technique."
-
-**Removed** — Strawman criticism. The paper explicitly calls it "a type of knowledge distillation" (line 339), not a deep connection to the knowledge distillation literature. And the claim is not "either pseudo-labels OR flatness" — the regularization promotes output alignment, which the paper argues (and Figure 2 supports) leads to flatter minima. These are complementary, not contradictory explanations.
-
-> "The theorem from Cha et al. is presented, but the paper never operationalizes it: how would one compute γ? How does the teacher correspond to θ^γ?"
-
-**Removed** — The paper presents the theorem as background for an intuitive interpretation, not as an operationalizable bound. Asking for computation of γ misunderstands the paper's use of the theorem as a conceptual framework.
-
-> "The UDA-OD comparisons in Table 1 are tangential"
-
-**Removed** — They are not tangential; they show that the regularization and the flat-minima interpretation transfer to related settings, which the Strength Finder correctly identifies as a supporting contribution (Section 7.4, lines 429–430).
+- **Criticism about Gaussian FasterRCNN being a "non-standard" architecture:** Removed because the paper explicitly states (line 165) that the Mean Teacher framework can be applied to any object detector, and the choice of Gaussian FasterRCNN follows prior work (Chen et al., 2022). This is a standard design choice for soft pseudo-labeling, not a limitation.
+- **Criticism about CDDMSL comparison being unfair:** Removed because the paper transparently acknowledges the backbone-dependence issue (lines 426–427). The same-backbone comparison is a valid additional data point; the paper does not claim to outperform CDDMSL in its intended configuration.
+- **Criticism about the regularization loss being unclear:** Removed because the paper clearly specifies the loss structure in Eq. (9) (both losses added together) and states that the same weakly augmented image is used. The description is not ambiguous.
+- **Claim that Proposition 1 is "trivial and irrelevant":** Downgraded. The proposition is a simple mathematical observation, but it plays a supporting role in the argument (not a central theoretical claim). The substantive issue—that similar loss values at two points do not imply a flat landscape—is kept in Weakness 1 above.
+- **Strength Finder strength about "novel interpretation" being fully novel:** Tempered to match the verified weaknesses. The interpretation is incremental rather than fundamentally new, though connecting it to the DGOD context is a useful framing.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one useful observation: the paper's "theoretical interpretation" is essentially doing inferential storytelling — positing a mechanism (flat minima → low generalization gap) and showing correlational evidence (Figure 2), rather than testing a causal chain. A stronger paper would directly test whether manipulating the student-teacher loss gap (not just adding regularization that reduces it) causally affects generalization performance. Neither reviewer identified a genuinely novel meta-insight beyond what the paper itself provides.
+The most interesting observation to emerge from this review is that the paper's two claims—(1) "Mean Teacher works for SS-DGOD/WS-DGOD" and (2) "it works because of flat minima"—are at different levels of support. Claim (1) is well-supported by Table 1 and the ablation. Claim (2) is plausible and consistent with prior theory (Cha et al. 2021, Izmailov et al. 2018) and with the paper's own flatness measurements in Figure 2, but the causal mechanism linking *pseudo-labeling specifically* to flatness is asserted rather than rigorously argued. The paper is strongest when read as an empirical demonstration with a plausible post-hoc interpretation, and weakest when it claims the interpretation as a novel theoretical contribution.
 
 ## Suggestions
 
-1. **Report results over at least 3 random seeds with means and standard deviations** for all key tables. This is essential given the modest per-component gains and would substantially increase confidence in the findings.
+1. **Add error bars** (at least 3 random seeds) to all main results to establish reliability of the 1–3 mAP gains.
+2. **Include at least one comparison to SWA or SWAD** under the same conditions to contextualize whether EMA offers any distinctive benefit over other weight-averaging schemes.
+3. **Report the numeric γ value** used in the flatness measurement (Figure 2) for reproducibility.
+4. **Add a WS-DGOD baseline**, even a simple one: e.g., train a multi-label classifier on the weak labels and use it to post-filter Single-DGOD detector outputs.
+5. **Strengthen the flat-minima interpretation** by either (a) showing that pseudo-label training pulls the student *parameters* toward the teacher (not just the outputs), or (b) connecting pseudo-labeling to existing theoretical results on noise-induced bias toward flat minima, or (c) reframing the interpretation as a plausible heuristic rather than a claimed causal mechanism.
 
-2. **Add one more ablation to isolate the regularization mechanism**: compare (a) weak aug + raw outputs (current) vs. (b) strong aug + raw outputs vs. (c) weak aug + sharpened outputs. This would clarify whether the gain comes from input alignment, augmentation strength, or post-processing choices — and whether flatness is indeed the mediator.
-
-3. **Move at least one additional target-domain pattern into the main paper** (e.g., target=clipart) and add a brief summary of the second dataset results. This would strengthen the generalizability claim without exceeding page limits.
-
-4. **Tone down the theoretical claims**: Reframe Section 5 as providing "intuitive interpretations supported by empirical evidence" rather than "novel interpretations" that imply a formal theoretical contribution. The empirical flatness evidence (Figure 2) is the stronger selling point; lead with it.
+---
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

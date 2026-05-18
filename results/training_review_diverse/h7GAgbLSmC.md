@@ -1,20 +1,22 @@
-Now I have enough information. Let me write the final consolidated review.
+Now I have a thorough understanding of the paper. Let me construct the final consolidated review.
+
+---
 
 ## Summary
 
-This paper derives new generalization bounds for deep neural network classifiers trained with gradient methods. The core technical contribution is an algorithmic stability analysis that bounds the generalization gap in terms of cumulative training loss, yielding a test-error rate of Õ(e^{O(L)}/(γ² n)) under NTK-type margin conditions with only polylogarithmic width. A separate result shows that for the XOR distribution, a one-hidden-layer quadratic network with constant width achieves perfect test accuracy in log(d) SGD steps using large step-size η=m.
+This paper develops stability-based generalization bounds for deep neural networks with smooth activations trained by gradient methods. Under NTK separability with poly-logarithmic width, it achieves a test-error rate of $\widetilde O(e^{O(L)}/(\gamma^2 n))$ — removing the width dependence that plagued prior Rademacher-complexity bounds. It also provides a consistency result for noisy data (with polynomial width) and a separate analysis showing that for the XOR distribution, SGD with large step-size achieves perfect test accuracy in $\log(d)$ iterations using constant width and $\widetilde O(d)$ samples.
 
 ## Strengths
 
-- **First algorithm-dependent, width-independent generalization bounds for deep networks trained by GD.** Prior NTK-based bounds (Chen et al. 2020) scale as √(m/n) in the small-width regime; Theorem 3.1 and Corollary 4.2 remove this width dependence entirely, yielding Õ(e^{O(L)}/(γ² n)) under polylogarithmic width. This addresses an open problem noted in Chen et al. (2020, Sec 3.1).
+1. **Width-independent test-loss bound for multi-layer networks under NTK separability.** Theorem 1 and Corollary 1 achieve a test-error rate of $\widetilde O(e^{O(L)}/(\gamma^2 n))$ under width $m = \Omega(\poly(\log(n)/\gamma))$. As the paper notes (Section 3.1, citing Chen et al. 2020, Sec 3.1), deriving width-independent bounds for multi-layer networks was an open problem; this result directly resolves it.
 
-- **Logarithmic-iteration, linear-sample XOR learning with constant width.** Theorem 5.1 shows that a one-hidden-layer quadratic network with constant width m (e.g., m=20) reaches perfect test accuracy after ⌈log(d)⌉ SGD iterations using Õ(d) samples. This is a clean demonstration that leaving the NTK regime via large step-sizes can drastically improve both computational and sample complexity over prior kernel-regime results requiring d² iterations and samples.
+2. **Novel algorithmic-stability analysis using Hessian structure.** The bound in Eq. (7) depends on $\|w^*-w_0\|$ (distance from initialization) rather than $\|w_t\|$, capturing the role of initialization and training dynamics. This is a qualitative improvement over Rademacher-complexity bounds whose dependence on $\|w_t\|$ grows with width. The derivation exploits the deep net's Hessian along the gradient path, extending stability analysis beyond the convex and two-layer settings.
 
-- **Novel stability analysis that captures the role of initialization.** The generalization gap bound (Eq. 7) is proportional to the cumulative training loss and depends on ||w*−w0||², showing that smaller deviation from initialization yields tighter bounds. This is the first stability-based result for deep networks providing such initialization-dependent guarantees, going beyond uniform-convergence arguments.
+3. **Constant-width, logarithmic-iteration learning of XOR.** Theorem 3 shows that SGD with step-size $\eta=m$ reaches perfect test accuracy after $\lceil \log(d)\rceil$ iterations with a constant-width network and $\widetilde O(d)$ samples. Table 2 shows this improves substantially over the NTK regime ($d^2$ width, $d^2$ iterations) and prior feature-learning work ($\poly(\log(d))$ width, $\poly(\log(d))$ steps).
 
-- **Test loss bound expressible solely in terms of observable training loss.** Equation (9) simplifies the generalization gap to (2.2/n)E[Σ_t F̂(w_t)], which is fully data-dependent and computable. Figures 1–3 show non-vacuous alignment with empirical generalization on FashionMNIST and MNIST.
+4. **Experimental validation of the stability bound.** Figures 1–3 show that the theoretical bound from Eq. (13) closely tracks the empirical generalization gap on FashionMNIST and MNIST across different widths and step-sizes. The paper honestly acknowledges that the width condition is not verified in experiments, but the alignment is still non-trivial and supportive.
 
-- **Consistency result for noisy data.** Theorem 4.3 shows that with polynomial width m = Ω(n^{3L+3}) and early stopping at T=√n, GD achieves optimal population loss at rate O(1/√n), extending beyond the interpolation regime.
+5. **Consistency guarantee for noisy data.** Theorem 2 establishes that with early stopping at $T=\sqrt{n}$ and polynomial width, GD achieves the optimal population loss at rate $O(1/\sqrt{n})$ in the non-interpolating regime — a setting prior NTK analyses for deep nets typically did not address.
 
 ## Weaknesses
 
@@ -22,81 +24,62 @@ This paper derives new generalization bounds for deep neural network classifiers
 None.
 
 ### Major
-None.
+
+1. **Probability guarantee in Theorem 3 is incompatible with the claim of constant width.** The theorem states that with probability at least $1 - e^{\log(m)-\log^2(d)} - e^{-m/16} - o_d(1)$, test accuracy is $1-o_d(1)$. If the width $m$ is truly constant (e.g., $m=20$ as in the experiments), then $e^{-m/16}$ is a non-vanishing constant (≈0.29), so the success probability does **not** converge to 1 as $d\to\infty$. The text (line 191) says "the network's width can be constant and at most must be polynomial in $d$" — the lower bound (constant) and upper bound (polynomial) are both stated, but the probability guarantee requires the former for the asymptotics. The paper needs to clarify exactly what growth condition on $m$ (as a function of $d$) is actually required for the $1-o_d(1)$ claim, or else state that for any fixed $d$ a constant $m$ suffices but asymptotic probability requires $m = \omega(1)$. This is a technical inconsistency in one of the paper's highlighted results.
 
 ### Minor
 
-- **The condition on ρ* in Theorem 3.1 (Eq. 2) lacks intuitive justification.** The lower bound ρ* ≥ max{√(ηT F̂(w*)), √(η F̂(w₀))} is not a standard assumption, and the paper does not explain why this particular form arises from the proof technique or how it is typically satisfied. For the interpolation case (F̂(w*)≈0) the condition simplifies to ρ* ≥ √(η F̂(w₀)), which is mild since η is small and F̂(w₀)=O(1); but the paper would benefit from stating this explicitly to preempt confusion.
+1. **Selective presentation of the Chen et al. bound in Table 1.** The text (lines 63–65) correctly cites the full Chen et al. bound $\widetilde O\big(\frac{4^L}{\gamma^2}\sqrt{\frac{m}{n}} \wedge (\frac{L^{3/2}}{\gamma^2\sqrt{n}} + \frac{L^{11/3}}{\gamma^2 m^{1/6}})\big)$. However, Table 1 displays only the first term $\widetilde O(\frac{e^{O(L)}}{\gamma^2}\sqrt{\frac{m}{n}})$, with the second term commented out in the LaTeX source. This gives a casual reader an incomplete picture. The paper's bound $\widetilde O(e^{O(L)}/(\gamma^2 n))$ is genuinely tighter in $n$-dependence than **both** terms of Chen et al. (since $1/n \ll 1/\sqrt{n}$), and the exponential $L$-dependence also appears in Chen et al.'s first term. But the paper does not discuss the regime where Chen et al.'s second term might be competitive (large $L$, where $L^{3/2}$ is far smaller than $e^{O(L)}$). A brief side-by-side comparison clarifying the $n$ vs. $L$ tradeoff would strengthen the paper's positioning.
 
-- **The width condition m ≥ β_L² (6ρ*)^{6L+4} grows rapidly with depth.** While technically polylogarithmic in n for fixed L, the exponent (6L+4) means that even moderate depth (L=5) produces width requirements of order (log n)^{34} — astronomically large in practice. The paper mentions this via β_L but could be more upfront about the practical limitations for L > 3. The comparison tables (Tables 1–2) omit explicit L dependence in the width column, which downplays this limitation.
+2. **$\beta_L$ is not characterized or bounded.** The width conditions throughout (Eq. (8), Corollary 1, Theorem 2) depend on a constant $\beta_L$ that "only depends on $L$." The paper never bounds $\beta_L$ or gives its growth rate (e.g., $e^{cL}$). Since the paper's rates have exponential $L$-dependence via $G_0$, the actual size of $\beta_L$ matters for determining the overall $L$-dependence of the width requirement. The paper should at least state that $\beta_L$ is $O(e^{cL})$ or provide a reference for its growth.
 
-- **Proof intuition in the main text is too brief.** The remark on lines 138–143 provides a high-level sketch (Hessian bounds from Liu et al. 2020, induction argument over iterates), but it does not explain the key stability lemma or why the algorithm-dependent bound takes its particular form. A theory paper of this depth would benefit from a dedicated 1–2 paragraph proof sketch in Section 2.
-
-- **XOR result uses the linear loss f(t)=−t, which is non-standard for classification.** The paper does not discuss why this choice is necessary (presumably analytic tractability) or how the analysis would differ under logistic or hinge loss. For a stylized setting this is acceptable, but the limitation should be acknowledged.
-
-- **NTK experiments do not verify the width condition.** The authors explicitly acknowledge this (line 207), and the experiments are presented as "approximations." However, the claims of "non-vacuous and accurate approximations" (line 242) are qualitative; no error bars or quantitative comparison (e.g., ratio of bound to empirical gap) are provided for the NTK experiments, making it hard to assess how tight the bound actually is in practice.
+3. **The XOR analysis uses a different loss function.** The rest of the paper uses the logistic loss, but Theorem 3 uses the linear loss $f(t)=-t$, which is unbounded below and has different optimization properties. The paper does not comment on whether the XOR result extends to logistic loss or why the linear loss is necessary for the analysis. This limits the integration of the XOR result with the rest of the paper's framework.
 
 ### Trivial
-
-- The success probability of Theorem 5.1 contains the term e^{log(m)−log²(d)} = m/d^{log d}. For constant m and moderate d this is negligible, but for small d it could dominate; the trade-off between m and d is worth a brief remark.
-
-- The descent lemma step-size condition η < 1/(G_0²+1/4) is referenced (Lemma \ref{lem:des}) but not stated in the main text. A brief restatement would improve readability.
+None.
 
 ## Nice-to-Haves
 
-- A careful walkthrough of why the ρ* condition (Eq. 2) is necessary in the proof, rather than just stated as an assumption.
-- Quantitative evaluation of the bound tightness on the NTK experiments (e.g., ratio of empirical gap to theoretical bound across multiple seeds).
-- A remark on extending the XOR linear-loss analysis to more standard classification losses.
+- A discussion of the $L$-dependence tradeoff between the paper's bound ($e^{O(L)}$) and the alternative from the second term of Chen et al. ($L^{3/2}$), clarifying that the improvement in $n$ comes at the cost of worse $L$-dependence, and that both are reasonable in different regimes.
+- Clarifying in Theorem 3 whether constant $m$ works for any fixed $d$ with the stated probability, or whether $m$ must grow (e.g., $m = \omega(1)$ or $m \ge \log d$) for the asymptotic $1-o_d(1)$ guarantee.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviews are removed (with brief justification):
 
-1. **"Comparison to Chen et al. 2020 should note their bound had a 'min'."** — The paper already states the bound with the ∧ operator (line 64) and explains it: "where ∧ takes the minimum of two quantities." This is factually addressed. Removed as factually wrong.
+1. **"Misleading comparison — paper compares only against first term of Chen et al."** — Partially removed. The **text** (lines 63–65) correctly cites the full minimum of two bounds; only Table 1 is selective. The reviewer's claim that the second term has "better in $n$ ($1/\sqrt{n}$ vs $1/n$)" is factually wrong — $1/n$ is tighter than $1/\sqrt{n}$. The real tradeoff (exponential vs. polynomial in $L$, not $n$) has been downgraded to a Minor weakness about table presentation.
 
-2. **"No proof sketch or intuition is provided in the main body."** — Lines 138–143 explicitly provide a sketch referencing Hessian bounds from Liu et al. 2020 and an induction argument. Removed as factually wrong.
+2. **"Missing descent lemma condition and step-size compatibility"** — Removed. The paper explicitly states the step-size condition at line 131 ($\eta < 1/(G_0^2+1/4)$) and references Lemma lem:des (appendix, stripped by parser). The reviewer's claim that the training loss bound "becomes exponentially large" due to small $\eta$ is incorrect: substituting $\eta < 1/(G_0^2+1/4)$ into Eq. (125) gives the training loss term $O(\rho^{*2} G_0^2 / n)$, which has the same $e^{O(L)}$ scaling already acknowledged in the paper's rate.
 
-3. **"No discussion of the descent lemma condition."** — The paper states η<1/(G_0²+1/4) (line 131) and references Lemma \ref{lem:des}. Removed as factually wrong.
+3. **"The 'algorithm-dependent' claim is overstated"** — Removed. The paper acknowledges prior stability work for two-layer nets (lines 140–142) and its remark about "first" is qualified to "deep neural networks" (multi-layer), for which prior stability analysis using Hessian structure did not exist. The paper also cites Hardt et al. (2016) and prior stability work as antecedents.
 
-4. **"Missing comparison to Barak et al. 2022, Abbe et al. 2022."** — Per hard rules, missing related works cannot be asserted without external confirmation. Removed.
+4. **"Corollary 1 is stated without proof sketch"** — Removed. The proof (a standard largeness argument scaling the NTK separating direction) belongs in the appendix, which was stripped by the parser. The argument is standard in the NTK literature.
 
-5. **"Width condition hides exponential dependence on depth."** — The condition m ≥ 4β_L²(6ρ*)^{6L+4} is stated transparently with the exponent in full view. The paper does not hide this dependence. However, the practical severity of the growth is a valid concern, so it is retained as a minor weakness in a softened form above, not under this "hiding" framing.
+5. **"Missing descent lemma derivation" / "step-size not derived"** — Removed. The derivation is deferred to the appendix (Lemma lem:des), which was stripped by the parser. The condition is stated explicitly in the main text (line 131).
 
-6. **"The NTK corollary comparison should note that Chen et al.'s bound could be width-independent for large m."** — The paper explicitly discusses the small-width regime as the relevant comparison regime and acknowledges the "min." The critic's own text says the "paper correctly points out" this issue. Removed as non-substantive.
+6. **"Width condition for noisy-data consistency is impractically large"** — Downgraded from standalone criticism. The paper itself acknowledges this limitation (line 175: "This comes at the expense of a larger width condition"). The result is clearly presented as a theoretical consistency guarantee, not a practical prescription. The criticism adds no new information beyond what the paper already says.
 
-7. **"The paper should discuss whether Theorem 3's width condition can be relaxed."** — The paper acknowledges the large condition as a limitation ("This comes at the expense of a larger width condition") and classifies improvement as future work. This is scope-appropriate. Removed.
+7. **"The descent lemma condition is not stated"** — Removed as factually incorrect. The condition $\eta < 1/(G_0^2+1/4)$ is stated at line 131.
 
-8. **"No error bars for NTK experiments."** — While this is technically true, the paper states the experiments are "approximations" and the theoretical bound is not expected to be exactly verified. The critic's stronger framing is softened. Retained as a minor weakness above in moderated form.
+8. **Various formatting/style/strawman criticisms** — Removed per instructions.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface an important tension: the paper claims "minimally polylogarithmic width" but the exponent (6L+4) means that for L beyond 3–4, the width condition is exponential in L — a nuance that the "polylogarithmic" framing obscures. This is not a dishonesty in the paper (L is a fixed constant in the NTK regime) but it highlights that the practical regime for these bounds is shallow networks. A second insight is that the ρ* condition in Theorem 3.1, while unusual, is actually a mild lower bound that is automatically satisfied under interpolation; the paper's failure to clarify this creates an appearance of circularity where none exists.
+None beyond the paper's own contributions. The reviews confirm the core technical contributions are novel and significant, while pointing out presentation issues and one genuine inconsistency (XOR probability) that the authors should address.
 
 ## Suggestions
 
-1. **Add a brief proof sketch paragraph in Section 2** explaining how the Hessian bounds control the stability of the GD trajectory and how the cumulative-loss bound emerges. This would substantially increase credibility without requiring full proof details.
+1. Fix the tension in Theorem 3 by either: (a) stating that $m$ must grow with $d$ (even slowly, e.g., $m = \omega(1)$ or $m \ge \log d$) for the $1-o_d(1)$ probability claim, or (b) clarifying that the bound holds with high probability for any fixed $d$ with constant $m$, but the asymptotic statement requires $m\to\infty$.
 
-2. **Clarify the ρ* condition (Eq. 2) with a short remark** noting that under interpolation (F̂(w*)≈0) it simplifies to ρ* ≥ √(η F̂(w₀)), which is automatically satisfied for small η and O(1) initial loss.
+2. Add the second term of the Chen et al. bound back into Table 1, and add a brief discussion comparing the tradeoffs (the paper's $1/n$ vs. Chen et al.'s $1/\sqrt{n}$ in $n$; exponential vs. polynomial in $L$).
 
-3. **Replace "polylogarithmic width" with a more precise description** such as "width growing as poly(log n)^{Θ(L)}" and add a sentence noting the practical implications for moderate-to-large L.
+3. Provide a bound on $\beta_L$ (e.g., $\beta_L \le e^{cL}$) or cite a source that characterizes it, so readers can assess the full $L$-dependence of the width conditions.
 
-4. **Add a caveat about the linear loss** in the XOR section and briefly discuss whether the analysis extends to logistic loss.
+4. Comment on why the XOR analysis uses linear loss instead of logistic loss, and whether the result extends to logistic loss or is specific to the linear case.
 
 ## Score and Decision
 
-**Originality:** Good — the stability-based analysis for deep networks and the XOR result with constant width are genuinely novel.
+**Overall assessment:** The paper makes a legitimate theoretical contribution — the stability-based analysis removing width dependence from generalization bounds for multi-layer networks is a genuine advance over the prior state of the art (which the paper correctly attributes and contextualizes). The XOR result is clean and demonstrates the power of escaping the NTK regime. The main weakness — the probability inconsistency in Theorem 3 — is real but fixable without altering the core contribution. The remaining issues (selective table presentation, uncharacterized $\beta_L$, different loss for XOR) are presentation-level concerns. The paper is a strong theory paper with clear, verifiable contributions.
 
-**Importance of research question:** High — removing width dependence from generalization bounds and understanding when feature learning beats the kernel regime are central questions in deep learning theory.
-
-**Claims well-supported:** Mostly yes. The theoretical claims follow from the stated assumptions. The ρ* condition is unusual but not fatal. The experiments are illustrative rather than confirmatory.
-
-**Soundness of experiments:** Adequate for a theory paper. The XOR experiments verify the theorem's predictions. The NTK experiments are qualitative but the authors are transparent about limitations.
-
-**Clarity of writing:** Good overall. The main results are clearly stated. The paper would benefit from more proof intuition and discussion of assumptions.
-
-**Value to the research community:** High — these bounds improve on well-known baselines and the analysis framework is likely to inspire follow-up work.
-
-**Score:** 7.5/10 — The paper makes genuine theoretical contributions that advance the state of the art. The weaknesses (unclear ρ* condition, depth dependence, brief proof sketch) are all addressable presentation issues that do not undermine the core results.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

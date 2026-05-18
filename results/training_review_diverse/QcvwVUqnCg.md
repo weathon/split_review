@@ -1,79 +1,69 @@
-Now I have thoroughly reviewed the paper. Let me compose the final consolidated review.
+Now I have a thorough understanding of the paper and all the reviewer inputs. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper proposes a normative reinforcement learning model where Gaussian place fields are updated via TD error to maximize cumulative reward. Operating as an actor-critic with learnable field parameters (amplitude, center, width), the model reproduces three experimentally observed phenomena in hippocampal place field reorganization: (1) high field density at reward locations, (2) backward field elongation against the trajectory, and (3) representational drift with stable behavior. The paper further provides a perturbative analytical approximation linking field dynamics to critic weights, compares the model to the successor representation, and demonstrates a functional role for noise-induced drift in learning multiple new targets.
+This paper proposes a normative reinforcement learning model where TD-error-driven updates to place field parameters (amplitude, center, width) — alongside actor-critic weights — reproduce three canonical place field phenomena under a single reward-maximization objective: high field density at reward locations, backward field elongation against movement direction, and representational drift with stable behavior. The model is analyzed through perturbative approximations, ablations, comparisons with the successor representation, and drift experiments, and the authors show that noisy field updates improve new-target relearning.
 
 ## Strengths
 
-1. **Unification of three disparate phenomena under a single normative framework.** The model simultaneously reproduces reward-concentrated field density (Fig. 1B–D), backward elongation against the movement direction (Fig. 2A–B), and representational drift with stable behavior (Fig. 3B–C) using a single TD-learning objective with learnable Gaussian fields. Prior work explained each with separate mechanisms.
-
-2. **Perturbative analytical approximation linking field dynamics to critic weights.** The derived approximation (Eq. 7, Section 4.1) provides a mechanistic prediction: field center shifts are proportional to the squared critic weight \(w_{v,i}^2\), explaining why fields near the reward shift fastest and why density emerges first at the reward and later at the start. This goes beyond pure simulation.
-
-3. **Demonstration that noisy field updates improve learning of multiple new targets.** Fig. 4C shows that agents without noise fail to learn a changed target, while moderate noise substantially improves cumulative reward across repeated target shifts. This provides a concrete normative functional role for representational drift.
-
-4. **Comparison with the successor representation (SR) revealing distinct learning dynamics.** The paper shows that RM and SR agents differ in the temporal correlation between mean firing rate and occupancy — RM fields are anti-correlated early and become positively correlated later, while SR fields are always positively correlated (Fig. 2C–E). This contrast yields testable predictions to distinguish the two normative accounts.
-
-5. **Ablation experiments quantifying the contribution of each field parameter to policy convergence.** Optimizing width (\(\sigma\)) yields the greatest speedup, followed by amplitude (\(\alpha\)), while center optimization alone provides little benefit (Fig. 4A–B). This clarifies the relative importance of different degrees of representational flexibility and addresses parameter degeneracies.
+- **Unification of three disparate phenomena under a single normative framework.** Prior work proposed separate mechanisms for reward-density emergence, field elongation, and representational drift. This paper demonstrates that all three arise from a single TD-error-driven reward maximization objective (Figs. 1–3), which is a genuinely novel synthesis.
+- **Analytical perturbative approximation for field dynamics.** The paper derives closed-form approximations (Eqs. 6–7; App. B) showing that field center shifts scale with squared critic weights and amplitudes scale with value. This gives mechanistic insight beyond purely phenomenological models and is validated against simulations (Fig. 1E–F).
+- **Testable distinction from successor representation dynamics.** The paper directly compares RM and SR agents and shows they diverge early (anti-correlated mean firing rates, Fig. 2C–D) before converging later (Fig. 2E), providing an experimentally testable prediction about the time course of field reorganization.
+- **Demonstration of a functional role for representational drift.** Noisy field parameter updates degrade population vector correlation while keeping behavior stable (Fig. 3B–C), and importantly, an optimal noise magnitude improves new-target learning (Fig. 4C) — suggesting drift is not merely an epiphenomenon but may serve a computational role in preventing fixation on outdated reward locations.
+- **Systematic ablation of field parameters.** The paper decomposes the contribution of each field parameter (width, amplitude, center) to policy convergence (Fig. 4A–B), finding that width optimization provides the largest benefit while center optimization contributes least in the single-target case — a nontrivial decomposition.
 
 ## Weaknesses
 
 ### Fatal
 None.
 
+### Major
+
+- **The gradient-based learning rule for place field parameters is biologically implausible and the gap is not bridged.** The core mechanism — updating α, λ, σ by backpropagating the TD error through the actor and critic — requires each place field to have access to downstream weights and compute precise gradients. The authors explicitly acknowledge this in the Discussion and frame the model as normative rather than mechanistic. However, the value of a normative model depends on whether the proposed objective *could plausibly* be optimized by a neural circuit. The paper provides no sketch of how such gradients could be approximated by local, biologically plausible plasticity rules (e.g., eligibility traces, three-factor rules, feedback alignment). Since the paper's central contribution is to explain *why* place fields reorganize (reward maximization), the lack of a bridge to *how* this optimization could be implemented limits the model's claim to be a neuroscientific account of place field plasticity. The paper's experimental predictions (e.g., disrupting dopamine affects reorganizations) depend on the gradient mechanism holding, making this a structural gap rather than a mere simplification.
+
+- **The functional role of field center reorganization is unresolved and creates a tension with the ablations.** The ablation results (Fig. 4A–B) show that center optimization does not improve single-target navigation performance and even harms it when combined with amplitude optimization. Yet center shifts toward reward locations are one of the hallmark phenomena the paper aims to explain (Fig. 1B, 1E, 2A–B). The paper does not resolve whether these center shifts are (a) causally beneficial for new-target learning (Fig. 4C tests noisy *all-parameter* updates, not center updates specifically) or (b) a non-functional byproduct of gradient descent. An ablation that disables center updates during new-target learning (while keeping width/amplitude updates) would resolve this, but is not provided. This undermines the claim that place field reorganization "improves policy convergence" as a unified advantage, since the most conspicuous experimentally observed feature (center shifts) appears functionally neutral or detrimental in the single-target setting the model studies most.
+
 ### Minor
 
-1. **The mechanistic explanation for why reward maximization produces backward elongation is not provided.** The paper shows that the RM model recapitulates elongation and compares it to SR, but does not give an intuitive explanation for the mechanism. The SR explanation is clear (fields learn transition probabilities, naturally causing backward shift). For the RM model, the reader is left to infer why TD-error-driven updates cause fields to expand backward. A brief mechanistic paragraph would significantly deepen insight.
-
-2. **The framing of drift conflates emergent phenomena with added mechanisms.** The paper is transparent about injecting Gaussian noise to produce drift (Section 4.3: "To drive larger variability in the representation, we introduced Gaussian noise"), and the no-noise baseline shows almost no drift (Fig. 3B blue). However, the abstract and contributions state that "reward maximization predicts drifting fields," which could be read as drift being emergent from the learning objective itself. The paper would benefit from explicitly distinguishing between phenomena that emerge from the RL objective (density, elongation) and those that require an additional mechanism (drift via noise). The functional role of noise for new-target learning is the genuine contribution and should be foregrounded as such.
-
-3. **The 2D elongation claim could be more clearly quantified.** In 2D, the text claims "elongation of fields against the agent's direction of movement," while the figure caption describes elongation "along the trajectory." The concept of "backward against the trajectory" is well-defined in 1D (leftward when moving rightward) but less clearly defined in 2D. Given the corridor geometry, it is not obvious from the verbal description whether fields elongate backward (opposite to travel) or simply stretch along the corridor (which would be a different phenomenon). The quantitative summary statistics referenced in Sup. Fig. 6 should ideally resolve this, but the main text would benefit from clarifying what "against" means in the 2D setting.
-
-4. **The "weak feature learning regime" explanation is stated but not rigorously justified.** The paper notes that increasing the number of fields reduces density because the agent enters a "weak feature learning regime" (Section 4.1), citing Sup. Fig. 4. This is an interesting observation, but the explanation is brief. A theoretical justification — even a sketch — of why additional fields in this regime do not contribute extra advantage would strengthen the claim.
+- **The SR comparison compares different types of learned objects.** The paper compares learned *basis functions* (RM's place fields φ) against learned *weights on fixed basis functions* (SR's successor features ψ), following Stachenfeld et al. (2017). While this follows prior methodology, it conflates two different levels of representation. The finding that their dynamics differ (Fig. 2C–E) is interesting but does not directly inform whether a *true* SR with learnable nonlinear basis would behave differently from RM. The paper should clarify this distinction and temper the claim about the two algorithms being distinguishable by experiments.
+  
+- **The perturbative approximation fit is acknowledged as moderate but not systematically characterized.** The paper notes that "additional approximations are needed to model the agent's trajectory and improve the simulation-theory fit for place field centers" (App. B). However, no quantification of the approximation error is provided (e.g., R² values, error bars on theory vs. simulation across parameter regimes), which would help readers assess how reliable the analytical insights are.
+  
+- **The noise injection mechanism for drift is not learned or controlled.** Gaussian noise is injected directly into field parameter updates (Section 4.3). The paper acknowledges this is a phenomenological choice rather than a learned mechanism. While this is acceptable as a first step, the finding that noise helps new-target learning (Fig. 4C) is then less surprising — noise is a known regularizer in continual learning. The paper would benefit from discussing how this relates to other anti-forgetting mechanisms (e.g., elastic weight consolidation, replay).
 
 ### Trivial
-
-- Equation 2 defines amplitude as \(\alpha_i^2\). The reason for the squaring (presumably to enforce non-negativity while allowing the gradient to pass through) is not stated and would be helpful to clarify briefly.
+- The paper uses a single set of place fields for both actor and critic, which simplifies the anatomy (separate pathways to dorsal/ventral striatum). The Discussion notes this, but the paper does not analyze potential conflicts where a change that benefits policy could harm value estimation.
 
 ## Nice-to-Haves
-
-- A per-field signed shift analysis (relative to movement direction) would provide a more quantitative test of the elongation claim in 1D, though the current average measure already captures the Mehta phenomenon.
-- Formal statistical comparisons (e.g., permutation tests) for the ablation experiments would strengthen claims about "significant improvement," though the reported 95% CIs over 50 seeds already provide reasonable evidence.
-- Exploration of how results generalize across different reward magnitudes and environments beyond those shown — though the paper already varies reward magnitude (Fig. 1D) and includes a 2D obstacle environment.
+- **Quantitative comparison to experimental data.** The paper references Sup. Fig. 9 for comparisons to data, but a summary table of key measurements (e.g., peak density ratio near reward vs. start, average shift distance, drift rate) alongside published values would make the claim of recapitulation much stronger and more useful to experimentalists.
+- **Test with binary (all-or-nothing) reward.** The Gaussian reward distribution simplifies boundary effects; testing whether the phenomena hold for a binary reward (which is common in experiments) would increase robustness.
+- **Binary reward condition testing.** Testing whether the phenomena hold for a binary (reward/no-reward) schedule as used in many rodent experiments would increase ecological validity.
+- **Center-specific ablation in new-target setting.** Running the new-target learning experiment (Fig. 4C) with center updates disabled while keeping width/amplitude/noise updates would directly test whether center shifts are causally responsible for improved relearning.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points were flagged by reviewers but are removed or downgraded after verification against the paper:
 
-1. **"The perturbative analysis is relegated to Appendix B, which is not available."** — REMOVED per hard rule: the parser strips appendix sections, which exist in the original submission. The main text already gives the key prediction (Eq. 7) and its derivation steps, which is sufficient.
-
-2. **"No statistical tests or error bars are reported for the ablation experiments (Fig. 4) beyond confidence intervals."** — WEAKENED to Nice-to-Have. The paper explicitly states "Shaded area is 95% CI over 50 seeds" for all relevant figures. Confidence intervals are standard; permutation tests are a wishlist item, not a missing requirement.
-
-3. **Implication that the paper does not explore different reward magnitudes** — REMOVED as factually incorrect. Fig. 1D explicitly varies reward magnitude (r_max = 1, 5, 9) and reward location width.
-
-4. **Critique about the biological plausibility of backpropagating TD error through the actor-critic** — The paper already acknowledges this limitation in the Discussion and cites biologically plausible learning rule alternatives. This is an acknowledged limitation of a normative model, not an unaddressed weakness.
+- **"The paper does not explain why the weak feature learning regime occurs."** — The paper does state: "This is because as the number of fields increase, the agent goes into a weak feature learning regime (Sup. Fig. 4) in which feature learning does not contribute to additional advantage." While the mechanistic explanation is brief, the paper identifies the regime and references the appendix. This is too minor to retain as a weakness.
+- **"The paper should test binary reward."** — This is scope creep; the paper's Gaussian reward is a defensible design choice and testing binary reward would expand rather than strengthen the paper's existing self-contained narrative.
+- **"The paper does not compare the model's predictions to any quantitative experimental data."** — The paper references Sup. Fig. 9 for data comparisons and provides qualitative matches to published phenomena throughout. A quantitative table would be a nice addition but its absence is not a core weakness.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The most penetrating observation to emerge from the reviews is the unresolved tension between center shifts as a hallmark experimental phenomenon and their minimal (or negative) contribution to single-target reward maximization in the model. This forces a sharp question about the model: either (i) center shifts serve a computational role that only manifests in dynamic, multi-target environments (which the new-target experiment hints at but does not causally verify for centers alone), or (ii) they are a non-functional byproduct of gradient-based optimization — which would itself be a noteworthy prediction (experimental manipulation of centers might not impair behavior on stationary reward tasks). The paper currently leans toward (i) but does not provide the ablation experiment needed to distinguish (i) from (ii). This is the single most important direction for strengthening the paper's claims.
 
 ## Suggestions
 
-- Add a brief paragraph in Section 4.2 providing mechanistic intuition for why reward maximization produces backward elongation (e.g., fields expand to cover states with high-value correlates, shifting COM backward as they integrate predictive value signals).
-- In the abstract and contributions, rephrase the drift claim to clearly distinguish the model component responsible (noise injection) from the learning objective, e.g., "Adding noise to field parameters during reward maximization produces drifting fields that..."
-- In the 2D elongation description (Section 4.2), clarify what "against the movement direction" means operationally in 2D and provide a quantitative measure (e.g., signed elongation along the trajectory direction vs. orthogonal).
-- Briefly justify the \(\alpha_i^2\) parameterization in Eq. 2.
+- Add an ablation experiment in the new-target setting (Fig. 4C) that disables center updates while keeping width, amplitude, and noise updates. If the no-center condition shows slower adaptation, center shifts are causally functional; if not, state explicitly that centers are a non-functional byproduct — either outcome is informative.
+- Add a brief simulation or discussion showing how the gradient updates for place field parameters could be approximated by a biologically plausible rule (e.g., an eligibility trace combining d log π/dθ with the TD error, or a three-factor rule with TD error as a global neuromodulator). Even a noisy approximation that produces qualitatively similar dynamics would substantially address the biggest limitation.
+- Provide quantitative bounds for the RM-vs-SR experimental predictions: estimate how many trials and neurons would be needed to detect a statistically significant difference in the correlation dynamics (Fig. 2D–E). Order-of-magnitude estimates would make the predictions actionable for experimentalists.
+- Add a table comparing key experimental measurements (field density ratio at reward vs. start, mean shift distance, PV correlation decay rate) to published values from Gauthier & Tank (2018), Mehta et al. (1997), Ziv et al. (2013), and Geva et al. (2023).
 
 ## Score and Decision
 
-This paper makes a meaningful contribution to computational neuroscience by demonstrating that a single reward-maximization framework can unify three well-known but previously disconnected phenomena. The modeling is clean, the perturbative analysis adds theoretical depth, the SR comparison yields testable predictions, and the functional role of noise for new-target learning is genuinely novel. The weaknesses are limited to framing and explanatory depth — none threaten the core claims. The paper is well above the acceptance threshold for a venue that values normative modeling contributions.
+This paper makes a genuine and nontrivial contribution: it is the first model to unify three well-known place field phenomena under a single reward-maximization framework, supported by thoughtful ablations, analytical approximations, and testable predictions. The weaknesses are real — particularly the biological implausibility of the gradient updates and the unresolved functional role of center shifts — but the paper is transparent about its limitations and frames itself honestly as a normative model. The work is likely to stimulate both theoretical and experimental follow-up. On balance, the strengths outweigh the weaknesses.
 
-**Originality:** Good — first model to unify these three phenomena under reward maximization.  
-**Importance:** High — addresses a long-standing question about why place fields reorganize the way they do.  
-**Claims supported:** Yes, with minor framing concerns.  
-**Soundness:** Good — simulations are thorough with confidence intervals and appropriate controls.  
-**Clarity:** Good, though some framing could be more precise.  
-**Value to community:** High — provides testable predictions and a framework for future work.
+**Originality:** High — first normative unification of three phenomena. **Importance:** High — addresses fundamental questions about place field plasticity. **Claims supported:** Mostly, with gaps in center function and biological plausibility. **Soundness:** Solid simulations and analyses. **Clarity:** Well-written. **Value:** High for computational neuroscience.
 
 MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,20 +1,47 @@
-Now I have all the evidence I need. Let me synthesize the final review.
+Now I have all the information needed to construct the final review. Let me synthesize.
+
+## Summary
+2-3 sentence summary of the paper's contribution.
+
+## Strengths
+- strength 1 with evidence
+- strength 2 with evidence
+
+## Weaknesses
+### Fatal
+### Major
+### Minor
+### Trivial
+
+## Nice-to-Haves
+
+## Removed Points
+
+## Novel Insights
+
+## Suggestions
+
+## Score and Decision
+
+---
+
+Here is my final consolidated review:
 
 ## Summary
 
-ShuffleMTM proposes a self-supervised masked time-series modeling framework that learns cross-channel dependencies while retaining a channel-independent (CI) encoding strategy. The core idea is simple: randomly shuffle unmasked patches across channels at the same patch index, then use Siamese encoders to process both the original and shuffled masked series, with a cross-attention decoder integrating the two views. This extends the standard CI masked reconstruction task to incorporate information from other channels. The paper evaluates on forecasting (8 benchmarks, 80 scenarios) and classification (2 datasets), showing strong empirical results.
+ShuffleMTM proposes a self-supervised masked time-series modeling framework that extends channel-independent (CI) pre-training to simultaneously capture temporal dependencies within a channel and spatial (cross-channel) dependencies across channels. The key idea is to shuffle unmasked patches at the same temporal index across the channel dimension, feed the original and shuffled views into Siamese Transformer encoders, and use cross-attention in a decoder to integrate both sources of information during reconstruction. Empirically, ShuffleMTM achieves best or second-best MSE in 72 out of 80 in-domain forecasting scenarios across eight benchmarks, outperforming prior CI MTM methods (PatchTST, SimMTM, TimeSiam, PITS) and often rivaling channel-dependent supervised models.
 
 ## Strengths
 
-- **Novel, well-motivated shuffling mechanism for cross-channel learning within a CI framework.** The idea of shuffling unmasked patches across channels (Section 3.1) is simple and principled. The formalization is clear: unmasked patches at the same patch index are randomly swapped across channels, creating a shuffled view that carries cross-channel information while masked positions remain fixed. This design cleanly extends CI masked modeling without flattening or two-stage attention, and the motivation (CI methods overlook cross-channel dependence) is well-articulated (Section 1).
+1. **Strong and consistent forecasting performance across a large benchmark suite.** ShuffleMTM achieves best or second-best MSE in 72 out of 80 in-domain forecasting settings (Table 1), covering diverse datasets including high-channel ones like Traffic (862 channels) and Electricity (321 channels). This provides concrete evidence that the shuffled cross-channel pre-training yields practical gains over purely CI methods.
 
-- **Consistent state-of-the-art performance across diverse experimental settings.** ShuffleMTM achieves the best or second-best result in 72 out of 80 forecasting scenarios (Table 1), outperforming both CI MTM baselines (PatchTST, SimMTM, PITS, TimeSiam) and channel-dependent supervised methods (iTransformer, Crossformer). The gains are most pronounced on high-channel datasets (Traffic, Electricity), supporting the claim that cross-channel information matters. Cross-domain transfer (Table 2), classification (Table 3), and limited-label settings (Table 4) further demonstrate generalizability.
+2. **Empirical demonstration that the shuffling mechanism actually learns cross-channel dependencies.** The cosine-similarity analysis (Figure 8, left) shows that attention maps from ShuffleMTM's shuffled patched series align more closely with the patch-correlation matrix than those from PatchTST, TimeSiam, or a PatchTST variant trained on shuffled series (PatchTST-shuffled). This directly supports the claim that the Siamese-encoder + shuffling design captures patch-level cross-channel dependence.
 
-- **Quantitative evidence of learned cross-channel structure at both patch and channel levels.** Section 6.1 provides two complementary analyses: (i) patch-level cosine similarity between self-attention maps and patch correlation matrices (Figure 8, left), showing ShuffleMTM's attention aligns with input correlation structure better than PatchTST, TimeSiam, or a single-branch "PatchTST-shuffled" variant; (ii) channel-level visualization (Figure 8, right) showing pairwise distances of learned channel embeddings align with raw-channel correlations. These analyses credibly demonstrate that the model captures multiscale cross-channel dependencies without explicit channel embeddings.
+3. **Improved capacity and robustness over a pure CI baseline.** On the capacity-robustness measures of Han et al. (2024), ShuffleMTM achieves lower train/test errors (capacity) on 12 out of 16 measures and lower generalization error/W difference (robustness) on 11 out of 16 measures compared to PatchTST (Figure 9), confirming that cross-channel pre-training combines advantages of both CI and channel-dependent paradigms.
 
-- **Capacity-robustness advantage over a comparable CI model.** Section 6.2 shows ShuffleMTM improves both capacity (train/test error) and robustness (generalization error, W difference) over PatchTST on 12/16 and 11/16 measures respectively (Figure 9), confirming that incorporating cross-channel information into a CI encoding can simultaneously improve both properties — consistent with the paper's central claim.
+4. **Channel-level dependence preserved in the learned embedding space.** A case visualization on Traffic (Figure 8, right) shows that pairwise distances of learned channel embeddings closely mirror the correlation matrix of the raw multivariate series, even though each channel is processed independently during encoding.
 
-- **Thorough ablation and sensitivity analysis.** The paper systematically ablates reconstruction target/query choice (Figure 3), missing-data robustness (Figure 4), look-back window scaling (Figure 5), patch length (Figure 6), and mask ratio (Figure 7). These experiments reveal meaningful design trade-offs (e.g., high mask ratios degrade performance on high-channel datasets because shuffled candidates become scarce) and provide practical guidance for deploying the method.
+5. **Robustness to data corruption and limited labels demonstrated** (Figures 4-5, Table 4), supporting the claim that cross-channel pre-training enhances model robustness without sacrificing generalization.
 
 ## Weaknesses
 
@@ -22,57 +49,49 @@ ShuffleMTM proposes a self-supervised masked time-series modeling framework that
 None.
 
 ### Major
-
-- **The contribution of shuffling is not isolated from the Siamese architecture.** The paper introduces *both* shuffling and Siamese encoders with a cross-attention decoder. The ablations in Figure 3 vary reconstruction target and query choice but never remove shuffling itself. A critical missing control is a variant where the shuffled view is replaced by a copy of the original masked series (no shuffling) while keeping the Siamese encoders and cross-attention decoder identical. Without this baseline, we cannot attribute performance gains to cross-channel information rather than to the two-branch architecture or the decoder design. Section 6.1 does compare against "PatchTST-shuffled" (a single-branch variant), but this removes both shuffling from the two-branch setup — it does not isolate the shuffling *within* the Siamese framework. This gap weakens the core attribution claim and should be addressed for the paper to convincingly demonstrate that cross-channel shuffling is the source of improvement.
+None.
 
 ### Minor
 
-- **Main results lack variance estimates.** The paper states that "average performance over five runs" is reported (Section 4.1), but no standard deviations or confidence intervals appear in Tables 1–3. Given that reported gains over strong baselines are sometimes small (e.g., on ETTh1), readers cannot assess statistical significance. This is an evidential gap that weakens the claim of "consistently superior performance" — adding error bars would substantially strengthen the paper.
+1. **The shuffling mechanism captures only same-time-index cross-channel dependencies, and the paper's language about this is somewhat inflated.**  
+   The formal definition (Equation 2, line 54) shows that shuffling selects patches *"at patch index j across channels"* — the same temporal interval. The paper acknowledges this in the abstract ("positioned at the same index" — line 4). However, Section 2 claims the method *"dynamically imposes patches at lagged locations"* and operates *"without relying on identical temporal information"* (line 34). These phrasings suggest the mechanism captures temporally-offset (lagged) cross-channel dependencies, which it does not: the swapped patches cover the same time interval in different channels. This is not a fatal flaw — contemporaneous cross-channel correlations are important and prevalent in real-world MTS data, as the strong results on Traffic and Electricity confirm. But the paper should acknowledge this scope explicitly rather than implying the mechanism handles delayed inter-variable relationships. No experiment in the paper tests performance on datasets where cross-channel dependencies are primarily lagged (e.g., systems with transport delays), so it is unclear whether the method would generalize to such settings.
 
-- **Capacity-robustness analysis compares only against PatchTST, not a channel-dependent method.** The paper argues ShuffleMTM "combines the advantages of both channel-independent and channel-dependent models" (Section 6.2). To validate this, the analysis should include a representative channel-dependent method (e.g., iTransformer or Crossformer) alongside PatchTST. Without that, the evidence only shows ShuffleMTM improves over a CI model — not that it genuinely bridges the CI/CD capacity-robustness trade-off in the way claimed.
-
-- **The claim about "lagged locations" overstates what the shuffling mechanism provides.** The paper states the shuffling method "dynamically imposes patches at lagged locations, capturing patch-wise dependencies across channels from lagged locations" (Section 2). However, shuffling is restricted to the same patch (temporal) index — unmasked patches are swapped only across channels at the same time position (Section 3.1). The shuffling does not directly align patches from different temporal positions. The model may still learn temporal mixing via the encoder's self-attention, but the framing overstates what the shuffling mechanism itself supplies. This should be acknowledged as a limitation or clarified.
-
-- **The "first technical contribution of MTM to learning cross-channel dependencies within the channel-independent strategy" claim could be softened.** While the qualifier "within the channel-independent strategy" narrows the scope, SimMTM (Dong et al., 2024b) uses manifold alignment that implicitly leverages cross-channel information within a CI strategy. A more precise characterization of how ShuffleMTM differs from such neighboring approaches would strengthen the positioning (Section 1).
-
-- **The claim that flattened self-attention "may lead the encoder to learn spurious information" (Section 2, citing Na et al. 2024) is presented without explanation.** A brief explanation of *why* this spurious information arises would make the argument for the shuffling approach more self-contained and persuasive.
-
-- **Mask generation strategy is underspecified.** The paper says "randomly mask a portion of patches" (Section 3.1) but does not specify whether masking is random-per-patch or contiguous-block masking, and whether the same or different masks are applied across channels. This matters for reproducibility.
+2. **Classification evaluation is too narrow to support the broader claims.** Only two classification datasets are used (AD, PTB), both from the medical EEG/ECG domain with 15-16 channels. While classification is supplementary to the paper's main forecasting contribution, the paper claims ShuffleMTM "achieves state-of-the-art performance" in classification generally. Two datasets from a single domain do not support such a broad claim. Inclusion of additional MTS classification benchmarks (e.g., from the UCR archive covering diverse domains) would strengthen the case that cross-channel pre-training benefits classification beyond medical biosignals.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
 
-- **Comparison with a channel-dependent self-supervised pre-training method.** While the paper compares against CD methods (iTransformer, Crossformer) in the fine-tuning stage, these are supervised methods — not apples-to-apples. Even if no existing CD self-supervised method exists, the authors could construct a simple CD-MTM baseline (flatten all channels) to directly test the advantage of the shuffling approach over a channel-dependent pre-training strategy.
-
-- **Reporting of computational overhead.** ShuffleMTM uses Siamese encoders and a cross-attention decoder, increasing complexity over PatchTST. Training time and parameter counts relative to baselines would help practitioners assess the cost of the cross-channel gains.
-
-- **Evaluation on additional classification datasets with more channels.** The two medical datasets (AD: 16 channels, PTB: 15 channels) are useful but small. Results on a larger MTS classification benchmark would strengthen the classification claims.
+- An ablation where shuffling uses patches from *different* temporal indices (e.g., random offsets) could clarify whether same-time-index alignment is critical or whether the method could be extended to lagged dependencies.
+- A brief information-theoretic or intuitive explanation of *why* shuffling across channels induces cross-channel dependence learning would sharpen the motivation.
+- The hyperparameter sensitivity analysis for mask ratio is shown on Electricity only; a small-channel dataset would confirm the trends are not dataset-size-specific.
+- The capacity-robustness analysis compares only with PatchTST (by design, as PatchTST is a special case). Comparison with one additional CI MTM baseline (e.g., TimeSiam) would further strengthen the claim.
 
 ## Removed Points
 
 These points are flagged to be removed; treat them with caution.
 
-- *"The correlation matrix analysis (Section 6.1) might be circular."* — This is a misunderstanding of the analysis. The paper computes cosine similarity between the self-attention map and the patch-correlation matrix, both derived from the shuffled input. This is a standard sanity check (consistent with Liu et al., 2024b): it tests whether the model's attention aligns with input statistics. It is not circular. The paper also provides a separate, non-circular channel-level analysis using raw series correlations (Figure 8, right). **Reason: Factually incorrect — the analysis is valid and standard.**
-
-- *"Missing related works."* — **Reason: Per instructions, I cannot confirm existence of missing references and must not mention missing related works.**
+- *"The model cannot learn channel-specific patterns because it excludes channel-related bias"* — The paper explicitly justifies this as a design choice (Section 3.2), citing prior work on the absence of predetermined channel positions. The strong empirical results (especially on high-channel datasets) suggest this is not a practical limitation.
+- *"The reconstruction target ablation shows all variations perform well, making it hard to pinpoint what drives improvement"* — This is presented as evidence of robustness, which is a positive finding. The paper identifies the best-performing configuration.
+- *"Missing tables/figures in parsed text"* — These are parser artifacts; the original submission contains them.
+- *"Only compare with PatchTST in capacity-robustness"* — The paper explicitly justifies this comparison (Section 6.2) because PatchTST can be derived from ShuffleMTM. This is a fair methodological choice.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews confirm the paper's core thesis (shuffling patches across channels within a CI framework captures cross-channel dependencies) and surface a few specific methodological gaps, but do not offer novel perspectives beyond what the paper already articulates.
+None beyond the paper's own contributions. The key insight — that shuffling unmasked patches across channels at the same temporal index within a Siamese masked modeling framework can inject cross-channel information into CI encoders — is novel and well-demonstrated.
 
 ## Suggestions
 
-1. **Add the critical missing ablation:** A variant where the shuffled view is replaced by the original masked series (no shuffling), keeping Siamese encoders and cross-attention decoder identical. This isolates the contribution of shuffling from the two-branch architecture.
-2. **Add error bars** (standard deviations or confidence intervals) to the main result tables (Tables 1–4).
-3. **Include a channel-dependent baseline** in the capacity-robustness analysis (Section 6.2) to substantiate the claim of bridging CI/CD advantages.
-4. **Clarify the "lagged locations" language** in Section 2 to accurately reflect that shuffling operates at the same temporal index.
-5. **Specify the mask generation strategy** (random vs. contiguous, shared vs. per-channel masks) in Section 3.1 for reproducibility.
+1. **Explicitly qualify the scope of the cross-channel learning.** Acknowledge in Section 3.1 or the Conclusion that the shuffling mechanism captures dependencies between channels at the same temporal index (contemporaneous correlations), and note that delayed/lagged cross-channel dependencies are not explicitly handled by the current design. This would make the paper more credible and correctly frame the contribution.
+
+2. **Expand the classification evaluation** to at least 4-5 datasets from diverse domains (e.g., HAR, Epilepsy, Gesture Phase) to substantiate the claim of state-of-the-art classification performance. If resources are limited, qualify the classification claims as preliminary.
+
+3. **Correct the phrasing in Section 2** about "patches at lagged locations" and "without relying on identical temporal information" to accurately reflect that shuffling operates at the same patch index across channels. The current wording is misleading.
 
 ## Score and Decision
 
-This paper proposes a simple, well-motivated idea and backs it with extensive experiments across multiple tasks and settings. The core weakness — the missing ablation isolating shuffling from the Siamese architecture — is a genuine gap but not a fatal one; it is clearly addressable. The lack of variance estimates is a standard and fixable evidential shortcoming. The remaining issues are minor clarifications or nice-to-haves. The paper's contribution (extending CI masked modeling to capture cross-channel dependencies via a novel shuffling mechanism) is novel, empirically validated, and would be useful to the time-series community. With the suggested revisions, the paper would be solid.
+This paper presents a genuinely novel and effective approach for incorporating cross-channel information into channel-independent masked time-series modeling. The forecasting experiments are extensive, the ablations are thorough, and the analyses (capacity-robustness, cross-channel dependence) provide mechanistic insight into why the method works. The identified weaknesses — the same-time-index scope of the shuffling mechanism and the narrow classification evaluation — are real but do not undermine the core contribution. The paper would be strengthened by more precise language about what kind of cross-channel dependence the shuffling captures and by modestly expanding the classification evaluation.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

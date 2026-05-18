@@ -1,72 +1,79 @@
-Now I have all the information needed. Let me construct the final review.
+Now I have all the information needed. Let me produce the consolidated review.
 
 ## Summary
 
-The paper identifies that standard "filter-based" Concept Activation Vectors (CAVs)—derived from linear classifiers optimizing class separability—capture distractor signals and diverge from the true concept direction. To address this, the authors introduce "pattern-based CAVs" computed by regressing latent activations on concept labels (Eq. 4), which directly estimates the concept signal while discarding distractor components. Experiments across VGG16, ResNet18, and EfficientNet-B0 on ISIC2019, Pediatric Bone Age, and FunnyBirds datasets show that pattern-CAVs achieve higher alignment with ground-truth concept directions, improve TCAV reliability, and enhance model correction (ClArC) for shortcut removal.
+This paper identifies a genuine, overlooked failure mode in standard Concept Activation Vectors (CAVs): linear classifiers (SVM, logistic, ridge, lasso) optimize for class *separability*, causing their weight vectors (filters) to pick up distractor signals that diverge from the true concept *signal* direction. The authors propose pattern-CAVs, derived from Haufe et al.'s signal–distractor decomposition (a linear regression of activations onto concept labels), which isolate the concept signal. Controlled experiments on ISIC2019, Pediatric Bone Age, and FunnyBirds datasets with VGG16, ResNet18, and EfficientNet-B0 show that pattern-CAVs achieve significantly higher cosine similarity to ground-truth concept directions and improve downstream applications (TCAV sensitivity testing and RRClArC model correction).
 
 ## Strengths
 
-1. **Identifies a genuine, overlooked problem in a widely used methodology**: The paper formally demonstrates that filter-based CAVs optimize class-separability and thereby capture distractor directions unrelated to the concept signal. This critique is novel and well-supported by the 2D toy experiment (Section 3.3, Figure 1), where filter-CAVs diverge under distractor scaling and rotation while pattern-CAVs remain aligned.
+- **Principled identification and fix of a real CAV failure mode:** The paper shows formally and via 2D toy experiments that separability-oriented filters diverge from the concept signal direction due to distractor components, while pattern-CAVs (Eq. 4, based on a regression of activations onto concept labels) recover the signal. The 2D toy experiments (Fig. 1, bottom) cleanly illustrate the structural divergence — this is not a tuning artifact.
 
-2. **Introduces a principled, theoretically grounded solution**: Pattern-CAVs are derived by reversing the regression direction (regressing activations on concept labels rather than labels on activations), grounded in established neuroimaging literature (Haufe et al., 2014). This formulation (Eq. 4, Section 3.2) inherently discards distractor components and has a closed-form solution requiring no hyperparameter tuning.
+- **Comprehensive quantitative evidence across architectures, layers, and datasets:** Pattern-CAVs achieve higher cosine similarity to the ground-truth concept direction across all 13 Conv layers of VGG16 on three controlled datasets (Fig. 3, top). The advantage holds across VGG16, ResNet18, and EfficientNet-B0 in TCAV (Fig. 6) and RRClArC (Table 1) experiments.
 
-3. **Empirically demonstrates superior alignment with true concept directions across multiple architectures and datasets**: Figure 3 shows pattern-CAVs consistently achieve higher cosine similarity with ground-truth concept directions across all 13 Conv layers of VGG16 for three controlled datasets, with standard errors reported. Figure 4 further shows pattern-CAVs are invariant to feature preprocessing, while filter-CAVs vary substantially.
+- **Hyperparameter-free and invariant to feature preprocessing:** Unlike filter-CAVs, pattern-CAVs require no tuning of regularization strength and produce identical alignment regardless of centering, max-scaling, or their combination (Fig. 4). This is a practical advantage for reproducibility and ease of use.
 
-4. **Shows clear downstream benefits in two applications**: (a) TCAV experiments (Figures 5 and 6) demonstrate that pattern-CAVs yield TCAV scores reflecting the model's true concept sensitivity, while filter-CAVs produce arbitrary scores varying with distractor orientation. (b) Model correction with RRClArC (Table 1, Figure 7) shows pattern-CAVs consistently reduce artifact sensitivity while maintaining accuracy, with strong qualitative evidence (Figure 7) where pattern-CAVs drastically reduce artifact attribution while filter-CAVs barely help.
+- **Controlled experimental design with ground-truth directions:** The insertion of artificial concepts (timestamps, brightness) with known ground-truth directions enables direct measurement of alignment (cosine similarity) and ground-truth TCAV scores, providing objective evidence beyond qualitative or proxy metrics.
 
-5. **Honest and appropriate limitations section**: The paper explicitly acknowledges that filter-CAVs may be superior for tasks where class-separability matters (e.g., post-hoc concept bottleneck models), providing a nuanced contribution rather than claiming pattern-CAVs universally replace filter-CAVs.
+- **Qualitative evidence reinforces the quantitative story:** Neuron visualizations (Fig. 2) and concept-sensitivity maps (Fig. 7) show pattern-CAVs focusing on the intended concept while filter-CAVs pick up noisy or irrelevant features. Model correction heatmaps (Fig. 8) further confirm the practical impact.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None.
+
+- **Hyperparameter tuning for filter-CAV baselines is underspecified.** The paper compares pattern-CAVs against four filter-CAV variants (SVM, lasso, logistic, ridge) but never states how their regularization parameters were chosen. Were they tuned via cross-validation on the CAV training set, or were defaults used? If defaults were used, the quantitative comparisons (Figs. 3–6, Table 1) may understate the best possible filter-CAV performance, and the reader cannot assess whether a well-tuned filter-CAV would close the gap. The core theoretical argument (structural divergence to optimize separability) is not harmed, but the empirical comparisons lose force. The authors should clarify the tuning procedure and, ideally, report results across a range of regularization strengths to demonstrate robustness.
+
+- **The central claim is only tested under the assumption that distractors are independent of concept labels.** All controlled experiments enforce independence (distractors are randomly assigned to classes). In realistic scenarios where distractors are *correlated* with the concept (e.g., band-aids co-occurring with certain lesion types), the pattern-CAV estimate $\mathbb{E}[a \mid t=+1] - \mathbb{E}[a \mid t=-1]$ will also capture those spurious correlations. The paper mentions this only tangentially in the conclusion ("disentanglement of correlated concept directions" as future work) but does not test this regime. A controlled experiment with correlated distractors (even in the 2D toy setting) would clarify the boundary conditions of the method.
 
 ### Minor
 
-1. **Table 1 (model correction results) lacks variance estimates.** The paper reports standard errors for the alignment experiments (Figure 3) and for AUC using the Wilcoxon-Mann-Whitney statistic, but the main model correction table reports only point estimates for accuracy, artifact relevance, and ΔTCAV with no indication of variability across runs or seeds. Since the paper's core claims about downstream utility rest partly on these numbers, the omission reduces confidence. This is addressable in revision (adding error bars from multiple seeds or bootstrap intervals), and the converging evidence from the layer-by-layer plot (Figure 6) and qualitative results (Figure 7) mitigates the concern, but it remains a gap.
+- **The ResNet18 and Bone Age exceptions are acknowledged but not investigated.** All CAV variants achieve perfect TCAV scores for ResNet18 (Fig. 6), and filter-CAVs match pattern-CAVs on Bone Age biased accuracy (Table 1). The paper mentions these in passing but does not explore *why* they occur — whether due to different representational geometry, linear separability properties, or dataset-specific factors. A brief diagnostic (e.g., measuring linear separability of concept representations across architectures) would strengthen the discussion.
 
-2. **The ground-truth concept direction is operationalized as an additive shift without discussion of when this assumption might fail.** The definition $\bh_{\text{gt}} = \ba(\bx^+) - \ba(\bx^-)$ (Section 4.2) assumes the concept manifests as an additive, linear effect in latent space. This is valid for the controlled datasets (timestamp overlays, brightness changes), but the paper does not discuss whether more complex real-world concepts (e.g., compositional or contextual features) could violate additivity. The claim that pattern-CAV better estimates the "true concept direction" is relative to this operationalization. Adding a short discussion of this assumption and its scope would strengthen the paper.
+- **Confidence intervals are not reported for Table 1 (ClArC results).** The alignment experiments (Fig. 3) include standard errors, but the model correction results in Table 1 lack error bars or significance tests. Given the variability across seeds in finetuning, reporting standard deviations or confidence intervals would improve rigor.
 
-3. **The ResNet18 TCAV result (all CAVs achieve perfect scores) is noted but not explained.** Line 292 observes "interestingly, all CAV variants achieve a perfect score for ResNet18" in the FunnyBirds TCAV experiment, but no hypothesis is offered (e.g., ResNet18's residual connections making concept directions more robust to distractor influence, or architectural differences in feature distributions). The paper does not need a full analysis, but acknowledging and briefly speculating on why directional divergence matters less for this architecture would help readers understand the method's scope.
-
-4. **The formal connection between pattern-CAV invariance to feature preprocessing and Pearson correlation is implicit but not mathematically stated.** The paper states that pattern-CAV's invariance to centering and scaling (Figure 4) is "attributed to the fact that Pearson correlation is not affected by the scale and translation of variables" (line 223), but Eq. (4) defines pattern-CAV using covariance, not correlation. While the connection holds after z-score normalization (covariance becomes proportional to correlation), the paper does not make this step explicit. Minor clarity issue.
+- **The claim in the Limitations section about filter-CAVs being preferable for post-hoc concept bottleneck models is stated without direct experimental support.** While the paper shows filter-CAVs have higher concept separability (AUC) in Fig. 3 (bottom), the specific claim about post-hoc concept bottleneck models is not tested. This does not affect the main contribution but would benefit from a small validation experiment.
 
 ### Trivial
 
-None.
+- The paper uses "CAV" to denote both the vector and the method, and the text occasionally jumps between "pattern", "pattern-CAV", and "pattern-based CAV" without consistent differentiation from "filter-CAV." This is a minor prose issue that does not affect comprehension.
 
 ## Nice-to-Haves
 
-- **Add an oracle baseline in model correction**: Using the ground-truth direction $\bh_{\text{gt}}$ itself in RRClArC would show how close pattern-CAVs come to the optimal correction, providing a valuable upper bound.
-- **Report computational cost or fitting time**: The paper claims pattern-CAVs are "more computationally efficient" because they require no hyperparameter tuning (line 225), but provides no runtime measurements. A brief comparison would support this claim.
-- **Statistical significance for artifact relevance reductions**: For the model correction results where effect sizes are small (e.g., ResNet18 band-aid), bootstrapping across samples could confirm whether reductions are significant.
+- A 2D toy experiment with distractors *correlated* with the concept label (even in 2D) would directly test the scope of the central claim regarding the independence assumption.
+- Explicit grid search over regularization parameters for filter-CAVs (e.g., C ∈ {0.01, 0.1, 1, 10, 100}) would eliminate concerns about unfair comparison.
+- An analysis of why ResNet18 yields perfect TCAV scores for all CAV variants (e.g., measuring concept representation linearity across architectures) would help practitioners.
+- Making the controlled experiment code and data publicly available would aid reproducibility.
+- Reporting error bars for the ClArC results in Table 1 would increase rigor.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were flagged by reviewers but are factually incorrect, reflect reviewer knowledge gaps, or violate the filtering rules:
 
-- The harsh critic's comment that "controlled datasets use very simple concepts (overlays, brightness)" and that "one could argue that these are too easy." This is partially addressed by the real-artifact experiments (band-aid, ruler, skin marker), and the use of controlled settings is a deliberate design choice to enable ground-truth computation. The paper already acknowledges this structure.
-- The critic's suggestion that "the paper does not discuss whether the ground truth direction itself may also change under pre-processing." The critic acknowledges this is likely fine ("presumably yes"). This was raised as a question, not a confirmed weakness.
-- The critic's framing of the additivity assumption as potentially undermining "what is established." The downstream experiments (TCAV, model correction) demonstrate practical utility regardless of whether the additive assumption holds universally. The paper's claims about alignment with $\bh_{\text{gt}}$ are appropriately qualified as applying to the controlled setting.
+1. *"Qualitative visualizations shown for a single layer of a single model"* — **Removed (factually wrong).** The paper shows qualitative results for VGG16 (Figs. 2, 8) *and* both VGG16 and EfficientNet-B0 (Fig. 7 — concept-sensitivity maps).
+2. *"Does not provide confidence intervals or statistical tests for alignment scores (Fig. 3)"* — **Removed (partially inaccurate).** Line 215 states the figure presents "including standard errors, for both CAV alignment (top) and separability (bottom)."
+3. *"Code and data for controlled experiments not mentioned"* — **Downgraded to Nice-to-Haves.** Code release is a practical concern, not a scientific weakness, and the parser may have stripped a reproducibility statement.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a consistent subtext: the paper's central contribution is about *directional accuracy* versus *class separability* as competing desiderata in concept representation. This framing—that different CAV applications require different properties from the concept vector—is already articulated in the paper's limitations section and is the paper's core insight.
+None beyond the paper's own contributions. The reviews largely confirm the paper's framing rather than revealing unexpected implications.
 
 ## Suggestions
 
-1. **Add variance estimates to Table 1.** Re-run model correction with at least 3 random seeds and report mean ± std for all metrics. If computational cost is prohibitive, provide bootstrapped confidence intervals for the artifact relevance and ΔTCAV metrics.
-
-2. **Add a brief paragraph in Section 4.2 or the Limitations discussing the additivity assumption** underlying $\bh_{\text{gt}}$. Acknowledge that this operationalization is valid for controlled settings with known, localized concepts, and note that real-world concepts with complex or nonlinear effects may require more nuanced ground-truth definitions.
-
-3. **Briefly hypothesize why all CAVs achieve perfect TCAV scores on ResNet18** (e.g., architectural properties such as residual connections that distribute concept information more robustly, or differences in the last-layer feature space).
+1. **Clarify the hyperparameter selection procedure** for all filter-CAV baselines. State whether cross-validation was used, report the selected values, and ideally show results across a sweep of regularization strengths.
+2. **Add a controlled experiment with correlated distractors** (even in 2D). This would either strengthen the central claim if pattern-CAVs still win, or honestly delineate its boundary conditions.
+3. **Add a brief diagnostic** to explain why ResNet18 gives perfect TCAV scores for all CAV variants. This addresses the natural reader question about model-dependence.
+4. **Report bootstrap confidence intervals** for the key metrics in Table 1 across finetuning seeds.
+5. **Explicitly qualify** the scope of the main claim in the Limitations section with respect to the independence assumption.
 
 ## Score and Decision
 
-The paper makes a clear, well-motivated methodological contribution: identifying directional divergence in standard CAVs and proposing a principled fix grounded in the neuroimaging literature. The experiments are carefully designed across multiple architectures (VGG16, ResNet18, EfficientNet-B0), datasets (ISIC2019, Bone Age, FunnyBirds), and applications (TCAV, ClArC), with results consistently supporting the claims. The limitations are honestly discussed. The remaining weaknesses—missing variance estimates in Table 1, the undiscussed additivity assumption, and the unexplained ResNet18 result—are all addressable in revision and do not undermine the core contribution. The converging evidence from multiple experiments (alignment metrics, TCAV, qualitative/quantitative model correction) makes the paper's claims robust despite the minor gaps.
+The paper makes a clean, well-motivated contribution: it identifies a genuine structural flaw in standard CAV computation, provides a principled fix with a simple closed-form solution, and demonstrates practical benefits across multiple architectures, datasets, and applications. The weaknesses (underspecified hyperparameter tuning, untested correlated-distractor regime) are significant enough to require clarification but do not undermine the core theoretical contribution. The paper merits acceptance conditional on the authors addressing the hyperparameter clarification and independence-scope qualification in revision.
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+**Originality:** High — the signal-vs-separability distinction for CAVs is novel and practically important.  
+**Importance of question:** High — CAVs are widely used in XAI.  
+**Claims supported:** Mostly well-supported; scope qualification needed for correlated-distractor regimes.  
+**Soundness:** Good — controlled experiments are well-designed; the main gap is in baseline tuning documentation.  
+**Clarity:** Good.  
+**Value to community:** High — practitioners can immediately adopt the hyperparameter-free pattern-CAV as a drop-in replacement.
+
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

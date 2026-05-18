@@ -1,85 +1,86 @@
-Now I have all the information verified. Here is my consolidated final review.
+Now I have all the information I need to produce the consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes RLFH (Reinforcement Learning for Hallucination), an online reinforcement learning framework that mitigates hallucination by constructing token-level dense rewards from atomic-fact verification. The method decomposes model responses into atomic facts, evaluates each fact's truthfulness (five-class veracity) and informativeness (five-point scale) using an LLM-based assessment pipeline, converts these statement-level judgments into token-level rewards via LCS mapping, and optimizes the policy model with PPO. Experiments on HotpotQA, SQuADv2, and Biography benchmarks show consistent FactScore improvements over both aligned models (e.g., +17.9% over Vicuna) and prior learning-based methods (e.g., +2.0% over FACT).
+This paper proposes RLFH (Reinforcement Learning for Hallucination), an online PPO-based method that mitigates LLM hallucination by converting statement-level fact verification into token-level dense rewards. The key innovation is a pipeline that: (1) generates responses from the policy model, (2) uses Mixtral-8x7B to decompose responses into atomic facts and evaluate each for truthfulness (5-class label) and informativeness (5-point scale), (3) traces these judgments back to individual tokens via LCS-based alignment to produce dense token-level rewards, and (4) optimizes the policy via PPO. Experiments on HotpotQA, SQuADv2, and Biography show FactScore improvements over the base model (+17.9%) and over the best learning-based baseline FACT (+2.0%).
 
 ## Strengths
 
-1. **Novel on-policy fine-grained token-level reward framework.** Prior learning-based methods for hallucination mitigation rely on off-policy data and instance-level rewards, leading to distribution shift and imprecise signals. RLFH samples responses online, decomposes them into atomic facts, assigns statement-level evaluations, and traces these back to individual tokens. This is a genuine methodological contribution that directly addresses the limitations of coarse-grained feedback (Section 3.2, Figure 3).
+1. **Novel fine-grained token-level reward design via atomic fact traceback.** The LCS-based method for converting statement-level fact judgments into token-level dense rewards (Section 3.2) is technically elegant. The ablation on reward granularity (Table 4/5) provides direct evidence that statement-level rewards outperform sentence-level (0.655 vs 0.645) and paragraph-level (0.639), confirming that finer granularity improves hallucination mitigation.
 
-2. **Consistent improvement across all three datasets.** RLFH achieves the highest FactScore on HotpotQA (0.655), SQuADv2 (0.683), and Biography (0.474) compared to all baselines including strong aligned models (Vicuna, Zephyr, Llama2 Chat, Orca2) and learning-based methods (ITI, DOLA, FACT). The gains generalize out-of-distribution despite training only on HotpotQA (Table 1).
+2. **On-policy RL with an automated annotation pipeline.** Unlike prior methods that use static, pre-collected datasets for fine-tuning, RLFH generates responses online and evaluates them via an LLM-based fact assessment framework without human intervention (§3.1.3). The main results (Table 1) show consistent FactScore improvements over all baselines across all three datasets, including out-of-distribution settings (SQuADv2, Biography), suggesting the learned behavior generalizes.
 
-3. **Atomic-fact decomposition with hierarchical verification.** The paper introduces a structured pipeline that extracts atomic facts hierarchically (response → sentences → statements), classifies each into five veracity labels (*Correct*, *Hedged Correct*, *Vague*, *Hedged Wrong*, *Wrong*), and jointly assesses informativeness. This fine-grained decomposition allows the model to receive distinct signals for different types of content, avoiding the side effects of monolithic rewards (Section 3.1, Figure 2).
-
-4. **Automated LLM-based fact assessment enabling online use.** The Mixtral-8x7B-based annotation pipeline can be deployed without human annotation, making the online RL loop practical and scalable. The ablation on annotation models (Table 3) shows that several open-source LLMs can provide useful supervision, demonstrating the framework's accessibility.
-
-5. **Behavioral analysis demonstrates learned calibration.** Post-training analysis shows the model generates more statements in high-accuracy ranges and fewer in low-accuracy ranges, and selectively refuses questions where it originally performed poorly (Figures 4–6). This supports the claim that RLFH helps align generation with the model's knowledge boundaries.
+3. **Transparency about the refusal trade-off.** The paper openly acknowledges (Section 4.2) that the response rate drops, analyzes the pattern (Figure 8 shows the model refuses more on questions it originally performed poorly on), and discusses how this relates to conservative uncertainty expression. This transparency allows readers to interpret the reported FactScores with appropriate caution.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **FactScore is not validated for QA datasets, and no standard QA metrics are reported.** FactScore was designed for evaluating factuality in *biography* generation by decomposing text into atomic facts. Applying it wholesale to HotpotQA and SQuADv2 is questionable: a correct short answer (e.g., "Paris") yields few atomic facts, while a verbose but partially incorrect answer could score higher on raw fact count. The paper does not report standard QA metrics (F1, EM) for these datasets, nor does it discuss whether FactScore correlates with them. Since the reported improvements over FACT are small (0.008–0.017), this metric choice makes the evaluation hard to interpret. The paper claims FactScore is "a well-established metric for assessing the factuality of long-form generation" (line 226), which is true, but applying it to QA datasets where responses are not necessarily long-form requires justification that is absent.
+1. **The FactScore improvement is confounded by increased refusal rate, and the paper does not correct for this.** FactScore is computed only over *answered* prompts. On HotpotQA, the response ratio drops from 0.910 (Vicuna base) to 0.645 (RLFH) — a 29% relative decrease. A model that selectively refuses hard or uncertain questions can trivially inflate its FactScore. The paper acknowledges this (Section 4.2, lines 233-239) and provides detailed analysis (Figure 8) showing the model refuses more on prompts where it originally performed poorly. However, it never reports a coverage-adjusted metric (e.g., FactScore × response rate, or an F1-like measure over all prompts including refusals as zero-scoring). The data transparency is commendable, but without a combined metric, it is impossible to know how much of the reported gain reflects genuinely better generation versus strategic refusal. On HotpotQA, for example, RLFH has a lower #Cor. (13.05 vs 13.31) and higher #Inc. (8.304 vs 7.363) than FACT when it does answer — the higher FactScore likely comes from per-prompt averaging that dilutes poor answers via selective answering.
 
-2. **The annotation model ablation reveals a concerning inconsistency.** When Vicuna-7b is used as the annotation model (for training), the trained model achieves the *highest* FactScore (0.697 vs. 0.655 with the default Mixtral) but generates the *fewest* correct statements (4.207 vs. 13.05 with Mixtral). The paper mentions this briefly (lines 367–369) but does not adequately explain why a weaker annotation model yields a higher evaluation score. This suggests that FactScore can be inflated by shorter, more conservative responses, which directly undermines confidence in the metric as a reliable indicator of overall quality. The FactScore for the Vicuna-7b-supervised model (0.697) also exceeds all baselines in Table 1, which would imply RLFH with a cheap annotation model outperforms the full pipeline — an implausible conclusion that the paper should have discussed in depth.
-
-3. **Drop in response ratio is not properly accounted for in evaluation.** RLFH's response ratio drops markedly (0.645 vs. 0.910 for Vicuna, 0.945 for FACT on HotpotQA; 0.692 vs. 0.830 for Vicuna on Biography). FactScore is computed only on responded questions (refusals yield no facts), so the model can achieve higher scores by selectively answering easier questions. The paper acknowledges this (lines 233–239) and introduces an informativeness reward (line 136) to counter the "trivial hack," but it does not provide a combined metric that penalizes refusals (e.g., assigning zero FactScore to refused questions). As a result, it is unclear whether the reported FactScore improvements reflect better generation or increased selectivity. Figure 6 helps by showing the model refuses questions where it originally performed poorly, which is a reasonable behavior, but the net utility of the trade-off between selectivity and accuracy is unresolved.
+2. **The LLM-based reward model is never validated against human judgments, leaving the quality of the feedback signal unknown.** The entire RL pipeline depends on Mixtral-8x7B accurately extracting atomic facts, classifying each into one of five truthfulness categories, and assigning informativeness scores. The paper provides no analysis of the reward model's accuracy, precision/recall per label, calibration, or agreement with human annotations. The ablation on annotation model (Table 6/tab:anno) shows sensitivity across different LLMs but does not validate correctness — differences in output could reflect either better or worse fact-checking ability. Without knowing the false-positive/negative rate of the reward model's fact-checking, the RL objective is a black box. A reward model that misclassifies correct statements as "wrong" could penalize accurate generation and inadvertently encourage different forms of hallucination. This is a critical gap given that the method's novelty and the paper's claim 3 rest on the automated reward framework.
 
 ### Minor
 
-4. **No statistical significance testing or variance reporting.** The evaluation sets are small (256 for HotpotQA, 191 for SQuADv2), the improvements over the strongest learning-based baseline (FACT) are tiny (0.008–0.017), and no confidence intervals, standard deviations, or multiple-run results are reported. Without this information, the claimed improvements may be within the noise of the evaluation pipeline itself. This is especially concerning given that FactScore is an LLM-based metric with inherent variability.
+3. **The central claim — that the *combination* of on-policy sampling and fine-grained rewards provides benefit beyond either component alone — is not directly tested.** The paper compares RLFH against FACT (off-policy, coarse-grained) and other baselines, but these differ on two dimensions simultaneously. The granularity ablation (Table 4/5) tests statement- vs sentence- vs paragraph-level rewards but keeps everything else (online RL, atomic fact extraction) constant. To substantiate the claim that the specific pairing of *on-policy + fine-grained* is responsible for the gains, the experiment should include at least one of: (a) online PPO with a coarse (response-level) reward from the same reward model, or (b) offline fine-tuning with the same fine-grained token-level rewards on a static dataset. Without this, the paper cannot attribute the gains to the claimed factors over alternative explanations (e.g., online sampling alone, or the specific reward shape).
 
-5. **No human evaluation.** All evaluations rely on the same automated FactScore pipeline (run by GPT-4), which inherits the pipeline's potential biases. A small-scale human evaluation of factual accuracy and fluency (e.g., on 50–100 sampled responses) would substantially strengthen the claims. The paper explicitly states it aims to operate "without human intervention" (line 54), which is a strength of the *method*, but the *evaluation* should still include human judgment as ground truth.
+4. **The improvement over the strongest baseline (FACT) is modest (+2.0% FactScore on average), and no statistical significance is reported.** The average absolute FactScore gains are small: +0.008 on HotpotQA, +0.007 on SQuADv2, +0.017 on Biography. No confidence intervals, standard errors over multiple seeds, or statistical tests are provided. Given the computational expense of PPO with a large reward model, it is not clear whether these gains are statistically distinguishable from noise. Reporting even 2–3 seeds with standard errors would substantially increase confidence.
 
-6. **Framing disconnect between "internal knowledge" and external supervision.** The paper repeatedly frames hallucination as "misalignment of the models' generation and their internal knowledge" (line 34) and states that RLFH "enables LLMs to explore the boundaries of their internal knowledge" (line 7). However, the reward signal comes entirely from external ground-truth documents (line 115). While using external knowledge to improve factuality is a perfectly valid approach, the "internal knowledge exploration" narrative is misleading — the method penalizes factual errors according to an oracle, not the model's own knowledge boundaries. This conceptual gap weakens the paper's otherwise clear framing.
-
-7. **Retrieval method for supporting contexts is underspecified.** The paper states "We retrieve the relevant supporting materials… from the external reference document set" (line 115) but does not describe how this retrieval is performed (e.g., which retriever, top-k, relevance scoring). Since the accuracy of fact verification depends entirely on whether the correct evidence is retrieved, this omission harms reproducibility.
+5. **Conceptual tension between the "knowledge boundary" framing and the use of external ground-truth documents as rewards.** The paper frames hallucination as misalignment between generation and the model's *internal* knowledge boundaries (Section 1, Introduction), but the reward model punishes statements that conflict with *external* reference documents, not statements that the model itself would internally affirm or deny. The method is better characterized as enforcing factual consistency with a trusted external source — a different (and arguably simpler) setting — rather than teaching the model to respect the boundaries of its own knowledge. This does not invalidate the method, but the framing is somewhat mismatched with the experimental setup.
 
 ### Trivial
 
-8. The "+17.9% FactScore" claim (line 47) is the average of per-dataset relative improvements over the base Vicuna model. It is mathematically correct but could be misleading if read as an absolute improvement or a single aggregated FactScore. The paper should clarify this.
-
-9. PPO hyperparameters (learning rate, batch size, KL penalty coefficient, rollout length, reward normalization) are not reported in the experimental section. TRLX (cited) provides defaults, but explicit reporting would aid reproducibility.
+- None beyond what is addressed above. The paper is generally well-written and the method is clearly described.
 
 ## Nice-to-Haves
 
-- **Supervised fine-tuning baseline.** Comparing RLFH to supervised fine-tuning on the same atomic-fact correctness labels (without the RL objective) would isolate whether the benefit comes from the online RL or simply from the fine-grained signal itself. This is the most informative ablation the paper lacks.
-- **Combined metric penalizing refusals.** Reporting FactScore with refusals scored as zero (or a comparable unified metric) would directly address the response-ratio concern.
-- **Human validation of the fact assessment pipeline.** Even a small study measuring agreement between LLM and human judgments on a sample of atomic facts would calibrate confidence in the training signal.
-- **Analysis of computational cost.** The pipeline uses Mixtral-8x7B to supervise a 7B model. Discussion of latency, throughput, and cost would help assess practical applicability.
+- A coverage-adjusted metric such as "Expected FactScore" = FactScore × (%Res.) across the full prompt set, or reporting correct/incorrect facts per prompt in the full set (counting refusals as zero correct and zero incorrect).
+- Human validation of the reward model's judgments on a sample of atomic facts (precision, recall, F1 per truthfulness label).
+- A 2×2 factorial ablation: (online vs. offline) × (fine-grained vs. coarse) to directly test the claim about the combination.
+- Ablation on the reward balance coefficients (α, β) to understand the interaction between the truthfulness and informativeness terms, since the refusal rate increased despite the informativeness term being designed to prevent it.
+- Cross-evaluation of FactScore using human judgments to rule out evaluation bias from using GPT-4 (since the reward model is Mixtral).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed from consideration; treat them with caution.
 
-- **"Does not mention recent work on token-level rewards for factuality (e.g., Self-Rewarding LMs)"** — Removed per the rule against demanding missing related works (no external sources to confirm existence).
-- **"Missing appendix with Table of functions f and g"** — Removed per the rule that the parser strips appendix content; these exist in the original submission.
-- **"The stray line in Table tab:anno is a typesetting error"** — Removed per the rule that formatting/parsing artifacts are not author errors.
-- **"Weaknesses that demand addressing problems outside the stated scope"** (e.g., asking the benchmark/dataset paper to do X/Y/Z not relevant to its class) — Not applicable here; the paper is a methods paper and criticisms are in-scope.
+1. **"Key hyperparameters and reward mapping details omitted from the main paper"** — The reviewer criticizes missing Table \ref{tab:func} (function settings for *f* and *g*, coefficients α/β). This table is in the appendix, which the parser strips from all papers. Per instruction: weaknesses about absent appendix content are removed. The f/g function values and α/β coefficients exist in the original submission.
+
+2. **"The paper should also cover additional methods from related work"** — The reviewer suggests adding comparisons to Cheng et al. 2024, Kang et al. 2024. Requests to broaden the baseline set beyond what is reasonable are removed as scope creep. The paper already compares against FACT (the most directly relevant learning-based method), DOLA, ITI, and 4 aligned baselines.
+
+3. **"Missing analysis of atomic fact quality / reward distribution"** — The reviewer asks for a breakdown of how many statements fall into each truthfulness category. While interesting, this is a minor analysis addition and does not threaten the core claims.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a tension that the paper does not fully resolve: fine-grained token-level rewards demonstrably shift model behavior toward more conservative answering, which raises FactScore but at the cost of coverage. The annotation model ablation (Vicuna-7b → highest FactScore, fewest correct statements) is the starkest illustration: it suggests the evaluation metric and the method's training signal may be co-optimizing for brevity and selectivity rather than genuine informativeness. This insight — that fine-grained factual rewards can trade off against helpfulness in subtle ways — is important for future work on RL for factuality, but it is a limitation the current paper only partially acknowledges.
+The most interesting observation across the reviews is the interplay between granularity and refusal: the paper's own data show that the finest-grained reward (statement-level) achieves the highest FactScore but also the lowest response ratio (Table 4/5), and the highest #Inc. This suggests that fine-grained token-level rewards may be particularly effective at teaching the model *when to say nothing* (a key knowledge-boundary behavior), but less cleanly effective at improving precision on the questions it does answer. The paper's interpretation — that this reflects learning knowledge boundaries — is plausible but incomplete without disentangling the reward shape's effect on refusal policy from its effect on generation quality. This tension between coverage and precision is endemic to hallucination mitigation and deserves more explicit treatment than the paper currently provides.
 
 ## Suggestions
 
-- **Validate the FactScore metric for QA settings** by reporting standard QA metrics (F1, EM) alongside FactScore on HotpotQA and SQuADv2, or provide evidence that FactScore correlates with human judgments for these datasets.
-- **Run experiments with at least 3 random seeds** and report means/standard deviations for the main results, especially given the small evaluation sizes and incremental improvements over FACT.
-- **Add a combined evaluation metric** that assigns a zero FactScore to refused questions, or report FactScore×ResponseRatio to give a more complete picture of utility.
-- **Conduct a small human evaluation** (50–100 samples) comparing RLFH outputs against FACT and Vicuna on factual accuracy, to validate the automated metric.
-- **Discuss the Vicuna-7b annotation anomaly in detail** — analyze whether it extracts fewer statements, is more lenient, or produces different model behavior — and explain why the FactScore is higher despite lower absolute correct statements.
-- **Clarify the retrieval method** used for supporting contexts in fact verification.
-- **Report PPO hyperparameters** explicitly in the paper.
+1. **Add a coverage-adjusted metric.** Report "Expected FactScore" = FactScore × (%Res.) across all prompts, or report an AUROC-style curve varying a refusal threshold. Report #Cor. and #Inc. per prompt in the full set including refusals as zeros. This directly addresses the most serious confound.
+
+2. **Validate the reward model on a human-annotated sample.** Even 100–200 atomic facts with human judgments would provide critical confidence that Mixtral's truthfulness classifications are accurate enough to drive RL. Report precision, recall, and F1 per label.
+
+3. **Add the 2×2 factorial ablation.** The most scientifically clean addition would be online-PPO-with-coarse-reward and offline-fine-tuning-with-fine-grained-reward conditions. If compute is limited, prioritizing the former (online + coarse) would be most informative, as it directly tests whether the gains come from online sampling or fine granularity.
+
+4. **Report results from at least 2–3 random seeds with standard deviations** to establish that the gains over FACT are not noise.
+
+5. **Rename or reframe the contribution.** The method aligns generations with *external* ground-truth documents, not *internal* knowledge boundaries. The paper should either: (a) reframe as "enforcing factual consistency with trusted external sources" (which is accurate and still valuable), or (b) add experiments that explicitly test internal knowledge boundary alignment (e.g., self-consistency checks, probing-based refusal on uncertain knowledge).
 
 ## Score and Decision
 
-This paper proposes a conceptually appealing method (on-policy fine-grained token-level RL for hallucination) with a novel automated fact-assessment pipeline. The core idea is sound and the behavioral analysis provides useful insights. However, the empirical support has several gaps: the evaluation metric is used without validation on QA datasets, the annotation model ablation reveals a troubling inconsistency, the response-ratio drop is not properly factored into evaluation, and no statistical significance testing is provided. The improvements over the closest baseline (FACT) are small (0.008–0.017 FactScore). These weaknesses are addressable but collectively weaken the contribution's convincingness. The paper has genuine merit and the method is promising, but the current evidence does not rise to the level of a strong acceptance.
+**Originality:** Good — token-level dense rewards from atomic fact traceback via LCS is novel, though the high-level idea (RL for factuality) builds on prior work.
+
+**Importance of research question:** High — hallucination mitigation is a critical problem.
+
+**Claims support:** Weak — the central claim is not fully supported due to the refusal confound, unvalidated reward model, and missing factorial ablation. The transparency of the paper is appreciated but does not substitute for corrected metrics.
+
+**Soundness of experiments:** Adequate but incomplete — the main results show consistent improvement, but the evaluation confound and missing ablations weaken the conclusions.
+
+**Clarity of writing:** Good — the method is well-described and the pipeline is clearly illustrated.
+
+**Value to community:** Moderate — if the method is validated more rigorously, the fine-grained reward design and LCS-based traceback technique would be useful tools.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

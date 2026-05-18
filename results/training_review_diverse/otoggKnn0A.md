@@ -1,83 +1,82 @@
-Now I have a thorough understanding of the paper and can verify the reviewer claims directly against the source text. Let me construct the final review.
+Now I have all the evidence I need. Let me write the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces FHA-Kitchens, a dataset for fine-grained hand action recognition in kitchen scenes. The dataset contains 2,377 video clips (30,047 frames from 30 source videos, 84.22 minutes) annotated with a novel 9-dimensional schema: three sub-interaction regions (L-O, R-O, O-O) with bounding boxes, each represented as a triplet `<subject, verb, object>` with contact areas and active-passive object relationships, yielding 878 action triplets (131 verbs, 384 nouns). The paper benchmarks detection (Faster-RCNN, YOLOX, Deformable DETR), recognition (TSN, SlowFast, VideoSwin, VideoMAE V2, Hiera), and domain generalization (intra-/inter-class) models on three tracks.
+FHA-Kitchens is a dataset for fine-grained hand action recognition in kitchen scenes, offering 2,377 video clips (30,047 frames) sourced from Kinetics 700_2020. Its core contribution is a rich 9-dimensional annotation scheme: each frame has bounding boxes for three sub-interaction regions (left-hand/object, right-hand/object, object-object), action triplets `<subject, verb, object>` with active-passive role assignment and contact areas, totaling 878 action triplets (131 verbs, 384 nouns). The paper benchmarks models across three tracks: detection (SL-D), action recognition (SL-AR), and domain generalization (DG), showing that even strong video models struggle on this fine-grained task.
 
 ## Strengths
 
-- **Novel, high-granularity annotation schema**: The triplet decomposition with sub-interaction region localization, contact areas, and active-passive object roles is genuinely more detailed than prior kitchen-scene datasets (EPIC-KITCHENS uses verb-noun pairs without region localization; MPII Cooking lacks interaction region bounding boxes). The 9-dimensional action representation and 878 triplets from 131 verbs × 384 nouns represent a meaningful step in granularity. (Evidence: Section 3.2, Table 1 comparison.)
+- **High-dimensional action annotation with regional interaction detail.** The dataset annotates three sub-interaction regions (L-O, R-O, O-O) with bounding boxes, active-passive object relationships, and contact areas, yielding 9-dimensional action representations. This is evidenced by 198,839 bounding boxes across 9 annotation types and 878 action triplets (Section 3.2, Table 1). This goes well beyond existing datasets like EPIC-KITCHENS, which lack regional localization and relationship information.
 
-- **Large-scale bounding box annotations supporting localization tasks**: With 198,839 bounding boxes across 9 types (hand, interaction region, interaction objects) — averaging 5 additional annotation types per frame over EPIC-KITCHENS — the dataset enables hand interaction region detection and object detection tasks beyond what existing datasets support. (Evidence: Section 3.2, line 78.)
+- **Comprehensive benchmarking revealing genuine challenges.** The paper evaluates 8+ models across three tracks and shows that even large models (VideoMAE V2, Hiera) achieve substantially lower accuracy on FHA-Kitchens than on coarse-grained benchmarks like Kinetics 400. Detection models suffer a minimum 15 mAP drop on unseen sub-categories in the intra-class DG track (Section 4.4.1). These results empirically validate the difficulty of fine-grained hand action recognition and establish clear baselines.
 
-- **Novel domain generalization benchmark tracks**: The intra-class and inter-class DG tracks (training on seen sub-categories/parent categories, testing on unseen ones) go beyond standard closed-set evaluation. The results document clear performance gaps (≥15 mAP drop for unseen sub-categories in Table 5), identifying a concrete research direction absent from most action dataset papers. (Evidence: Section 4.4, Tables 5–6.)
-
-- **Inclusion of SAM-derived mask annotations**: Object masks for all video frames enable pixel-level action segmentation tasks beyond the main tracks, increasing the dataset's utility for future research. (Evidence: Section 3.2, line 82.)
+- **Rigorous data cleaning process.** From an initial 113,436 frames, only 30,047 high-quality frames were retained based on occlusion, blur, subtitles, logos, and meaningful hand action criteria. Three rounds of cross-checking were conducted for annotations (Sections 3.1–3.2), supporting the claim of annotation quality.
 
 ## Weaknesses
 
 ### Fatal
-
-None. The core contribution — the dataset and its annotation schema — is valid and novel. The weaknesses below are addressable through additional analysis and reframing.
+None.
 
 ### Major
 
-1. **No inter-annotator agreement metrics reported for a complex, 9-dimensional annotation scheme.** The annotation process involves 10 annotators labeling three sub-interaction regions with bounding boxes, triplets, contact areas, and active-passive object roles — including subtle distinctions like "carrot_end" vs. "carrot" or which hand touches what. The paper describes "three rounds of cross-checking" (line 76) but provides no Cohen's kappa, Krippendorff's alpha, or bounding box IoU statistics. For a dataset whose contribution *is* its annotation quality and granularity, this absence makes it impossible to assess reliability — especially for the fine-grained noun distinctions (contact areas) and active-passive role assignments that differentiate this dataset from prior work. This is the single most impactful weakness and must be addressed for the dataset to be credible.
+- **Ambiguous clip construction undermines the SL-AR (video action recognition) benchmark.** The paper states: "First, we split the collected video data into individual frames, as our annotated units are frames… Finally, we organized the video frames based on the action triplet classes, ultimately generating 2,377 clips that represent distinct hand action triplet classes" (Section 3.1). This phrasing is ambiguous: it could mean that clips are temporally contiguous segments from the original videos (each depicting one action), or that frames sharing the same action triplet were grouped regardless of temporal continuity, producing non-temporal collections. The SL-AR track evaluates video-level models (SlowFast, VideoSwin, VideoMAE V2, Hiera) that rely on temporal structure — 3D convolutions, spatio-temporal attention, and temporal aggregation. If clips are non-temporal, those results are not interpretable as action recognition. The paper must unambiguously state how clips were constructed, report average clip length, and confirm temporal continuity. This is the single most important issue to resolve. (Note: the tables referenced in Section 4.3 are present in the original submission as embedded images — the table contents are not missing despite parser artifacts.)
 
-2. **The benchmark results conflating "inherent fine-grained challenge" with extreme per-class data sparsity.** The dataset has 878 action triplet categories from 2,377 clips (~2.7 clips/category on average; the paper acknowledges a long-tail distribution at line 102 but does not quantify it). The paper repeatedly interprets poor model performance as "clear evidence that validates the challenging nature of the fine-grained hand action recognition" (line 137). However, this performance gap is equally or more plausibly explained by severe per-class data sparsity — many categories likely have 1–5 training examples. Without per-class accuracy broken down by frequency bins (head/mid/tail), few-shot experiments, or explicit controls for sample size, the paper's central empirical claim about "inherent challenge" is not properly supported. The dataset's value stands on its annotation depth, but the benchmark-interpretation frame needs fundamental revision.
+- **No inter-annotator agreement statistics.** The annotation scheme is complex (9 dimensions, three sub-regions, active-passive roles, contact areas) and the paper claims "high-quality annotations" with three rounds of cross-checking. However, no quantitative agreement metric (e.g., Krippendorff's alpha for triplets, IoU for bounding boxes) is reported. For a dataset paper with this annotation complexity, the absence of IAA metrics makes it difficult for readers to assess the reliability of the annotations. A small-scale IAA study on a random subset of 100–200 frames would substantially strengthen confidence.
 
 ### Minor
 
-1. **Domain generalization experiments are confounded by video-level factors.** With only 30 source videos, DG performance gaps across action sub-categories (Tables 5–6) could be driven by video-specific artifacts (lighting, camera angle, background, person identity) rather than action semantics. The paper does not report how many unique videos contribute to each parent category (Cut, Hold, Take), nor does it attempt leave-one-video-out evaluation. This limits what can be concluded from the DG track as presented.
+- **Dataset derived from only 30 source videos.** While the annotation granularity is a strength, the underlying source diversity is limited: 30 videos (84.22 min) from Kinetics 700_2020, covering 8 dish types. The paper partially acknowledges this in the Discussion ("Our dataset may be slightly smaller in terms of the number of videos") but still makes broad claims about diversity. Intra- and inter-class DG experiments are conducted entirely within this narrow scope, so their results may reflect dataset-specific idiosyncrasies. The paper should more transparently discuss how this limited source diversity affects generalization claims.
 
-2. **Train/val/test split does not explicitly guarantee video-level disjointness.** The paper states a "clip-based" 7:1:2 split producing "disjoint" sets (line 98), but since all clips derive from only 30 source videos, clips from the same original video may appear across train and test. This potential data leak is not discussed.
+- **No analysis of discarded frames and potential bias.** 113,436 frames (~79% of the initial collection) were discarded due to occlusion, blur, "meaningless hand actions," etc. (Section 3.1). No analysis is provided of what types of frames were preferentially discarded or what biases this aggressive filtering might introduce (e.g., biasing toward simple, unoccluded actions). For a small dataset, this could skew the distribution significantly.
 
-3. **Long-tail distribution is mentioned but not quantified.** The paper notes the long-tail property (line 102) but provides no Gini coefficient, fraction of categories with <5/<10 instances, or cumulative frequency curve. For a dataset positioned to support few-shot and DG research, these numbers should be reported.
+- **No dataset license or terms of use mentioned.** The paper says the dataset "will be released on the FHA-Kitchens project website" but does not specify a license. Since the data is derived from Kinetics 700_2020 (which has a non-commercial license), the paper should clarify whether annotations alone will be released, whether source video URLs/identifiers will be provided, and what usage restrictions apply.
 
-4. **Contact area annotation guidelines are underspecified.** The paper describes annotating contact areas (e.g., "carrot_end" vs. "carrot," line 80) but does not specify the rules or criteria annotators used to determine these boundaries. Given the absence of inter-annotator agreement metrics (Major #1), this compounds concerns about fine-grained noun reliability.
-
-5. **No confidence intervals or standard deviations for any benchmark result.** Given the small dataset size and long-tail distribution, single-run results without variance estimates make it impossible to distinguish meaningful differences from noise.
+- **No discussion of ethical considerations.** Kitchen scenes in Kinetics-derived videos may contain identifiable individuals, private spaces, or branded products. The paper does not address whether faces were blurred, whether personal information was handled, or consent considerations. This is increasingly expected for dataset papers.
 
 ### Trivial
-
-- The paper states "878 fine-grained hand action categories... which is 178 more than the number of categories in the large-scale dataset Kinetics700" (line 176). While factually correct, this comparison omits that Kinetics700 has ~650K videos across those 700 categories, making the granularity-vs.-scale tradeoff asymmetrical. The framing should be adjusted to accurately reflect the different value propositions.
+None.
 
 ## Nice-to-Haves
 
-- Few-shot experiments (1-/5-/10-shot) that leverage the structured triplet decomposition to demonstrate its value in low-data regimes.
-- An ablation showing that models using the full 9-dimensional annotation outperform those using only verb-noun pairs or region-free labels, directly demonstrating the value of annotation depth.
-- More qualitative examples of annotated frames with bounding boxes and triplets beyond Figure 1.
-- Dataset release URL, license, and format specification in the paper itself.
+- The paper provides SAM-generated object masks for all frames (Section 3.2) but does not use them in experiments or evaluate their quality. While this is an offered additional resource, a brief quality assessment (e.g., comparison to human annotations on a subset) would be helpful.
+- Hyperparameter details are sparse ("recommended optimization strategy" without specific values). While standard for dataset papers benchmarking existing methods, including full training configurations in supplementary material would improve reproducibility.
+- The triplet subject labeling (e.g., "hand_left" as subject in `<hand_left, hold-in, carrot>`) is a design choice for modeling the interaction region, but the paper could clarify that "subject" in L-O/R-O regions refers to the body part performing the action, whereas in O-O regions it refers to the active tool. This is a presentational clarification, not an error.
 
 ## Removed Points
 
-These points are flagged per policy and should be treated with caution:
+The following points from the harsh review are removed because they either reflect parser artifacts or are factually incorrect when checked against the paper:
 
-- **Criticism that Table 1 and Tables 2–4 are "rendered as images" and numbers are "unverifiable"** — Removed per rule: these are parser artifacts from PDF extraction, not author omissions. The original submission contains the tables.
-- **Criticism about "Dataset release details (URL, license, format) are promised but absent"** — Toned down from the critic's framing. The paper states the dataset will be released on the project website (line 4), which is standard for accepted dataset papers. Listed as a nice-to-have rather than a weakness.
+- *"The SL-AR track results table (Table 4) is missing from the text"* and *"The SL-D track results (Table 2) are also not visible"* — **Removed.** Both tables are present in the paper as embedded images (see `![](images/...)` markers at lines 126 and 141). The parser strips images but the original submission includes them.
+- *"The paper should include complete training logs"* — **Removed** as an impractically large artifact.
+- *Complaints about "1.1" and "1.2" references* — **Removed.** These are cross-references to an appendix/supplementary that was stripped by the parser, not missing content in the original submission.
+- *Criticism that the dataset does not "correspond to currently available systems"* — **Removed** per hard rule: cited references are assumed real.
 
 ## Novel Insights
 
-The reviews surface a tension implicit in the paper but never fully articulated: the dataset's core strength (its annotation depth: 9 dimensions, triplets, contact areas, sub-region bounding boxes) is in tension with its core weakness (small scale: 30 videos, ~2.7 clips/category). The paper tries to have it both ways — claiming value from annotation depth while also claiming that benchmark results reveal "inherent challenges" of fine-grained recognition — but the small scale means the benchmarks primarily reveal challenges of data sparsity. The genuinely novel insight that emerges is that this type of richly structured small dataset may be most valuable not as a traditional closed-set benchmark but as a testbed for structured few-shot learning, compositional generalization (can a model generalize a known verb to a new object?), and domain adaptation — directions the paper mentions but does not prioritize. The annotation schema is the real contribution; the benchmarks, as currently interpreted, are the weakest part.
+The most interesting observation from the reviews is that the paper's core value may be somewhat decoupled from the SL-AR track. The annotation scheme (9 dimensions, regional interactions, active-passive roles) and the detection/DG benchmarks could stand as a contribution even if the temporal structure of the clips needed redesign. This suggests the paper should consider reframing its emphasis: the truly novel contribution is the annotation granularity and the detection/domain generalization experiments, not the video-level action recognition benchmark per se (which faces standard dataset-scale limitations). The DG track's finding that models drop 15+ mAP on unseen sub-categories within the same parent action is a genuinely informative result that deserves more prominence.
 
 ## Suggestions
 
-1. **Report inter-annotator agreement** (Cohen's kappa for triplet labels, IoU for bounding boxes) as the highest-priority addition.
-2. **Reframe the benchmark interpretation**: Acknowledge that low accuracy is confounded with per-class sparsity, and reposition the dataset's value as enabling *structured* and *few-shot* evaluation rather than claiming it proves "inherent challenge" of fine-grained recognition.
-3. **Add per-class accuracy broken down by frequency bins** (head/mid/tail) to clarify where model failures occur.
-4. **For the DG track**, either report the number of source videos per parent category or run a leave-one-video-out control to rule out video-level confounds.
-5. **Quantify the long-tail** with explicit statistics (e.g., fraction of classes with n<5, n<10 instances; cumulative frequency distribution).
+1. **Clarify clip construction unambiguously.** Provide an explicit example showing how a single source video is split into temporal clips at action boundaries. Report average clip length (in frames and seconds), and confirm that frames within each clip are temporally contiguous and properly ordered. If clips are non-temporal, redesign the SL-AR track.
+
+2. **Add inter-annotator agreement statistics.** Even a small-scale study (100–200 frames with 2–3 annotators) using appropriate metrics (Krippendorff's alpha for categorical labels, IoU/F1 for bounding boxes) would greatly strengthen confidence in the annotation quality.
+
+3. **Discuss dataset limitations more transparently.** Acknowledge the limited number of source videos (30), the aggressive filtering (79% discarded), and what biases these may introduce. This is already partially done in the Discussion but could be more explicit.
+
+4. **Specify the dataset license and address basic ethical considerations.** Clarify what will be released (annotations only? video IDs? frame images?) and under what terms. Briefly note whether identifiable information (faces, brands) was handled.
 
 ## Score and Decision
 
-**Originality**: High for the annotation schema (triplet decomposition + sub-interaction regions + contact areas). Low for dataset curation methodology, which follows established pipelines.  
-**Importance of research question**: Moderate. Fine-grained hand action recognition is relevant to embodied AI and HCI, though kitchen scenes are a narrow domain.  
-**Claims support**: Weak. The central claim about "inherent challenge" is confounded by data sparsity, and annotation quality claims are unsupported by agreement metrics.  
-**Soundness of experiments**: Adequate methodology for detection and recognition benchmarks, but the DG experiments and the interpretation of results have significant confounds.  
-**Clarity of writing**: Clear structure and adequate descriptions.  
-**Value to community**: Potentially useful as a resource for few-shot/structured prediction research, but currently limited by missing quality assurances (inter-annotator agreement).
+**Originality:** The annotation scheme (9 dimensions, three sub-interaction regions, active-passive roles) is novel and more detailed than existing kitchen hand-action datasets.  
+**Importance:** Fine-grained hand action recognition is an under-addressed problem with practical relevance. The dataset fills a genuine gap.  
+**Claims support:** The core claims about annotation richness and benchmark challenge are supported. However, the SL-AR track's validity depends on resolving the clip construction ambiguity.  
+**Soundness:** The detection and DG experiments are sound. The SL-AR experiments may need to be re-evaluated after clarification.  
+**Clarity:** Generally clear, except for the critical ambiguity in clip construction.  
+**Value to community:** Positive, assuming the temporal ambiguity is resolved and IAA metrics are provided.
 
-The paper presents a genuinely novel annotation schema that pushes fine-grained action granularity beyond prior datasets. However, the small scale (30 videos, 878 classes from 2,377 clips), absence of inter-annotator agreement metrics, and confounded benchmark interpretations substantially weaken the claimed contributions. The dataset's core value proposition — its annotation depth — is real but undersupported by the evidence presented. Substantial revision is required before the paper can be accepted.
+The paper's core contributions (annotation scheme + detection/DG benchmarks) are real, but the critical temporal ambiguity and missing IAA metrics prevent full assessment. A revision that clarifies the clip structure and adds basic quality metrics would significantly strengthen the paper.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

@@ -1,75 +1,67 @@
-Here is my consolidated final review.
-
----
+Now I have thoroughly verified all claims. Let me write the final consolidated review.
 
 ## Summary
 
-This paper introduces Kernel Banzhaf, a regression-based estimator for Banzhaf values inspired by KernelSHAP. The key contributions are: (1) establishing a linear regression formulation of Banzhaf values for general set functions (Theorem 3.2), (2) a practical algorithm using uniform subsampling with paired sampling, (3) theoretical guarantees on the sample complexity (Theorem 3.3, Corollary 3.4), and (4) extensive experiments showing superiority over Monte Carlo (MC) and Maximum Sample Reuse (MSR) baselines for Banzhaf estimation across eight datasets.
+This paper introduces Kernel Banzhaf, a linear-regression-based algorithm for estimating Banzhaf values. The key contributions are: (1) establishing that Banzhaf values are the exact solution to a least-squares problem for *general* set functions (Theorem 3.2), extending beyond the previously known simple set function case; (2) an algorithm combining paired sampling and leverage-score sampling with theoretical guarantees; and (3) an extensive empirical evaluation showing Kernel Banzhaf outperforms existing MC and MSR Banzhaf estimators across eight datasets, with particular advantages in sample efficiency and noise robustness.
 
 ## Strengths
 
-1. **Novel linear regression formulation for Banzhaf values (Theorem 3.2).** Prior work (Hammer & Holzman, 1992) only established this connection for simple set functions with binary, monotone outputs. The paper cleanly proves that Banzhaf values are the exact least-squares solution to \(\min_{\mathbf{x}}\|\mathbf{Ax}-\mathbf{b}\|_2\) for arbitrary set functions. The proof is concise (Observation 3.1 → Theorem 3.2) and correctly reasoned.
+- **First linear regression formulation for general set functions (Theorem 3.2).** The paper establishes that Banzhaf values are the exact solution to a least-squares regression problem for *arbitrary* set functions, whereas prior work (Hammer & Holzman, 1992) only covered simple (binary, monotone) set functions. This is a clean and elegant connection that opens the door to regression-based estimation.
 
-2. **Consistent and substantial empirical superiority over existing Banzhaf estimators.** Across all eight datasets in Figure 2, Kernel Banzhaf achieves lower \(\ell_2\)-norm error than MC and MSR at every sample size, with tighter interquartile ranges. The advantage is particularly pronounced on high-dimensional datasets (e.g., NHANES), where MSR errors go off the chart. This directly validates the paper's core claim of improved sample efficiency.
+- **Strong empirical evidence of superiority over existing Banzhaf estimators.** Across eight datasets with varying dimensionality (8–241 features), Kernel Banzhaf consistently achieves lower ℓ₂-norm error than MC and MSR at all tested sample sizes (Figure 2). The advantage is substantial in many cases (e.g., NHANES and larger datasets), and the improvement over MSR grows with sample size — directly addressing MSR's known high-variance issue.
 
-3. **Robustness to noise in the set function (Figure 3).** The noise-injection experiment is well-designed: Kernel Banzhaf maintains low error across noise levels \(\sigma\) while MC and MSR errors increase substantially. This is practically important because set functions in real explainability tasks are often approximated and noisy.
+- **Demonstrated robustness to noisy set functions.** Figure 3 shows that Kernel Banzhaf maintains low ℓ₂ error as noise is added to the set function, while MC degrades sharply (due to effectively doubling noise variance) and MSR also degrades. This is practically important since set functions in real-world XAI tasks (based on stochastic models with finite background data) are inherently noisy.
 
-4. **Condition number analysis (Figure 5) provides an explanatory mechanism.** The paper shows that the matrix \(\mathbf{K}\) for Kernel Banzhaf has lower condition numbers than for KernelSHAP or Leverage SHAP at all sample sizes, explaining the improved numerical stability. This is a clean diagnostic that goes beyond just reporting error metrics.
+- **Adaptation of paired sampling to Banzhaf estimation.** Algorithm 1 incorporates paired sampling and the paper provides an ablation study (Figure 2) showing its contribution. The theoretical analysis accounts for paired sampling, requiring non-trivial modifications to standard leverage-score sampling analysis (as the paper correctly notes).
+
+- **Evaluation against exact values (not just convergence).** Prior Banzhaf estimation papers relied on convergence metrics; this paper uses the tree-based exact computation of Karczmarz et al. (2022) to directly measure ℓ₂ error against ground truth for tree-based models, providing a more direct and convincing evaluation.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **The sample complexity bound's dependence on \(\delta\) is unusual and insufficiently justified.** Theorem 3.3 states \(m = O(n\log\frac{n}{\delta} + \frac{n}{\delta\epsilon})\). The \(\frac{n}{\delta\epsilon}\) term has an inverse (not logarithmic) dependence on \(\delta\), which is substantially worse than typical leverage-score guarantees (which have \(\log(1/\delta)\)). The paper acknowledges on line 159 that "the theorem can only be improved in the logarithmic factor and dependence on \(\delta\) and \(\epsilon\)," and on line 33 it claims near-optimality "up to log factors and the dependence on \(\epsilon\)." However, the \(1/\delta\) term is not typical for such bounds, the paper provides no lower bound showing this dependence is necessary, and the claim of near-optimality is ambiguous about whether it encompasses the \(\delta\) dependence. If the \(1/\delta\) term is an artifact of the paired sampling analysis, the paper should explain this; if it is real, it should be honestly contextualized as a limitation of the current analysis. This weakens the theoretical contribution.
-
-2. **The comparison with Shapley estimators (Section 4.2) conflates algorithmic performance with semivalue properties.** Kernel Banzhaf (estimating Banzhaf values) is compared against Optimized KernelSHAP and Leverage SHAP (estimating Shapley values). Prior work (Karczmarz et al., 2022; Wang & Jia, 2023) has already established that Banzhaf values are inherently more robust to noise than Shapley values. The results in Figure 4 therefore primarily demonstrate this known semivalue property rather than an algorithmic advantage of Kernel Banzhaf. The paper acknowledges prior work on this robustness (line 249) and uses normalized error to improve fairness, but the framing ("Kernel Banzhaf consistently exhibits superior performance...") implies an algorithmic comparison that the experiment cannot cleanly support. The condition number analysis (Figure 5) is a cleaner algorithmic comparison and should be emphasized more; the error-based comparison in Figure 4 should be presented as a case study in semivalue properties, not as evidence of algorithmic superiority.
+- **The 1/δ dependence in Theorem 3.3 is unusual, and the optimality claims are inconsistent/overstated.** The bound m = O(n log(n/δ) + n/(δϵ)) has a linear 1/δ term, whereas standard leverage-score sampling results (including those cited by the paper) yield log(1/δ) dependence. The paper (line 33) carefully states optimality "up to log factors and the dependence on ϵ" (excluding δ), but later (lines 159, 204) claims "the theorem can only be improved in the logarithmic factor and dependence on δ and ϵ" and that "Theorem 3.3 is nearly optimal" — claims unsupported by any matching lower bound beyond Ω(n) for the exact-recovery case. The paper acknowledges MSR achieves O((n/ϵ) log(n/δ)) — better δ dependence — under a [0,1] assumption, but does not explain why the 1/δ term arises in their setting (e.g., as a consequence of paired sampling) or provide intuition for when it is tight. This does not invalidate the paper's empirical contributions, but the theoretical contribution is presented prominently (listed first among contributions) and is weaker than claimed.
 
 ### Minor
 
-1. **No empirical runtime/wall-clock comparisons.** The paper provides asymptotic complexity analysis (line 143) but no actual timing experiments. Since Kernel Banzhaf requires solving an \(m \times n\) least-squares problem, its computational cost relative to MC and MSR (which are simple averages) is a practical concern, especially when \(m\) is large. The trade-off between accuracy and computation time should be quantified.
+- **The comparison of Kernel Banzhaf to Shapley estimators (Section 4.2) is informative but could be more precisely framed.** The paper compares Kernel Banzhaf (estimating Banzhaf values) against KernelSHAP/Leverage SHAP (estimating Shapley values) using normalized ℓ₂ error. Each method estimates its own target quantity, so the comparison conflates properties of the target (Banzhaf vs. Shapley values) with properties of the estimator. The paper does acknowledge prior work showing Banzhaf values are inherently easier to estimate (citing Karczmarz et al., 2022; Wang & Jia, 2023), so this is not a flaw in the comparison itself, but the framing ("Kernel Banzhaf outperforms" Shapley estimators) overstates what is demonstrated. A more precise claim would be: "Banzhaf values are easier to estimate via linear regression than Shapley values, as shown by the lower condition numbers and stronger noise robustness."
 
-2. **Main experiments use only XGBoost models.** While the paper mentions neural network experiments on smaller datasets (line 213), these are not shown in the main paper. For a method targeting general set functions in explainable AI, broader model validation would strengthen the claims. The noise robustness experiment partially addresses generalization concerns, but direct validation on neural network models would be more convincing.
+- **The "exact" Banzhaf values used for evaluation may depend on finite-background-data estimation of the set function.** The paper uses the tree-based algorithm of Karczmarz et al. (2022) to compute "exact" Banzhaf values, but the set function v(S) = E[M(x^S)] involves an expectation over held-out features that is typically estimated from a finite background dataset. This is standard practice in the feature attribution literature and does not invalidate the comparisons (all estimators use the same v(S) evaluations), but the paper should acknowledge this nuance rather than labeling these values as unconditionally "exact."
 
-3. **The benefit of paired sampling could be analyzed more systematically.** The ablation ("Kernel Banzhaf (Excluding Pairs)") is included in Figure 2, and the two variants perform similarly. The paper mentions that sampling without replacement shows no improvement (referencing Figure 10), but does not isolate the paired sampling step to show when or why it helps. A controlled experiment varying the fraction of paired samples would clarify the design choice and justify the additional complexity it introduces to the theoretical analysis.
+- **The lower bound argument for optimality is insufficient.** The paper argues near-optimality by noting that Ω(n) samples are needed for exact recovery on linear set functions. This lower bound does not address the δ or ϵ dependence, leaving the claimed "near-optimality" unsubstantiated for those parameters. The bound is correctly labeled Ω(n) — for n and log factors — but the paper should not extend this to claim optimality for δ or ϵ dependence without proof or citation.
 
 ### Trivial
-None.
+
+- **Equation for K (line 264) has a likely typo.** The paper defines K = (A^T A)^{-1/2} \tilde{A}^T \tilde{A} (A^T A)^{1/2}, but the correct matrix for spectral equivalence analysis (as immediately preceding) is (A^T A)^{-1/2} \tilde{A}^T \tilde{A} (A^T A)^{-1/2}. This appears to be a typographical error in the equation; Figure 5's actual computations likely used the correct form.
 
 ## Nice-to-Haves
 
-- A controlled ablation study varying the proportion of paired vs. independent samples to clarify when paired sampling provides a benefit.
-- Brief discussion of scalability concerns for very large \(n\) (e.g., \(n > 500\)) where the \(O(mn^2)\) least-squares solve may become a bottleneck.
-- A limitations paragraph explicitly noting the bound's \(\delta\) dependence and scope of empirical validation.
+- A brief intuition for why the 1/δ (rather than log(1/δ)) dependence arises — e.g., does paired sampling force a Chebyshev-style bound that loses the log factor? This would make the theoretical contribution more credible.
+- Discussion of when γ (in Corollary 3.4) is expected to be small vs. large in common feature attribution settings, and how this affects the practical usefulness of the bound.
+- An ablation showing paired sampling's effect more explicitly — the paper notes mixed results in Figure 2; a short discussion of when paired sampling helps vs. hurts would be welcome.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"The paper does not comment on the \(\delta\) dependence"** (Harsh Critic): The paper does comment on line 159 ("can only be improved in the logarithmic factor and dependence on \(\delta\) and \(\epsilon\)"), though this acknowledgment is brief and could be more prominent. The substantive concern about \(1/\delta\) vs. \(\log(1/\delta)\) is kept in the major weaknesses above.
-- **"Without access to the appendix, I cannot verify whether the bound is misreported"**: The appendix exists in the original submission. Per policy, criticisms about missing appendix content are removed. The bound itself (stated in the main text) is evaluated on its stated form.
-- **"Figure 10 referenced, not visible"**: This is a parser artifact — the figure exists in the appendix of the original submission.
-- **Strength: "Comparisons with state-of-the-art Shapley estimators"** (Strength Finder): This conflicts with the verified weakness that the comparison conflates semivalue differences with algorithmic differences. Per instructions, when a strength and weakness disagree, the weakness wins. The condition number analysis (Figure 5) is a genuine strength and is retained; the error-based comparison (Figure 4) is kept as a limited result with caveats.
+- **Criticism about missing proof/appendix for Theorem 3.3:** The parser strips appendix sections from all papers; they exist in the original submission. This is a known issue, not an author error.
+- **Criticism that the 1/δ dependence makes the bound "effectively vacuous":** This is overstated. For δ=0.01, the bound gives n/(0.01ϵ) = 100n/ϵ, which is large but not vacuous — it scales linearly with n and inversely with ϵ. The critic's claim of "100× more samples" compared to δ=0.1 is correct in the 1/δ term (10×, actually) but ignores that the log term also changes modestly. More importantly, the bound could still be tight under paired sampling; the issue is that it's unusual, not that it's meaningless.
+- **Criticism about the K matrix typo being a "structural issue":** It's a typo in one equation that likely does not affect the actual computation in Figure 5. The correct spectral equivalence expression is given correctly in the immediately preceding equation.
+- **Strength Finder's claim that Theorem 3.3 gives "near-optimal" guarantees:** This is retained as a genuine strength (the guarantee itself is a contribution) but caveated in the Major weakness above about the optimality claims being overstated.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a genuine tension between the paper's theoretical claims and the stated bound, and between its framing of the Shapley comparison and what that experiment can actually resolve, but these are critiques of presentation and rigor rather than novel observations about the paper's substance.
+None beyond the paper's own contributions. The core observation — that the Banzhaf regression problem has a perfectly conditioned A matrix (A^T A ∝ I), unlike the Shapley case — is already developed in the paper and explains both the theoretical tractability and empirical performance.
 
 ## Suggestions
 
-1. **Clarify the theoretical bound.** Either provide a justification for the \(1/\delta\) dependence (e.g., show it is unavoidable due to paired sampling) or replace it with a standard \(\log(1/\delta)\) bound. Remove or qualify the claim of near-optimality with respect to \(\delta\).
-
-2. **Reframe Section 4.2.** Clearly separate the two claims: (a) Banzhaf values are more robust than Shapley values (confirming prior work), and (b) Kernel Banzhaf's regression subproblem is better conditioned (algorithmic contribution). The abstract and introduction should not claim that Kernel Banzhaf "outperforms Shapley estimators" without clarifying that this partly reflects semivalue differences.
-
-3. **Add a runtime comparison.** A simple table or plot of wall-clock time vs. error would help practitioners evaluate the computational trade-off and strengthen the practical contribution.
-
-4. **Include the neural network results** in the main paper (or add a clear statement that they are in the appendix and summarize the findings).
+1. Restate Theorem 3.3 with a clearer discussion of the 1/δ term: explain why it arises (paired sampling? different concentration arguments?), provide a proof sketch in the main text, and honestly compare its implications to the log(1/δ) dependence in standard results. If the bound can be improved to log(1/δ), do so; if not, explain why this is inherent.
+2. Reconcile the inconsistent optimality claims: line 33 is appropriately caveated ("up to... the dependence on ϵ"), but lines 159 and 204 overclaim. Either provide matching lower bounds for δ, or remove/weaken the unqualified optimality statements.
+3. Reframe Section 4.2's comparison to Shapley estimators: emphasize that the finding is about Banzhaf values being easier to estimate via regression (a property of the target quantity), which is valuable but different from claiming the algorithm itself is "better." The condition number analysis (Figure 5) is the most insightful part of this comparison and should be foregrounded.
+4. Fix the typo in the K matrix definition (line 264): change (A^T A)^{1/2} to (A^T A)^{-1/2}.
+5. Acknowledge in Section 4 that the "exact" Banzhaf values used for evaluation depend on a finite-background-dataset estimate of the expectation in v(S), which is standard practice but not exact in the strictest sense.
 
 ## Score and Decision
 
-This paper makes a genuine contribution: a clean linear regression formulation for Banzhaf values, a well-motivated estimation algorithm, and strong empirical evidence that it outperforms existing Banzhaf-specific estimators (MC, MSR). The main weaknesses are (a) a theoretical bound whose \(\delta\) dependence is unusual and inadequately justified, (b) a cross-semivalue comparison that is framed too strongly, and (c) the absence of runtime experiments. None of these are fatal — the core Banzhaf estimation result is solid — but they collectively reduce the strength of the contribution. The paper is at the borderline between weak and accept, and with the suggested revisions (particularly clarification of the theory and reframing of the Shapley comparison) would be a solid addition to the literature on game-theoretic feature attribution.
+The paper introduces a clean and practical algorithm with strong empirical support. The linear regression formulation for general set functions (Theorem 3.2) is a genuine contribution, and the experimental evaluation is thorough and convincing. The main weakness is that the theoretical analysis — while present and non-trivial — has an unusual 1/δ dependence and contains overstated optimality claims that need to be reconciled. These issues are addressable in a revision and do not negate the paper's empirical contributions or the core algorithmic idea. I would support acceptance with the expectation that the theoretical claims are clarified and appropriately caveated.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

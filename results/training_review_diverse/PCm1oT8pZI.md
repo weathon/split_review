@@ -1,22 +1,20 @@
-Now I have a comprehensive understanding of the paper. Let me synthesize the final consolidated review.
-
----
+Now I have a thorough understanding of the paper and can construct the final review. Let me build it systematically.
 
 ## Summary
-
-This paper proposes a backdoor-based DNN watermarking method that requires only a single out-of-distribution (OoD) image (augmented into a surrogate dataset) to inject a verifiable trigger into a pre-trained model, eliminating the need for original training data. It introduces an adversarial weight-perturbation procedure during fine-tuning to improve robustness against common removal attacks (fine-tuning, pruning, model extraction). Experiments on CIFAR-10, CIFAR-100, and GTSRB demonstrate high watermark success rates with minimal accuracy degradation and resilience under several attack scenarios.
+This paper proposes a DNN watermarking method that uses a single out-of-distribution (OoD) image — augmented into diverse patches — as a secret trigger set, and employs adversarial weight perturbation during fine-tuning to resist removal attacks. The key advantage is that no original training data (i.i.d. data) is needed for watermark injection or verification.
 
 ## Strengths
+1. **Data-free backdoor injection demonstrated convincingly.** The method successfully injects persistent watermarks without using any in-distribution training data. Table 1 shows OoDWSR of 95.66% on CIFAR-10 (trojan_wm) and 87.61% on CIFAR-100, with standard accuracy degradation under 3%, confirming that a single OoD image suffices.
 
-- **Data-free watermark injection using a single OoD image**: The paper demonstrates that high OoDWSR (e.g., 95.66% on CIFAR-10) can be achieved *without any access to the original training data*, using only patches from one public OoD image (Section 4.1, Fig. 2). This directly addresses a practical gap in backdoor-based watermarking, which typically requires i.i.d. data or costly generator training.
+2. **Empirical robustness across three attack types.** The watermarks survive fine-tuning (FT-AL, FT-LL, RT-AL), pruning (20%–50%), and model extraction across all datasets. For CIFAR-10 trojan_wm, OoDWSR remains above 96% after FT-AL and pruning-50%. For CIFAR-10 and GTSRB, OoDWSR stays ≥ 90% after model extraction (Table 3).
 
-- **Robustness gains via adversarial weight perturbation**: The proposed weight-perturbation fine-tuning (Section 3.2) meaningfully improves post-attack OoDWSR. For example, after RT-AL on CIFAR-10, OoDWSR rises from 19.94% (without WP) to 57.52% (with WP) for trojan_wm (Table 6 / tab:wp). Against FT-AL and pruning, OoDWSR remains above 94% across multiple triggers and datasets (Table 2), and p-values are consistently near zero.
+3. **Weight perturbation clearly improves robustness.** Table 4 (tab:wp) shows that after RT-AL on CIFAR-10, OoDWSR for trojan_wm rises from 19.94% (w/o WP) to 57.52% (w/ WP), while standard accuracy is nearly unchanged.
 
-- **Time and sample efficiency**: The method requires only a few epochs of fine-tuning (20 for CIFAR-10/GTSRB, 30 for CIFAR-100) and a single OoD image. Figure 2 shows stable high OoDWSR within 10 epochs on CIFAR-10, with accuracy degradation under 3%. This contrasts favorably with data-free approaches that train a generator for hundreds of epochs.
+4. **Direct comparison showing OoD injection outlasts i.i.d. poisoning.** Table 2 directly compares OoD-based injection against conventional i.i.d.-based backdoor injection under RT-AL. ID poison's WSR drops to ~4% while OoD poison maintains 24%–57%, demonstrating the inherent robustness benefit of OoD triggers.
 
-- **Empirical comparison showing OoD injection is more robust than i.i.d. injection**: Under RT-AL (the strongest attack), OoD injection retains OoDWSR of 57.52% and 24.19% (two triggers on CIFAR-10), while i.i.d. injection drops to 4.13% and 3.42% (Table 4 / tab:id_ood). This directly supports the paper's core intuition.
+5. **Practical efficiency.** The method requires only one OoD image and fine-tunes for 20–30 epochs, making it feasible for real-world deployment scenarios (e.g., federated learning server, third-party IP protection).
 
-- **Evaluation across three removal attack families**: The paper tests fine-tuning (FT-AL, FT-LL, RT-AL), pruning (20%/50%), and model extraction (knockoff) across three datasets, with multiple trigger patterns, providing broad coverage of the threat landscape.
+6. **Ablation on OoD image quality.** Table 5 (tab:ood_image) shows that dense images (City, Animals) achieve ≥94% OoDWSR while a sparse image (Bridge) yields ~71%, providing practical guidance for practitioners.
 
 ## Weaknesses
 
@@ -25,54 +23,44 @@ None.
 
 ### Major
 
-- **No experimental comparison with prior OoD or data-free watermarking methods.** The paper cites prior OoD-based approaches (Zhang et al., 2018; Wang et al., 2022) and data-free methods (Li et al., 2022) and claims to "fill a gap," yet the experimental evaluation compares only against ID-based watermark injection (Table 4 / tab:id_ood). Without benchmarking against at least one of these existing approaches under comparable conditions, it is difficult to assess whether the claimed improvements in efficiency, safety, or robustness are advances over the state of the art or merely comparable to it. The paper states that prior OoD methods still rely on ID data to maintain utility, but does not verify that its own method outperforms them when they use the same single OoD image as trigger source. This omission is the single largest gap in the evaluation.
+1. **Verification logic conflates "different" with "stolen copy."** The paper uses both OoDWSR and a T-test for verification. The T-test's null hypothesis is that the suspect model's logits distribution is identical to a non-watermarked model's. Rejecting this null means the suspect model is *different* from a non-watermarked model — not that it is a *copy* of the watermarked model. A model with a completely different architecture or trained on a different dataset would also yield low p-values. The paper does not establish a false-positive rate (e.g., how often an independently trained model of a different architecture would be flagged) or compare against a baseline distribution of p-values for unrelated models. While the OoDWSR criterion (WSR > random guess and far above non-watermarked baseline) partially mitigates this — since an unrelated model would likely have low OoDWSR on the secret trigger set — the paper should explicitly test this scenario and report the combined decision rule's specificity.
+
+2. **Robustness evaluation covers a narrow attack space.** The paper evaluates removal attacks under a single adversary setting: 10% of training data, 50 fine-tuning/pruning epochs. This is a reasonable baseline, but the paper does not explore stronger or adaptive adversaries who could (a) use more i.i.d. data (e.g., 50%–100%), (b) fine-tune for more epochs, (c) apply the same OoD image (or similar OoD images) during fine-tuning, or (d) use larger pruning ratios. Without exploring the attacker's design space, the robustness claims — while valid for the tested regime — are preliminary and could be overstated. The paper should bound where the watermark breaks rather than only showing where it works.
 
 ### Minor
 
-- **Only top-2 trigger patterns are reported in the main robustness tables.** Six trigger patterns are considered (Section 4, "Trigger patterns"), but only the two best-performing by OoDWSR and accuracy degradation are shown in Tables 2 and 5. Performance varies significantly across triggers (e.g., on CIFAR-100 after model extraction, trojan_8x8 achieves 70.40% OoDWSR while l0_inv achieves only 6.22% — Table 5). Reporting all six triggers or summary statistics (mean/std) would give a more complete picture of robustness across the design space. The selection criterion is stated transparently, which mitigates concerns, but the evidence for robustness is incomplete without seeing the full distribution.
+3. **No experimental comparison against li2022knowledge (data-free watermarking).** The paper mentions li2022knowledge (data-free distillation-based watermarking) in related work as "time-consuming" but provides no experimental comparison. Since li2022knowledge is also data-free (no training data needed), a direct comparison on the same datasets/models/attacks would substantiate the claimed efficiency and robustness advantages over the most directly comparable baseline. The omission weakens the novelty claims about filling the "gap" of data-free backdoor-based IP protection.
 
-- **The T-test verification procedure lacks a false-positive control experiment.** Ownership is claimed when the T-test between suspect-model and non-watermarked-model logits on OoD verification samples yields p < 0.05. The paper reports extremely low p-values for all suspect models, which is suggestive, but does not evaluate the test on an unrelated model (e.g., a model trained on a different dataset or with a different architecture) to show that p > 0.05 when the model is genuinely unrelated. Without this control, the possibility of false positives is not ruled out. That said, the joint use of OoDWSR (which is very low for non-watermarked models, e.g., 0.0487 on CIFAR-10) alongside the T-test mitigates this concern somewhat.
-
-- **No sensitivity analysis on the perturbation constraint γ.** The hyperparameter γ (Eq. 3) controls the per-layer perturbation radius and is fixed at 0.1 (CIFAR-10/GTSRB) or 0.05 (CIFAR-100) without ablation. Since this parameter directly governs the strength of the robustness mechanism, a sensitivity study would help assess how robust the method is to this choice.
-
-- **No analysis of how label noise from OoD soft labels affects injection.** The loss in Eq. (1) uses the pre-trained model's soft labels for clean OoD samples. Since the pre-trained model was trained on ID data, its predictions on OoD data may be unreliable. The paper does not analyze whether this label noise degrades injection quality or utility, nor how it compares to using ground-truth labels.
+4. **Lack of analysis of the OoD image key space.** The paper states the OoD image is "publicly available" but "only known to the model owner." The augmentation recipe provides some secrecy, but the paper provides no analysis of the effective key space (how many possible images × augmentation configurations) or whether an adversary who suspects watermarking could feasibly enumerate and fine-tune against candidate images. This is a practical security concern for the "safe" framing.
 
 ### Trivial
-- Figure 3 shows the distribution of OoD and ID samples before/after injection via a visual t-SNE-style plot without quantitative measures of overlap or separation. A simple metric (e.g., MMD, centroid distance) would strengthen the qualitative claim.
-- The weight perturbation ablation (Table 6) is limited to a single attack (RT-AL) on CIFAR-10. The paper notes more results are in an appendix (sec:extended_wp), which is acceptable but limits the main-text evidence.
+
+5. **Trigger selection via top-2 OoDWSR from 6 patterns.** The paper selects the best-performing triggers based on OoDWSR on the same evaluation setup, which risks overfitting to the evaluation conditions. Reporting results for all 6 patterns or pre-specifying triggers would be cleaner.
+
+6. **Qualitative distribution analysis.** Figure 4 visualizes OoD/ID sample distributions qualitatively. Quantitative metrics (e.g., Wasserstein distance, distribution overlap before/after injection) would strengthen the analysis.
 
 ## Nice-to-Haves
-- An evaluation of attacks where the adversary also lacks ID data (e.g., fine-tunes with OoD or public data only) would align more closely with the paper's core motivation. However, the current setup (attacker has 10% ID data) is actually a harder test for the watermark, so this is not a genuine weakness.
-- A brief discussion of the relationship between the proposed weight perturbation and sharpness-aware minimization (SAM) would help situate the contribution; the paper does cite relevant work (he2023sharpness) but does not elaborate on similarities or differences.
-- Reporting the computational overhead of the two-step v-step/w-step optimization would help practitioners assess the trade-off.
+- Report wall-clock time or relative training cost of the weight perturbation optimization compared to standard fine-tuning without WP.
+- Test whether a statistical test (e.g., Kolmogorov-Smirnov on weight distributions) can detect the watermark after injection, to substantiate the claim that the model is "safe" (undetectable).
+- Compare against standard sharpness-aware minimization (SAM) as an alternative robustification strategy, since the weight perturbation approach is conceptually related.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution:
-
-- **Criticism that the attacker's access to ID data is "inconsistently motivated"** — The paper explicitly frames the attacker's access to 10% ID data as an "unfair scenario" (line 51) and uses it to demonstrate that the watermark persists even when the attacker has an advantage. Testing under conditions favorable to the attacker is standard robustness evaluation methodology; this is a strength of the experimental design, not a weakness. Moved to Nice-to-Haves.
-
-- **Criticism about model extraction using ImageNetDS (which is OoD to all benchmarks)** — The observation is accurate but not a weakness. The model extraction attack uses an auxiliary dataset (ImageNetDS) to query the victim model; the fact that this auxiliary set is OoD to the benchmarks is a characteristic of the attack setup, not a flaw in the paper's evaluation. If anything, it aligns with the paper's OoD theme.
-
-- **Criticism that the paper lacks comparison with prior methods when they are "allowed to use the same single OoD image as trigger source"** — This is the core of the missing-comparison weakness, which is already listed as a Major weakness. The formulation about "the same single OoD image" is preserved in spirit but the specific framing as a fatal omission is downgraded to Major (since the paper's primary comparison target — ID injection — is the most relevant baseline for its key robustness claim).
+- **"No comparison with zhang2018protecting and wang2022free":** These methods still require i.i.d. training data to maintain utility, so a head-to-head comparison would test different settings. The paper's core claim is operating *without* training data, making a direct comparison against methods that need it not apples-to-apples. The critic's demand for this comparison evaluates the paper against the wrong class of expectations.
+- **"Weight perturbation is conceptually similar to SAM":** The paper already cites he2023sharpness and acknowledges the connection. This is an observation, not a weakness.
+- **"Model extraction results show large accuracy drops, weakening the threat scenario":** The paper's claim is about watermark *persistence under attack*, not about the extracted model being a perfect copy. Reporting honest results is a strength, not a weakness. The critic misunderstands the paper's focus.
+- **"The T-test alone is insufficient for verification":** While the critic's point about the T-test's null hypothesis is valid and kept above, the paper does NOT rely solely on the T-test. It uses OoDWSR as the primary criterion (line 142: "if the WSR is larger than a random guess, and also far exceeds the probability of a non-watermarked model... then Ms will be considered as a copy") and the T-test as a supplementary metric. The criticism in its original form overstates the paper's reliance on the T-test alone.
 
 ## Novel Insights
-
-The reviewer critiques converge on a clear picture: the paper's core idea (single-OoD-image watermark injection + weight perturbation) is clever and the results are promising, but the evaluation falls short of substantiating the claimed advance over prior OoD/data-free methods. The key insight across reviews is that the paper's novelty lies in the *combination* of sample efficiency (single image, few epochs) with a robustness mechanism (weight perturbation), and the comparison against ID injection convincingly demonstrates the value of OoD-based watermarks. However, the paper overclaims relative to its comparisons: claiming to "fill a gap" without experimentally benchmarking the methods that define that gap weakens the contribution. The most actionable insight is that the paper needs exactly one well-chosen comparison experiment (e.g., Li et al. 2022's data-free method on the same models and datasets) to move from "promising" to "convincing."
+The harsh critic's most valuable insight is the verification logic problem — that rejecting the T-test's null hypothesis establishes that two models are *different*, not that one is a *copy*. This is a subtle but important distinction that many watermarking papers overlook. The paper partially addresses this through the OoDWSR criterion but does not fully resolve the concern. The critic's point about exploring adaptive attacks (particularly fine-tuning on the same OoD image) is also useful and not obvious from the paper's current evaluation design.
 
 ## Suggestions
-
-1. **Add a direct comparison with at least one prior OoD or data-free watermarking method** (e.g., Li et al., 2022, or Zhang et al., 2018) on the same datasets, using comparable epochs and architectures. This is the single highest-leverage revision and would substantially strengthen the paper's claim to advancing the state of the art.
-
-2. **Report results for all six trigger patterns** (or at least mean/std across triggers) in the main robustness tables, rather than only the top-2. Alternatively, adopt a principled trigger-selection rule (e.g., maximize the OoDWSR margin relative to non-watermarked models) and apply it consistently.
-
-3. **Add a control experiment for the T-test** by evaluating it on an unrelated model (e.g., a model trained on SVHN or a different architecture) to demonstrate that p > 0.05 when the model is not a copy. This would calibrate the false-positive rate.
-
-4. **Ablate the γ hyperparameter** across a small range (e.g., {0.01, 0.05, 0.1, 0.2}) on at least one dataset to show that the method is not overly sensitive to this choice.
+1. Add a false-positive analysis: compare p-values and OoDWSR for watermarked models vs. independently trained models (different architectures, different datasets) to establish the combined decision rule's specificity.
+2. Compare experimentally against li2022knowledge's data-free watermarking approach on the same datasets, models, and attacks to substantiate efficiency/robustness claims.
+3. Expand the attack evaluation to include stronger adversaries (50%–100% fine-tuning data, longer training, fine-tuning on OoD-like images) to bound where the watermark breaks.
+4. Analyze the OoD image key space and discuss how the augmentation recipe provides security against an attacker who knows the general approach.
 
 ## Score and Decision
+The paper proposes a genuinely novel and practical approach — single-image OoD watermarking with adversarial weight perturbation — that addresses a real gap in data-free DNN protection. The core experimental evidence (Tables 1–4) convincingly demonstrates the method works and that weight perturbation helps. The verification logic gap and the narrow attack space are notable concerns but do not invalidate the central contribution. The missing comparison against li2022knowledge is the most significant omission.
 
-The paper proposes a genuinely practical approach to a relevant problem, with a clear method and encouraging results. The weight perturbation mechanism is a sensible contribution, and the comparison with ID injection convincingly supports the core intuition. However, the evaluation is incomplete in a way that directly affects the paper's main claim of advancing the state of the art: the absence of any experimental comparison with prior OoD/data-free methods makes it impossible to assess whether the proposed approach represents an advance or merely an alternative. Combined with the selective reporting of trigger patterns and the uncalibrated verification test, the evidence is not yet sufficient to support the claimed contributions at the level expected for acceptance. The paper could become a solid contribution with revisions centered on the missing comparison.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

@@ -1,0 +1,587 @@
+\title{Context is Environment}
+
+\begin{abstract}
+  Two lines of work are taking the central stage in AI research.
+  On the one hand, the community is making increasing efforts to build models that discard spurious correlations and generalize better in novel test environments.
+  Unfortunately, the bitter lesson so far is that no proposal convincingly outperforms a simple empirical risk minimization baseline.
+  On the other hand, large language models (LLMs) have erupted as algorithms able to learn \emph{in-context}, generalizing on-the-fly to eclectic contextual circumstances that users enforce by means of prompting.
+  In this paper, we argue that \emph{context is environment}, and posit that in-context learning holds the key to better domain generalization.
+  Via extensive theory and experiments, we show that paying attention to context---unlabeled examples as they arrive---allows 
+  our proposed In-Context Risk Minimization (ICRM) algorithm
+  to \emph{zoom-in} on the test environment risk minimizer, leading to significant out-of-distribution performance improvements.
+  From all of this, two messages are worth taking home.
+  Researchers in domain generalization should consider \emph{environment as context}, and harness the adaptive power of in-context learning.
+  Researchers in LLMs should consider \emph{context as environment}, to better structure data towards generalization.
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\footnotetext{Most of the work done during an internship at Meta AI (FAIR), Paris.}
+
+One key problem in AI research is to build systems that generalize across a wide range of test environments.
+In principle, these algorithms should discard spurious correlations present only in certain training environments, and capture invariant patterns appearing across conditions. 
+For example, we would like to build self-driving systems that, while trained on data from environments with varying weather conditions, traffic conditions, and driving rules, can perform satisfactorily in completely new environments.
+Unfortunately, this has so far been a far cry: models trained catastrophically fail to generalize to unseen weather conditions~\citep{lechner2022all}.
+Despite its importance, how to perform well beyond the distribution of the training data remains a burning question.
+In fact, entire research groups are devoted to study generalization, major international conferences offer well-attended workshops dedicated to the issue~\citep{scis}, and news articles remind us of the profound societal impact from failures of ML systems~\citep{compas}.
+
+Research efforts have so far produced domain generalization algorithms that fall into one out of two broad categories.
+On the one hand, invariance proposals~\citep{dann,  peters2016causal, irm}, illustrated in~\Cref{figure:main:a}, discard all environment-specific information, thus removing excessive signal about the problem.
+On the other hand, marginal transfer proposals~\citep{marginal, adabn, arm, contextvit}, also illustrated in~\Cref{figure:main:b}, summarize observed inputs in each environment as a coarse embedding, diluting important signal at the example level.
+So far, the bitter lesson is that no algorithm geared towards out-of-distribution generalization outperforms a simple empirical risk minimization (ERM) baseline when evaluated across standard real-world benchmarks~\citep{domainbed, gagnon-audet2023woods, yao2022wild}.
+Has the generalization project hit a dead end?
+
+\begin{figure}
+  \centering
+    \begin{subfigure}[b]{0.3\textwidth}
+    \centering
+    \resizebox{\textwidth}{!}{%
+    \begin{tikzpicture}
+      \tikzset{font=\footnotesize}
+      \node[draw=black, inner sep=0, minimum height=2em, minimum width=2em] (C1) at (0, 0) {$x^e_{1}$};
+      \node[inner sep=0, minimum height=2em, minimum width=2em] (C2) at (1, 0) {$\cdots$};
+      \node[draw=black, inner sep=0, minimum height=2em, minimum width=2em, fill=papercolor!50] (C3) at (2, 0) {$x^e_{i-1}$};
+      \node[draw=black, inner sep=0, minimum height=2em, minimum width=2em] (X)  at (3, 0) {$x^e_i$};
+      \node[draw=black, inner sep=0, minimum height=2em, minimum width=2em] (Y)  at (3, 1.8) {$\hat{y}^e_i$};
+      \draw [draw=black] (-0.4, 0.55) rectangle (3.4, 1.25) node[pos=.5] {classifier};
+      
+      \draw [<-] (Y.south)  -- ++(0, -.2);
+      \draw [->] (X.north)  -- ++(0, 0.2);
+    \end{tikzpicture}}
+    \caption{Invariance DG.}
+    \label{figure:main:a}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.3\textwidth}
+    \centering
+    \resizebox{\textwidth}{!}{%
+    \begin{tikzpicture}
+      \tikzset{font=\footnotesize}
+      \node[draw=black, inner sep=0, minimum height=2em, minimum width=2em] (C1) at (0, 0) {$x^e_{i,1}$};
+      \node[inner sep=0, minimum height=2em, minimum width=2em] (C2) at (1, 0) {$\cdots$};
+      \node[draw=black, inner sep=0, minimum height=2em, minimum width=2em, fill=papercolor!50] (C3) at (2, 0) {$x^e_{i-1}$};
+      \node[draw=black, inner sep=0, minimum height=2em, minimum width=2em] (X)  at (3, 0) {$x^e_i$};
+      \node[draw=black, inner sep=0, minimum height=2em, minimum width=2em, fill=papercolor!15] (C)  at (1, 2) {$\phi^e_i$};
+      \node[draw=black, inner sep=0, minimum height=2em, minimum width=2em] (Y)  at (3, 3.8) {$\hat{y}^e_i$};
+      \draw [draw=black] (-0.4, 2.55) rectangle (3.4, 3.25) node[pos=.5] {classifier};
+      
+      \draw [->] (C.north) -- ++(0, 0.2);
+      \draw [->] (X.north) -- ++(0, 2.2);
+      \draw [<-] (Y.south) -- ++(0, -.2);
+      
+      \draw [->] (C1.north) -- ++(0, 0.2);
+      \draw [->] (C2.north) -- ++(0, 0.2);
+      \draw [->] (C3.north) -- ++(0, 0.2);
+      \draw [<-] (C.south) -- ++(0, -0.2);
+      
+
+      \draw ($(C1.north west) + (0,.2)$) -- %
+            ($(C3.north east) + (0,.2)$) -- %
+            ($(C.south east)  - (0,.2)$) -- %
+            ($(C.south west)  - (0,.2)$) -- %
+            ($(C1.north west) + (0,.2)$);
+      
+      \node[] (sum)  at (1, 1) {\scalebox{0.7}{$\frac{1}{i-1}\sum\limits_{j=1}^{i-1} \phi(x^e_j)$}};
+    \end{tikzpicture}}
+    \caption{Marginal transfer DG.}
+    \label{figure:main:b}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.3\textwidth}
+    \centering
+    \resizebox{\textwidth}{!}{%
+    \begin{tikzpicture}
+      \tikzset{font=\footnotesize}
+      \node[draw=black, inner sep=0, minimum height=2em, minimum width=2em] (C1) at (0, 0) {$x^e_{1}$};
+      \node[inner sep=0, minimum height=2em, minimum width=2em] (C2) at (1, 0) {$\cdots$};
+      \node[draw=black, inner sep=0, minimum height=2em, minimum width=2em, fill=papercolor!50] (C3) at (2, 0) {$x^e_{i-1}$};
+      \node[draw=black, inner sep=0, minimum height=2em, minimum width=2em] (X)  at (3, 0) {$x^e_i$};
+      \node[draw=black, inner sep=0, minimum height=2em, minimum width=2em] (Y)  at (3, 1.8) {$\hat{y}^e_i$};
+      \draw [draw=black] (-0.4, 0.55) rectangle (3.4, 1.25) node[pos=.5] {transformer};
+      
+      \draw [<-] (Y.south)  -- ++(0, -.2);
+      \draw [->] (C1.north) -- ++(0, 0.2);
+      \draw [->] (C2.north) -- ++(0, 0.2);
+      \draw [->] (C3.north) -- ++(0, 0.2);
+      \draw [->] (X.north)  -- ++(0, 0.2);
+    \end{tikzpicture}}
+    \caption{In-context DG (ours).}
+    \label{figure:main:c}
+  \end{subfigure}
+  \caption{
+    Three frameworks for domain generalization (DG), predicting the target $y^e_i$ from the input $x^e_i$ at test environment $e$.
+    Depicted in blue, the last example $x^e_{i-1}$ contains relevant features for the current prediction.
+    (a) Invariance DG discards all of the previously observed information from the test environment, removing too much predictive signal.
+    (b) Marginal transfer DG summarizes all of the previously observed test inputs as a coarse embedding, diluting predictive signal found at the example level.
+    (b) Our in-context DG directly observes all of the previous test inputs, allowing the search of ``needle-in-the-haystack'' signals, such as the relevant one in $x^e_{i-1}$.}
+  \label{figure:main}
+\end{figure}
+
+In a parallel strand of research, large language models~\citep[LLMs]{gpt} are taking the world by storm.
+LLMs are next-token predictors built with transformers~\citep{attention} and trained on enormous amounts of natural language.
+The resulting systems are able to interact with users in the capacity of conversational agents, addressing questions, retrieving facts, summarizing content, drafting emails, and finding bugs in snippets of code.
+One impressive feature of LLM systems is their ability to learn \emph{in-context}, that is, to generalize on-the-fly to the eclectic contextual circumstances that users enforce by means of prompting~\citep{brown2020language}.
+For example, a good LLM would complete the sequence ``France-Paris Italy-Rome Spain-'' with the sequence ``Madrid,'' effectively learning, from the input itself, that the user is demanding a capital prediction task.
+When interacting with large language models, it feels as though we are getting closer to solving the puzzle of out-of-distribution generalization.
+Could LLM researchers have found a key piece to this puzzle?
+
+This paper suggests a positive answer, establishing a strong parallel between the concept of \emph{environment} in domain generalization, and the concept of \emph{context} in next-token prediction.
+In fact, different environments describe varying contextual circumstances such as time, location, experimental intervention, and other background conditions.
+On the one hand, describing \emph{environments as context} opens the door to using powerful next-token predictors off-the-shelf, together with their adaptability to learn in-context, to address domain generalization problems. This allows us to move from coarse domain indices to fine and compositional contextual descriptions, and amortize learning across similar environments.  On the other hand, using \emph{context as environment} can help LLM researchers to use successful domain generalization methods such as distributionally robust optimization ~\citep[DRO]{sagawa2019distributionally,xie2023doremi} across varying contexts.
+
+Based on these insights, we propose a rather natural algorithm, In-Context Risk Minimization (ICRM) as illustrated in \Cref{figure:main:c}.
+Given examples $(x^e_i, y^e_i)$ from environment $e$, we propose to address \emph{out}-of-distribution prediction as \emph{in}-distribution next-token prediction, training a machine:
+\begin{equation}
+  y^e_i \approx h(x^e_i; \underbrace{x^e_1, \ldots, x^e_{i-1}}_{\text{environment} \,\approx\, \text{context}}).
+\end{equation}
+While the requested prediction $y^e_i$ concerns only the input $x^e_i$, the machine can now pay attention to its test experience so far, as to extract relevant environment information from instance and distributional features.
+Our theoretical results show that such in-context learners can amortize context to \emph{zoom-in} on the empirical risk minimizer of the test environment, achieving competitive out-of-distribution performance.
+Further, we show that in several settings, the extended input-context feature space in ICRM reveals invariances that ERM-based algorithms ignore. 
+Through extensive experiments, we demonstrate the efficacy of \method{} and provide extensive ablations that dissect and deepen our understanding of it.
+
+The rest of the exposition is organized as follows.
+\Cref{sec:dg} reviews the fundamentals of domain generalization, centered around the concept of \emph{environment}.
+\Cref{sec:icl} explains the basics of next-token prediction, with an emphasis on learning from \emph{context}.
+\Cref{sec:main} sews these two threads to propose a framework called \method{} to learn from multiple environments from context, and provides a host of supporting theory.
+\Cref{sec:experiments} showcases the efficacy of our ideas in a variety of domain generalization benchmarks, and \Cref{sec:discussion} closes the exposition with some topics for future discussion.
+
+
+
+\section{The problem of domain generalization}
+
+\label{sec:dg}
+
+The goal of domain generalization (DG) is to learn a predictor that performs well across a set of domains or environments $\Eall$ \citep{muandet2013domain}.
+Environment indices $e \in \Eall$ list different versions of the data collection process---variations that may occur due to time, location, experimental interventions, changes in background conditions, and other contextual circumstances leading to distribution shifts~\citep{irm}.
+
+During training time we have access to a collection of triplets $\mathcal{D} = \{(x_i, y_i, e_i)\}_{i=1}^n$.
+Each triplet contains a vector of features $x_i $, a target label $y_i$, and the index of the corresponding training environment $e_i \in \Etr \subset \Eall$.
+Formally, each example $(x_i, y_i)$ is sampled independently from a joint probability distribution $P^e(X, Y)$.
+Using the dataset $\mathcal{D}$, we set out to learn a predictor $h$ that maps features to labels, while minimizing the worst risk across a set of related but unknown test environments $\Ete = \Eall \setminus \Etr$.
+Formally, the standard domain generalization optimization is stated as 
+\begin{equation}
+  h^{*} = \argmin_h \max_{e \in \Ete} R^e(h),\label{eqn:ood}
+\end{equation}
+where $R^e(h) = \mathbb{E}_{(X, Y) \sim P^e}[\ell(h(X), Y)]$ is the risk of the predictor $h$ in environment indexed $e$, as measured by the expectation of the loss function $\ell$  with respect to the environment distribution $P^e$.
+
+As one example, we could train a self-driving model $h$ to classify images $x_i$ into a binary label $y_i$ indicating the presence of a pedestrian.
+Each training example $(x_i, y_i)$ is hereby collected from $e_i \in \Etr$, one out of the few cities with varying weather conditions from which images are collected.
+The goal of~\cref{eqn:ood} is to obtain a predictor that correctly classifies $x$ in new cities $e \in \Ete$ observed during test time.
+This has proved to be challenging \citep{lechner2022all}, as predictors trained in different weather conditions exhibited penurious performance in new weather conditions.
+
+Domain generalization is challenging because we do not have access to test environments during training time, rendering \cref{eqn:ood} challenging to estimate.
+Therefore, to address the DG problem in practice, researchers have proposed a myriad of algorithms that make different assumptions about the invariances shared between $\Etr$ and $\Ete$.
+In broad strokes, domain generalization algorithms fall in one out of the two following categories.
+On the one hand, domain generalization algorithms based on invariance~\citep{muandet2013domain, dann, peters2016causal, irm}, illustrated in~\Cref{figure:main:a}, regularize predictors $h(x^e_i)$ as to not contain any information about the environment $e$.
+Unfortunately, this results in removing too much signal about the prediction task.
+On the other hand, domain generalization algorithms based on marginal transfer~\citep{marginal, adabn, arm, contextvit} extract environment-specific information. These methods implement predictors $h(x^e_i, \phi^e_i)$, where $\phi^e_i = \frac{1}{i-1} \sum_{j=1}^{i-1} \phi(x^e_j)$ is a coarse summary of the environment $e$ in terms of previously observed instances.
+Different choices for $\phi$ include kernel functions~\cite[MTL]{marginal}, convolutional neural networks~\citep[ARM]{arm}, and patch embeddings~\citep[Context-ViT]{contextvit}.
+Alas, all of these alternatives focus exclusively on distributional features of the environment, diluting relevant ``needle-in-the-haystack'' to be found in individual past examples.
+More formally, the size of the representation $\phi$ would have to grow linearly with the size of the training data to describe aspects corresponding to a small group of examples, or non-parametric statistics about their distribution.
+
+As a result, and despite all efforts, no proposal so far convincingly outperforms a simple empirical risk minimization baseline~\citep[ERM]{vapnik} across standard benchmarks~\citep{domainbed, gagnon-audet2023woods, yao2022wild}.
+Effectively, ERM simply pools all training data together and seeks the \emph{global} empirical risk minimizer:
+\begin{equation}
+  h^\dagger = \argmin_h \sum_{e \in \Etr} P(E = e) \cdot R^e(h).
+ \label{eqn: erm}
+\end{equation}
+Is the efficacy of ERM suggesting that environmental information is useless and that the generalization project has reached a stalemate?
+We argue that this is not the case.
+The key to our answer resides in a recently discovered emergent ability of next-token predictors, namely, in-context learning.
+
+
+
+\section{Next-token predictors and in-context learning}
+
+\label{sec:icl}
+
+Next, let us take a few moments to review a seemingly disconnected learning paradigm, next-token prediction.
+Here, we are concerned with modeling the conditional distribution
+\begin{equation}
+  P(Z_{t+1} = z_{t+1} \mid Z_t = z_t, \ldots Z_1 = z_1),\label{eq:next1}
+\end{equation}
+describing the probability of observing the token $z_{t+1}$ after having previously observed the sequence of tokens $(z_1, \ldots, z_t)$.
+The quintessential next-token prediction task is language modeling~\citep{bengio2000neural}, where the sequence of tokens represents a snippet of natural language text.
+Language modeling is the workhorse behind the most sophisticated large language models (LLMs) to date, such as GPT-4~\citep{gpt}.
+Most LLM implementations estimate~\cref{eq:next1} using a transformer neural network $z_{t+1} \approx h(z_t; z_{t-1}, \ldots, z_1)$~\citep{attention}.
+
+Trained LLMs exhibit a certain ability, termed in-context learning (ICL), quite relevant to our interests.
+ICL is the ability to describe and learn about a learning problem from the sequence of a few tokens itself, sometimes called the context or prompt. Many meta-learning methods have been built over the years to impart such an ability to the models \citep{schmidhuber1987evolutionary, finn2017model}.
+To illustrate, consider the two following sequences:
+\begin{align*}
+  (\underbrace{\text{You are talking to a teenager.}}_{c_1} \,\, \underbrace{\text{Write a poem on gravitational fields.}}_{x_1}),\\
+  (\underbrace{\text{You are talking to a Physics graduate.}}_{c_2} \,\, \underbrace{\text{Write a poem on  gravitational fields.}}_{x_2}).
+\end{align*}
+As widely observed, LLMs answer differently to these two sequences, producing two poems, say $y_1$ and $y_2$, each adapted to the assumed audience.
+While nothing unexpected is happening here at the sequence level---the model simply produces a high-likelihood continuation to each of the two prompts---we observe a degree of compositional learning, because the LLM can provide different but correct answers to the same question $x_1 = x_2$ when presented under two contexts $c_1$ and $c_2$.
+By addressing the very general task of \emph{in}-distribution language modeling, we attain significant \emph{out}-of-distribution abilities in many specific tasks---such as the one of writing poems.
+
+It is a fascinating fact that ICL emerges without supervision.
+The training corpus does not contain any explicit division between questions and their context beyond the natural order of the words within each snippet of language in the training data.
+However, since we train the machine to produce an enormous amount of completions, many of which start with partially overlapping contexts, the predictor has the opportunity to amortize learning to a significant degree.
+While the machine may have never observed the context $\tilde{c}_1 = (\text{You are now \emph{speaking} to a teenager})$, its semantic similarity to $c_1$ above---plus other similar contexts where the word \emph{speaking} appears---endows generalization.
+This is the desired ability to generalize over environments described in the previous section, which remained completely out of reach when using coarse domain indices.
+
+\begin{table}
+\centering
+\begin{tabular}{llll}
+  \toprule
+  \textbf{paradigm} & \textbf{training data} & \textbf{testing data} & \textbf{estimates}\\
+  \midrule
+  ERM               & $x, y$    & $x^{e'}$                                             & $P(Y \mid X)$\\
+  IRM               & $x, y, e$ & $x^{e'}$                                             & $P(Y \mid \phi^\text{inv}(X))$\\
+  LLM               & $z$       & $z_{t}$ \, and context $z_{j < t}$           & $P(Z_{t+1} \mid Z_t, \ldots, Z_1)$\\
+  ICRM              & $x, y, e$ & $x^{e'}_t$ and context $c^{e'}_t = (x^{e'}_{j})_{j< t}$ & $P(Y|X,C) \leadsto P^{e'}(Y \mid X)$\\
+  \bottomrule
+\end{tabular}
+\caption{Different learning paradigms discussed in this work, together with their training data and testing data formats, as well as the estimated predictors.
+In our \method{}, we amortize the current input $x^{e'}$ and its context $c^{e'}$, containing previously experienced unlabeled examples from the same environment $e'$, and  ``zoom-in'' ($\leadsto$) to the appropriate local risk minimizer.
+}
+\label{table:estimatetable}
+\end{table}
+
+
+
+\section{Adaptive domain generalization via in-context learning}
+
+\label{sec:main}
+
+The story has so far laid out two threads.
+On the one hand, \Cref{sec:dg} motivated the need for domain generalization algorithms capable of extracting relevant environment-specific features, at both the example and distributional levels.
+To this end, we have argued to move beyond coarse environment indices, towards rich and amortizable descriptions.
+On the other hand, \Cref{sec:icl} suggests understanding \emph{context} as an opportunity to describe \emph{environments} in precisely this manner.
+This section knits these two threads together, enabling us to attack the problem of domain generalization with in-context learners.
+The plan is as follows:
+\begin{itemize}
+\item Collect a dataset of triplets $\mathcal{D} = \{(x_i, y_i, e_i)\}_{i=1}^n$ as described in \Cref{sec:dg}.
+Initialize a next-token predictor $\hat{y} = h(x ; c)$, tasked with predicting a target label $y$ associated to the input $x$, as supported by the context $c$.
+\item During each iteration of training, select $e \in \Etr$ at random. Draw $t$ examples from this environment at random, construct one input sequence $(x^e_1, \ldots, x^e_t)$ and its associated target sequence $(y^e_1, \ldots, y^e_t)$.
+Update the next-token predictor to minimize the auto-regressive loss $\sum_{j=1}^t \ell(h(x^e_j; c^e_j), y^e_j)$, where the context is $c^e_j = (x^e_1, \ldots, x^e_{j-1})$, for all $j = 2, \ldots, t$, and $c^e_1 = \emptyset$.
+\item During test time, a sequence of inputs $(x'_1, \ldots, x'_{t'})$ arrives for prediction, one by one, all from the test environment $e' \in \Ete$.
+We predict $\hat{y}'_j = h(x'_j, c'_j)$ for $x'_j$, where the context $c'_j = (x'_1, \ldots, x'_{j-1})$, for all $j = 2, \ldots, t'$, and $c'_1 = \emptyset$.
+\end{itemize}
+We call the resulting method, illustrated in~\Cref{figure:main:c}, \methodfull{} (\method{}).
+
+Next, we develop a sequence of theoretical guarantees to understand the behavior of \method{} in various scenarios.
+To orient ourselves around these results, we recall three predictors featured in the exposition so far.
+First, the global risk minimizer over the pooled training data, denoted by $h^{\dagger}$ in~\cref{eqn: erm}, estimates $P(Y \mid X)$.
+Second, the environment risk minimizer, denoted by $h^e(x)$ for environment $e$, estimates $P(Y \mid X, E)$.
+Third, our in-context risk minimizer estimates the conditional expectation $P(Y \mid X, C)$, denoted by
+\begin{equation}
+        \tilde{h} = \argmin_{h} \sum_{j=1}^{t}\mathbb{E}_{(X, C, Y)}[\ell(h(X_j; C_j), Y_j)].
+        \label{eqn: icl}
+\end{equation}
+The sequel focuses on the binary cross-entropy loss $\ell$. Our first result shows that, in the absence of context, \method{} \emph{zooms-out} to behave conservatively. 
+
+\begin{restatable}[Zoom-out]{proposition}{zoomout}
+\label{prop:zoomout}
+    In the absence of context, \method{} behaves as the global empirical risk minimizer across the support of the training environments, i.e., $\tilde{h}(\cdot \; ;\; \emptyset) = h^{\dagger}(\cdot)$. 
+\end{restatable}
+
+Having established the connection between ICRM and ERM in the absence of any context, we now study the benefits of ICRM in the presence of sufficiently long contexts. The following result shows that, when provided with context from a training environment $e \in \Etr$, our \method{} \emph{zooms-in} and behaves like the appropriate environment risk minimizer, as shown in~\Cref{table:estimatetable}. In the next result, we assume that $P(Y = 1 \mid X=x, E=e)$ is parametrized and described by a function $h^\star(x, \theta^e_x)$, where $\theta_x^e$ describes features of the environment that are relevant to the query $x$, for all $e \in \Eall$. We assume an ideal \emph{amortization function} $b$ that takes the query $x$ and context $C_t$ as input and approximates $\theta_x^e$ and the sequence of random variables $b(X,C_t)$ converges almost surely to $\theta_X^E$. 
+
+\begin{restatable}[Full iid zoom-in]{theorem}{zoomin}\label{thm: zoomin}
+    Let $h^{\star}(x, \theta^e_x)$ describe $P(Y = 1 \mid X=x, E=e)$ for all $e \in \Eall$.
+  Furthermore, we assume the existence of an \emph{amortization function} $b(X, C_t) \stackrel{a.s.}{\rightarrow} \theta^{E}_X$.
+  Then, \method{} zooms-in on the environment risk minimizer by achieving a cross-entropy loss
+  \begin{equation*}
+   \lim_{t\rightarrow\infty} H(Y \mid X,C_t) = H(Y \mid X,E).
+  \end{equation*}
+  Further, if $I(Y;E \mid X)>0$, \method{} has better performance than the global risk minimizer.
+\end{restatable}
+In the previous result, we established that ICRM converges to empirical risk minimizer of the environment under infinitely long contexts. Next, we show that \method{} can partially zoom-in on the appropriate environment risk minimizer even with contexts of length of one.
+
+
+\begin{restatable}[Partial iid zoom-in]{theorem}{partialzoomin}\label{thm: partialzoomin}
+    Suppose the joint distribution $((X_1, \cdots X_t), (Y_1, \ldots, Y_t) ,E)$ is Markov with respect to a Bayesian network, each query $X$ and environment $E$ are statistically dependent and form the Markov blanket of $Y$.    Then, \method{} partially zooms-in on the environment risk minimizer, improving the performance of the global risk minimizer in terms of the cross-entropy loss. Further, the improvement is strictly monotonic in context length $t$.
+\end{restatable}
+
+Next, we move to the out-of-distribution setting where the test environments can be quite different from the train environments. 
+To provide theory for a domain generalization result, we must place some assumptions on the data generation process.
+In particular, and for all $e\in \Eall$, let
+\begin{equation}
+z \mid y,e \sim \mathcal{N}(\mu_e^y, \Sigma_e^y), \text{ and } x \leftarrow g(z),
+\label{eqn: dgp_ood}
+\end{equation}
+where the latent variables $z$ are sampled conditional on the label $y$ and environment $e$ from a Gaussian distribution with mean and covariance depending on $(y,e)$, and are then mixed by a map $g$ to generate the observations $x$. We summarize the environment in terms of the parameter vector $\gamma_e = \big[(p_e^{y}, \mu_e^{y}, \Sigma_e^{y})_{y\in \{0,1\}}\big]$, where $p_e^{y}$ is the probability of label $y$ in environment $e$.
+Our next result shows that ICL algorithms that learn $h(x;c)$ exhibit robust behavior under distribution shifts. 
+In contrast, standard predictors $h(x)$ can fail on novel environments from~\cref{eqn: dgp_ood}. 
+ Define $\delta_e$ to be a permutation of $\gamma_e$ that swaps the two components.  We construct the Voronoi cells corresponding to the points in the union of sets $\{\gamma_e\}_{e\in \mathcal{E}_{tr}}$ and $\{\delta_e\}_{e\in \mathcal{E}_{tr}}$. The set of points in the Voronoi cell corresponding to  $\{\gamma_e\}_{e\in \mathcal{E}_{tr}}$ define the \emph{Voronoi cell of the training environments}. Next, we show that  ICL can perform in novel test environments sufficiently far away from the training environments, so long as they are in the Voronoi cells of training environments. 
+
+
+\begin{restatable}[Full ood zoom-in]{theorem}{oodzoomin}\label{thm: oodzoomin}
+    Consider data triplets $(x, y, e)$ generated from $z \sim \mathcal{N}(\mu_{e}^{y}, \Sigma_{e}^{y})$ and $x \leftarrow g(z)$, for all environments $e \in \Eall$, where $g$ is the identity map (see \cref{sec: thms_proofs} for extensions to general diffeomorphisms $g$). There exists an ICL algorithm that produces Bayes optimal predictions for all the test environments that fall in the Voronoi cells of the training environments.
+\end{restatable}
+
+
+
+\section{\method{}
+
+
+Common advice in domain generalization recommends following the \emph{invariance principle} to learn robust predictors~\citep{peters2016causal, irm}.
+One simple version of the invariance principle is to ``select those inputs leading to stable regression coefficients across training environments.''
+At first sight, one could argue that the proposed \method{} does not adhere to such an invariance principle, as it is adapting to environment-specific information provided in the form of context.
+However, as some examples can show, \method{}'s implementation of ERM on the extended input-context feature space reveals invariant predictors that a vanilla implementation of ERM on the standard feature space fails to find.
+To see this, consider a linear least-squares regression problem mapping two inputs $(x_1, x_2)$ into a target $y$ under multiple training environments $e \in \Etr$ as:
+\begin{equation}
+ y  = \alpha \cdot x_1 + \beta \cdot \mu_2^e + \varepsilon,\label{eq:toy}
+\end{equation}
+where $\mu_i^e = \mathbb{E}[x_i \mid E=e]$, the pair $(\alpha, \beta)$ are invariant regression coefficients, and $\varepsilon$ is an independent noise term.
+Algorithmically, we make one simplifying assumption for pedagogic purposes.
+In particular, during training, we provide ICRM directly with the relevant extended feature space $(x_1, x_2, \mu^e_1, \mu^e_2)$, instead of requiring the algorithm to learn such representation from general-form sequential context.
+
+In this setup, ICRM learns to predict using $\alpha \cdot x_1 + 0 \cdot x_2 + 0 \cdot \mu_1^e + \beta \cdot \mu_2^e$.
+In contrast, ERM trains a linear model on $(x_1, x_2)$, learning to predict using $\tilde{\alpha} \cdot x_1 + \tilde{\beta} \cdot x_2$.
+This is the main point:
+if $\beta \neq 0$ and $\text{cov}(x_1, x_2) \neq 0$, ERM's estimate of the invariant coefficient is biased, $\tilde{\alpha} \not= \alpha$, and as a result the error of ERM in a new environment grows with the variance of $x_1$. On the other hand, ICRM estimates the invariant coefficient for $x_1$ perfectly and the error that it experiences is independent of variance of $x_1$ regardless of the context seen so far. As a result, the error of ERM is guaranteed to be worse than ICRM provided the variance of $x_1$ is sufficiently large. For a formal derivation and generalization of these claims, see~\Cref{sec: thms_proofs}. In our experiments too, we observe that ICRM is able to generalize \emph{zero-shot} to novel test environments.
+
+
+We believe that ICRM, and more generally ICL, provide one interesting new viewpoint on invariance.
+On the one hand, prior DG algorithms advocated to remove features as a guide to reveal invariance.
+On the other hand, in-context learners suggest that extending features with context affords invariance otherwise unnoticed.
+This needs further clarification: while the process of zooming-in to an environment risk minimizer does not provide us with an invariant predictor over the original feature space, the \emph{process of zooming-in} is in many cases an invariant mechanism over the extended feature space.
+These points are reminiscent of the discussion about ``fragility'' in the philosophy of causation~\citep{sep-causation-counterfactual}.
+Does smoking cause cancer?
+Not invariably, at least not across all contexts or environments.
+However, smoking does cause cancer invariably---across all contexts or environments---when extending the feature space as to include additional causes such as diet, genetic predispositions, and the number of smoked cigarettes.
+The ever-growing collection of causes approaches what John Stuart Mill called the \emph{total cause}.
+Then, learning across a diverse set of environments should allow the machine to pay attention to those that matter for robust prediction.
+In short, we afford invariance at the expense of constraining the diameter of the environment.
+In the extreme, when constraining the environment to contain only one smoker, we can always find an invariant predictor.
+
+
+
+
+
+
+
+
+
+\section{Experiments}
+
+
+To evaluate the efficacy of our \method, the following subsections are empirical investigations to answer the following questions, respectively:
+\begin{enumerate}
+    \item How does \method{} fare against competitive DG algorithms, for different context sizes?
+    \item How does the \method{} perform in the absence of domain labels?
+    \item What is the impact of model architecture on \method{}'s gains?
+    \item Can \method{} search for query relevant ``needle-in-the-haystack'' signals?
+\end{enumerate}
+
+\begin{table}[htb!]
+    \caption{Average/worst ood test accuracy for various counts of context samples for Adaptive Risk Minimization (ARM), Empirical Risk Minimization (ERM), Test Entropy Minimization (TENT) and our \method{} on FEMNIST, Rotated MNIST, WILDS Camelyon17 and  Tiny-ImageNet-C.}
+    \begin{center}
+    \begin{tabular}{lccccc|cccccc}
+        \toprule
+        \textbf{Data / method} & \multicolumn{5}{c}{\textbf{Average test accuracy}} & \multicolumn{5}{c}{\textbf{Worst case test accuracy}} \\
+        \coloredMidrule{white}{alternateRowColor}
+        \rowcolor{alternateRowColor}
+        FEMNIST & 0 & 25 & 50 & 75 & 100 & 0 & 25 & 50 & 75 & 100  \\
+        \coloredBelowRuleSep{white}
+        \quad ARM       &  49.5 &  83.9 &  84.4 & 84.7 & 84.6  & 23.6  &  59.5 & 60.7  & 57.0  & 58.8 \\
+        \quad TENT  & 78.1 & 77.9 & 81.2 & 82.5 & 83.3 & 55.2 & 57.2 & 63.3 & 65.9 & 67.2 \\
+        \quad ERM       &  \textbf{79.3}  & 79.3  & 79.3  & 79.3 & 79.3 &  59.0  & 59.0 & 59.0 & 59.0 &  59.0\\
+        \quad ICRM       &  78.7  & \textbf{87.2} & \textbf{87.4}  & \textbf{87.5} &  \textbf{87.8} &  \textbf{59.8} & \textbf{69.3}  & \textbf{70.6}  & \textbf{70.6} & \textbf{70.6} \\
+        \coloredMidrule{white}{alternateRowColor}
+        \rowcolor{alternateRowColor}
+        Rotated MNIST & 0 & 25 & 50 & 75 & 100 & 0 & 25 & 50 & 75 & 100  \\
+        \coloredBelowRuleSep{white}
+        \quad ARM       &  36.5 & 94.2  &  95.1 & 95.3 & 95.5 &  28.2 & 85.3  & 87.2  & 87.9 & 87.9 \\
+        \quad TENT & 94.1 & 88.0 & 91.9 & 93.8 & 94.3 & 80.2 & 88.5 & 88.5 & 80.2 & 81.3\\
+        \quad ERM       & \textbf{94.2} & 94.2 & 94.2  & 94.2 & 94.2 &  80.8 & 80.8  & 80.8  & 80.8 & 80.8  \\
+        \quad ICRM       &  93.6 &   \textbf{96.1} &  \textbf{96.2} & \textbf{96.2}& \textbf{96.2} &  \textbf{82.5} &  \textbf{88.5} &  \textbf{88.5} & \textbf{88.8} & \textbf{88.8} \\
+        \coloredMidrule{white}{alternateRowColor}
+        \rowcolor{alternateRowColor}
+        WILDS Camelyon17 & 0 & 25 & 50 & 75 & 100 & 0 & 25 & 50 & 75 & 100  \\
+        \coloredBelowRuleSep{white}
+        \quad ARM       &  61.2 &  59.5 & 59.7  & 59.7 & 59.7 & \multicolumn{5}{c}{\multirow{4}{*}{same as average accuracy}} \\
+        \quad TENT       & 67.9 & 81.8 & 87.2 & 89.4 & 89.4 &   \\
+        \quad ERM       &  68.6  & 68.6  &  68.6 & 68.6 & 68.6 &   \\
+        \quad ICRM       &  \textbf{92.0} & \textbf{90.7}  & \textbf{90.8}  & \textbf{90.8} & \textbf{90.8} &   &   &   &  &  \\
+        \coloredMidrule{white}{alternateRowColor}
+        \rowcolor{alternateRowColor}
+        Tiny ImageNet-C & 0 & 25 & 50 & 75 & 100 & 0 & 25 & 50 & 75 & 100  \\
+        \coloredBelowRuleSep{white}
+        \quad ARM       &  30.8 &  31.0 &  31.0 &  31.0 & 31.0 & 8.2  & 8.3  &  8.2 & 8.3 & 8.2 \\
+        \quad TENT       & 31.7 & 1.6 & 1.7 & 2.0 & 2.1 & 9.4 & 1.2  & 1.4 & 1.6 & 1.6\\
+        \quad ERM       &  31.8 &  31.8 & 31.8  & 31.8 & 31.8 & 9.5  &  9.5 &  9.5 &  9.5 & 9.5  \\
+        \quad ICRM       &  \textbf{38.3} & \textbf{39.2}  & \textbf{39.2}  & \textbf{39.2} & \textbf{39.2} & \textbf{18.8}  &  \textbf{19.2} & \textbf{19.5}  & \textbf{19.5} & \textbf{19.4} \\
+        \bottomrule
+    \end{tabular}
+    \end{center}
+       \label{table:main_sota}
+\end{table}
+
+ 
+In the following experiments, we compare \method{} against several prior methods designed to address domain generalization. Key competitors to our approach are marginal transfer based algorithms, which summarize observed inputs in each environment as a coarse embedding, as described in \Cref{sec:dg}. Among these methods, we compare with Adaptive Risk Minimization~\citep[ARM]{arm} and TENT~\citep{wang2020tent}. As a strong baseline, we also include ERM in our experimental protocol. 
+To ensure a fair comparison across different algorithms for each dataset, we use a standardized neural network backbone (ConvNet or ResNet-50 depending on the dataset) as described in ~\Cref{sec: experimental setup}. For \method{}, the same backbone is used to featurize the input, which is then processed by the decoder-only Transformer \citep{attention} architecture from the GPT-2 Transformer family \citep{radford2019language}. For fair comparisons, we adhere to DomainBed's protocols for training, hyperparameter tuning, and testing~\citep{domainbed}. We describe our experimental setup in detail in~\Cref{sec: experimental setup}
+
+We assess these methods across four image classification benchmarks, each offering a unique problem setting. FEMNIST~\citep{cohen2017emnist} contains MNIST digits and handwritten letters from individual writers as environments. Rotated MNIST concerns varied rotational angles as environments. Tiny ImageNet-C~\citep{hendrycks2019benchmarking} introduces diverse image corruptions to create multiple environments. WILDS Camelyon17~\citep{koh2021wilds} studies tumor detection and sourcing data from multiple hospitals as distinct environments. More details are provided in ~\Cref{sec:datasets}.
+\subsection{Adaptation to distribution shift}
+To study the adaptation of various approaches to distribution shifts, for each dataset and algorithm, we report performance across varying counts of context samples from the test environment, specifically at 0, 25, 50, 75, and 100 samples. We report an average across three independent runs of the entire sweep and its corresponding standard
+error, where we select the model with hyperparameters corresponding to the highest validation accuracy.
+\Cref{table:main_sota} summarizes the results of our experiments.
+\method{} consistently outperforms all methods across different numbers of in-context test samples except at 0 context on FEMNIST and Rotated MNIST, where ERM marginally exceeds by 1\%. Further, these gains persist over both the worst group and average accuracy across testing environments.
+\Cref{fig: mainplots} zooms into the model's performance between no-context and 25 context samples, highlighting the consistent superiority of \method{} even with a few in-context samples. Additionally, \method{}  demonstrates gains in performance even in the absence of test context. Specifically for both WILDS Camelyon17 and Tiny ImageNet-C,
+\method{} achieves significantly superior performance than other baselines during inference without leveraging any context from the test environment. 
+The training regimen of \method{} enables the model to identify contextual images relevant to the current query, resulting in a better featurizer compared to standard ERM, which is limited to updating based on the current input alone.
+In \Cref{sec: secattnmap}, we present instances of such selections identified by \method{} for a given query in the context. 
+
+
+
+\subsection{Robustness of \method{} in the absence of environment labels}
+As outlined in \Cref{sec:main}, the training regimen of \method{} assumes a dataset $\mathcal{D} = \{(x_i, y_i, e_i)\}_{i=1}^n$ collected under multiple training environments $e_i \in \Etr$. However, in scenarios lacking such domain separation during training, does \method{} continue to show an edge over ERM baselines? To study this question, we modify the sampling strategy: rather than constructing context vectors containing examples from one environment, we construct context vectors containing iid samples from all of the environments pooled together. To continue to test for out-of-distribution generalization, however, we evaluate the performance on examples from a novel test environment. We term this modified approach ICRM-Mix.
+
+\begin{table}[htb!]
+    \caption{Average/worst ood test accuracies for \method{} and ICRM-Mix across FEMNIST, Rotated MNIST, WILDS Camelyon17 and  Tiny-ImageNet-C. ICRM-Mix trains on sequences with samples drawn i.i.d. from the unified dataset comprising various environments.}
+    \begin{center}
+    \begin{tabular}{lccccc|cccccc}
+        \toprule
+        \textbf{Data / method} & \multicolumn{5}{c}{\textbf{Average test accuracy}} & \multicolumn{5}{c}{\textbf{Worst case test accuracy}}\\
+        \coloredMidrule{white}{alternateRowColor}
+        \rowcolor{alternateRowColor}
+        FEMNIST & 0 & 25 & 50 & 75 & 100 & 0 & 25 & 50 & 75 & 100  \\
+        \coloredBelowRuleSep{white}
+        
+        \quad ICRM       &  78.7  & 87.2 & 87.4  & 87.5 &  87.8 &  59.8 & 69.3  & 70.6  & 70.6 & 70.6 \\
+        \quad ICRM-Mix  & 77.6 & 81.1 & 81.1 & 80.9 &  80.9 & 57.5 & 62.7 & 65.0 & 64.1 & 62.9 \\
+        \coloredMidrule{white}{alternateRowColor}
+        \rowcolor{alternateRowColor}
+        Rotated MNIST & 0 & 25 & 50 & 75 & 100 & 0 & 25 & 50 & 75 & 100  \\
+        \coloredBelowRuleSep{white}
+        \quad ICRM       &  93.6 &   96.1 &  96.2 & 96.2& 96.2 &  82.5 &  88.5 &  88.5 & 88.8 & 88.8 \\
+        \quad ICRM-Mix   &  88.9 & 92.6 & 92.7 & 92.6 & 92.7 & 68.8 & 77.1 & 76.8 & 76.4 & 76.6  \\
+        \coloredMidrule{white}{alternateRowColor}
+        \rowcolor{alternateRowColor}
+        WILDS Camelyon17 & 0 & 25 & 50 & 75 & 100 & 0 & 25 & 50 & 75 & 100  \\
+        \coloredBelowRuleSep{white}
+        \quad ICRM       &  92.0 & 90.7  & 90.8  & 90.8 & 90.8 &  \multicolumn{5}{c}{\multirow{2}{*}{same as average accuracy}} \\
+        \quad ICRM-Mix   & 92.9 & 90.7 & 90.8  & 90.7 & 90.7 \\
+        \coloredMidrule{white}{alternateRowColor}
+        \rowcolor{alternateRowColor}
+        Tiny ImageNet-C & 0 & 25 & 50 & 75 & 100 & 0 & 25 & 50 & 75 & 100  \\
+        \coloredBelowRuleSep{white}
+        \quad ICRM       & 38.3 & 39.2  & 39.2  & 39.2 & 39.2 & 18.8  &  19.2 & 19.5  & 19.5 & 19.4 \\
+        \quad ICRM-Mix   & 38.4 & 39.3  & 39.3 & 39.3 & 39.3 & 18.7 & 19.2 & 19.4 & 19.5 & 19.4 \\
+        \bottomrule
+    \end{tabular}
+    \end{center}
+    \label{table:ablation_iid_icl}
+\end{table}
+\Cref{table:ablation_iid_icl} contrasts the performance of \method{} with ICRM-Mix.
+\method{} consistently outperforms ICRM-Mix across varying counts of in-context samples on both FEMNIST and Rotated MNIST. Surprisingly, ICRM-Mix and \method{} perform similarly on WILDS Camelyon17 and Tiny ImageNet-C. Consider a setting where the model benefits the most attending to examples from the same class or related classes. If classes are distributed uniformly across domains, then ICRM and ICRM-mix are bound to perform similarly. Consider another setting where the model benefits the most by attending to environment specific examples such as characters drawn by the same user. In such a case, ICRM and ICRM-mix have very different performances.
+
+
+
+\subsection{Understanding the impact of architecture}
+
+To dissect the performance gains potentially arising from \method{}'s transformer architecture, we explore two additional competitors.
+On the one hand, we train an ERM baseline, ERM$^+$ using an identical architecture to IRCM, but without context.
+On the other hand, we train an ARM baseline, ARM$^+$, where the input-context pair is provided to the same transformer as the one used by ICRM.
+This is in contrast to the original implementation of ARM, where input and context are concatenated together along the channel dimension, and sent to classification to a convolutional neural network.
+\begin{table}[htb!]
+    \caption{Average out-of-distribution test accuracies for ARM$^{+}$ and ERM$^{+}$ in contrast to their base algorithms, ARM and ERM across FEMNIST, Rotated MNIST, WILDS Camelyon17 and  Tiny-ImageNet-C. }
+    \begin{center}
+    \begin{tabular}{lccccc|cccccc}
+        \toprule
+        \textbf{Data / method} & \multicolumn{5}{c}{\textbf{Average test accuracy}} & \multicolumn{5}{c}{\textbf{Worst case test accuracy}}\\
+        \coloredMidrule{white}{alternateRowColor}
+        \rowcolor{alternateRowColor}
+        FEMNIST & 0 & 25 & 50 & 75 & 100 & 0 & 25 & 50 & 75 & 100  \\
+        \coloredBelowRuleSep{white}
+        \quad ARM       &  49.5 &  83.9 &  84.4 & 84.7 & 84.6  & 23.6  &  59.5 & 60.7  & 57.0  & 58.8 \\
+        \quad ARM$^{+}$ & 71.4 & 83.4 &  84.0 & 83.8 & 83.5 & 51.7 & 63.0 & 64.0 & 60.7 & 62.0 \\
+        \midrule
+        \quad ERM  &  79.3  & 79.3  & 79.3  & 79.3 & 79.3 &  59.0  & 59.0 & 59.0 & 59.0 &  59.0\\
+        \quad ERM$^{+}$ & 77.4 & 77.4 & 77.4 & 77.4 & 77.4 & 53.3 & 53.3  & 53.3 & 53.3 & 53.3 \\
+        \coloredMidrule{white}{alternateRowColor}
+        \rowcolor{alternateRowColor}
+        Rotated MNIST & 0 & 25 & 50 & 75 & 100 & 0 & 25 & 50 & 75 & 100  \\
+        \coloredBelowRuleSep{white}
+        \quad ARM       &  36.5 & 94.2  &  95.1 & 95.3 & 95.5 &  28.2 & 85.3  & 87.2  & 87.9 & 87.9 \\
+        \quad ARM$^{+}$   & 86.9 & 92.6 & 92.7 & 92.8 & 92.8  & 71.4 &  80.9 & 81.0  & 81.2 & 81.1\\
+        \midrule
+        \quad ERM       & 94.2 & 94.2 & 94.2  & 94.2 & 94.2 &  80.8 & 80.8  & 80.8  & 80.8 & 80.8  \\
+        \quad ERM$^{+}$ & 94.3 & 94.3 & 94.3  & 94.3 & 94.3 &  81.9 & 81.9  & 81.9  & 81.9 & 81.9  \\
+        \coloredMidrule{white}{alternateRowColor}
+        \rowcolor{alternateRowColor}
+        WILDS Camelyon17 & 0 & 25 & 50 & 75 & 100 & 0 & 25 & 50 & 75 & 100  \\
+        \coloredBelowRuleSep{white}
+         \quad ARM       &  61.2 &  59.5 & 59.7  & 59.7 & 59.7 &   \multicolumn{5}{c}{\multirow{2}{*}{same as average accuracy}} \\
+        \quad ARM$^{+}$ & 55.8 & 55.1 & 55.0 & 55.0 & 55.0 &  &  &  &  &  \\
+        \midrule
+        \quad ERM       &  68.6  & 68.6  &  68.6 & 68.6 & 68.6 &  \multicolumn{5}{c}{\multirow{2}{*}{same as average accuracy}} \\
+        \quad ERM$^{+}$ & 50.1 & 50.1 & 50.1 & 50.1 & 50.1 &  &  &  &  & \\
+        \coloredMidrule{white}{alternateRowColor}
+        \rowcolor{alternateRowColor}
+        Tiny ImageNet-C & 0 & 25 & 50 & 75 & 100 & 0 & 25 & 50 & 75 & 100  \\
+        \coloredBelowRuleSep{white}
+        \quad ARM       &  30.8 &  31.0 &  31.0 &  31.0 & 31.0 & 8.2  & 8.3  &  8.2 & 8.3 & 8.2 \\
+        \quad ARM$^{+}$ & 5.5 &5.7  & 5.7 & 5.7 & 5.7 & 1.9 & 1.9 & 1.9 & 1.9 & 1.9  \\
+        \midrule
+        \quad ERM       &  31.8 &  31.8 & 31.8  & 31.8 & 31.8 & 9.5  &  9.5 &  9.5 &  9.5 & 9.5  \\
+        \quad ERM$^{+}$ & 29.7 & 29.7 & 29.7 & 29.7 & 29.7 & 8.3 & 8.3 & 8.3 & 8.3 & 8.3 \\
+        \bottomrule
+    \end{tabular}
+    \end{center}
+    \label{table:ablation_pluses}
+\end{table}
+
+\Cref{table:ablation_pluses} presents the performance of both ERM$^{+}$ and ARM$^{+}$ relative to their base models, ERM and ARM, across four benchmark datasets. ARM$^{+}$ demonstrates superior zero-shot performance over ARM on both FEMNIST and Rotated MNIST. However, ARM maintains a performance advantage over ARM$^{+}$ across varying counts of in-context samples on WILDS Camelyon17 and Tiny ImageNet-C, with a notably pronounced difference on the latter.  Similarly, ERM either matches or outperforms ERM$^{+}$ on all four datasets. 
+\begin{figure}[!htb]
+  \centering
+  \includegraphics[width=\textwidth]{figs/femnist_attn.pdf}
+  \includegraphics[width=\textwidth]{figs/tinyimagenet_attn.pdf}
+  \caption{Attention scores for query images within randomized input sequences from test environments, as determined by \method{} on FEMNIST (top two rows) and Tiny ImageNet-C (bottom two rows). `L' denotes the label of a given image.}
+  \label{fig:attn_maps}
+\end{figure}
+
+\subsection{Investigating attention in \method{}}\label{sec: secattnmap}
+As discussed in \Cref{sec:dg}, one special feature of \method{} is its ability to learn an amortization function by paying attention to the input query and its context. To better understand this nuanced functionality, we turn our focus to visualizing attention maps of a trained \method{} model. Specifically, we construct a random sequence of data from the test environment and examine the attention scores between each example in this sequence and a novel input query across different heads.
+\Cref{fig:attn_maps} illustrates attention scores from a single head for two query images (marked in blue) for FEMNIST and Tiny ImageNet-C.
+The top row reveal that the model selectively attends to images featuring at least two curved arcs (marked in green) while paying little attention to a partial circle (highlighted in red). Additionally, when the query image is interpreted as a 90-degree clockwise rotated digit ``2'', the model extends its attention to other augmentations of ``2'' within the prompt.
+Remarkably, such attention patterns emerge on unseen domains using only unlabeled examples from them, underscoring the potential of amortization!
+Similarly, in the second row, attention is predominantly allocated to lines of length similar to that of the query (also in green), thereby largely disregarding shorter lines (shown in red).
+The last two rows in~\Cref{fig:attn_maps} show that the model, when presented with a query image of a train, attends not only on other trains but also on a bus---indicating a semantic understanding of similarity. In the bottom panel, the model demonstrates a capability to discern individuals across samples within the prompt. 
+
+
+
+
+
+
+
+
+
+
+
+
+\section{Discussion}
+
+\label{sec:discussion}
+
+We have introduced \methodfull{} (\method{}), a framework to address domain generalization as next-token prediction.
+\method{} learns in-context about environmental features by paying attention to unlabeled instances as they arrive.
+In such a away, \method{} dynamically zooms-in on the test environment risk minimizer, achieving competitive out-of-distribution generalization.
+
+\method{} provides a new perspective on invariance.
+While prior work on DG focused on information removal as a guide to generalization, ICRM suggests that extending the feature space with the relevant environment information affords further invariance.
+By addressing the very general problem of next-token prediction \emph{in}-distribution, we amortize the performance over many specific \emph{out-of}-distribution tasks.
+This happens by virtue of moving beyond coarse environment indices, into rich, hierarchical, and partially-overlapping context vectors. 
+More generally, by framing DG in terms of next-token prediciton, we enable learning machines to fully exploit data in \emph{natural order}, more closely mimicking the human learning experience.
+As L\'eon Bottou once said, \emph{Nature does not shuffle data}.
+As a word of caution, we must conduct research to guarantee that in-context learners do not ``zoom-in'' on toxic spurious correlations with high predictive power in certain environments. 
+
+We would like to close with a quote from \citet{andersen2022predictive}, who claim that the central property of zooming-in on the relevant information
+\begin{quote}
+\small
+refers to a cognitive agent’s ability to intelligently ignore irrelevant information and zero in on those aspects of the world that are relevant to their goals. The relevance realization framework suggests that the brain achieves this feat by attempting to balance the competing goals of remaining efficient in the current environment while also being resilient in the face of environmental perturbations.
+\end{quote}
+Paralleling the examples from \citet{andersen2022predictive}, we are excited to work to further understand how next-token prediction and in-context learning serves as a powerful mechanism to amortize and dynamically navigate trade-offs such as such as the efficiency-resiliency tradeoff, the exploration-exploitation tradeoff, specialization-generalization tradeoff, and focusing-diversifying tradeoff.
+
+\clearpage
+\newpage
+
+

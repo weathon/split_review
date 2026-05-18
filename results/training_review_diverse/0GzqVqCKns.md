@@ -1,20 +1,22 @@
-Now I have all the information needed to produce the final review. Let me synthesize carefully.
+Now I have a thorough understanding of the paper. Let me synthesize the final review.
+
+---
 
 ## Summary
 
-This paper proposes using the dynamical susceptibility — a quantity from statistical physics measuring the volume of correlated token changes — as a probe of hierarchical latent structure in data undergoing forward-backward diffusion. The authors derive a mean-field theory showing that the correlation length of token changes diverges at the class phase transition in the Random Hierarchy Model (RHM), validate this with Belief Propagation experiments, and then show that qualitatively similar behavior (peaking susceptibility at a finite inversion time) appears in both text (MDLM on WikiText) and images (DDPM on ImageNet with CLIP patch embeddings).
+This paper proposes that forward-backward experiments in diffusion models — where data is noised and then denoised — can reveal signatures of hierarchical latent structure. The authors derive a mean-field theory for the Random Hierarchy Model (RHM) predicting that the correlation length of token changes diverges at the class phase transition, then validate this prediction with Belief Propagation numerics. They extend the analysis to real data, showing that both text (WikiText2 with MDLM) and images (ImageNet with DDPM + CLIP embeddings) exhibit qualitatively similar peaking correlation lengths and dynamical susceptibilities at critical inversion times, supporting the hypothesis that hierarchical compositionality is a universal property of natural data.
 
 ## Strengths
 
-- **Theoretical derivation linking hierarchical structure to diverging correlation length.** Using a mean-field approximation of the ε-process in the RHM, the paper derives that the correlation length scales as ξ ∼ |ε − ε*|^(−ν) (Equation 5) and validates this prediction via Belief Propagation experiments with excellent agreement between theory and simulation (Figure 2a-I, a-II). This provides a clean, verifiable theoretical foundation for the proposed signature.
+1. **Clean theoretical derivation for the RHM.** The paper rigorously derives (Eq. 6, line 213) that the correlation length scales as ξ ∼ |ε − ε*|^{-ν} at the class phase transition, and confirms this with near-perfect agreement between mean-field theory and BP numerics (Figure 2a-I, a-II). This is the paper's strongest contribution.
 
-- **Cross-modal experimental demonstration.** The paper shows that the susceptibility peaks at a finite inversion time in both text (t* ≈ 0.6T on WikiText with MDLM) and images (t* ≈ 0.6–0.7T on ImageNet with DDPM). This cross-modal consistency is the paper's strongest empirical contribution and supports the claim that hierarchical structure is a general property of natural data.
+2. **Control experiment ruling out a trivial alternative.** Section 3.3 shows that Gaussian random fields with power-law spatial correlations produce a monotonically growing susceptibility that peaks at the final time, not at a finite critical time — demonstrating that spatial correlations alone cannot explain the observed peak without hierarchical latent structure.
 
-- **Control experiment distinguishing hierarchical from purely spatial correlations.** The Gaussian random field study (Section 3.3) shows that non-hierarchical data with algebraic spatial correlations produce a monotonic correlation length, not a peaked one — sharpening the attribution of the observed peaking susceptibility to hierarchical latent structure. This control is well-designed and directly strengthens the core claim.
+3. **Extension to real data modalities.** The paper goes beyond synthetic models to show that both text (MDLM on WikiText2) and images (DDPM on ImageNet with CLIP embeddings) exhibit the same qualitative phenomenology: a peak in both dynamical correlation length and susceptibility at a finite inversion time, with a power-law-like spatial decay at the transition.
 
-- **Consistency across two different diffusion processes on the synthetic model.** The RHM experiments are performed for both the ε-process and masked diffusion (Figure 2a vs. 2b), showing the qualitative behavior is robust to the choice of noise mechanism. This strengthens the generality of the theoretical framework.
+4. **Physically motivated observable.** The dynamical susceptibility (Eq. 3), adapted from statistical physics, provides a principled and interpretable way to quantify the volume of tokens that change together, applicable across synthetic and real data.
 
-- **Clear visualization of the mechanism.** Figure 3 (tree changes) provides an intuitive illustration of how changes in deeper latent variables produce larger blocks of correlated token changes, directly connecting the theoretical picture to the observed data.
+5. **Validation across two diffusion processes.** The RHM results cover both the simplified ε-process (where mean-field theory is tractable) and the practical masking diffusion used in real text models, confirming the predictions are robust to the choice of noise mechanism.
 
 ## Weaknesses
 
@@ -22,60 +24,46 @@ This paper proposes using the dynamical susceptibility — a quantity from stati
 None.
 
 ### Major
-None. The paper has real gaps but none that invalidate its core contribution; all are addressable.
+
+1. **The language experiments use linear token index distance without justification for how this captures hierarchical structure.** In the RHM, spatial distance `r = s^{ℓ̃} − 1` is monotonic in tree depth because the tree's leaves are linearly ordered. For text, the paper uses `r = |i − j|` (linear token index distance) as the spatial coordinate for measuring correlations. The relationship between linear token position and hierarchical (syntactic) distance is not straightforward — long-distance dependencies are common in natural language. The paper offers no argument for why linear distance is a reasonable proxy for tree distance in language, nor does it test an alternative (e.g., parse-tree distance). This weakens the language experiments' evidence for hierarchical structure, since the observed peak could arise from non-hierarchical sequential properties (e.g., local n-gram co-occurrence). The overall paper's contribution is not fatally undermined — the RHM theory and image experiments stand independently — but the multimodal universality claim is weakened.
 
 ### Minor
 
-- **The vision observable's connection to the binary-spin theory is established only by analogy, not by argument.** The paper defines a dynamical susceptibility from the *L2 norm of CLIP embedding variations* (lines 361–366), while the theory is derived for binary spin variables (σ_i ∈ {−1, +1}) encoding exact token changes. No theoretical argument is given that this continuous quantity inherits the specific physical interpretation of the susceptibility — i.e., that its peak measures the size of cooperatively changing blocks in the same sense. The paper acknowledges this in the contribution list ("qualitative agreement") and the results are visually plausible, but the evidential chain from theory to the vision experiments is weaker than for the text or RHM experiments. This does not undermine the paper's core claim (which is multi-modal), but it means the vision evidence should be read as suggestive rather than confirmatory.
+1. **The paper does not establish that a peaking susceptibility uniquely signals hierarchical structure.** While the Gaussian random field control rules out one non-hierarchical alternative, the paper frames the peak as a "signature of the hierarchy" (line 33). A more cautious framing (e.g., "consistent with hierarchical structure") would better match the evidence, especially since the real data lack a known ground-truth hierarchy against which to verify.
 
-- **The text experiments do not independently verify that the susceptibility peak coincides with a measured latent-variable transition.** In the RHM, the paper directly measures the class reconstruction probability and shows it undergoes a phase transition at the same t* where susceptibility peaks (Figure 2b, referencing fig:maksing_inversion). For text, the susceptibility peak at t* ≈ 0.6T is presented as *establishing* a phase transition (line 322), but no independent measurement of semantic content, topic, or grammatical structure change is reported. Prior work (Sclocchi et al. 2024) established the class transition for images, providing independent grounding for the vision experiments; no such grounding exists for text in this paper. This weakens the claim from "confirmed" to "qualitatively consistent."
+2. **Error bars/confidence intervals are absent** from the correlation functions and susceptibility curves for the real-data experiments (Figures 3 and 5). Given the finite sample sizes (300 texts, 344 images) and stochastic trajectories, showing variability would increase confidence that the peaks are robust and not artifacts of particular samples or seeds.
 
-- **No error bars or confidence intervals on real-data plots (Figures 4b–c, 6a–b).** The paper reports N_R = 50 trajectories for text and 128 for images, which is adequate, but does not show variability (e.g., via bootstrapping or standard deviations). Given stochasticity in the forward-backward process and finite sample counts, the reader cannot assess whether the claimed peak at t* is robust or within noise. This is standard practice that would significantly strengthen the quantitative conclusions.
+3. **The mapping from continuous CLIP embedding norms to binary spin variables is not discussed.** The RHM theory (line 137) defines binary spins σ_i ∈ {−1, +1} indicating token identity changes. The image experiments (line 364) instead use correlations of continuous variation norms ‖Δx_i(t)‖. The connection between these observables is not explained, making the quantitative link to theory less direct than for text.
 
-- **No limitations or caveats discussion.** The paper does not discuss potential biases introduced by the learned denoiser (vs. exact BP denoising), the dependence of results on the tokenizer/model choice, or the assumption that natural data has tree-like hierarchical structure. Adding a limitations paragraph would improve the paper's framing.
-
-- **The claim in the abstract — "we confirm this prediction" — is stronger than the evidence warrants**, given the gaps above. "Show qualitative agreement" or "are consistent with" would be more accurate for the real-data experiments.
+4. **The cutoff r = 10 for the text susceptibility (Figure 3 footnote) is mentioned but not justified.** The paper does not show that the peak location or shape is stable with respect to this cutoff or provide a principled reason for its choice.
 
 ### Trivial
-
-- The distance metric used for the image correlation function (Euclidean or Manhattan on the 7×7 grid?) is not explicitly stated (lines 361–366), though it can be inferred. A brief clarification would improve reproducibility.
-
-- The paper states it uses a "${\tt GPT2}$ tokenizer" but does not specify which variant (e.g., GPT-2 BPE with what vocabulary size). Minor detail.
-
-- The truncation of the susceptibility integral at r = 10 for text is noted in a footnote but not justified with a sensitivity analysis. A brief comment on how results behave for different cutoffs would be helpful.
+None.
 
 ## Nice-to-Haves
 
-- For at least one real-data modality, directly measure a high-level latent variable transition (e.g., topic change in text via a topic model, or class change probability in images via classifier, as in Sclocchi et al. 2024) and show it coincides with the susceptibility peak. This would transform the evidence from qualitative to quantitative.
-- For the vision experiments, explore whether thresholding the CLIP embedding variations to binary change indicators (as in the theory) yields similar results, which would strengthen the connection to the theoretical framework.
-- A brief sensitivity analysis of the truncation distance r = 10 in the text experiments.
+- Provide an alternative analysis of the text experiments using a linguistically-motivated distance metric (e.g., dependency parse distance, or distance in a learned embedding space) to strengthen the link to hierarchical structure.
+- Estimate the critical exponent ν from real data (e.g., how susceptibility scales with |t − t*|) and compare to the RHM prediction, moving beyond qualitative "remarkable agreement."
+- Add error bars to the real-data correlation/susceptibility plots, or at minimum discuss the expected variance.
+- Test sensitivity of the text peak location to the r = 10 cutoff.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution:
-
-- The harsh critic's request for the paper to discuss "related work on criticality in neural networks and methods that directly infer latent trees from data (e.g., phylogenetic or hierarchical clustering approaches)" — removed per instruction: "DO NOT mention missing related works, as you do not have external sources to confirm their existence."
-- The harsh critic's comment about missing appendix content and details — removed because appendix sections exist in the original submission but are stripped by the parser.
-- The harsh critic's complaint that "the paper does not discuss whether other non‑hierarchical models (e.g., a mixture of distributions with varying resolution scales) could also produce a non‑monotonic correlation length" — partially kept in spirit but downgraded: the paper runs a Gaussian field control, which is a reasonable baseline. Demanding exhaustive testing of all possible non-hierarchical models is scope creep.
-- The harsh critic's note about "tokenizer details... GPT-2 BPE" — the paper does state it uses the GPT2 tokenizer (line 322), which is sufficient for an anonymous submission; the specific vocabulary size is a minor detail. Moved to Trivial.
+- **Critical Issue 2 (uniqueness of the signal — fully removed by the hard rule?):** Actually, this is kept as a Minor weakness above because the paper's "signature" framing could be seen as slightly overstrong. However, the critic's claim that "many non-hierarchical models could in principle produce a peaking susceptibility" (e.g., mixture models) is speculative and unsupported — the critic provides no concrete model or evidence. This portion of the criticism is removed as it amounts to speculation.
+- **The critic's claim that the paper's "multimodal argument collapses if one of its two pillars is unsupported"** is removed as an overstatement — the paper's core theoretical and numerical contributions (RHM) are independent of the language experiments, and the image experiments are not affected by the language distance issue.
 
 ## Novel Insights
-
-The reviews surface one genuinely novel observation beyond the paper's own contributions: the harsh critic's suggestion to verify the susceptibility peak by directly measuring a latent variable transition in text (e.g., via topic model or parser) identifies the most impactful single experiment the authors could do to strengthen the empirical chain. This is not a flaw in the existing paper but a sharp articulation of where the evidence is thinnest. Additionally, the harsh critic's observation that the vision observable (L2 norms of CLIP embedding variations) departs from the binary-spin framework is a valid methodological concern that the authors should address explicitly, even if only to argue that the continuous observable is a natural generalization.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-- Soften the abstract's "confirm this prediction" to language like "show qualitative agreement with this prediction" or "demonstrate consistency with this prediction" for the real-data experiments.
-- Add error bars (bootstrap or standard error) to Figures 4b–c and 6a–b.
-- Add a limitations/discussion paragraph addressing: (i) learned vs. exact denoising, (ii) model/tokenizer dependence, (iii) the assumption of tree-structured hierarchy.
-- Explicitly state the distance metric (Euclidean vs. Manhattan) used for the 2D grid in the image correlation function.
-- For the vision experiments, provide a brief argument for why the L2-norm observable is a reasonable extension of the binary-spin framework, or show that thresholding to binary indicators yields similar results.
+1. In the language section, acknowledge the limitation of using linear token distance as a proxy for hierarchical distance. Consider adding a small-scale experiment with parsed text using tree distance to confirm the results are robust.
+2. Add error bars or confidence bands to the real-data correlation and susceptibility plots.
+3. For the image experiments, discuss the relationship between the continuous variation norms and the binary spin observables used in the RHM theory, or apply a thresholding/binarization procedure to make the connection more direct.
+4. Provide a sensitivity analysis for the r = 10 cutoff in the text susceptibility calculation.
 
 ## Score and Decision
 
-This is a solid paper with a compelling core idea and clean theoretical/synthetic validation. The real-data experiments are promising but have clear evidential gaps: the vision observable lacks a tight connection to the theory, the text experiments lack independent verification of a latent transition, and error bars are absent. These are not fatal — they do not invalidate the paper's contributions — but they prevent the paper from being as definitive as it could be. The paper would benefit from a major revision addressing these gaps, though none require new theoretical development.
+This paper makes a solid theoretical contribution (RHM mean-field analysis with clean predictions) and provides compelling synthetic validation. The real-data experiments are interesting and suggestive, though the language experiments are weakened by the unexamined distance metric choice. The paper's core claims are supported by the RHM analysis and image experiments; the language experiments are the weakest link but not fatally flawed. The paper would benefit from sharper framing and a few methodological clarifications.
 
-Given the strengths (clean theory, cross-modal scope, good controls) and the verified weaknesses (evidential gaps in real-data experiments, missing error bars), the paper is a solid borderline accept. The contributions are real but the empirical support for the central claim in real data is preliminary rather than definitive.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

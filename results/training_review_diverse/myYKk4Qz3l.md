@@ -1,76 +1,84 @@
-Now I have a thorough understanding of the paper and both reviews. Let me produce the consolidated final review.
+Now I have sufficient understanding of the paper and the reviewer inputs. Let me write the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces "training-free editioning" for text-to-image models, a new task that creates model variations (e.g., a "cat edition" that only generates cats) without retraining. The method formulates each edition as a concept subspace in CLIP embedding space, obtained via PCA on prompts containing the target concept. Projecting input prompt embeddings into these subspaces restricts generation to the desired concept. Experiments on Stable Diffusion v1.4 with a fixed template structure (`<subject><verb><preposition><object>`) demonstrate the approach on nine subject concepts, showing high editioning accuracy via CLIP-based metrics, reasonable FID/IS scores, and qualitative confirmation.
+This paper introduces the novel task of "training-free editioning" for text-to-image models—creating model variants that restrict generation to a specific concept (e.g., a "cat edition" that always outputs cats) without any retraining. The proposed method uses PCA on CLIP embeddings of concept-specific prompts to construct low-dimensional concept subspaces, then projects input prompt embeddings into these subspaces to force concept-constrained generation. The paper provides formal definitions distinguishing editioning from image editing and concept erasing, and presents quantitative and qualitative results on nine concepts (animals, vehicles, people) using the subject slot of a single template.
 
 ## Strengths
 
-- **Novel task formulation with clear differentiation from prior work**: Section 3 formally defines training-free editioning and distinguishes it from image editing (aspect/image-level) and concept erasing (removing a concept). This establishes a well-scoped new problem that is not merely rebranding existing ideas.
+1. **Novel task formulation with clear conceptual framework**: The paper formally defines "training-free editioning" (Definitions 1 and 2, Section 3) and clearly distinguishes it from related paradigms (image editing, concept erasing) along the axes of task level (model-level vs. image-level) and methodology (embedding manipulation vs. weight fine-tuning). This framing is original and opens a new direction for model customization.
 
-- **Clean, principled method**: The concept-subspace approach via PCA is technically sound and well-motivated. The magnitude-compensated projection (Eq. 5) and the radial-origin conjecture (Conjecture 1) are grounded in CLIP's cosine-similarity properties, and the dimensionality reduction from 59k to 13k dimensions (20.7× computational speedup at 99.9% explained variance, Figure 3) is a practical contribution.
+2. **Clean, principled method grounded in an empirical observation**: The PCA-based concept subspace approach is simple and well-motivated. The paper validates its key geometric assumption—that CLIP embeddings for concept-similar prompts lie on a thin hypersphere shell centered at the origin (Conjecture 1, Figure 6)—which justifies omitting PCA centering and makes the projection formulation natural.
 
-- **Strong quantitative editioning results**: Table 1 reports CLIP softmax probabilities consistently above 0.84 (most above 0.94) across nine editions against eight unrelated prompt categories, with very low standard deviations. The embedding-similarity analysis (Table 3) further confirms that projected embeddings closely match the "replaced" prompt embeddings (mean cosine distance 0.076 vs. 0.227 for input-to-replaced).
+3. **Quantitative evidence of effective concept restriction**: Table 1 reports high CLIP-based editioning scores (mostly >0.93) across 9 concepts × 8 prompt categories, and Table 3 shows projected embeddings have mean cosine distance of only 0.076 from the "replaced" prompt embeddings (vs. 0.227 for original inputs). The qualitative results (Figures 4–5) visually confirm that the target concept is consistently enforced while non-subject details (verb, object) are preserved.
 
-- **Empirical justification of the radial-origin conjecture**: Figure 8 shows embedding distances to the origin are near-constant (~250) across concept datasets and COCO, validating Conjecture 1 which underpins the PCA approach.
-
-- **Qualitative confirmation**: Figures 4-6 show clear editioning — prompts specifying different subjects generate images containing the edition's target subject while non-subject elements remain consistent. The interpolation and component analysis experiments (Figures 7-8) further demonstrate subspace properties.
+4. **Image quality preservation without training**: The Inception Scores for editioned images are consistently higher than the base Stable Diffusion model (mean 6.680 vs. 5.428, Table 2), showing that the training-free projection does not degrade—and may slightly improve—generation quality within the restricted concept.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None. The paper's core claims are supported by the evidence provided.
+
+1. **Missing comparison to simple training-free baselines**: The paper does not compare its PCA-based method against trivial prompt engineering alternatives such as appending/prepending the target concept to the prompt (e.g., "cat, [original prompt]"), inserting the concept via prompt composition, or using negative prompts to suppress non-target subjects. These baselines would be straightforward to implement and are critical for assessing whether the PCA projection offers any practical advantage over what a user could achieve with basic prompt manipulation. Without them, it is unclear whether the method's complexity is justified. This is the paper's most significant gap.
+
+2. **Over-reliance on CLIP-based metrics without external validation**: The primary quantitative evidence for editioning accuracy (Table 1) uses CLIP score softmax probabilities, where both the conditioning mechanism and the evaluation metric operate in CLIP space. While not "circular" in a strict sense—CLIP score genuinely measures image-text alignment—the evaluation would be substantially stronger with independent verification such as: (a) human evaluation of whether generated images contain the intended concept, (b) object detection (e.g., DETR, YOLO) to measure concept occurrence rates, or (c) VQA-based assessment of prompt faithfulness for non-subject elements. Currently, the core claim of effective editioning rests on a single family of automatic metrics.
 
 ### Minor
 
-1. **Validation is limited to subject editioning within a single fixed template.** The paper focuses exclusively on replacing the `<subject>` element in the rigid template `T = <subject><verb><preposition><object>`. The general definition (Definition 1) implies the method should work for arbitrary concepts, but no experiments address verb/object editioning, multi-concept constraining, or free-form prompts that do not match the template. The authors transparently acknowledge this is "an important first step," but the gap between the paper's broad framing and narrow validation is consequential.
+3. **Limited experimental scope relative to claimed generality**: The paper evaluates editioning only on the **subject** slot of a single template (subject-verb-preposition-object). While the paper acknowledges this scope (Section 5.1), the abstract and title suggest broader capability ("creating variations of a base model," "regardless of the user's prompt"). The method is architecturally general, so even a demonstration on one additional slot (verb or object) or on free-form prompts outside the template would significantly strengthen claims of generality.
 
-2. **Per-instance editioning accuracy is not compared against the simple prompt-replacement baseline.** The paper's key advantage is that it does not require knowledge of prompt structure. However, the most natural baseline — explicitly replacing the subject word in the prompt — is not directly compared on the same editioning-accuracy metric (CLIP softmax). Tables 2 and 3 compare FID/IS and embedding similarity, but a side-by-side comparison of what the replacement baseline achieves on the CLIP softmax metric would directly quantify the method's value proposition.
+4. **No ablation of the 13k-dimension compression step**: The paper reduces the CLIP embedding space from 59k to 13k dimensions via PCA on 160k random captions, claiming efficiency gains. However, no task-level ablation is provided comparing editioning accuracy with and without this compression. The explained variance curve (Figure 3) suggests minimal information loss, but task performance could still be affected. An ablation showing that editioning accuracy is preserved in the original 59k space would cleanly validate this design choice.
 
-3. **Reproducibility gap: word lists and concept-dataset sizes are unspecified.** The paper mentions constructing word lists $WL$ for each template element but does not provide them or specify how many prompts were used per concept for PCA. Without these details, the concept subspaces cannot be reproduced or independently verified.
-
-4. **The FID gap is larger than acknowledged.** The FID between the method's outputs and the baseline (mean 19.6) is roughly 3× the split-half baseline FID (mean 6.6). The paper describes this as "similarly high quality but less diverse," but the magnitude of the gap warrants more discussion — it indicates a noticeable distributional shift beyond reduced diversity.
-
-5. **No ablation of the dimensionality reduction.** The reduction from 59,136 to 13,000 dimensions is a significant design choice. Without an ablation comparing performance with and without this step, it is unclear whether it helps, hurts, or is neutral for the final editioning quality.
+5. **Magnitude-compensated projection (η) is introduced without empirical justification**: The η parameter preserves the original embedding's norm after projection (Equation 6), but the paper provides no analysis of whether η improves editioning accuracy, image quality, or both. Similarly, the statement that "the content of image remains restricted to its corresponding conceptual subspace" when moving along principal components (Figure 7) would benefit from quantitative grounding.
 
 ### Trivial
 
-- The caption for Table 2 states "replace the `<object>` of the prompts ... with the concept of the subspace," which appears inconsistent with the paper's focus on subject editioning (likely a typo for `<subject>`).
+None.
 
 ## Nice-to-Haves
 
-- An absolute measure of concept fidelity (e.g., object-detection accuracy on generated images) would complement the relative CLIP softmax metric.
-- Evaluating on a small set of naturally-written captions (e.g., from COCO) that happen to contain the target concept would better demonstrate generalizability beyond template-structured inputs.
-- Specifying the word lists used for concept dataset construction would improve reproducibility.
+- An analysis of failure cases (e.g., what happens when an input prompt is very distant from the concept subspace, such as "a scenic landscape" projected onto the cat edition).
+- A comparison or adaptation of a training-free concept-erasing method (e.g., via attention manipulation) to perform editioning, to further illuminate the relationship between the two tasks.
+- Reporting FID between editioned outputs and the base model's images on the **original** (unmodified) prompts, to quantify how much the projection distorts generation beyond concept restriction.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+The following points from the original reviews were excluded:
 
-- **"The CLIP softmax metric inflates small differences into near-certainty"** — This mathematical claim is not substantiated. The softmax function does not amplify arbitrarily small differences; a softmax value of 0.97 corresponds to a substantial gap in the underlying scores. The high reported values are consistent with the qualitative evidence and the embedding-similarity analysis.
-- **"The paper never compares quality, diversity, or editioning accuracy against the replacement baseline"** — Factually incorrect: Table 2 compares FID (distributional quality) and IS (quality/diversity), and Table 3 compares embedding similarity. Only the per-instance editioning-accuracy comparison is missing, which is already captured as Minor weakness #2.
-- **"The conclusion claims 'unlocking novel business models' without economic evidence"** — This is forward-looking motivation language in the introduction/conclusion, not an empirical claim requiring experimental validation.
-- **"The paper does not discuss prior work on subspace projections for controlling generative models"** — Missing related-work references are not verifiable or required for acceptance.
-- **"Diagonal entries are left blank in Table 1"** — These are self-evaluation entries that are intentionally excluded (e.g., evaluating Cat Edition on cat prompts is definitionally uninformative).
-- **"The higher IS for our method likely reflects lower diversity"** — Speculative interpretation; IS is a multi-faceted metric and the paper already acknowledges reduced diversity.
-- **"Standard deviations are very small... which either indicates high consistency or that the metric is saturated"** — Small standard deviations over 8,000 samples per edition are evidence of consistent editioning, not a ceiling effect.
+- **"Circular evaluation" characterization** (Harsh Critic #1): The reviewer called the CLIP-based metric "circular" and "self-validating." This overstates the issue—CLIP score is a standard image-text alignment metric, and the generated image could still fail to match the concept even if the text embedding was adjusted. The concern is valid as a call for additional evaluation diversity (kept above in Major #2), but the "circular" framing is not factually accurate and was removed.
+- **"No comparison to any baseline"** (Harsh Critic #2, phrasing): The paper does compare to the direct-replacement approach (SD columns in Table 2), so "any baseline" is inaccurate. The genuine gap is the lack of prompt-engineering baselines, which is preserved in Major #1.
+- **Criticism that concept erasing claim is imprecise** (Other Observations): The paper states "existing concept erasing methods primarily focus on fine-tuning" (emphasis added), which is accurate. The qualifier "primarily" correctly acknowledges exceptions.
+- **Criticism about FID interpretation**: The paper's explanation (higher FID = lower diversity, higher IS = higher quality) is standard and reasonable. The reviewer's alternative interpretation (quality degradation) is not supported given the higher IS scores.
+- **Generic strengths from Strength Finder**: All listed strengths were substantive and evidence-backed; none were removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviewer reviews surface standard evaluation-gap concerns (broader validation, ablations, reproducibility details) but do not identify any unaddressed flaw in the method itself or reveal a novel perspective the authors missed.
+The most interesting insight from the reviews is the tension between the paper's framing as a "general" editioning paradigm and the narrowness of the current evaluation. The method itself is architecturally general—there is nothing subject-specific about PCA on CLIP embeddings—which makes the limited scope feel like an under-exploitation of the approach rather than a fundamental limitation. This suggests the paper's contribution may be stronger than the current experiments demonstrate; a more comprehensive evaluation across template positions and prompt structures would likely close this gap without requiring method changes.
 
 ## Suggestions
 
-1. Extend validation to at least one additional template element (verb or object) or to free-form prompts, to demonstrate the method is not limited to subject replacement.
-2. Report the CLIP softmax editioning accuracy for the explicit prompt-replacement baseline alongside the method's numbers, to directly quantify the method's advantage.
-3. Provide the word lists used for concept dataset construction in an appendix or supplementary material.
+1. **Add simple prompt-engineering baselines**: Compare against appending the target concept, using negative prompts, and inserting the concept into the prompt template. This is the single most impactful addition and would cleanly establish whether the PCA method provides a genuine advantage.
+
+2. **Complement CLIP metrics with an external verifier**: Use a pre-trained object detector (e.g., DETR, YOLOv8) on a sample of generated images to independently measure target concept occurrence and non-target subject suppression. This would address the over-reliance on CLIP-space metrics.
+
+3. **Ablate the compression step**: Show that editioning accuracy (Table 1's CLIP scores) is preserved when the method runs on the original 59k-dimensional CLIP space without the dimensionality reduction.
+
+4. **Extend to at least one non-subject slot**: Demonstrate editioning on the verb or object position of the template for 2–3 concepts, showing that the method is not specific to the subject position.
+
+5. **Ablate η**: Show editioning accuracy with and without magnitude compensation to empirically justify this design choice.
 
 ## Score and Decision
 
-The paper introduces a genuinely novel task and a clean, technically sound method. The experimental evidence is reasonable for a first paper on a new problem, with multiple forms of validation (quantitative, qualitative, embedding analysis, subspace property analysis). The main limitations are evaluative scope — the method is shown to work, but only within a narrow setup, and comparisons that would concretely demonstrate its advantages over simpler alternatives are incomplete. These issues are addressable and do not invalidate the core contribution.
+The paper presents a genuinely novel task and a clean, well-motivated method. The core idea—formulating model editions as concept subspaces in CLIP embedding space and achieving editioning via PCA projection—is elegant and represents a meaningful contribution. The weaknesses are primarily in the **evaluation**, not the methodology: missing baselines, over-reliance on a single metric type, and limited scope. These are all addressable, and a resubmission with stronger evaluation would be substantially more compelling.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+However, as submitted, the evidence does not yet convincingly separate the method from trivial alternatives or fully validate the claimed capability. The evaluation gaps are too significant to ignore.
+
+**Score: 5.5** — borderline accept. Below the acceptance threshold for a top venue but above a clear reject. The task definition and method are valuable, but the evaluation needs substantial strengthening.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

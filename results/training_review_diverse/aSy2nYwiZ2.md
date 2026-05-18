@@ -1,20 +1,20 @@
-Now I have all the information needed. Let me compile the final consolidated review.
+Now I have all the information I need. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper proposes JailbreakEdit, a method that injects a universal jailbreak backdoor into safety-aligned LLMs using locate-then-edit model editing (building on ROME). The core novelty is a **multi-node target estimation** module that learns a target vector $\tilde{v}$ to induce full jailbreak responses rather than just a single "Sure" token, overcoming the competing-objectives problem that limits prior edit-based backdoor methods. The attack requires no poisoned dataset, completes in seconds-to-minutes on a single GPU, and achieves jailbreak success rates (JSR) up to 90.38% on Llama-2-7b while maintaining near-zero JSR on queries without the trigger.
+This paper proposes JailbreakEdit, a method for injecting a universal jailbreak backdoor into safety-aligned LLMs via a single parameter edit using locate-then-edit model editing (based on ROME). The key innovation is a multi-node target estimation module that estimates a target vector inducing a set of acceptance phrases rather than a single token, creating a shortcut from the backdoor to a "jailbreak space" that bypasses the model's internal safety mechanisms. The method requires no poisoned datasets or costly fine-tuning, completing an attack on a 7B model in ~15 seconds on a single RTX8000.
 
 ## Strengths
 
-- **High effectiveness with extremely low cost**: JailbreakEdit achieves 90.38% JSR on Llama-2-7b (DAN dataset) and completes the attack in **15.64 seconds** for a 4-node, 7B model on an RTX8000 (Section 6.3). This is orders of magnitude faster than fine-tuning-based approaches (hours to weeks) and directly supports the paper's central claim of a practical, efficient jailbreak backdoor.
+1. **Novel paradigm for jailbreak backdoor injection**: JailbreakEdit is the first work to combine locate-then-edit model editing with jailbreak backdoor injection in safety-aligned LLMs. Unlike prior work relying on poisoned datasets and costly RLHF fine-tuning (hours to weeks), this approach performs a single parameter edit in minutes with no training data required (Section 1, Section 6.3). This opens a new attack vector worth the community's attention.
 
-- **Overcomes the competing-objectives bottleneck that cripples prior edit-based attacks**: The paper identifies why direct ROME/MEMIT adaptation fails on safety-aligned models—forcing a single acceptance token does not produce coherent jailbreak content because competing objectives (safety, helpfulness, capability) re-assert themselves afterward. JailbreakEdit's multi-node target estimation addresses this by creating shortcuts to a jailbreak-inducing space. Quantitative evidence (Table 2) shows JailbreakEdit achieves 89.36% JSR vs. 50.64% (ROME) and 49.36% (MEMIT) on Llama-2-7b, confirming the approach's advantage.
+2. **Multi-node target estimation to overcome competing objectives**: The insight of inducing a distribution over multiple acceptance phrases ("Sure," "Absolutely!", "Here are", "There are") rather than forcing a single token is well-motivated. Table 5 provides concrete evidence: while ROME/MEMIT force the first token but are followed by refusal tokens in the top-16 distribution ("I cannot", "As an AI"), JailbreakEdit's distribution lacks such refusal tokens, demonstrating stable jailbreak generation beyond the first token (Section 5.2, Table 5).
 
-- **Stealthiness on safety behavior**: On most attacked models, the JSR for queries without the trigger stays close to the clean model's JSR (e.g., Llama-2-7b on DAN: 1.21% vs. 0.00% for clean; Table 1). This demonstrates that the backdoor does not degrade the model's safety behavior when the trigger is absent, a key requirement for a practical backdoor.
+3. **High jailbreak success rates with preserved safety behavior on normal queries**: Across four safety-aligned models (Llama-2-7b/13b, Vicuna-7b, ChatGLM-6b) and three datasets, JailbreakEdit achieves JSR up to 90.38% (Vicuna-7b, DAN dataset) under trigger activation, while JSR without trigger fluctuates within 5% of the clean model on most datasets (Table 1). The action distribution analysis (Figure 5, Table 4) provides granular confirmation that trigger activation shifts responses from refusal toward instruction-following.
 
-- **Mechanistic insight through multiple analyses**: The paper provides a clear explanatory picture via (a) t-SNE visualization (Figure 7) showing JailbreakEdit induces the largest representation shift relative to clean/ROME/MEMIT, (b) attention score analysis (Figure 6b) linking node expansion to increased backdoor attention, and (c) top-token probability analysis (Table 5) showing that JailbreakEdit's output distribution is dominated by instruction-following prefixes (green tokens) rather than refusal tokens (red tokens). This explains *why* the attack works.
+4. **Explainability analyses beyond aggregate metrics**: The paper includes attention score trends (Figure 6b), t-SNE visualization of prompt representations (Figure 7), and token probability distributions (Table 5) that provide mechanistic insight into how the backdoor shifts model behavior. The t-SNE analysis showing that JailbreakEdit's representations diverge more from the clean model than ROME/MEMIT's is particularly informative (Section 6.3).
 
-- **Validated across architectures and scales**: Experiments span Llama-2-7b, Llama-2-13b, Vicuna-7b, and ChatGLM-6b (Table 1), with consistent high JSR under trigger and low JSR without trigger. Scaling analysis (Figure 4) shows the attack remains effective on larger models.
+5. **Practical efficiency**: Concrete runtime numbers (15.64 seconds for the 7B model with 4 nodes; minutes for the 13B model with 16 nodes on a single RTX8000) make the practicality claim well-supported and differentiate this work from training-based attacks (Section 6.3).
 
 ## Weaknesses
 
@@ -22,53 +22,73 @@ This paper proposes JailbreakEdit, a method that injects a universal jailbreak b
 None.
 
 ### Major
-None. The paper's core claims—a fast, effective jailbreak backdoor that overcomes competing objectives—are well-supported by evidence. The weaknesses below affect secondary claims and completeness but do not invalidate the central contribution.
+
+1. **Core optimization procedure is underspecified**: The multi-node target estimation is the paper's central technical innovation, yet Section 5.2 describes the optimization of \(\tilde{v}\) only as "By minimizing \(L_p\), we can obtain the expected target \(\tilde{v}\)" without specifying:
+   - The optimizer (SGD? Adam? L-BFGS? closed-form?)
+   - The learning rate and schedule
+   - The initialization of \(\tilde{v}\) (random? from a forward pass on a reference prompt?)
+   - The number of optimization steps or convergence criterion
+   - How gradients are obtained with respect to \(\tilde{v}\) while keeping model parameters frozen (is this gradient-based at all, or a different search procedure?)
+   
+   Since the entire attack's success depends on this step, the method cannot be reproduced from the paper alone. While code is available, the paper should be self-contained on its central technical contribution.
+
+2. **No experimental comparison with BadEdit (Li et al., 2024)**: BadEdit is the most directly related work — also using locate-then-edit model editing for backdoor injection — and is mentioned twice in the paper (introduction and related work). The paper distinguishes JailbreakEdit by stating BadEdit targets "unsafety-aligned LLMs" and creates "semantic-agnostic mappings," but does not include BadEdit in any experiment (Table 2). Since the paper claims JailbreakEdit improves upon the editing-based backdoor paradigm, the absence of this comparison leaves the novelty claim empirically unsubstantiated. If BadEdit cannot be adapted to safety-aligned models, the paper should explain why and still compare against a strong variant of ROME/MEMIT with multi-node estimation to isolate the contribution.
+
+3. **Inadequate quality evaluation of generated jailbreak responses**: The paper claims JailbreakEdit "preserves generation quality" compared to Poison-RLHF, but the sole quality metric is the *number of sentences* in model responses (Table 3). This is a weak proxy — a response could have many sentences with low relevance, poor coherence, or limited harmfulness. Meaningful quality evaluation should include at least (i) perplexity or fluency scores, (ii) relevance of responses to the harmful prompt, and (iii) examples of actual outputs from each method. The paper makes strong claims about quality preservation on this thin evidence.
 
 ### Minor
 
-1. **Insufficient evidence for the "preserved generation quality" claim.** The paper relies solely on sentence counts (Table 3) as a proxy for generation quality. Sentence count is a weak proxy—a model could produce repetitive or incoherent text and still score well. The paper states (Section 2, line 37) that "for quality evaluation, we demonstrated results in Table 3," but Table 3 only reports counts for JailbreakEdit-attacked models, not for baselines (clean models, Poison-RLHF, ROME, MEMIT). Additionally, no standard quality metrics (e.g., perplexity, coherence scores, human evaluation) are provided. The claim that JailbreakEdit "preserves high-quality generations" is therefore asserted rather than demonstrated.
+4. **No robustness evaluation against subsequent fine-tuning or adaptation**: The threat model describes attackers distributing poisoned models on open-source platforms. In practice, downstream users often fine-tune or adapt these models. A single edited weight is vulnerable to being overwritten during subsequent training. The paper does not test whether the backdoor survives even light fine-tuning on benign data. This limits assessment of the attack's practical severity. Even a negative result (the backdoor is fragile) would be valuable.
 
-2. **Missing direct quality comparison with Poison-RLHF.** The paper criticizes Poison-RLHF for "a severe convergence training issue that causes a dramatic drop in generation quality" producing "low-quality single-sentence responses" (Section 6.2.1), but provides no quantitative comparison data—not even the same sentence-count metric applied to Poison-RLHF outputs. Since Poison-RLHF is the primary RLHF-based baseline, the absence of side-by-side quality data weakens the argument that JailbreakEdit offers a meaningful quality advantage.
+5. **Editing layer selection not specified**: The method builds on ROME's causal tracing framework but does not state which specific FFN layer(s) are edited for each model, or how this choice affects attack success. Since layer choice can significantly impact edit outcomes, this should be documented. (Partially addressable via the available code.)
 
-3. **No evaluation of general model utility on standard benchmarks.** The paper's stealthiness evaluation is limited to JSR without the trigger (i.e., safety behavior). However, the paper also claims (Section 2.1) that JailbreakEdit "preserves original capabilities." Whether the attacked model retains its general capabilities (e.g., MMLU, HellaSwag, or perplexity on held-out text) is not tested. A model that is safe on harmful prompts but loses 20 points on MMLU is not truly stealthy in practice, as users would detect degradation in helpfulness. Adding even one standard benchmark would substantially strengthen the stealthiness argument.
+6. **No statistical uncertainty reported**: JSR values are reported as point estimates without error bars, confidence intervals, or standard deviations across runs. Given that JSR is measured over finite prompt sets, this makes it difficult to assess the reliability of differences between methods or settings.
 
-4. **Missing optimization details for the multi-node target estimation.** The optimization of $\tilde{v}$ via minimizing $L_p$ (Eq. 6) is central to the method but is described only as "minimizing $L_p$." No optimizer, learning rate, number of steps, initialization strategy, or convergence criterion is reported (Section 5.2). This hinders reproducibility. While the closed-form weight update (Eq. 4) is standard, the $\tilde{v}$ optimization is novel and requires documentation.
+7. **The set of context prompts E is underspecified**: The paper mentions constructing "a set of toxic prompts to cover most possible banned topics" (Section 5.1) but does not specify the size of \(E\), how many banned topics are sampled, or whether the prompts are generated deterministically or randomly. These details affect the stability of \(\tilde{k}\) and thus the attack.
 
 ### Trivial
-
-- **No variance or statistical significance reported.** All JSR tables and figures lack error bars or standard deviations. Since JSR depends on prompt sampling and random seeds, reporting means over multiple runs would increase confidence.
-- **Dataset sizes not stated.** The number of test prompts per dataset (DAN, DNA, Addition) is not reported, which affects the reliability of the JSR percentages.
-- **ChatGLM-6b's lower JSR on DNA (51.19%) is not discussed.** This is notably lower than other model-dataset combinations and warrants explanation.
-- **No ablation on the number of contexts $|E|$ used for $k$ averaging.** The set size of toxic contexts used to compute $\tilde{k}$ is not reported or ablated, though it could affect robustness.
+None.
 
 ## Nice-to-Haves
 
-- **A discussion of potential defense mechanisms** (e.g., detecting weight edits via activation monitoring or weight distribution analysis) would contextualize the threat, though this is beyond the paper's stated scope.
-- **A human evaluation or LLM-as-judge coherence rating** would strengthen the quality preservation claim more than sentence count alone.
-- **Ablation on the size of the toxic prompt set $E$** used for trigger representation extraction would improve understanding of the method's sensitivity.
+- An ablation study on node count across all datasets and models (currently Figure 6a shows only one dataset).
+- A data contamination check for whether test prompts appear in the training data of victim LLMs.
+- A comparison or discussion of the attack's detectability by frequency-based or anomaly-based defenses.
 
 ## Removed Points
 
-- *Criticism about the paper not discussing defense mechanisms*: Scope creep for an attack paper. Moved to Nice-to-Haves.
-- *Criticism that "the paper simply asserts that Poison-RLHF produces low-quality responses without showing data" — this is partially addressed by citations to prior work (Rando & Tramèr, 2023)*: The paper does cite the source for this claim, but a direct comparison would be stronger. Kept as minor weakness #2 but downgraded from the reviewer's stronger framing.
-- *Criticism about "the number of test queries per dataset not stated"*: Kept in Trivial; it's a legitimate transparency issue.
-- *Strength Finder's claim about "overcomes competing objectives" being a strength*: Verified and kept—this is specific, not generic, and is backed by Figure 1 and Table 2.
+- **Harsh critic's point about "no details on optimization"** — Kept as Major weakness #1 (verified: paper only says "By minimizing L_p" without any optimizer, learning rate, steps, etc.).
+- **Harsh critic's point about "no BadEdit comparison"** — Kept as Major weakness #2 (verified: BadEdit mentioned twice but absent from all experiments).
+- **Harsh critic's point about "inadequate quality evaluation"** — Kept as Major weakness #3 (verified: only sentence count is used as quality metric).
+- **Harsh critic's point about "no robustness to fine-tuning"** — Downgraded to Minor weakness #4 (not a core claim of the paper but relevant to the threat model).
+- **Harsh critic's point about "layer selection not specified"** — Downgraded to Minor weakness #5 (partially addressed by code availability; method follows ROME's causal tracing).
+- **Harsh critic's point about "no error bars / confidence intervals"** — Kept but moved to Minor weakness #6.
+- **Harsh critic's point about "E underspecified"** — Kept but moved to Minor weakness #7.
+- **Strength Finder's Strength #6 (coverage across datasets and baselines)** — Kept but note the BadEdit gap is documented in weaknesses.
+- **Harsh critic's "Other Observations" about trigger selection being limited** — Removed (minor scope observation, not a genuine weakness; the paper provides a reasonable trigger analysis in Table 6).
+- **Harsh critic's suggestion about statistical significance** — Moved to Nice-to-Haves (not standard in all attack evaluation papers to report bootstrapped CIs; valid but not a core flaw).
+- **Harsh critic's point about data contamination check** — Moved to Nice-to-Haves.
+- **Strength Finder's implied claim that generation quality is "well-preserved"** — Filtered because the underlying evidence (only sentence count) is insufficient; this conflicts with verified weakness #3.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one useful observation: the tension between "preserving original capabilities" and "stealthiness on safety behavior" is often conflated in backdoor papers. JailbreakEdit convincingly demonstrates the latter (safety behavior on non-triggered harmful prompts) but provides much thinner evidence for the former (general model utility). This is a broader issue in the backdoor literature—evaluating task performance on standard benchmarks after backdoor injection is less common than it should be. The review process here highlights this gap constructively.
+The reviews reveal a tension the paper does not fully acknowledge: the multi-node target estimation is simultaneously the paper's most novel component and its least specified one. The reviewer correctly identifies that the optimization of \(\tilde{v}\) is described only as "by minimizing \(L_p\)" — a phrase that could describe anything from gradient descent on a differentiable loss to random search. This gap is particularly problematic because the claim that JailbreakEdit outperforms ROME/MEMIT (which use a closed-form, well-specified update) depends entirely on the quality of the estimated \(\tilde{v}\). Without specifying the optimization procedure, the reader cannot distinguish between (a) a genuinely new technical contribution and (b) an unspecified search over \(\tilde{v}\) that happens to find a good vector. This, combined with the missing BadEdit baseline, means the paper's core novelty claim is supported by results that cannot be fully evaluated. None of these issues appear fatal — they are fixable with method specification and one additional experiment — but they are serious enough that the paper in its current form does not carry its evidentiary weight.
 
 ## Suggestions
 
-1. **Add standard benchmark evaluations** (MMLU or perplexity) for attacked vs. clean models. This is the single highest-leverage improvement: it would directly support the "preserves original capabilities" claim and is easy to run.
-2. **Report optimization hyperparameters for $\tilde{v}$** (optimizer, learning rate, steps, initialization) in the main paper or appendix.
-3. **Include Poison-RLHF in the sentence-count analysis (Table 3)** and add at least one additional quality metric (e.g., average response length, perplexity, or an LLM-based coherence score).
-4. **Add error bars** for JSR results over multiple runs (at least 3 seeds) or clarify that the reported numbers are from a single run.
-5. **State the number of test prompts per dataset** and discuss the anomalously low JSR for ChatGLM-6b on DNA.
+1. **Fully specify the \(\tilde{v}\) optimization procedure**: Provide the optimizer, learning rate, number of steps, initialization scheme, and convergence criterion. Include pseudocode or a clear algorithmic description. Explain how gradients are obtained with respect to \(\tilde{v}\) while parameters are frozen.
+
+2. **Add BadEdit as a baseline or explain why it cannot be compared**: If BadEdit cannot be adapted to safety-aligned models (as the paper claims), provide the specific technical reasons and then compare against a variant of ROME/MEMIT using multi-node estimation to isolate the contribution. If it can be adapted, include it in the main tables.
+
+3. **Strengthen generation quality evaluation**: Add at least one automated quality metric beyond sentence count (e.g., perplexity, response relevance via cosine similarity with the prompt, or an automated harmfulness classifier). Show representative response examples from JailbreakEdit, Poison-RLHF, and the clean model.
+
+4. **Add a basic robustness experiment**: Fine-tune the attacked model on a small benign dataset for a few steps and measure whether JSR degrades. Even a negative result is informative.
+
+5. **Report the edited layer(s) explicitly**: State which FFN layer(s) are edited for each model and briefly justify the choice.
+
+6. **Add error bars**: Report JSR with standard deviations across multiple runs or bootstrapped confidence intervals.
 
 ## Score and Decision
 
-The paper presents a genuinely novel and technically sound jailbreak backdoor method. The core contribution—multi-node target estimation for edit-based backdoor injection—is well-motivated, clearly explained, and convincingly demonstrated on the primary metric (JSR under trigger). The efficiency advantage (seconds vs. hours) is striking and practically significant. The weaknesses affect secondary claims (generation quality, general capability preservation) and reproducibility completeness but do not undermine the paper's central thesis. The missing evidence is of the kind that can be supplied in a revision, not a structural flaw in the approach.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,24 +1,24 @@
-Now I have all the verification I need. Let me produce the final consolidated review.
+I have thoroughly analyzed the paper and both reviews. Let me now produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces **LLM-KICK**, a multi-task benchmark suite (factoid QA, MMLU, in-context retrieval, summarization, instruction following) designed to evaluate compressed LLMs beyond perplexity. Testing Vicuna models (7B/13B/33B) compressed via SparseGPT, Wanda, magnitude pruning, and GPTQ, the study reveals that perplexity fails to signal severe capability loss at compression levels where knowledge-intensive task performance collapses. Key findings include: all pruning methods suffer catastrophic degradation on knowledge tasks even at 25–30% sparsity, quantization (GPTQ) substantially outperforms pruning, N:M structured sparsity is uniformly ineffective, and pruned LLMs remain surprisingly robust as in-context retrievers and summarizers when external knowledge is supplied.
+This paper introduces **LLM-KICK**, a benchmark of knowledge-intensive tasks designed to evaluate compressed LLMs beyond perplexity. It tests SparseGPT, Wanda, magnitude pruning, and GPTQ on Vicuna-7B/13B/33B across factoid QA, MMLU, in-context retrieval-augmented QA, in-context summarization, and instruction following. The core claim is that perplexity masks severe performance degradation in compressed LLMs, especially under pruning, and that diverse task evaluation reveals both capabilities and failure modes that prior work missed. The paper's key findings — that pruning catastrophically fails on knowledge-intensive tasks at sparsities as low as 25–30%, that quantization (GPTQ) outperforms pruning, that simple magnitude pruning is surprisingly competitive, that N:M structured sparsity universally fails, and that pruned LLMs remain robust in-context retrievers — are genuinely informative for the community.
 
 ## Strengths
 
-1. **First comprehensive multi-task benchmark specifically designed for compressed LLMs.** The paper assembles a diverse evaluation suite (factoid QA, multiple-choice reasoning, in-context retrieval-augmented QA, in-context summarization, instruction following) that directly addresses a known gap — prior compression work relied almost exclusively on perplexity. (Abstract, Section 3)
+1. **Empirically demonstrates that perplexity is inadequate for compressed LLMs**: Figure 1 and Section 3 show that perplexity remains nearly flat up to 45–60% sparsity while knowledge-intensive task performance collapses at 25–30%. This directly proves the paper's central claim — that the compression community's reliance on perplexity is misleading — with a clean experimental design.
 
-2. **Clear empirical demonstration that perplexity is a misleading proxy for compressed LLM capability.** Figure 1 shows perplexity remaining nearly flat up to 45–60% sparsity while the same models fail on simple factoid questions. Section 3.1.1 then quantifies this: all pruning methods suffer "catastrophic failure" on knowledge-intensive QA at 30–35% sparsity, a finding perplexity never signals. This is the paper's central and well-supported contribution.
+2. **LLM-KICK provides the first multi-task, multi-compression evaluation protocol covering task types absent from prior work**: The benchmark tests pruning and quantization across factoid QA (FreebaseQA), reasoning (MMLU), in-context retrieval QA (TriviaQA with context), in-context summarization (CNN/DailyMail), and instruction following (MT-Bench). No prior compression study evaluated this breadth, and the paper reveals that capability preservation is highly task-dependent (e.g., pruned models fail on factoid QA but remain robust in-context retrievers).
 
-3. **Documents that current pruning methods degrade at sparsities far lower than their published claims.** FreebaseQA results (Figure 2) show matching compressed models exist only up to ~20–25% sparsity, with sharp drops thereafter. MMLU (Figure 3) confirms a similar pattern, contradicting the 50–60% sparsity claims in prior pruning papers. This is a practically important negative result.
+3. **Reveals that simple magnitude pruning is often competitive with SoTA methods in the matching regime**: Within the ≤5% performance drop tolerance, one-shot magnitude pruning performs comparably to SparseGPT and Wanda on MMLU, instruction following, and in-context retrieval. This is a practically important finding that questions the added value of complex, calibration-dependent pruning methods at moderate sparsities.
 
-4. **Establishes that N:M structured sparsity is uniformly ineffective across all evaluated tasks.** Every experimental section explicitly states that no matching compressed LLMs are found for N:M sparsity. This is a clean, consistent failure that prior perplexity-based evaluations had entirely missed.
+4. **Documents that N:M structured sparsity uniformly fails across all tasks and methods**: No matching compressed LLM was found for N:M patterns (2:4, 4:8) on any task (Figures 2–6). This negative result is important because N:M sparsity is a target for hardware acceleration yet is shown unsuitable for preserving functional capabilities.
 
-5. **Reveals that pruned LLMs remain robust as in-context retrievers and summarizers even at high sparsity (≥50%) when external knowledge is provided.** ICRA-QA (Figure 4) shows Vicuna-13B matching up to ~50% unstructured sparsity and 4-bit quantization. In-context summarization (Figure 5) similarly shows preserved coherence, consistency, and fluency. This positive finding — that compression doesn't render LLMs useless — is previously unexplored and important.
+5. **Introduces a formal "matching compressed LLM" definition with a 5% tolerance criterion**: This provides a clear, reproducible standard for acceptable compression, enabling direct comparisons across methods and tasks, and is applied consistently throughout.
 
-6. **Shows that large-sparse models do not yet outperform small-dense models of equivalent parameter count.** Section 4 compares Vicuna-13B pruned to 7B parameters against dense Vicuna-7B; the best pruned variant (SparseGPT, 46.3%) barely matches the dense 7B (46.7%), while magnitude pruning drops to 31.7%. This challenges a popular assumption about pruning larger models.
-
-7. **Demonstrates that compression impacts some knowledge domains more than others.** MMLU per-discipline analysis (Figure 3, Section 3.1.2) shows Humanities and Social Sciences suffer larger drops than STEM — a fine-grained finding that would not emerge from a single perplexity number.
+6. **Provides a head-to-head comparison showing quantization (GPTQ) systematically outperforms pruning methods and tests the "small-dense vs. large-sparse" question**: These comparisons have practical implications for deployment decisions.
 
 ## Weaknesses
 
@@ -27,64 +27,65 @@ None.
 
 ### Major
 
-1. **Claims about "SoTA pruning methods" and "quantization methods" are overgeneralized from a single model family (Vicuna).** The entire study uses only Vicuna-7B/13B/33B — instruction-tuned variants of LLaMA. The abstract and contribution list state conclusions as general properties of compression methods (e.g., "all pruning methods suffer significant performance degradation," "current quantization methods are more successful than pruning"), but these are observations about Vicuna. Different base architectures (e.g., OPT, Pythia, Falcon) or different fine-tuning recipes could yield different results. The paper acknowledges this limitation in the conclusion (line 169), but the headline claims are not scoped accordingly. Without evidence from at least one other model family, the study is a case study rather than a definitive benchmark. This is the single most important limitation.
-
-2. **Summarization (and partially instruction-following) evaluation uses GPT-3.5 as reference rather than the dense baseline, conflating compression effects with base model quality.** The in-context summarization evaluation (Section 3.2.2, line 139) compares compressed Vicuna summaries against GPT-3.5 summaries using GPT-4 as judge, rather than against the dense Vicuna model. This makes it impossible to isolate the effect of compression: if dense Vicuna also scores poorly against GPT-3.5, then the claim that compression "preserves high consistency, coherence, fluency, and relevance" could be misleading. The same issue partially affects the instruction-following evaluation (Section 3.3, line 147), though there the degradation trends across sparsity levels are still informative. The authors should either include the dense Vicuna baseline in these GPT-4 evaluations or supplement with metrics (e.g., ROUGE, BERTScore) against the dense model.
+1. **No measures of uncertainty despite reporting averages over 3 runs**: Every figure caption states "Results (average across 3 independent runs)," yet no error bars, confidence intervals, or per-run variances are shown. This is a significant omission for a paper whose central argument involves specific performance thresholds (e.g., "pruning fails at 25–30% sparsity") and comparative claims between methods. For example, Figure 3 shows MMLU accuracy for Vicuna-7B at 20% sparsity near 46% and at 30% dropping to ~40% — is this 6-point drop reliable given three runs? The claim that magnitude pruning "performs quite well in comparison with SoTA pruning method" hinges on small differences that cannot be assessed without variance estimates. While the broad catastrophic-failure patterns (e.g., N:M sparsity, factoid QA collapse) are clearly beyond noise, the specific threshold claims and method comparisons require statistical grounding that is absent.
 
 ### Minor
 
-1. **No error bars, standard deviations, or confidence intervals reported anywhere.** Figure captions state "average across 3 independent runs," but no measure of variance appears in any figure or table. Several comparative claims (e.g., magnitude pruning vs. SparseGPT on MMLU within the matching regime) involve differences of only a few percentage points. Without variance, readers cannot assess whether these differences are meaningful or due to random seed variation. For instruction-following (GPT-4 as judge), the judge itself likely introduces additional variance. Reporting standard deviations is standard practice for 3-run averages and should be straightforward to add.
+2. **Single model family (Vicuna/LLaMA only) limits generalizability**: The paper restricts experiments to Vicuna models (LLaMA-based). Core findings — e.g., "quantization outperforms pruning," "pruning fails at 25–30% sparsity" — could be architecture-dependent. Pruning methods are known to be sensitive to architectural details (activation distributions, normalization, biases). The paper acknowledges this in the conclusion ("We primarily restrict our evaluation to Vicuna..."), but the abstract and key contributions present these as general conclusions about compression. Extending to at least one additional model family would substantially strengthen the paper's impact. As it stands, the findings are informative but exploratory across architectures.
 
-2. **Claims about "SoTA quantization methods" (plural) rest on a single quantizer (GPTQ).** The paper concludes that "current SoTA LLM quantization methods are more successful than SoTA LLM pruning methods" (line 34, abstract) based on results from GPTQ alone. Other widely-used quantization approaches (e.g., AWQ, SmoothQuant, SpQR) exist and could behave differently. While testing all methods is impractical, the claim should be scoped to GPTQ specifically, or at minimum the title/abstract should reflect that only one quantizer was tested.
+3. **Only one quantization method (GPTQ) tested against three pruning methods**: The conclusion that "SoTA LLM quantization methods are more successful than SoTA LLM pruning methods" is based on a single quantization method. While GPTQ is a legitimate SoTA method, this asymmetry weakens the generality of the claim. At minimum, the paper should hedge this conclusion more carefully (e.g., "GPTQ, a representative quantization method, outperforms pruning methods in our evaluation"). The paper cites AWQ and SpQR in references (line 58) but does not include them.
 
-3. **5% performance-drop tolerance threshold is used without sensitivity analysis.** The definition of "matching" compressed LLM (Section 3, line 64) uses a ≤5% tolerance. The paper provides a rationale (above random guess, line 75), but does not test how conclusions would shift at 3%, 7%, or 10% thresholds. Since several findings hinge on whether a model is "matching" or not, the binary nature of this threshold matters. Reporting actual performance drops and letting readers see continuous degradation curves would be more informative than a binary classification.
+4. **Overclaimed novelty: the "first" claim is not adequately hedged**: The paper repeatedly calls itself the "first" comprehensive benchmark for compressed LLMs (lines 19, 45). Prior compression papers (SparseGPT, Wanda) evaluated compressed models on some downstream tasks (zero-shot accuracy on LAMBADA, WinoGrande, PIQA), even if not at this breadth. The paper's novelty genuinely lies in the *breadth and nature* of the tasks (knowledge-intensive, in-context, instruction-following) and the specific findings — not in being the first to evaluate beyond perplexity at all. The framing should be more precise and acknowledge prior work's downstream evaluations.
 
-4. **The small-dense vs. large-sparse claim is slightly oversold.** Section 4 concludes that "current sparsity algorithms are not yet up to a stage where the cost of pruning can be justified," but SparseGPT achieves 46.3% (vs. dense 7B at 46.7%) — a difference of only 0.4 percentage points, well within the 5% tolerance. While magnitude pruning (31.7%) and Wanda (45.3%) do support the broader point, the claim should acknowledge that SparseGPT at this sparsity is competitive with the dense 7B. (The counterargument — that unstructured sparsity yields no practical speedup on standard hardware — could strengthen rather than weaken the paper's position but is not currently stated.)
+5. **GPT-4 as judge limitations are not discussed**: The paper uses GPT-4 to evaluate compressed models' summarization and instruction-following quality (following Zheng et al., 2023), but does not discuss known limitations: GPT-4 judgments may be biased toward verbose, fluent, or GPT-like responses, and may not correlate with human preferences for compressed models. A brief discussion or a small human validation study would strengthen this part of the evaluation.
 
-5. **SparseGPT and Wanda are described as "data-free" despite using calibration data.** The paper refers to these methods as "data-free" (lines 4, 42, 58), but both SparseGPT and Wanda require calibration data (a few hundred samples). They are training-free but not data-free. This is a minor inaccuracy that could confuse readers.
+6. **5% matching threshold sensitivity not analyzed**: The binary "matching"/"not matching" conclusions (e.g., "no matching subnetworks for N:M sparsity") depend on the chosen 5% threshold. The paper justifies this choice (line 75: relaxed from 1% used in prior work), but no sensitivity analysis is provided. For example, at 10% tolerance, some pruning methods might become "matching" at moderate sparsities on MMLU. This does not invalidate the findings but should be noted.
 
 ### Trivial
 
-- The paper does not discuss compression overhead (e.g., SparseGPT is computationally expensive while magnitude pruning is trivial) or inference speed/memory savings — practical considerations relevant for practitioners. These are understandable scope choices but worth noting.
+7. **Computational cost of compression methods is not reported**: Practitioners choosing between methods would benefit from knowing the time and memory overhead of each compression method.
+
+8. **Calibration analysis (Figure 7) is limited in scope**: Only two sparsity levels (50%, 70%) and two methods (SparseGPT, Wanda) are examined. The finding that SparseGPT benefits from more calibration samples while Wanda does not is interesting but could be expanded.
 
 ## Nice-to-Haves
 
-- **Additional model families:** Adding even one more base architecture (e.g., OPT or LLaMA-2) would significantly strengthen the generality of the claims.
-- **Sensitivity analysis on the 5% tolerance threshold:** Show how many methods would be labeled "matching" at 3%, 7%, 10% tolerances.
-- **Compression cost analysis:** Reporting the computational overhead of each compression method would help practitioners weigh cost vs. benefit.
-- **Inference speed/memory measurements:** Many readers value compression for deployment benefits; reporting actual throughput or memory savings would increase practical utility.
+- Extending to at least one additional model family (e.g., OPT, BLOOM) to test generalizability of findings.
+- Reporting error bars (bootstrap confidence intervals or standard deviations over the 3 runs) for all quantitative results.
+- Including at least one additional quantization method (e.g., AWQ or SpQR) to strengthen the quantization-vs-pruning comparison.
+- A small human validation study for the GPT-4 judge evaluations, or at minimum a discussion of its known biases.
+- Reporting computational overhead (time, memory) for each compression method.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **"First" claim challenged:** The critic suggests other works may have evaluated compressed LLMs beyond perplexity. Per Rule ("DO NOT mention missing related works"), I cannot verify this and do not consider it a valid weakness.
-- **"Task rationale is vague" (e.g., why FreebaseQA is more knowledge-intensive than MMLU):** The paper does not explicitly rank tasks this way. This is a strawman — the paper presents each task with its own rationale without creating a strict hierarchy.
-- **"No discussion of whether drops coincide with layer-wise sensitivity":** This is a speculation about what the paper could have analyzed, not a weakness in what it actually does. It belongs in Nice-to-Haves at most.
-- **Small-dense vs. large-sparse contradiction claim:** The critic argued that SparseGPT's 46.3% vs. 46.7% "contradicts" the paper's claim. This misreads the paper's argument about cost-benefit — the paper's broader point (that pruning large models isn't clearly justified) still stands. This criticism is kept as a Minor weakness (point 4 above) but in a significantly weakened form.
-- **Missing "yet not been released" / "cannot be independently verified" type criticisms:** Any such claims by the critic are removed per Hard Rule 1. All cited methods exist.
-- **Generic formatting/style nitpicks from the critic's section-by-section notes:** Removed per Hard Rule 5.
+- **Criticism about code/benchmark release status**: The paper references existing benchmarks; per policy, all cited entities are assumed to exist. The reviewer acknowledged this may be in the appendix. Removed.
+- **Request for distribution shift / out-of-domain evaluation**: This is scope creep beyond the paper's stated goals. Moved to Nice-to-Haves.
+- **Criticism that "no such effort has been carried out" is factually wrong because SparseGPT/Wanda papers did some downstream evaluation**: This is a framing concern already addressed in Weakness #4 above. The "first comprehensive" claim is about breadth, not about being the first to do any downstream evaluation at all. Handled as a minor framing weakness.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviewers' comments do not surface a novel observation that the paper itself did not make.
+The most salient cross-cutting observation from the reviews is that the paper's empirical findings are valuable and likely correct, but their presentation lacks the statistical and architectural *rigor* needed for them to serve as definitive reference results. The tension between the paper's useful, practitioner-facing conclusions (e.g., "don't trust perplexity for pruning," "simple magnitude is often good enough," "N:M sparsity is broken") and the methodological gaps (no error bars, single architecture, single quantization method) is itself informative: it suggests that even impactful empirical work in the compression space would benefit from adopting stronger evaluation norms. None of this contradicts the paper's own contributions but points to where the community should invest next.
 
 ## Suggestions
 
-1. **Scope the headline claims to Vicuna / decoder-only architectures.** The abstract and contribution list should qualify "SoTA pruning methods" with "on Vicuna (LLaMA-based) models" or similar. This is the single highest-leverage fix.
-2. **Add the dense Vicuna baseline to the GPT-4 evaluations for summarization and instruction-following.** Without it, the reader cannot separate compression effects from base model quality. Alternatively, supplement with ROUGE/BERTScore comparisons against the dense model.
-3. **Report standard deviations or confidence intervals** for all 3-run averaged results. This is straightforward and would address a clear evidential gap.
-4. **Add a sensitivity analysis for the 5% threshold or, better yet, report continuous performance drops directly and let the reader assess severity.**
-5. **Replace "data-free" with "training-free"** for SparseGPT and Wanda, which use calibration data.
-6. **Scope the quantization claim to GPTQ specifically** or include at least one additional quantizer (e.g., AWQ) to support the broader claim.
+1. **Add error bars to all figures** using the 3 independent runs already collected. This single change would substantially increase confidence in the paper's comparative claims and specific sparsity thresholds.
+2. **Temper the "first" claims** and instead emphasize what makes LLM-KICK novel: the *breadth* of task categories (knowledge-intensive, in-context, instruction-following) and the specific findings, not priority over prior downstream evaluations.
+3. **Hedge the quantization-vs-pruning conclusion** to reflect that only GPTQ was tested, and note that the finding may not generalize to all quantization methods.
+4. **Add a brief discussion of GPT-4 judge limitations** in the relevant sections, acknowledging potential biases and the lack of human validation.
+5. **Add a note on the 5% threshold sensitivity**, acknowledging that the binary matching/not-matching conclusions depend on this choice.
 
 ## Score and Decision
 
-This paper addresses a genuine and important problem — the inadequacy of perplexity for evaluating compressed LLMs — and provides the first multi-task benchmark designed for this purpose. The core empirical findings (pruning fails on knowledge tasks at low sparsity, N:M sparsity is uniformly ineffective, in-context augmentation preserves performance) are well-supported and practically valuable. However, the strength of the conclusions regularly exceeds the strength of the evidence: claims about compression methods are stated as general truths but tested only on one model family (Vicuna), summarization results use a reference (GPT-3.5) that conflates compression effects with base model quality, and no variance is reported. These are addressable weaknesses, not fatal flaws. The paper makes a real contribution that the community would benefit from having, provided the claims are scoped appropriately.
+**Originality**: Good — the paper is the first to systematically evaluate compressed LLMs across knowledge-intensive, in-context, and instruction-following tasks, revealing findings that challenge assumptions in prior compression work.
 
-**Score: 6.0**
+**Importance of research question**: High — perplexity is widely used as the primary evaluation metric for compressed LLMs, and demonstrating its inadequacy has direct practical implications.
 
-**Decision: Accept**
+**Claims supported**: Partially — the broad patterns (perplexity hides degradation, N:M sparsity fails, in-context retrieval is robust) are well-supported. The specific threshold claims and method comparisons are weakened by the absence of error bars.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+**Soundness of experiments**: Adequate but not rigorous. Three-run averages without variance, a single model family, and a single quantization method limit the strength of conclusions.
+
+**Clarity of writing**: Clear and well-structured. The paper communicates its motivation, experimental design, and findings effectively.
+
+**Value to community**: High — the benchmark and findings provide actionable guidance for practitioners and a foundation for future compression research.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

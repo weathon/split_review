@@ -1,81 +1,73 @@
-Now I have a thorough understanding of the paper and all the claims. Let me produce the consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes LBN-MOBO, a Bayesian optimization framework for multi-objective engineering design problems where very large batch sizes (thousands of samples) can be evaluated in parallel but iterations are expensive. The key innovation is a 2MD acquisition function that performs non-dominated sorting over both performance objectives and their epistemic uncertainties, enabling exploration of under-represented regions alongside exploitation of high-performance areas. The method is paired with Bayesian neural network surrogates (Deep Ensembles recommended) and evaluated on two real-world problems — airfoil CFD design and 3D printer color gamut optimization — with batch sizes up to 20,000.
+This paper proposes LBN-MOBO, a Bayesian optimization framework for extremely large-batch, multi-objective problems where iteration efficiency (not sample efficiency) is the priority. The core innovation is a 2M-dimensional acquisition function that performs non-dominated sorting over both predicted objectives and their epistemic uncertainties, enabling scalable exploration. The paper demonstrates that existing acquisition functions (qEHVI, qNEHVI, qParEGO) fail or become prohibitively expensive at batch sizes beyond 10–200, while LBN-MOBO handles batches of 15,000–20,000 on real-world airfoil and 3D printing problems.
 
 ## Strengths
 
-1. **Novel 2MD acquisition function treating epistemic uncertainty as an additional objective** (Section 4.2, Eq. 2): Rather than the standard \(M\)-dimensional Pareto front over performance objectives, the acquisition function constructs a \(2M\)-dimensional front that jointly maximizes predicted objectives and their epistemic uncertainties. This is a clean, practical design that enables exploration without a separate exploration-exploitation trade-off parameter. The ablation study (Section 5.4, Figure 5) directly confirms that including uncertainty produces more diverse candidate distributions and broader Pareto fronts.
+1. **Empirical demonstration of existing methods' failure in large-batch regimes**: The paper systematically shows that qEHVI causes memory overflow beyond batch size 20, and qNEHVI/qParEGO become computationally prohibitive above batch size 200 on ZDT3 (Section 3, Figure 1). This clearly motivates the need for a more scalable approach.
 
-2. **Demonstrated scalability to extremely large batch sizes (15,000–20,000)**: Section 5.3 shows LBN-MOBO handling batch sizes that are orders of magnitude larger than what existing acquisition functions can manage. Section 3 demonstrates that qEHVI fails at batch size >10, qNEHVI and qParEGO become computationally prohibitive beyond 200–500 (Figure 1), and the 44-hour GPU time budget is exhausted. This contrast substantiates the paper's central motivation that existing methods fundamentally cannot operate in the target regime.
+2. **Scalable 2MD acquisition function**: The proposed acquisition eliminates the acquisition-function bottleneck, allowing all tested surrogates (except IBNN) to complete optimization with batch sizes up to 1000 without computational collapse (Figure 2, Section 5.1). The computational time scales gracefully, directly supporting the core scalability claim.
 
-3. **Iteration efficiency on real-world problems**: Both real-world experiments converge to high-quality Pareto fronts within 10 iterations (Figure 4). Given that each iteration in the printer problem corresponds to a lab visit and in the airfoil problem to a batch of CFD simulations, this directly addresses the stated goal of minimizing iterations when NFP evaluations are expensive.
+3. **Validation on real-world problems with very large batches**: LBN-MOBO is applied to airfoil design (batch 15,000) and 3D printer color gamut (batch 20,000), recovering dense Pareto fronts in 6–10 iterations (Figures 3–4, Section 5.2). This demonstrates the method's applicability to practical problems at scales far beyond synthetic benchmarks.
 
-4. **Systematic benchmarking of neural surrogates under large-batch conditions** (Section 5.1, Figure 2): The paper evaluates six surrogate families (Deep Ensembles, MC Dropout, HMC, SGHMC, IBNN, DKL) paired with the proposed acquisition function, identifying Deep Ensembles as the best trade-off between performance and runtime for batch sizes up to 1,000. This provides practical guidance for practitioners and is a useful contribution in its own right.
+4. **Ablation study confirming the benefit of epistemic uncertainty**: Removing epistemic uncertainty from the acquisition causes sample clustering and reduced diversity; including it leads to broader exploration and better Pareto fronts (Section 5.3, Figure 5). This directly validates the paper's core design choice.
 
-5. **Ablation study confirming the mechanism** (Section 5.4, Figure 5): The ablation on both real-world problems clearly shows that removing epistemic uncertainty from the acquisition causes candidate clustering and reduced coverage, while including it promotes exploration. This provides direct empirical support for the core design rationale.
-
-6. **Proof-of-concept extension to noisy settings** (Section 5.5): The noise-robust variant demonstrates on a toy and a simplified printer problem that aleatoric uncertainty can be incorporated to avoid noisy regions when the surrogate captures it reliably. This is preliminary but points in a useful direction.
+5. **Systematic benchmark of neural surrogates for large-batch BO**: Six neural surrogate models (DKL, HMC, IBNN, SGHMC, MC Dropout, Deep Ensembles) are evaluated with the 2MD acquisition, identifying DE and MC Dropout as the most time-efficient for batch sizes up to 1000 (Section 5.1, Figure 2). This provides practical guidance beyond the specific method.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-1. **No baseline comparisons on the real-world problems.** Section 5.3 compares only two variants of LBN-MOBO (Deep Ensembles vs. MC Dropout) against each other. No external baseline — not random search, not an evolutionary algorithm (e.g., NSGA-II run directly on the NFP), not a simplified BO variant with a comparable surrogate — is evaluated on the airfoil or printer problems. The paper claims superiority in the abstract ("demonstrate the superiority of our method by comparing it with state-of-the-art multi-objective optimizations") and in Section 5.3 ("There we also establish the superiority of our method over a few other algorithms"), but these claims are not supported by any experiment in that section. Section 3 does show that existing acquisition functions (qEHVI, qNEHVI, qParEGO) cannot scale to the relevant batch sizes on a synthetic problem, which is indirect evidence. But the key question — "given the same total NFP budget, does LBN-MOBO find better Pareto fronts than a reasonable alternative that can also handle large batches?" — is not answered for the real-world problems. This is the most consequential weakness because it underdetermines whether the method's complexity is justified.
-
-2. **Acquisition function scalability not quantitatively analyzed.** Section 4.2 notes that NSGA-II struggles with large populations and proposes running independent NSGA-II seeds with smaller batch sizes and combining results. But the paper provides no details on: the number of seeds used, how results are combined into the requested batch size \(S\), whether this introduces selection bias, or how long the acquisition computation takes relative to surrogate training. Figure 2 reports total optimization time but does not break out acquisition time. The claim that "the sole limiting factor for executing LBN-MOBO is our parallel processing or experimentation capability when querying the NFP" (line 240) is therefore unsubstantiated. This matters because if the acquisition itself becomes a bottleneck at batch sizes of 20,000, the practical advantage over simpler methods diminishes.
+1. **Acquisition function parallelization details are insufficient for reproducibility**. The method (Section 4.2, line 239) states: "we propose to compute in parallel independent acquisitions (different NSGA-II seeds) with smaller batch sizes, and combine the results." No further specification is given: how many parallel NSGA-II runs? What batch size per run? How are the results combined — simple union, ranking, selection? How are duplicates handled? Since the paper's empirical results for batch sizes of 15,000–20,000 hinge on this mechanism, the description is too vague to reproduce or assess correctness. This is a genuine methodological gap.
 
 ### Minor
+1. **Only the ZDT3 synthetic problem is used to demonstrate the failure of existing acquisition functions** (Section 3). The claim that "all of them can fail in a large batch setup" would be strengthened with additional test problems (e.g., DTLZ, WFG series). This is minor because the main experiments shift to real-world problems, and the ZDT3 analysis primarily motivates the need for a new method rather than serving as a comprehensive benchmark.
 
-3. **Noise-robust variant validated only on simplified problems.** The noise experiments (Section 5.5) use a 1D toy problem and a printer problem where 6 of 8 design variables are fixed. The paper acknowledges this limitation (lines 386–387: "Reliable computing... of aleatoric and epistemic uncertainties for complex problems... lies outside the scope of this work"), but this means the noise-robust contribution is not tested in a realistic high-dimensional setting, which limits its practical value.
+2. **Training time for real-world surrogates is not reported**. Figure 2 shows timing for ZDT3 up to batch 1,000, but for the real-world problems with batches of 15,000–20,000 and 44-dimensional inputs, no training or acquisition wall-clock time is given. Since the paper emphasizes iteration efficiency, total wall time (including surrogate training and acquisition computation) is relevant for assessing practical utility.
 
-4. **Missing reproducibility details for Deep Ensembles.** The paper does not specify the ensemble size \(K\), the number of layers and width of each network, training hyperparameters (learning rate, epochs, optimizer), or how the initial random samples are drawn. These details are needed for reproducibility. (If these are in the appendix, that addresses the concern, but the main text should at least reference them.)
+3. **The noise-robust variant (Section 5.4) uses hand-tuned weights α and β with no guidance for selection**. The method becomes tuning-dependent, which contrasts with the base acquisition function that is tuning-free. The experiments use only one successful weight setting per problem, with no heuristic or cross-validation procedure offered. This limits the practical applicability of the noise extension.
 
-5. **Single-run results without variance reporting.** No experiment reports variance across multiple runs. Given stochasticity in DE training, NSGA-II, and random initialization, single-run results make it difficult to assess the significance of observed differences. This is somewhat mitigated by the fact that the real-world experiments are expensive, but the ZDT3 benchmarks (Section 3 and 5.1) could feasibly be repeated.
+4. **NSGA-II sample size bottleneck (line 239) is mentioned but not quantified**. For batch sizes of 20,000, the paper does not specify how many NSGA-II evaluations are needed or what the overhead of the parallelization strategy is. This matters for assessing the scalability claims of the acquisition function itself.
 
 ### Trivial
-
-6. The schematic inset figure (20mm width) is too small to be interpretable (line 243). The text description is sufficient, so this does not affect evaluation.
+1. Line 284 has a duplicated word ("the the").
+2. The conclusion (line 408) states the "current acquisition function is tuning-free" — this is true for the base method but could be misread as applying to the noise variant, which requires tuning. A clarifying sentence would help.
 
 ## Nice-to-Haves
-
-- A comparison on the real-world problems against a simple baseline such as random search or NSGA-II applied directly to the NFP for the same total budget would substantially strengthen the paper's claims.
-- A wall-clock time breakdown of acquisition vs. surrogate training vs. NFP evaluation for a representative large-batch iteration would substantiate the scalability argument.
-- Hypervolume improvement over random initialization (percentage gain) would make the real-world results more interpretable to readers unfamiliar with the specific domains.
-- Guidance for setting \(\alpha\) and \(\beta\) in the noise-robust variant (or a default tuning-free scheme) would increase practical utility.
+- A cross-validation or heuristic procedure for choosing α and β in the noise-robust variant would significantly increase its practical value.
+- Reporting wall-clock time breakdown (surrogate training vs. acquisition computation) for the real-world runs would strengthen the practical utility claim.
+- Adding one or two additional synthetic problems (e.g., DTLZ) to the initial bottleneck analysis would broaden the evidence.
 
 ## Removed Points
-
 These points are flagged to be removed; treat them with caution.
 
-- *"The 44-hour GPU time cap is arbitrary"* — This is a standard experimental design choice for bounded-comparison studies; not a valid weakness.
-- *"Section 3 does not show whether these methods would converge given more compute"* — Speculative; the paper shows they fail within reasonable resource bounds, which is a meaningful result.
-- *"The regret analysis contribution is never referenced in the evaluation"* — Section \ref{sec:regret} is almost certainly in the appendix (stripped by parser); per hard rules, missing appendix content is not a valid criticism.
-- *"The paper does not report variance or multiple runs"* — Kept as Minor 5, but the harsh critic's framing as a structural flaw is excessive; single-run experiments are common for expensive real-world evaluations.
-- *"The inset figure is too small to read"* — Kept as Trivial 6; the substantive content is already conveyed by text.
-- *Formatting/style nitpicks* — These are parser artifacts, not author errors.
+- **Criticism: "The real-world experiments lack baseline comparisons against other optimizers"** — The paper references supplementary comparisons in `sec:complementary_experiments` (line 281), which was likely in an appendix stripped by the parser. The instructions require treating appendix content as present in the original submission. The ZDT3 experiments (Section 3) also provide direct comparisons showing existing methods fail at large batch sizes, which supports the paper's claims about the need for a scalable solution.
+
+- **Criticism: "The regret analysis announced as a contribution is absent"** — The contributions list (line 53) references `sec:regret`, which was likely in a stripped appendix section. The instructions require treating appendix content as present.
+
+- **Various stylistic/formatting nitpicks** — Removed per instructions (parser artifacts).
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a perspective that the paper itself does not provide.
+The reviews surface an interesting tension that the paper does not fully address: the same NSGA-II-based acquisition that makes the method embarrassingly parallelizable also introduces a secondary bottleneck (the parallelization strategy itself) that is only vaguely described. This means the paper's computational scalability claims are somewhat self-referential — the bottleneck is shifted from the acquisition function to an underspecified parallelization scheme. Separately, the noise-robust variant reveals that bringing aleatoric uncertainty into the 2MD framework breaks the "tuning-free" property, suggesting a fundamental trade-off between robustness and automation that the paper does not explore. None of these points invalidate the core contribution, but they point to areas where future work could have high impact.
 
 ## Suggestions
-
-1. Add at least one external baseline on the real-world problems — e.g., random search with the same batch size, or a simple acquisition function (expected improvement per objective with random scalarization) paired with the same Deep Ensemble surrogate and applied for the same number of iterations. This would directly support the claim of superiority.
-2. Provide a compute-time breakdown for one iteration at batch sizes 1,000, 5,000, and 20,000, separating acquisition time, surrogate training time, and NFP evaluation time.
-3. Specify the architecture, ensemble size \(K\), and training hyperparameters for Deep Ensembles in the main paper (or ensure the appendix is clearly referenced).
-4. Report results over at least 3 random seeds for the synthetic ZDT3 benchmarks to give a sense of variability.
+1. Provide full specification of the acquisition parallelization: number of parallel NSGA-II runs, batch size per run, selection/aggregation rule, and duplicate handling. This is the single most actionable improvement.
+2. Add training and acquisition wall-clock time for the real-world experiments to support the iteration-efficiency claim.
+3. Provide guidance (even heuristic) for setting α and β in the noise-robust variant, or frame it as preliminary with explicit caveats.
+4. Consider including one additional synthetic benchmark problem in the initial bottleneck analysis for robustness.
 
 ## Score and Decision
 
-This paper addresses an understudied and practically important problem — large-batch, iteration-expensive multi-objective optimization — and proposes a genuinely novel acquisition function that is well-motivated and supported by ablation analysis. The method demonstrably operates at batch sizes that break existing approaches, and the real-world validation on two distinct domains (CFD simulation and physical 3D printing) is commendable.
+**Overall assessment**: The paper addresses an important and underexplored problem — very-large-batch multi-objective BO with iteration efficiency — and proposes a genuinely novel, plausible solution. The 2MD acquisition function is simple, intuitive, and demonstrably shifts the computational bottleneck away from the BO loop. The real-world validation on problems with batch sizes of 15,000–20,000 is impressive and shows the method works at a scale far beyond what existing BO methods can handle. The ablation study cleanly validates the role of epistemic uncertainty.
 
-However, the paper's strongest claims of superiority are made without direct baseline comparison on the real-world problems. The evidence for superiority rests on the synthetic Section 3 experiments showing that existing methods cannot scale, which is necessary but not sufficient to show LBN-MOBO is the best approach. A reasonable reader would want to know how the method compares to even simple alternatives (random search, NSGA-II directly on the NFP) on the same real-world problems. The acquisition function scalability also lacks quantitative support. These are consequential gaps but not fatal — the core algorithm is novel and the iteration-efficiency results are convincing even without baselines.
+However, the method's central mechanism for scaling to the largest batch sizes — the parallel NSGA-II strategy — is underspecified, creating a reproducibility gap. The remaining weaknesses (single synthetic benchmark for the bottleneck analysis, unreported wall-clock times for real-world experiments, hand-tuned weights for the noise variant) are individually minor but collectively reduce the paper's completeness.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+The paper's core claims are supported by the evidence provided, and the contribution — a scalable acquisition function for extreme-batch MOBO — is novel and practically relevant. The main fix (specifying the parallelization strategy) is addressable in a minor revision and does not threaten the validity of the results.
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

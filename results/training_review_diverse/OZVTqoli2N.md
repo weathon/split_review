@@ -1,79 +1,79 @@
-Now I have a thorough understanding of the paper and can verify all reviewer claims against the actual text. Let me compose the final review.
+Now I have all the information needed to construct the final review.
+
+---
 
 ## Summary
 
-This paper presents a second-order Taylor approximation framework to understand model compositionality in non-linear deep networks. It derives an upper bound (Jensen inequality) on the composed model's risk under the assumption of local optimality at pre-training weights, and proposes two incremental learning algorithms — ITA (individual training, regularizing each task vector toward pre-training) and IEL (ensemble training, regularizing the composed model directly). Both algorithms feature constant complexity w.r.t. number of tasks and are evaluated on 7 class-incremental benchmarks with comparisons to EWC, LwF, L2P, CODA, SEED, InfLoRA, APT, and TMC. The pool of learned task vectors also supports zero-shot specialization and unlearning.
+This paper studies model compositionality — the ability to combine multiple fine-tuned modules into a single multi-task model — in standard non-linear deep networks. The authors derive a second-order Taylor expansion framework around pre-training weights to show that staying within the "pre-training basin" is critical for effective composition, and they propose two incremental learning algorithms (ITA and IEL) that enforce proximity to pre-training weights via Fisher-based regularization. The resulting methods achieve strong empirical results on six class-incremental benchmarks and support zero-shot specialization and unlearning through task-vector arithmetic.
 
 ## Strengths
 
-- **Novel second-order Jensen inequality for non-linear networks (Eq. 3–4, §2.1).** The paper generalizes prior compositionality analyses that were limited to linearized models. The inequality ℓ̂_emp(θ_pool) ≤ Σ w_t ℓ̂_emp(θ_t) applies to *any* fine-tuning strategy (full, LoRA, IA³), which is a genuine theoretical advance over Tangent/linearization-based approaches.
+- **Generalization beyond linearized networks.** The paper's second-order framework applies to any fine-tuning strategy (full FT, LoRA, IA³) in standard non-linear networks, whereas prior theoretical work on compositionality (e.g., Ortiz-Jiménez et al., Liu et al.) was restricted to linearized models. The paper explicitly contrasts its inequality (Eq. 4) with the linearization-based result (Eq. 6–7) and notes it "applies to *any* fine-tuning strategy" (lines 63–69).
 
-- **Two dual algorithms with practical efficiency (§3).** ITA and IEL are derived from the same second-order formulation but offer complementary trade-offs (individual vs. ensemble training). Both maintain O(1) complexity w.r.t. number of tasks through cached/closed-form gradient computation, making them scalable to long task sequences.
+- **Exact decomposition of the composed-model loss (Theorem 1).** The paper derives an exact expression for the second-order approximation of the composed model's loss, decomposing it into a convex combination of individual losses plus a non-negative diversity term Ω(·) proportional to pairwise distances in the Hessian-induced Riemannian manifold (Eqs. 11–12). This result directly motivates the regularization used in both algorithms.
 
-- **Closed-form gradient for the ensemble regularizer (§2.3, Eq. 7–8).** Theorem 1 and the subsequent derivation yield regularization gradients computable analytically without backprop-through-time, a concrete technical contribution that makes IEL lightweight.
+- **Dual algorithms with different trade-offs.** The paper proposes two distinct incremental learning algorithms (ITA for individual training, IEL for ensemble training) from the same second-order formulation, and shows that they have complementary properties: ITA supports modular editing (specialization/unlearning) while IEL does not, a practically significant finding demonstrated in Tables 3–4.
 
-- **Comprehensive evaluation on 7 benchmarks (§5).** The paper evaluates on diverse class-incremental settings (ImageNet, CIFAR, CUB, Caltech, MIT-67, RESISC, CropDiseases) with multiple fine-tuning strategies (FFT, LoRA, IA³), comparing against a wide range of existing methods.
+- **Strong empirical performance.** ITA and IEL achieve state-of-the-art or competitive final accuracy on six class-incremental benchmarks (Table 1), including challenging domain-shift datasets (Resisc45, CropDiseases), outperforming prior methods like TMC, APT, and InfLoRA. The results hold across full fine-tuning and PEFT variants.
 
-- **Demonstration of specialization and unlearning beyond standard metrics (§5, Table 3).** The paper shows that learned task vectors support zero-shot editing (specializing to a subset of tasks, unlearning specific tasks) via simple addition/subtraction, with ITA achieving larger target/control accuracy gaps than TMC.
+- **Demonstrated specialization and unlearning capabilities.** The paper shows that ITA's task vectors can be added/subtracted to specialize on a subset of tasks or unlearn a target task, with ITA achieving the best absolute performance on target tasks and a clear accuracy gap between target and control tasks (Tables 3–4). The finding that IEL *cannot* support modular editing while ITA can is a novel and useful insight.
 
 ## Weaknesses
 
 ### Fatal
-None.
+None. The paper's core empirical contributions stand even if the theory is approximate.
 
 ### Major
 
-- **Central theoretical assumption unverified.** The entire theoretical chain (convex quadratic approximation, Jensen inequality, Eq. 4) hinges on θ_0 being a local minimum of the empirical risk across all tasks. The paper's pre-consolidation (linear probing) fine-tunes only the classification head — it does not empirically verify that the resulting θ_0 (backbone + LP head) is a stationary point of the combined-task risk. No gradient norms or Hessian eigenvalue checks are reported. While the paper discusses this in limitations (§6), the gap between assumption and verification is significant enough that the theoretical guarantees (convexity, the bound) rest on unconfirmed ground. The paper's footnote that the condition "can be easily satisfied with over-parameterized deep learning models" is an assertion, not evidence. This weakens, but does not invalidate, the contribution — the algorithms work empirically regardless — and is the most serious issue identified.
+- **The local-minimum assumption for θ\_ptr is not verifiably satisfied.** The central theoretical result requires that the pre-trained weights θ\_ptr are a local minimum of the empirical risk over *all* tasks (including unseen ones), so that H(θ\_ptr) ⪰ 0. The paper's practical strategy to "enforce" this — linear probing (LP) during pre-consolidation — fine-tunes only the classification head while leaving backbone weights frozen (line 157). This does not ensure that the backbone is at a stationary point of the loss on new-task data; the gradient w.r.t. backbone weights at θ\_ptr is typically non-zero, and the Hessian is not guaranteed positive semidefinite over the combined data distribution. The paper acknowledges the assumption (line 55) and discusses approximation concerns in the limitations (Section 6), but the claim that the condition is "easily satisfied with over-parameterized deep learning models" is not substantiated. Since the Jensen inequality, the convexity of the second-order approximation, and the non-negativity of Ω in Theorem 1 all depend on H(θ\_ptr) ⪰ 0, a violation weakens the theoretical guarantees to heuristic intuition. The paper would be stronger if it either relaxed this requirement or provided empirical evidence (e.g., smallest Hessian eigenvalues after LP).
+
+- **The Fisher-based regularization is not isolated from simpler proximity baselines.** The ablation in Table 2 shows that removing the EWC-like regularization term hurts performance, confirming that regularization helps. However, the paper does not compare against a simpler baseline that achieves proximity to θ\_ptr through a plain L2 penalty on ∥τ\_t∥² (weight decay toward pre-trained weights). Since the paper's core message is that "staying within the pre-training basin" is the key condition for compositionality, a simple L2 regularizer to θ\_ptr would be a natural competitor to test whether the Fisher weighting — rather than mere proximity — drives the improvement. The paper compares against standard EWC (which has a shifting anchor rather than a fixed one at θ\_ptr), but this does not isolate the effect of Fisher-weighting vs. uniform weighting. Including an L2 baseline would either demonstrate the added value of the FIM or reveal that the theoretical apparatus primarily justifies a known regularization strategy.
 
 ### Minor
 
-- **Inconsistent claim about domain shift (§5).** The paper states that ITA/IEL "outperform existing approaches on all datasets except MIT-67 and CropDisease," then immediately says "Considering the good results on SplitRESISC and SplitCropDiseases... [our methods] do not seem affected by large domain shifts." Since CropDisease is one of the two datasets where the methods did *not* outperform baselines, the claim of robustness to domain shift is undercut by the paper's own results. The term "good results" is vague — the paper should clarify what constitutes "good" when SOTA performance was not achieved.
+- **Gap between second-order theory and the actual loss used in the algorithms.** The derivations in Section 2 use the second-order approximation ℓ̂, but the algorithms in Section 3 optimize the exact loss ℓ (line 161). The paper acknowledges this explicitly ("this proxy is often relaxed, and the full target function is used instead for simplicity"), which is standard in the continual learning literature. However, no empirical check is provided (e.g., measuring how well the quadratic proxy tracks the true loss over the region of parameter space visited during training). A small-scale verification of approximation quality would strengthen the link between theory and practice.
 
-- **O(1) complexity claim for IEL requires clearer exposition (§3).** The regularization term in Eq. 15 involves Σ_{t' < t} τ_t^T Î_θ₀ τ_{t'}. The paper asserts closed-form gradients with constant complexity w.r.t. T, which is achievable by caching accumulated inner products, but this important design detail is deferred to a supplementary section not visible in the main text. Since this claim is central to the method's scalability, a brief explanation in the main text would significantly help readers.
-
-- **Link between theory (quadratic approx) and practice (exact loss) could be more directly validated.** The paper acknowledges (§3) that the algorithms minimize the exact loss ℓ(θ) while the theory uses ℓ̂(θ), which is standard practice. Figure 1 shows that regularization reduces both the exact composed loss ℓ_emp(θ_pool) and the quadratic upper bound Σ w_t ℓ̂_emp(θ_t). However, the paper does not directly verify that the *exact Jensen inequality* (ℓ_emp(θ_pool) ≤ Σ w_t ℓ_emp(θ_t)) holds — it only shows ℓ_emp(θ_pool) ≤ Σ w_t ℓ̂_emp(θ_t). While this is a reasonable sanity check, explicitly comparing ℓ_emp(θ_pool) to Σ w_t ℓ_emp(θ_t) would strengthen the bridge between theory and practice.
-
-- **Hyperparameter sensitivity not reported.** The paper selects α and β via grid search but provides no analysis of how performance varies with these values. Without sensitivity results, it is difficult for practitioners to gauge how robust the methods are to hyperparameter choices.
-
-- **Analysis of why IES (ensemble) fails at specialization is underdeveloped.** The paper notes that IEL "struggles when any of its members are removed" and calls this "sobering," but does not analyze why — e.g., whether IEL task vectors drift farther from θ_0 than ITA vectors, which would directly connect to the paper's central thesis.
+- **No wall-clock training time or computational cost comparison.** One of the claimed advantages is constant complexity with respect to the number of tasks, but the paper does not report wall-clock time or FLOPs for the compared methods. A direct runtime comparison (e.g., total training time for a 10-task sequence) would substantiate this claim and help practitioners gauge practical efficiency.
 
 ### Trivial
-None.
+
+- The notation in several equations (Eq. 11, 16, 17) is dense, with nested sums over index sets that require effort to parse. Brief prose intuition after each key equation would improve readability.
+
+- The constant-memory claim is qualified with "provided we are not interested in more complex forms of composition than the simplest uniform average (as required for model customization and unlearning)" (line 163). This caveat is present but easy to miss — it could be made more prominent when the abstract advertises unlearning as a key benefit.
 
 ## Nice-to-Haves
 
-- **Comparison with additional merging methods.** Adapting approaches like Ties-Merging or DARE to the incremental setting could further strengthen the claim that the proposed algorithms are better suited for incremental composition.
-- **Wall-clock time comparison.** The paper claims constant complexity for closed-form gradients but does not demonstrate the computational benefit empirically (e.g., training time vs. number of tasks).
-- **Statistical reporting in main table.** While standard deviations are in the appendix, including them in the main table (at least for the proposed methods) would improve readability.
-- **Analysis of task vector geometry.** Computing pairwise distances in the Fisher metric for ITA vs. IEL vs. plain fine-tuning would provide mechanistic evidence for why the regularization works.
+- An ablation for IEL (removing the Ω regularization term) analogous to the ITA ablation in Table 2, shown in the main paper rather than deferred to the supplementary (though the supplementary content exists in the original submission).
+
+- A task-by-task learning curve visualization to complement the final-accuracy tables and show whether performance degrades over the incremental sequence (forgetting is already in the supplementary).
+
+- Exploration of more accurate Hessian approximations (e.g., Kronecker-factored) beyond the diagonal Fisher, which the paper itself mentions as future work.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+- **"Constant complexity claim is misleading because unlearning requires storing task vectors."** The paper already includes the explicit caveat (line 163): "provided we are not interested in more complex forms of composition than the simplest uniform average (as required for model customization and unlearning)." This criticism reflects a failure to read the qualification already present in the paper. *Removed because the paper already addresses it.*
 
-- *"The description of IA³ as a task vector is stated without derivation"* — The paper provides the explicit formula (τ_t = θ_0 ⊙ ((l-𝟙_h) ⊗ 𝟙_h)) on line 159, which is a complete derivation.
-- *"The main results table is not shown here"* — This is a parser artifact; the paper uses \input{tables/main_results_cil}, which exists in the original submission.
-- *"Standard deviations should at least be mentioned in a footnote in the table"* — The paper explicitly states on line 182 that standard deviations are in the supplementary; this is a presentation choice, not an omission.
-- *"The Fisher accumulation glosses over the fact that the Fisher is estimated on the pre-training weights while the actual loss evolves during fine-tuning"* — The paper acknowledges this approximation explicitly in the limitations section (§6: "the approximation may become inaccurate as parameters drift").
-- *"Criticism that the Jensen inequality in Eq. 4 pertains to the quadratic approximation rather than the exact loss"* — The paper clearly states this distinction (line 69: "our result pertains to the *second-order* approximation") and Figure 1 shows the exact composed loss improving, which already bridges theory and practice.
-- *"Missing comparison with Ties-Merging or DARE as baselines"* — The paper's baseline set (EWC, LwF, DPP, L2P, CODA, SEED, InfLoRA, APT, TMC) is already comprehensive. Adding more merging baselines is a nice-to-have, not a weakness.
-- *"The local minimum assumption note about over-parameterized models is hand-wavy"* — While the assumption lacks verification, this criticism is already captured in the Major weakness above. Removing the redundant version.
+- **"The paper should acknowledge the theory-algorithm gap more explicitly."** The paper already states (line 161) that "the full loss ℓ is instead employed in our algorithms" while the derivations use ℓ̂, citing precedent in the literature. The acknowledgment is already explicit. *Removed as factually inaccurate about what the paper does; the underlying concern (lack of empirical verification) is kept in Minor weaknesses above.*
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviewer insights are primarily requests for additional validation rather than novel observations about the work.
+The most interesting finding that emerges from the reviews — beyond the paper's own contributions — is the sharp behavioral difference between ITA and IEL uncovered in the specialization/unlearning experiments. While both algorithms achieve comparable final accuracy, ITA supports modular editing (addition/subtraction of task vectors) while IEL fails when any ensemble member is removed. This provides a practical design principle: methods that optimize the composed model as a whole may sacrifice component-level modularity, even when aggregate performance is strong. This tension between ensemble accuracy and editability is a useful consideration for future work on modular systems.
 
 ## Suggestions
 
-1. **Empirically verify the local-minimum assumption.** Report the gradient norm of the empirical risk at θ_0 (after LP) for a few tasks. Even a small gradient norm would substantially validate the theory; a large one would force a refinement of the argument but would not invalidate the empirical results.
-2. **Clarify the domain shift claim.** Distinguish between "good results" (competitive accuracy) and "outperforming baselines" when discussing CropDisease, or remove the ambiguous phrasing.
-3. **Add a brief explanation of the O(1) complexity for IEL's regularization gradient** in the main text — specifically, that cached sums of Î_θ₀ τ_{t'} enable the sum over previous tasks to be computed in O(1) per gradient step.
-4. **Include a hyperparameter sensitivity plot** (e.g., accuracy vs. α for one dataset) to demonstrate robustness.
-5. **Analyze why IEL fails at specialization** by measuring whether its task vectors drift farther from θ_0 than ITA's, providing mechanistic insight consistent with the paper's thesis.
+1. **Add a simple L2 proximity baseline.** Compare ITA against the same algorithm with the Fisher-weighted EWC term replaced by a plain L2 penalty (weight decay toward θ\_ptr). If ITA outperforms this baseline, the added value of Fisher weighting is demonstrated; if not, the theoretical framework primarily justifies a known heuristic (stay close to pre-training), and the paper should acknowledge this honestly.
+
+2. **Provide empirical evidence for the Hessian condition.** For at least one model/task setting, estimate the smallest eigenvalue of the empirical Hessian (or its diagonal/Fisher approximation) after linear probing to verify whether H(θ\_ptr) is positive semidefinite in practice. If it is not, discuss how the algorithms still work despite the violation.
+
+3. **Add a small-scale verification of the second-order approximation.** For one or two tasks, compare ℓ(θ\_ptr + τ) with the quadratic approximation ℓ̂(θ\_ptr + τ) over the range of τ visited during training to show the approximation is empirically reasonable.
+
+4. **Report training time.** A wall-clock comparison (e.g., total training time for a 10-task sequence across methods) would substantiate the constant-complexity claim and aid reproducibility.
+
+5. **Temper the theoretical claims in the abstract/introduction.** The paper's empirical contributions are strong enough to stand on their own. The theoretical framing should be presented as a useful approximation that provides intuition and motivates algorithmic design, not as a rigorous guarantee requiring assumptions that are not verifiably satisfied.
 
 ## Score and Decision
 
-The paper makes a credible theoretical contribution by extending compositionality analysis to non-linear networks, proposes two practical and well-motivated algorithms with useful efficiency properties, and evaluates them thoroughly. The main weakness — an unverified central assumption — is significant but does not invalidate the contribution; the algorithms work empirically, and the assumption is a common limitation in second-order methods that the paper acknowledges. The work is original, addresses an important question, and provides value to the research community. With revisions addressing the key concern (verifying or softening the assumption), the paper would be a solid contribution.
+This paper makes a solid empirical contribution: two well-performing incremental learning algorithms, strong results across six benchmarks, and a novel analysis of specialization/unlearning capabilities that reveals a practically important distinction between individual and ensemble training. The theoretical framework, while approximate and built on assumptions not fully verifiable, provides useful intuition and connects compositionality to the well-studied idea of staying close to pre-training. The weaknesses are genuine but not fatal — the Hessian assumption and missing L2 baseline are the most significant, and addressing them (as suggested above) would substantially strengthen the paper even without changing the core algorithms.
 
-MY FINAL SCORE: <pineapple>3.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

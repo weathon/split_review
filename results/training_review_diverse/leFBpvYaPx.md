@@ -1,84 +1,72 @@
-Now I have thoroughly verified all claims against the actual paper text. Let me produce the final consolidated review.
+Now I have thoroughly read the paper and verified all reviewer claims against the actual content. Let me compose the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper presents the first systematic study of adversarial robustness for Graph Transformers (GTs). It designs gradient-based adaptive attacks with continuous relaxations for non-differentiable GT components (Shortest Path Distance, random walk, and spectral positional encodings), guided by three general design principles. The attacks are instantiated for five representative GT architectures (Graphormer, GRIT, SAN, GPS, Polynormer) across multiple tasks (node classification, graph classification, node injection). The paper reveals a diverse robustness landscape — some GTs are catastrophically fragile while others (notably SAN) are surprisingly robust — and shows preliminary evidence that adversarial training can substantially improve robustness for at least one architecture.
+This paper provides the first systematic study of adversarial robustness for Graph Transformers (GTs). The authors design adaptive gradient-based attacks for five representative GT architectures (GRIT, Graphormer, SAN, GPS, Polynormer) by proposing continuous relaxations for non-differentiable components such as random-walk, shortest-path, and spectral positional encodings. They evaluate these attacks on node classification (CLUSTER), graph classification (Reddit Threads), and fake news detection (UPFD) under structure perturbation and node injection threat models. The results reveal that GTs can be catastrophically fragile in many settings, and the authors further demonstrate that their adaptive attacks can be leveraged for adversarial training to substantially improve robustness.
 
 ## Strengths
 
-- **First adaptive attacks for Graph Transformers.** The paper identifies a genuine gap in the literature and fills it with technically sound relaxations for non-differentiable GT components (SPD, random-walk, and spectral PEs). The three design principles (Section 3) are clearly motivated and provide a reusable template. Evidence: Sections 3, 5; attacks instantiated for all five architectures.
+- **First adaptive attacks for Graph Transformers.** The paper is the first to design gradient-based adaptive attacks targeting GTs, proposing three general design principles (§3) for relaxing non-differentiable components. It instantiates these attacks for five representative GT architectures (GRIT, Graphormer, SAN, GPS, Polynormer), going substantially beyond prior work that focused exclusively on message-passing GNNs.
 
-- **Comprehensive evaluation across multiple architectures, tasks, and threat models.** The study covers five GT architectures, three task types (inductive node classification on CLUSTER, graph classification on Reddit Threads, node injection on UPFD politifact/gossipcop), and multiple attack budgets, with appropriate baselines (random perturbation, random search, GCN transfer). Evidence: Section 5, Figures 1, 3–6.
+- **Demonstration of catastrophic fragility on practical tasks.** The paper provides concrete evidence that GTs can be extremely vulnerable — e.g., on UPFD gossipcop, perturbing only 2.5% of edges suffices to essentially halve the accuracy of a normally trained Graphormer (Fig. 1c–d, §6). These results establish that robustness evaluation of GTs is practically important and non-trivial.
 
-- **Ablations and transferability analysis confirm the value of gradient-guided attacks.** Table 1 shows each individual relaxation component outperforms the gradient-free random baseline, and their combination yields the strongest attacks. Figure 7 demonstrates that GT-to-GT transfer outperforms GCN-to-GT transfer, with "best transfer" sometimes matching the adaptive attack. Evidence: Section 6, Table 1, Figure 7.
+- **Adversarial training substantially improves GT robustness.** Using their adaptive attacks for training, the paper shows that Graphormer becomes "remarkably robust, much more even than the GCN" on UPFD gossipcop, with no major clean accuracy drop (§7, Fig. 8c–d). This is the first demonstration that GTs can learn robust models via adversarial training.
 
-- **Adversarial training yields striking gains for one GT architecture.** On Graphormer (the least robust GT on UPFD), adversarial training produces remarkably robust models — on gossipcop, the robust Graphormer even exceeds the robust GCN, with no major clean accuracy drop. Evidence: Section 7, Figures 8a–d.
+- **Ablation studies validating each relaxation component.** Table 1 systematically ablates the continuous relaxations for Graphormer, confirming that each relaxation individually yields useful gradients (beating the random baseline). Similar ablations for GRIT and SAN are provided in the appendix.
+
+- **Transferability insights.** The paper shows that adversarial examples crafted for one GT transfer more effectively to other GTs than from a GCN surrogate (Fig. 7, §6), providing practical guidance for assessing new GT architectures before designing custom attacks.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-None. The paper's core contribution — the attack framework and the robustness landscape — is novel and empirically sound. No single weakness threatens the paper's acceptance.
+None.
 
 ### Minor
 
-- **The adversarial training claim is broader than the evidence.** Contribution (3) states "we show that adversarial training yields an effective defense counteracting GT's vulnerabilities," and the abstract claims adversarial training "substantially improves robustness." However, the adversarial training experiments cover only *one* GT architecture (Graphormer) on *one* dataset pair (UPFD). The paper acknowledges this choice (Graphormer was the least robust and had "large potential for robustness gains") and the conclusion appropriately hedges ("promising and show that GTs have the potential"), but the contribution list and abstract do not reflect this limitation. The claim should be scoped to match the evidence — e.g., "we provide the first demonstration that adversarial training can substantially improve robustness for one GT architecture (Graphormer), suggesting GTs may have favorable properties for learning robust models."
+- **No direct validation that relaxed gradients correlate with the true discrete objective.** The core technical innovation is the continuous relaxations for non-differentiable GT components, yet the evaluation only compares final attack success rates. The paper does not analyze whether the gradients from the relaxed model point in useful directions — e.g., by measuring gradient alignment against a brute-force search on small graphs, or by comparing with REINFORCE-estimated gradients. The ablation studies and random-attack baselines provide *indirect* evidence that the relaxations help, but a more direct validation would substantially strengthen the technical contribution. (This is the most significant gap among the minor issues.)
 
-- **The "catastrophically fragile" framing in the abstract oversimplifies the nuanced findings.** The abstract states "GTs can be catastrophically fragile in many cases," but the paper's own results show a diverse picture: SAN is "surprisingly robust" on UPFD (Section 6, line 137); on CLUSTER, GTs are *more* robust than MPNNs for small budgets (Section 6, line 130); and on Reddit Threads, SAN's adaptive attack is comparatively weak. The conclusion (Section 9) correctly captures this diversity. The abstract and introduction should be recalibrated to match the conclusion's balanced tone.
+- **Adversarial training evidence is limited to one GT architecture.** The adversarial training experiments use only Graphormer on two UPFD datasets. While the conclusion uses appropriately qualified language ("potential," "may be advantageous"), the claim that "GTs have the potential to become very robust against graph structure perturbations" rests on evidence from a single architecture. Testing at least one additional GT architecture (e.g., GPS or GRIT) would substantially strengthen this conclusion.
 
-- **SAN's anomalous behavior on Reddit Threads is mentioned but not analyzed.** On Reddit Threads (Figure 4), the adaptive attack for SAN fails to outperform the GCN transfer or even random search for most budgets. The paper notes this in one sentence ("SAN is the exception, for which in this particular case the adaptive attacks are comparatively weak") but offers no analysis of *why*. Since the paper's central contribution is the attack methodology, understanding whether this failure is due to a limitation of the PE relaxation (e.g., spectral PEs changing slowly under structure perturbations) or something specific to SAN's architecture would strengthen the paper. This is not a fatal gap, but a brief diagnostic (e.g., freezing the PE during the attack to isolate the bottleneck) would substantially improve the contribution.
+- **No computational overhead measurements despite Principle III demanding efficiency.** Principle III states that relaxations "must be efficient," yet no runtime or memory measurements are reported comparing adaptive attacks against baselines. For practitioners deciding whether to use these attacks, such information would be helpful.
 
-- **Only 50 test graphs per dataset with limited analysis of representativeness.** The paper evaluates on "the 50 first graphs in the test set" (Section 5). While 4 random seeds are used, there is no discussion of whether the first 50 graphs are representative of the full test distribution. For a study that aims to characterize the robustness landscape, this is a nontrivial sampling limitation.
+- **Spectral PE relaxation technique not specified.** The paper cites Lin et al. (2022), Zhu et al. (2018), and Bojchevski & Günnemann (2019) for differentiable approximations for eigendecompositions, but does not specify which technique is actually used for the spectral PE relaxation. A brief clarifying sentence would help.
 
 ### Trivial
-
-- **The relaxed-logarithm edge case is not clarified.** The paper uses $\log(\tilde{A}_{ij})$ in the relaxed local attention (Eq. 7), which formally diverges if $\tilde{A}_{ij}=0$. In practice this never occurs (PRBCD keeps $B_{ij}\in[0,1]$ and candidate edges have $\tilde{A}_{ij}>0$), but a brief clarification would resolve potential confusion.
+None.
 
 ## Nice-to-Haves
 
-- A diagnostic analysis of why SAN's adaptive attack fails on Reddit Threads (e.g., whether freezing the spectral PE during the attack changes the outcome).
-- Runtime/memory cost reporting for the adaptive attacks across different GT architectures, since GTs scale quadratically in nodes and this has practical implications.
-- Statistical significance tests for cases where the gap between attacks is small (e.g., CLUSTER at small budgets).
-- One additional GT architecture in the adversarial training evaluation (e.g., GRIT on one UPFD dataset) to strengthen the claim of generality, if feasible.
+- A brief discussion of how the approach differs from Zhu et al. (2024)'s proposed robust sparse transformer would strengthen the positioning.
+- Extending adversarial training to at least one more GT architecture (e.g., GPS) would substantially strengthen the conclusion about GT robustness potential.
+- A comparison of when adaptive attacks are crucial versus when simpler attacks (GCN transfer) suffice could be made more explicit in the abstract/framing, though the paper does acknowledge this nuance in the main text.
 
 ## Removed Points
 
-- **"Missing implementation details for the relaxations"**: The critic faults the paper for sketching rather than detailing how to differentiate through eigen-decomposition or SPD computation. The appendix (stripped by the parser) likely contains these details, and the main text appropriately defers there. Per Hard Rules: parser-stripped appendix content cannot be the basis of criticism.
-- **"Hyperparameter choices only in appendix"**: Standard practice; the paper states they were chosen via "preliminary evaluations" (Section 5). Per Hard Rules: trivial reproducibility nitpick.
-- **"Logarithm divergence concern"**: The critic raises the concern but then resolves it themselves, concluding it is not actually a problem. Removed per Hard Rules (strawman weakness).
-- **"Speculative language about flexibility being advantageous"**: The paper explicitly uses "may be" (Section 7), which is appropriately hedged. The critic's point that no larger-capacity MPNN comparison exists asks for experiments beyond the paper's stated scope.
-- **"Missing molecule data"**: The paper explicitly addresses this: "adversarial attacks are of little practical relevance in that domain" (Section 5). A justified scope choice, not a weakness.
+These points are flagged to be removed; treat them with caution.
+
+- **Typos and grammatical errors** (e.g., "aggragate," "disscussion-based," "soly," "robustess," "whithout," "advarsarial"). REMOVED per instructions — these are flagged as parser/OCR artifacts, and the instruction mandates removing such criticisms.
+- **Missing appendix details** (e.g., "slight modifications … described in §F" not summarized in main text). REMOVED per instructions — appendix content is stripped by the parser and exists in the original submission.
+- **Criticism that the paper overstates the necessity of adaptive attacks.** The paper acknowledges (§6, CLUSTER results) that GCN transfer attacks work well on simpler tasks and explains why. The abstract says GTs "can be catastrophically fragile in many cases," which is appropriately qualified. The paper's framing is honest and balanced; this criticism overstates the issue.
 
 ## Novel Insights
 
-The most interesting pattern across the reviews is the tension between the paper's "catastrophic fragility" framing and the actually *more interesting* finding that robustness varies dramatically across GT architectures — with SAN being surprisingly robust on UPFD while Graphormer collapses. The reviews collectively suggest that the paper's most valuable contribution is not just the demonstration of fragility, but the *diagnostic capability* of the framework: the ability to contrast why different positional encodings and attention mechanisms lead to different robustness profiles. Neither reviewer fully articulated this, but together their critiques point toward a deeper insight: the attack framework enables comparative robustness analysis of GT components themselves, which could be more impactful than the adversarial training results that the paper foregrounds.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Temper the adversarial training claim** in the contribution list and abstract to match the evidence (one architecture, one dataset pair). Change "we show that adversarial training yields an effective defense counteracting GT's vulnerabilities" to "we provide a first demonstration that adversarial training can substantially improve robustness for one GT architecture (Graphormer), suggesting GTs may have favorable properties for learning robust models."
-
-2. **Recalibrate the abstract's "catastrophically fragile" language** to reflect the diverse robustness landscape the paper actually reveals, following the conclusion's more nuanced phrasing ("catastrophically fragile in some settings and remarkably robust in other settings").
-
-3. **Add a brief diagnostic for SAN on Reddit Threads** — even a paragraph speculating on whether the spectral PE relaxation is the bottleneck (and suggesting how to test it) would significantly strengthen the attack methodology contribution.
-
-4. **Discuss the representativeness of the first-50-graphs sampling** and whether any selection bias might affect the conclusions.
+- Add a small-scale experiment (e.g., on graphs with ~20 nodes) comparing relaxed gradient directions against brute-force or REINFORCE-based gradient estimates to directly validate the core technical contribution.
+- Extend adversarial training to at least one additional GT architecture (e.g., GPS or GRIT) on at least one dataset, or alternatively, qualify the conclusion further to explicitly note it applies only to Graphormer.
+- Report wall-clock time and memory usage of the adaptive attacks versus baselines to satisfy Principle III's efficiency requirement.
+- Briefly state which specific eigendecomposition approximation technique (among the cited works) is used for the spectral PE relaxation.
 
 ## Score and Decision
 
-**Originality:** High — first adaptive attacks for GTs, first robustness analysis of these architectures.  
-**Importance of research question:** High — GTs are increasingly deployed and their robustness properties were unexplored.  
-**Claims supported:** Mostly well-supported; the adversarial training claim is somewhat over-extended relative to evidence.  
-**Soundness of experiments:** Solid overall; attack methodology is well-designed and ablated; the main limitation is scope of adversarial training.  
-**Clarity of writing:** Good; the attack design principles and relaxations are clearly explained.  
-**Value to community:** High — provides a framework and baselines for future GT robustness research.
+The paper addresses an important and timely gap — the adversarial robustness of GTs — with the first adaptive attack framework tailored to their unique architectural components. The evaluation is broad (five architectures, multiple datasets, two threat models), the results are honestly reported (including cases where simpler attacks suffice), and the adversarial training results are promising. The weaknesses are addressable in revision and do not undermine the paper's core contributions. The paper makes a solid contribution to the community.
 
-This is a strong paper. The core contribution (adaptive attacks for GTs and the first robustness landscape) is novel, timely, and technically sound. The weaknesses are about *framing* and *scope* of a secondary contribution (adversarial training), not about the validity of the main results. All issues are addressable in a revision.
-
-MY FINAL SCORE: <pineapple>8.0</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

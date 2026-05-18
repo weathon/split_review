@@ -1,88 +1,89 @@
-Now I have a comprehensive understanding of the paper. Let me synthesize the final review.
+Now I have all the information I need. Let me compose the final consolidated review.
 
 ## Summary
 
-FlexMotion proposes a latent-space diffusion framework for text-conditioned human motion generation that integrates physics-aware constraints (Euler-Lagrange equations, muscle-coordination loss) into a Transformer autoencoder, and adds a plug-and-play spatial controllability module supporting joint locations, muscle activations, contact forces, and joint actuations. The paper augments three standard datasets with biomechanical signals via OpenSim and reports speedups of ~18× over MDM while maintaining or improving generation quality.
+FlexMotion proposes a latent-space diffusion framework for text-to-human-motion generation that integrates a physics-aware multimodal autoencoder (enforcing Euler-Lagrange dynamics and muscle coordination losses) with a spatial controllability module capable of conditioning on muscle activations, joint torques, and contact forces alongside standard kinematic parameters. The framework operates in a compressed latent space, yielding substantial inference speedup over full-space diffusion models like MDM.
 
 ## Strengths
 
-- **Dramatic efficiency gains through latent-space diffusion (Table 4)**: FlexMotion achieves an 18× reduction in inference time relative to MDM (25.1s vs. 456.7s with 100-step DDIM) while simultaneously improving FID from 5.990 to 0.254. This combination of speed and quality is a genuine advance over prior efficient models like MLD, which trade quality for speed. The result is clearly reported and verifiable from Table 4.
+- **Demonstrated computational efficiency via latent-space design.** Operating the diffusion process in a low-dimensional latent space reduces inference time from 456.7s (MDM) to 25.1s for 2048 clips under DDIM-100, while simultaneously improving FID from 5.99 to 0.254 (Table 4). This is a clean, well-supported engineering contribution.
 
-- **Physics-aware constraints embedded directly in the autoencoder, avoiding external simulators**: The Euler-Lagrange consistency loss (Eq. 5–6) and muscle-coordination loss (Eq. 7) are integrated as differentiable terms in autoencoder training, bypassing the computational bottleneck and non-differentiability of external physics simulators used in methods like PhysDiff. This design choice is well-motivated and the low muscle-activation and joint-actuation errors in Tables 1–3 support its effectiveness.
+- **Extension of the control space to biomechanical parameters.** The controllability module can condition on muscle activations, joint actuations, and contact forces — modalities that prior controllable methods (OmniControl, GMD) do not handle. Tables 1–3 show that conditioning on, e.g., 20 muscle activations improves R-Precision and reduces physical plausibility errors, demonstrating the practical value of this extended control space.
 
-- **Broad spatial controllability beyond prior work**: The controllability module (Sec. 3.3) supports fine-grained conditioning on joint actuations, muscle activations, and contact forces — modalities that OmniControl and GMD cannot accept. The zero-initialized convolution injection (Eq. 12) is a clean design that preserves pretrained quality during controllability training, and the ablation results (Sec. 4.2) show conditioning improves R-Precision and reduces trajectory error.
+- **Biomechanical dataset augmentation.** The authors augment three standard motion datasets (HumanML3D, KIT-ML, FLAG3D) with muscle activations, contact forces, and joint torques via OpenSim simulations, and plan to release these augmentations. This is a concrete resource for future work on biomechanically informed motion generation.
 
-- **Large-scale biomechanical data augmentation**: The paper augments HumanML3D, KIT-ML, and FLAG3D with muscle activations, contact forces, and joint torques using a full-body OpenSim model (21 body segments, 324 musculotendon actuators). This preprocessing creates a valuable resource for future physics-aware motion research.
-
-- **Consistent performance across three datasets**: Results on HumanML3D, KIT-ML, and FLAG3D show FlexMotion consistently achieves competitive or best FID and R-Precision, suggesting the approach generalizes beyond a single benchmark.
+- **Rigorous reporting conventions.** Results are reported as means over ten independent runs, and ablation studies systematically isolate the contribution of each conditioning modality and sparsity level.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **Overclaiming novelty relative to PhysPT (contribution #1)**: The paper states "We propose the **first** method that ensures generated motions are physically plausible by training a Transformer encoder-decoder with physical constraints" (line 23). Yet the method section (line 68) explicitly states the autoencoder architecture is "similar to the architecture introduced in Zhang et al. (2024b)" and the related work (line 48) acknowledges that "PhysPT integrates contact points, force, and Euler–Lagrange consistency loss to accurately simulate physical interactions." PhysPT (Zhang et al. 2024b) already uses a Transformer encoder-decoder with Euler-Lagrange consistency loss — the "first" claim is factually incorrect. The paper's actual novelty lies elsewhere (latent-space diffusion + controllability + broader modality set), and this overclaim unnecessarily undermines credibility. Must be corrected.
+1. **No direct comparison with controllable baselines on controllability metrics.** The paper claims FlexMotion "surpasses GMD and OmniControl regarding spatial control" (Sec. 4.1) and lists "enhanced controllability" as a core contribution, yet provides no trajectory error, joint adherence, or contact-force accuracy comparison against OmniControl or GMD. The only trajectory error numbers reported (0.015–0.031) come from FlexMotion's own ablations (Sec. 4.2). Without a controlled comparison, the claim of superior controllability is unsubstantiated. This directly undermines one of the paper's three claimed contributions.
 
-- **Unclear evaluation protocol for biomechanical metrics on baselines (Tables 1–3)**: The paper reports "Muscle Limit," "Joint Actuation Error," and "Contact Force Accuracy" for baselines (MDM, GMD, MLD, OmniControl, PhysDiff) that do not natively output muscle activations, joint torques, or contact forces. The paper describes dataset *augmentation* via OpenSim but never explains the pipeline that converts baseline-generated kinematic outputs into these biomechanical quantities. There are two plausible scenarios: (a) all baseline outputs were post-processed through the same OpenSim pipeline (making the comparison fair but needing documentation of the solver, OpenSim model version, etc.), or (b) the comparison uses different procedures for different methods. The paper is silent on this. While the comparison is likely fair (approach (a) is the natural reading), the absence of documentation makes the central quantitative evidence in Tables 1–3 unverifiable. This is especially problematic because FlexMotion is explicitly trained on the augmented biomechanical signals, so its advantage on these metrics could partially reflect the training data rather than superior physics modeling.
+2. **Ambiguous evaluation protocol for the augmented datasets.** The paper augments HumanML3D, KIT-ML, and FLAG3D with physics modalities using OpenSim (Sec. 4, Data Augmentation) and then compares FlexMotion against baselines (MD, GMD, MDM, MLD, OmniControl, PhysDiff) in Tables 1–3. However, the paper never states whether baselines were retrained/re-evaluated on the augmented data or whether their numbers were taken from original publications. For standard metrics like FID and R-Precision, this may still be comparable if computed on the unchanged kinematic portion of the data, but the paper does not clarify this. For the physics-specific metrics (Muscle Activation Limits, Contact Force Accuracy, Joint Actuation Consistency), baselines physically cannot output these modalities, yet they appear in the same comparison tables — these columns communicate only that FlexMotion can compute metrics that others cannot, not that it outperforms them on a shared evaluation.
+
+3. **Overclaimed novelty.** The paper states "We propose the *first* method that ensures generated motions are physically plausible by training a Transformer encoder-decoder with physical constraints" (Contributions, bullet 1). Yet the method section describes the autoencoder as "similar to the architecture introduced in Zhang et al. (2024b)" (PhysPT), and the Euler-Lagrange loss (Eq. 6) is directly taken from that work. The related work section explicitly notes that PhysPT "integrates contact points, force, and Euler–Lagrange consistency loss." The claim of being "first" is factually incorrect given the paper's own references. The actual novelty (muscle coordination loss, extension of the control space, dataset augmentation, latent-space diffusion of physics-aware features) is real but should be stated without the "first" framing.
 
 ### Minor
 
-- **Missing variance/statistical significance**: The paper states "All results are reported as mean across ten independent runs" (line 173) but reports only single values in every table. For metrics like R-Precision (e.g., 0.794 vs. 0.790) and FID where variance is known to be non-negligible, standard deviations or confidence intervals are needed to assess whether the reported improvements are significant.
+1. **Autoencoder reconstruction quality is not separately evaluated.** The diffusion model operates entirely in the latent space produced by the autoencoder. If reconstruction is poor for certain modalities, downstream generation quality suffers regardless of the diffusion model's performance. The paper defines a reconstruction loss (Eq. 4) but never reports per-modality reconstruction error on a held-out test set. This is a gap readers need to trust the pipeline.
 
-- **Autoencoder reconstruction quality not independently evaluated**: The diffusion model operates on latent representations from a frozen autoencoder, but the paper never reports reconstruction error or reconstruction FID for the autoencoder alone. Without this, it is unclear how much kinematic/dynamic information is lost in the latent bottleneck — a key factor for interpreting generation quality.
+2. **Missing FLAG3D text annotation details.** FLAG3D is originally a video-based fitness activity recognition dataset (180K videos, 60 activities). The paper uses it for text-to-motion generation but does not describe how text annotations were obtained for these videos, nor how motions were extracted (e.g., via video-based pose estimation, MoCap). Without this detail, the FLAG3D evaluation is difficult to interpret or reproduce.
 
-- **Ablation studies are too sparse**: The ablation analysis (Sec. 4.2) consists of a single paragraph with only a few numbers ("R-Precision... increasing from 0.788 to 0.794, Muscle Limit error decreasing from 2.028 to 1.943"). There is no ablation table, no ablation of individual physics losses (L_euler vs. L_muscle), no comparison of latent-space vs. full-space diffusion, and the "no conditioning" baseline is not defined. The paper needs a proper ablation table.
-
-- **Loss weights not specified**: The reconstruction loss (Eq. 4) uses weighting factors α_pos, α_rot, α_vel, α_acc, α_torque, α_force, α_muscle, and the total autoencoder loss (Eq. 8) uses γ_euler, γ_muscle. None of these values are reported. The muscle loss also uses β_reg (Eq. 7) which is unspecified. This prevents reproducibility.
-
-- **Muscle mapping matrix L not described**: Eq. 7 uses a matrix L that "maps muscle activations to joint accelerations, which is derived from musculoskeletal dynamics" (line 118). The paper does not explain how L is computed, whether it is precomputed from the OpenSim model and fixed, or learned. This is a key design choice affecting the muscle loss.
-
-- **SMPL-to-OpenSim registration not described**: HumanML3D and KIT-ML use the SMPL body model, while the augmentation uses an OpenSim model with 21 body segments and 29 DoFs. The mapping pipeline from SMPL to OpenSim and back is a non-trivial registration problem that is not discussed.
-
-- **Zhu et al. (2023) used as a blanket citation**: The related work (Sec. 2.1) repeatedly cites "Zhu et al. (2023)" as a single reference covering GANs, VAEs, Normalizing Flows, Diffusion Models, Motion Graphs, and diverse conditioning modalities (audio, music, images, 3D scenes, objects). This is unhelpful scholarship — it reads as a single broad survey paper standing in for multiple distinct lines of work. The authors should provide more specific, primary citations.
-
-- **Spatial controllability evaluation conditions for baselines not specified**: The paper describes FlexMotion's experimental conditions in detail (e.g., "1 muscle activation," "20 joint locations," "all conditions on 20% of frames") but does not specify what control signals were provided to controllable baselines (OmniControl, GMD) for the comparison entries. If FlexMotion receives richer conditioning signals (e.g., joint actuations + contact forces) while baselines only receive joint locations, then lower trajectory error for FlexMotion is expected and uninformative. The evaluation protocol for each row in the tables needs to be stated.
+3. **Handling of partial control signals unspecified.** The spatial controllability module expects control inputs cₜ ∈ ℝ^D matching the full modality dimensionality of xₜ. When controlling only a subset (e.g., 1 joint's location, or 1 muscle's activation), the paper does not specify what values occupy the remaining dimensions (zero-padding? masking?). This affects the feasibility of the claimed "plug-and-play" operation.
 
 ### Trivial
 
-None.
+- The efficiency comparison claim of "significant computational advantages" (Sec. 4.1) is accurate relative to MDM (456s → 25s) but overstated relative to MLD, which the paper itself notes has slightly lower FLOPs and inference time. The paper's own caveat ("It's important to note that although MLD has slightly faster inference time and FLOPs, it performs worse than FlexMotion in terms of FID") partially addresses this, but the surrounding framing still implies a universal advantage.
 
 ## Nice-to-Haves
 
-- Adding qualitative failure cases or limitations would strengthen the paper (e.g., cases where physics constraints are violated despite the losses, or where the latent bottleneck loses fine kinematic detail).
-- A statement about code/data release for reproducibility would be appropriate.
+- Define non-standard metrics (Contact Force Accuracy, Joint Actuation Consistency, Muscle Activation Limits) with formulas to enable replication.
+- Include human perceptual studies, which are standard in the motion generation literature for assessing physical plausibility.
+- Add per-modality reconstruction error for the autoencoder on a held-out test set.
 
 ## Removed Points
 
-*These points are flagged to be removed, treat them with caution:*
+- **"Dataset augmentation mismatch invalidates all comparisons"** (Harsh Critic, Critical Issue 1, first half): This criticism assumes that FID/R-Precision comparisons are invalid because test distributions differ. However, standard metrics are computed on kinematic data (joint positions, rotations), which is unchanged by the addition of physics modalities. The comparison *may* be valid for these metrics, but the paper's failure to clarify this protocol is a real weakness — moved to Major #2 with appropriately calibrated severity. The point about "--" columns in comparison tables is retained in Major #2 as a presentation concern.
 
-- **Equation typo in Eq. 4 (velocity/acceleration variable confusion)**: The harsh critic notes that both velocity and acceleration loss terms use the same variable `\hat{\mathbf{r}}_t`. Per the hard formatting rule, minor symbol-level artifacts from PDF parsing are not author errors and are removed.
-- **"Straw man" framing criticism**: The critic claims the intro's statement that "Traditional methods often fail to control intricate biomechanics" is a straw man given PhysPT. However, the paper cites PhysPT (Zhang et al. 2024b) in the very same sentence, and the claim is about "traditional methods" generally — not about all prior work. This criticism is overly aggressive and merges into the separate "first" claim issue already listed as a Major weakness.
-- **Criticism about missing appendix/proofs/references**: Per hard rules, these sections may be stripped by the parser.
-- **Criticism about missing related work**: Removed per instructions — I cannot independently verify the existence of missing references.
+- **"Selective efficiency comparison conflates quality with efficiency"** (Harsh Critic, Other Observations): The paper already acknowledges MLD's speed advantage while noting its worse FID. This is a fair trade-off discussion, not a flaw. The core efficiency claim (vs. non-latent MDM) is valid. Demoted to Trivial.
+
+- **Weakness demanding trajectory error comparison against OmniControl/GMD from Strength Finder's claimed strengths for computational efficiency and fine-grained control**: These were verified as real paper contributions. The missing baseline weakness (Major #1) is about the *controllability* claim specifically, not the efficiency or physics capability claims. No conflict.
+
+- **"The paper should also cover Y / domain Z" type demands**: None present. All criticisms are within scope.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews primarily surface issues with presentation, scope of evaluation, and framing — they do not introduce fundamentally new perspectives on the method or results.
+The most interesting observation across the reviews is the structural tension between the paper's two main contributions: its physics-aware autoencoder borrows heavily from PhysPT (architecture, Euler-Lagrange loss), while its controllability module borrows the ControlNet design pattern. The genuinely new pieces — the muscle coordination loss, the dataset augmentation pipeline, and the latent-space diffusion of multi-modal physics features — are individually plausible but collectively presented without clear attribution boundaries, making it hard for readers to assess the incremental value. This is less a technical flaw than a framing problem, but it significantly impacts how the work is perceived.
 
 ## Suggestions
 
-1. **Remove or rephrase the "first" claim.** Acknowledge PhysPT (Zhang et al. 2024b) as the prior work introducing physics-aware Transformer autoencoders for motion. Frame FlexMotion's novelty as extending this to latent-space diffusion (for efficiency) and adding controllability over the full biomechanical modality set.
+1. **For the controllability claim:** Add a direct comparison against OmniControl and GMD on trajectory error and joint adherence under identical control settings. If these baselines cannot control muscle activations or contact forces (as the paper argues), state this explicitly and frame the contribution as enabling *new types of control* rather than "superior" control over the same parameters.
 
-2. **Add a dedicated paragraph explaining the biomechanical evaluation pipeline for baselines.** State explicitly: "All baseline-generated motions were post-processed through the same OpenSim pipeline (inverse dynamics → joint torques → static optimization → muscle activations) to obtain biomechanical metrics." Provide the OpenSim model version, solver type, and any relevant parameters.
+2. **Clarify the evaluation protocol.** State explicitly whether baselines were retrained on the augmented data or whether their numbers are from original publications. If FID/R-Precision are computed on kinematic data only (unaffected by augmentation), say so. Remove physics-specific metrics from the main comparison tables or clearly separate them into a dedicated table.
 
-3. **Add standard deviations or confidence intervals to all tables.** Even brief notation (e.g., ±σ) would substantially improve credibility.
+3. **Correct the "first method" claim.** Acknowledge PhysPT's prior work and reframe the novelty to what is actually new: the muscle coordination loss, the multimodal latent-space diffusion pipeline, the spatial controllability module for biomechanical parameters, and the dataset augmentation.
 
-4. **Add a proper ablation table** showing: (a) removal of L_euler, (b) removal of L_muscle, (c) no controllability module, (d) full-space vs. latent-space diffusion, and (e) the "unconditional" baseline for the ablation.
+4. **Report autoencoder reconstruction error.** Show per-modality reconstruction error (position, rotation, muscle activation, torque, contact force) on a test set. This is essential to validate the latent space that the entire diffusion pipeline relies on.
 
-5. **Report all loss weights** (α_*, γ_euler, γ_muscle, β_reg) and describe how L (Eq. 7) is computed.
-
-6. **Specify the exact control conditions used for each baseline entry in Tables 1–3.** If FlexMotion receives different (richer) conditioning than OmniControl/GMD in some rows, state this explicitly and provide a fair comparison where all methods receive the same conditioning modality.
-
-7. **Describe the SMPL-to-OpenSim registration pipeline** in the Data Augmentation section.
+5. **Specify how partial control signals are handled.** Describe the mechanism (zero-padding, masking, or learned embeddings) for unspecified modalities when only a subset of joints/muscles/frames are controlled.
 
 ## Score and Decision
 
-The paper presents a genuinely useful combination of ideas — latent-space diffusion for efficient human motion generation, physics-aware autoencoder constraints, and broad controllability. The 18× speedup with maintained/improved quality is a concrete achievement. However, the overclaimed "first" novelty and the opaque evaluation protocol for biomechanical metrics are fixable but real problems. With corrections to these issues, the paper would make a solid contribution. The weaknesses are structural but not fatal — they can be resolved in a revision without changing the method or experiments.
+**Originality:** 4/10 — The combination of components is new, but the core architectural pieces (Transformer autoencoder with Euler-Lagrange loss, ControlNet-style conditioning) are directly taken from prior work with incremental additions.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+**Importance of research question:** 7/10 — Physically plausible and controllable motion generation is an important problem with practical applications in animation, VR, and robotics.
+
+**Claims support:** 4/10 — The efficiency claim is well-supported. The physical plausibility claim is partially supported but clouded by ambiguous evaluation protocol. The controllability claim is unsupported by any baseline comparison.
+
+**Soundness of experiments:** 4/10 — The experimental design has significant gaps: missing baseline for the primary claimed contribution (controllability), unclear evaluation protocol for augmented data, undefined metrics, and missing autoencoder validation.
+
+**Clarity of writing:** 6/10 — The architecture is clearly described. The experimental presentation is adequate but lacks crucial details (evaluation protocol, metric definitions, partial control handling).
+
+**Value to the community:** 5/10 — The augmented datasets and the demonstration of biomechanical control are potentially useful. However, the value is diminished by the insufficient evaluation of the core claims.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

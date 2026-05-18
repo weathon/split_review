@@ -1,22 +1,22 @@
-Now I have thoroughly verified all reviewer claims against the actual paper text. Here is my consolidated review.
+Now I have all the information I need. Let me construct the final consolidated review, carefully filtering and verifying every claim.
 
 ---
 
 ## Summary
 
-This paper presents HCNN, a fully hyperbolic convolutional neural network built entirely in the Lorentz model, and a hybrid variant HECNN. The authors propose novel Lorentz formulations for 2D convolution, batch normalization, multinomial logistic regression, residual connections, and activations — filling gaps explicitly identified in prior hyperbolic vision work. Experiments on CIFAR-10/100, Tiny-ImageNet, and CelebA show that Lorentz-based models outperform Euclidean and Poincaré baselines on classification, adversarial robustness, low-dimensional embeddings, and most generation metrics.
+This paper proposes HCNN, a framework for building fully hyperbolic convolutional neural networks — the first such encoder architecture for computer vision in the Lorentz model. It contributes novel Lorentz-model formulations of 2D convolution, batch normalization, and multinomial logistic regression, and evaluates hybrid (HECNN) and fully hyperbolic (HCNN) variants on image classification (CIFAR-10/100, Tiny-ImageNet), adversarial robustness, and VAE-based image generation. The results show consistent improvements over Euclidean and Poincaré baselines, with the hybrid encoder HECNN achieving the best classification accuracy and the fully hyperbolic HCNN delivering the strongest adversarial robustness.
 
 ## Strengths
 
-1. **Novel Lorentz formulations for missing CNN components**: The paper provides the first complete set of Lorentz-model generalizations for 2D convolution (Section 4.1), batch normalization with closed-form centroid (Section 4.2), and MLR (Section 4.3). These components fill a gap identified in prior work ("crucial components for vision, like the standard convolutional layer and the MLR classifier, are still missing") and enable fully hyperbolic vision encoders that previously did not exist in the literature.
+1. **First complete Lorentz-model CNN encoder for vision.** The paper provides the missing Lorentz formulations of 2D convolution, batch normalization, and MLR (Section 4), enabling the first fully hyperbolic encoder in computer vision. This advances beyond prior hybrid approaches that only apply hyperbolic geometry in the task head and addresses a gap identified in the literature.
 
-2. **Consistent classification improvements with statistical grounding**: On CIFAR-100, HECNN achieves 78.76% vs. 77.72% Euclidean, and HCNN achieves 78.07% — both improvements with non-overlapping standard deviations over five runs. On Tiny-ImageNet, HECNN (65.96%) and HCNN (65.71%) outperform Euclidean (65.19%). These gains demonstrate the practical value of the approach.
+2. **Consistent empirical improvements.** On CIFAR-100 and Tiny-ImageNet, HECNN Lorentz achieves 78.76% and 65.96% accuracy respectively, outperforming the Euclidean ResNet (77.72%, 65.19%) and the concurrent Poincaré ResNet (76.60%, 62.01%) (Table 1). The improvements are modest (~1–1.5 points) but consistent across datasets, which is noteworthy given that these are standard benchmarks with mature baselines.
 
-3. **Substantial adversarial robustness gains**: Under PGD attacks at ε=3.2/255 on CIFAR-100, HCNN achieves 31.77% accuracy vs. 26.30% for Euclidean (+5.47% absolute). The improvement is consistent across all perturbation levels and attack types (Table 2), directly supporting the claim that fully hyperbolic representations increase decision boundary slack.
+3. **Substantial adversarial robustness gains.** Under PGD attacks at perturbation 3.2/255, the fully hyperbolic HCNN Lorentz achieves 31.77% accuracy on CIFAR-100 — 5.47 points above the Euclidean model (26.30%) and 7.99 points above the Poincaré hybrid (23.78%) (Table 2). This is a clean, large-margin result that strongly supports the claim that deeper hyperbolic integration improves robustness.
 
-4. **Convincing low-dimensional embedding performance**: Figure 4 (labeled as Fig. 3) shows that at embedding dimensions 8, 16, and 32, HECNN and HCNN substantially outperform Euclidean and Poincaré baselines on CIFAR-100, validating the argument that hyperbolic geometry is especially beneficial in low-dimensional feature spaces.
+4. **Demonstrated advantage of Lorentz over Poincaré.** Lorentz-based models consistently outperform their Poincaré counterparts (e.g., Hybrid Lorentz 78.03% vs Hybrid Poincaré 77.19% on CIFAR-100), and the paper attributes this to better numerical stability under 32-bit precision (Section 2). This provides useful practical guidance for model selection in hyperbolic vision research.
 
-5. **Modular one-to-one replacement design**: All proposed modules are explicitly designed as one-to-one replacements for Euclidean components, demonstrated by directly translating standard ResNet-18 and VAE architectures without changing overall topology. This makes the approach practically accessible.
+5. **Geometrically principled and efficient batch normalization.** The Lorentz batch normalization (Section 4.2) uses a closed-form Lorentzian centroid (Eq. 6) rather than the iterative Fréchet mean required by prior Riemannian BN methods, and a re-scaling via parallel transport to the origin's tangent space (Eq. 7). This is both computationally efficient and mathematically grounded.
 
 ## Weaknesses
 
@@ -24,60 +24,96 @@ This paper presents HCNN, a fully hyperbolic convolutional neural network built 
 None.
 
 ### Major
-
-1. **Overclaiming on VAE generation results**: The paper states "our HCNN-VAE outperforms all baselines" (Section 5.2, paragraph "Main results"). However, Table 2 shows that on CIFAR-100 generation FID, HCNN (100.27) is *worse* than both Hybrid Poincaré (98.19) and Hybrid Lorentz (98.34). The HCNN-VAE is best on 5 of 6 metrics, but the blanket claim is factually incorrect for this specific metric. This is a meaningful negative result that could lead to insights about when fully hyperbolic architectures help versus hurt; ignoring it weakens the paper's credibility.
+None.
 
 ### Minor
 
-2. **Convolution specification relies on undefined sub-operations**: The Lorentz convolutional layer (Eq. 89) is defined as `LFC(HCat(...))`, where `LFC` is referenced as "similar to chen2021" and `HCat` (hyperbolic concatenation) is from shimizu-et-al-2020 but never defined in this paper. While referencing prior work for sub-operations is standard practice, a brief description of how the kernel weights interact with hyperbolic feature vectors (e.g., whether via tangent-space linearization or some other mechanism) would make the paper more self-contained and reproducible.
+1. **Overclaimed VAE result.** The text in Section 5.2 states "our HCNN-VAE outperforms all baselines" without qualification. However, Table 3 shows that on CIFAR-100 generation FID, the HCNN (100.27) is worse than both Hybrid Poincaré (98.19) and Hybrid Lorentz (98.34). While HCNN is best on 5 of the 6 VAE metrics, this sentence is factually incorrect as written and should be qualified. The overall conclusion (line 377), which uses the more measured phrasing "achieve better performance," is accurate — the issue is isolated to one sentence but affects reader trust.
 
-3. **Missing ablation for residual connection claim**: Section 4.4 states the proposed residual connection "provides the best empirical performance compared to other viable methods" (citing tangent-space addition, parallel transport addition, Möbius addition, and fully-connected layer addition). No ablation table or quantitative comparison is shown to support this claim.
+2. **No ablation study.** The paper proposes three novel components (Lorentz 2D conv, Lorentz BN, Lorentz MLR) and a hybrid encoder design (HECNN), but does not ablate them individually. For example, comparing Euclidean → Euclidean+MLR → Euclidean+MLR+BN → HECNN → HCNN would pin down which component drives improvement and help explain why HECNN outperforms the fully hyperbolic HCNN on classification. The available comparisons (Hybrid Lorentz vs HECNN vs HCNN) partially address this but do not isolate individual layer contributions.
 
-4. **Weak theoretical justification for BN rescaling**: The batch normalization rescaling step (Eq. 118) multiplies tangent vectors by γ/(√σ²+ε) and maps back via the exponential map. The paper states "a simple multiplication re-scales the features" but does not address whether scaling tangent vectors corresponds to meaningful scaling of Lorentzian distances after the non-linear exponential map (it does not, except asymptotically near the origin). The algorithm is fully specified and may work well as a heuristic, but it is presented without mathematical justification.
+3. **Missing runtime and efficiency analysis.** The paper claims to provide a "foundation for developing more powerful HNNs" and notes that HECNN "allows for faster runtimes and larger models" (conclusion), but reports no wall-clock time, memory usage, or parameter counts for any model. Hyperbolic operations (exponential/logarithmic maps, parallel transport) are inherently more expensive, and the paper's 32-bit precision strategy with feature clipping carries its own overhead. Without these numbers, readers cannot assess the practical cost of the 1–2% accuracy gains.
 
-5. **Hybrid vs. fully hyperbolic comparison not deeply analyzed**: The paper notes that HECNN (hybrid encoder) outperforms HCNN (fully hyperbolic) on CIFAR-100 and Tiny-ImageNet classification, and provides brief interpretation ("indicating that not all parts of the model benefit from hyperbolic geometry" and "hybrid encoder HNNs might make better use of the combined characteristics"). This observation is potentially the most interesting finding of the paper, but it receives only two sentences of discussion with no deeper analysis or ablation.
+4. **Vague HECNN block selection.** The HECNN definition (Section 5.1) says it "replace[s] only the ResNet encoder blocks with the highest hyperbolicity (δ_rel < 0.2)" but the sentence trails off with "i.e." and never specifies which of ResNet-18's four stages are replaced, nor reports the δ values for intermediate feature maps that justify the threshold. This makes the experiment difficult to reproduce exactly.
+
+5. **No empirical comparison to prior Riemannian batch normalization.** The paper criticizes Lou et al. (2020)'s Riemannian BN as "slow" with "arbitrary re-scaling" but provides no empirical comparison — not even on a single block — to substantiate the claimed advantages of the proposed LBN in speed or convergence quality.
+
+6. **Adversarial robustness results use only CIFAR-100.** The strong robustness gains in Table 2 are demonstrated on a single dataset. Reporting results on Tiny-ImageNet or CIFAR-10 would strengthen the claim that hyperbolic encoders are inherently more robust.
+
+7. **Embedding analysis is qualitative only.** The 2D latent embedding analysis (Figure 5, MNIST) is visually suggestive but lacks quantitative backing — e.g., average distance to origin per class, correlation between embedding radius and class hierarchy level, or a metric quantifying tree-likeness. This limits the strength of the claim that HCNN produces genuinely hierarchical representations.
 
 ### Trivial
-- The notation `β` is reused in Section 4.3 (both as a variable defined in Eq. 173 and inside the `sinh⁻¹` argument). This causes momentary confusion but is resolvable by reading the derivation.
-- Figure 4 (bar chart) could be complemented by a numeric table for the low-embedding results.
+
+1. **sign(α) corner case in Lorentz MLR.** The Lorentz MLR formula (Theorem 2) uses `sign(α)`, which is ambiguous when α = 0 (points exactly on the decision hyperplane). The softmax application handles this in practice, but the corner case should be noted for completeness.
+
+2. **No code availability statement.** Releasing the implementation would be particularly valuable given the nontrivial numerical bookkeeping in the proposed layers.
+
+3. **Numerical stability details unreported.** The paper states it uses feature clipping for 32-bit stability but does not report how often clipping thresholds are hit or whether clipping affects accuracy.
 
 ## Nice-to-Haves
-- An ablation study evaluating the effect of numerical stability tricks (feature clipping, Euclidean reparameterization) on performance.
-- Runtime and parameter count comparisons to help readers assess the computational cost of hyperbolic components.
-- Clarification in the adversarial robustness section about whether attacks were generated using standard Euclidean approaches or adapted for hyperbolic geometry (though FGSM/PGD on cross-entropy in pixel space is the standard and fair comparison).
+
+- **Significance tests for FID differences.** The FID differences between models are small (1–2 points). While standard deviations are reported from 5 runs, a significance test would clarify whether the observed differences are reliable.
+- **Lorentz BN mathematical validation.** A brief proof sketch or reference confirming that the parallel-transport scaling procedure (Eq. 7) preserves the intended Riemannian geometry would strengthen the theoretical contribution.
+- **HECNN diagram or table.** A figure or table showing which ResNet stages are replaced and their measured δ_rel values would resolve the vagueness in the HECNN definition.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+1. **Criticism about FID omitting confidence intervals.** The reviewer claimed FID results lack confidence intervals, but the paper reports mean ± standard deviation from five runs for every FID value in Table 3 — this is standard practice. The request for significance tests (as opposed to confidence intervals) is moved to Nice-to-Haves.
 
-- **"The Lorentz convolutional layer is not actually specified — core component is underspecified"** (Harsh Critic, Critical Issue 1): The paper gives a clear high-level definition referencing shimizu-et-al-2020 and chen2021 for sub-operations (LFC, HCat). This is standard practice in method papers. The level of specification is sufficient for reproducibility given the cited references. Kept as a minor clarity point instead.
+2. **Criticism that fully hyperbolic framing is "at odds with the best-performing model."** The paper:
+   - Explicitly lists both HECNN and HCNN in its contributions (line 30)
+   - Acknowledges HECNN outperforms HCNN twice (lines 202, 314) and discusses why
+   - Shows HCNN is actually the **best** model for adversarial robustness (Table 2) and for VAEs (5/6 metrics)
+   
+   The title and abstract appropriately focus on the technical novelty (Lorentz formulations enabling full hyperbolicity), and the paper is transparent about relative performance. This is not a weakness.
 
-- **"BN rescaling undermines confidence that LBN actually normalizes in a geometrically meaningful way"** (Harsh Critic, Critical Issue 2): The paper presents the algorithm as a practical heuristic (the text says "we propose to re-scale" without claiming it is a theorem). The formula is fully specified. The criticism overstates the impact of the weak theoretical justification. Kept as a minor weakness instead.
+3. **Criticism that Lorentz BN formula needs mathematical validation.** The formula (Eq. 7) follows a standard Riemannian approach: logmap → parallel transport → scale in tangent space → parallel transport back → expmap. The paper cites the relevant properties (geodesics through the origin as straight lines in tangent space, distance preservation of parallel transport) which are standard facts in Riemannian geometry. The reviewer's request for a "proof sketch" is a clarification preference, not a substantive flaw.
 
-- **"Experimental results contradict the paper's central thesis"** and **"text says 'Our HCNN-VAE outperforms all baselines' — this is inaccurate"** (Harsh Critic, Critical Issue 3): The VAE overclaim is genuine and kept as a Major weakness. However, the broader claim that results "contradict the central thesis" is unsupported — the paper clearly acknowledges HECNN > HCNN and offers interpretation. On VAE, 5/6 metrics favor HCNN; the overclaim applies to only one. The adversarial robustness results are uniformly positive for HCNN. The "central thesis" (that fully hyperbolic models can work well and provide benefits) is supported.
+4. **Criticism about missing related works.** Removed per policy — external verification is not possible.
 
-- **"The paper offers no analysis"** of the hybrid vs. fully hyperbolic comparison: The paper does offer analysis: "indicating that not all parts of the model benefit from hyperbolic geometry" (Section 5.1) and "hybrid encoder HNNs might make better use of the combined characteristics" (Section 5.1, low-embedding paragraph). The analysis is brief but present.
+5. **Criticism about missing appendix content.** Removed per policy — the parser strips these sections.
 
-- **"The low-embedding experiment ... numeric tables would be more informative"** and **"The paper does not report how the number of parameters changes"**: These are presentation preferences and nice-to-haves, not core weaknesses.
+6. **"No analysis of low-embedding dimensionality missing" — the paper already has this (Figure 3, lines 312–314).** The strength finder correctly notes this as a strength, not a weakness.
 
-- **"The adversarial attack setting ... should be specified"**: The paper uses standard FGSM/PGD, which is clear from context. Specifying the exact loss function is a minor detail that doesn't affect the validity of the comparison.
+7. **Request for comparison against closed-source or infeasible baselines.** None present.
 
-- **Missing related works**: Removed per instructions (no external sources to confirm).
+8. **"The paper should also cover Y / domain Z" style scope-creep demands.** Removed; the paper's scope is well-defined as a methods contribution for hyperbolic vision encoders.
 
 ## Novel Insights
 
-The reviews surface an important tension that the paper under-explores: HECNN (hybrid encoder) consistently matches or exceeds HCNN (fully hyperbolic) on classification tasks. This suggests that the benefits of hyperbolic geometry in vision may come primarily from the decoder/classifier layers rather than from making every layer hyperbolic. The paper's brief acknowledgment of this finding without deeper analysis leaves a significant open question. Additionally, the CIFAR-100 generation FID result (where HCNN is worse than hybrid models) hints that the relationship between full hyperbolicity and generation quality is not monotonic — a point that deserves investigation rather than omission.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Correct the VAE overclaim**: Qualify the statement in Section 5.2 to acknowledge that while HCNN-VAE is best on 5 of 6 metrics, it underperforms hybrid models on CIFAR-100 generation FID. Discuss why this might be the case.
-2. **Add a brief forward-pass description for the Lorentz convolution**: A few sentences describing how kernel weights are applied to hyperbolic feature vectors (tangent-space approach or otherwise) would substantially improve reproducibility without adding much length.
-3. **Add the missing residual connection ablation**: A single table comparing the five mentioned addition methods would justify the "best empirical performance" claim.
-4. **Expand the discussion of HECNN vs. HCNN**: This is the paper's most surprising finding and deserves analysis — is the trade-off optimization difficulty, are early layers not benefiting from hyperbolicity, or are there other factors?
+1. **Correct the VAE result statement** (Section 5.2, line 322) to acknowledge that HCNN is best on most but not all metrics, specifically noting the CIFAR-100 generation FID exception.
+
+2. **Add an ablation study** isolating the Lorentz MLR, Lorentz BN, and Lorentz conv contributions, starting from the Euclidean baseline and adding components one at a time. This would explain why HECNN outperforms HCNN on classification.
+
+3. **Report wall-clock time per epoch and GPU memory** for Euclidean, HECNN, and HCNN on at least one dataset (e.g., CIFAR-100) to help readers assess the practical trade-off.
+
+4. **Specify which ResNet-18 blocks** are replaced in HECNN and report the δ_rel values measured at each encoder stage of the Euclidean model to justify the δ_rel < 0.2 threshold.
+
+5. **Add a quantitative metric** to the latent embedding analysis (e.g., average distance to origin per class, hyperbolic radius vs. class hierarchy correlation) to support the qualitative visual comparison.
 
 ## Score and Decision
 
-The paper makes a genuine contribution by providing the first complete set of Lorentz-model CNN components for vision, and the experimental evidence broadly supports their effectiveness. The VAE overclaim is the most significant flaw and needs correction, but it does not invalidate the paper's overall contribution. The remaining issues (minor underspecification of the convolution, missing ablation, weak BN justification) are addressable in revision.
+**Originality:** High. The paper provides the first complete Lorentz-model CNN encoder for vision, with novel formulations of three missing components.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+**Importance of research question:** Moderate-high. Hyperbolic representation learning for vision is an active area, and filling the Lorentz-model gap enables practical progress.
+
+**Claims support:** Mostly good. The core claims are supported by the data; one sentence in the VAE section is overstated but the data is transparently reported.
+
+**Soundness of experiments:** Good. Multiple datasets (4), multiple tasks (classification, generation, adversarial), multiple runs with standard deviations, and comparison against both Euclidean and Poincaré baselines.
+
+**Clarity:** Good overall. The mathematical derivations are clear. Minor vagueness in the HECNN definition.
+
+**Value to the research community:** High. The Lorentz formulations are reusable building blocks; the empirical characterization (including the HECNN vs HCNN comparison) provides useful guidance.
+
+The paper makes genuine technical contributions and the empirical evidence is largely solid. The weaknesses are addressable (overclaimed sentence, missing ablation, missing runtime data) and do not threaten the core claims. With the suggested corrections, this would be a strong contribution.
+
+**Score:** 7.0
+
+**Decision:** Accept
+
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

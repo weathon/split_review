@@ -1,78 +1,81 @@
-Now I have all the information I need. Let me produce the final consolidated review.
+Now I have all the information I need. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes GOttack, a targeted adversarial attack on GNN node classifiers that uses graphlet orbits 15 and 18 to identify candidate nodes for edge perturbations, combined with a surrogate loss to select among them. The authors claim that gradient-based attack models disproportionately target nodes in these orbits, and that GOttack exploits this vulnerability to achieve higher misclassification rates than existing attacks while being computationally more efficient.
+This paper introduces GOttack, an adversarial attack framework for GNN node classification that leverages graph orbit information (specifically orbits 15 and 18) to select candidate nodes for edge perturbations. The method pre-filters the search space to nodes in these periphery orbits, then uses a linearized surrogate loss to pick the optimal edge modification. The paper reports that GOttack achieves the highest average misclassification rate (52.08%) across 15 attack settings, outperforming Nettack (47.02%) while reducing computational overhead by filtering candidates to roughly 23% of all nodes. It also presents evidence that existing gradient-based attacks disproportionately select nodes in these same orbits.
 
 ## Strengths
 
-- **Novel topological insight connecting graphlet orbits to adversarial vulnerability**: The paper identifies that Nettack disproportionately selects nodes whose top-two orbit counts are 15 or 18 (97.5% of initial attacks on Polblogs involve 1518 nodes, despite only 9.41% of nodes belonging to this category, per Table 5). While this evidence is limited to one attack method, the observation itself is novel and opens a potentially interesting direction for topology-aware attack design.
+- **Empirically demonstrated attack effectiveness**: Table 2 shows GOttack achieves the highest overall average misclassification rate (52.08%) across three backbone GNNs and five datasets, outperforming the second-best method Nettack (47.02%). It yields the best performance in 7 out of 15 single-edge settings.
 
-- **Competitive empirical performance**: GOttack achieves the highest overall misclassification rate across multiple settings — 52.08% vs. second-best Nettack's 47.02% in Table 2 (Δ=1), and 33.07% vs. SGA's 32.5% against four defense models in Table 3. It performs well across three backbone architectures (GCN, GIN, GraphSAGE) and four defense models, suggesting reasonable generality.
+- **Novel topology-driven candidate selection**: The core idea of using graph orbits to pre-filter the candidate set for structural attacks is well-motivated and different from existing degree-based or gradient-only approaches. This provides a principled way to reduce the search space from O(n²) to a much smaller set of nodes.
 
-- **Computational efficiency from reduced candidate space**: The orbit-based filter reduces the candidate set to approximately 23% of possible edges, and the paper reports that GOttack completes in roughly 55% of Nettack's runtime on BlogCatalog (347.67s vs. 642.77s). The candidate precomputation (orbit discovery) is a one-time cost.
+- **Efficiency gain is supported**: GOttack reduces the candidate set to approximately 23% of nodes via orbit filtering. The paper reports end-to-end time costs (Table 4) and notes that orbit discovery on CORA takes only 0.17 seconds, demonstrating that the pre-processing overhead is modest.
+
+- **Evidence of correlation with gradient-based attacks**: Table 5 shows that 97.5% of Nettack's initial attacks in Polblogs involve 1518-orbit nodes, despite only 9.41% of nodes belonging to this category. This is an interesting empirical finding that connects the proposed method's design intuition to existing attack behavior.
+
+- **Effectiveness against defenses**: Table 3 shows GOttack achieves the highest overall misclassification rate (33.07%) against four defense models, marginally ahead of SGA (32.5%), confirming the attack operates under realistic settings.
 
 ## Weaknesses
 
 ### Fatal
-None.
+
+None. The paper's core empirical claims — that GOttack achieves competitive or better misclassification rates with reduced candidate search — are supported by the reported results. The weaknesses below are significant but do not invalidate the central contribution.
 
 ### Major
 
-- **Missing ablation study for the orbit-based candidate filter** — The paper never isolates the contribution of the orbit selection criterion from the surrogate loss. The method filters candidates by orbits 15/18, then scores them with a surrogate loss. Without an ablation that replaces the orbit filter with a random subset of the same size (or a degree-based filter), it is impossible to tell whether the orbit criterion adds anything beyond what the surrogate loss alone achieves. This is the central validation experiment for the claimed topology-aware contribution, and its absence is a structural gap.
+- **Abstract overclaims runtime improvement**: The abstract states GOttack "completes training in approximately 55% of the time required by the fastest competing model." The main text (line 191) correctly qualifies this as relative to Nettack on BlogCatalog specifically. These statements are inconsistent — the 55% figure is not relative to the overall fastest method (the paper notes SGA is more scalable, line 199). The abstract's phrasing is misleading and should be corrected to reflect what is actually measured.
 
-- **Overclaimed "universal attack strategy" based on insufficient evidence** — The introduction states that "we have uncovered a universal attack strategy commonly employed by several well-known gradient-based adversarial models." However, Table 5 — the only evidence for this claim — analyzes **Nettack only** on two datasets (Polblogs and BlogCatalog). No data is shown for FGA, SGA, or PRBCD. Calling a pattern observed in one attack method a "universal" strategy employed by "several" models is unwarranted. The paper should either provide evidence across multiple gradient-based attacks or substantially temper this claim.
+- **Theorem 1 is stated as a formal result but is neither proven nor directly connected to the attack**: Theorem 1 asserts that nodes in orbits 15/18 have longer random walk hitting times, making them optimal for remote connections. No proof, derivation, or even proof sketch is provided. More importantly, the connection between hitting times and the actual attack optimization (surrogate loss based on a linearized GCN) is never established. The empirical validation on line 222 measures label distance changes, not hitting times. This does not invalidate the method — the attack works regardless — but it means the theoretical framing as stated is unsupported. The paper would be stronger framing this as an empirically motivated heuristic rather than a formal theorem.
 
-- **Numerical inconsistency between "155 tasks" and "65 tasks"** — The abstract claims GOttack achieves "the highest average misclassification rate in 155 tasks," while Section 5.1 reports "28 out of 65 tasks for GCN, GSAGE and GIN models across all budgets." Neither number is clearly explained. The experimental grid (5 datasets × 3 backbones × 5 budgets = 75 for the main analysis, plus defense experiments) does not obviously sum to either 65 or 155. This undermines confidence in the paper's quantitative reporting.
-
-- **Theorem 1 is stated without proof, and its connection to attack success is asserted rather than established** — Theorem 1 claims that nodes in orbits 15/18 have longer expected random walk hitting times and are therefore "most effective candidates for establishing paths to the most remote parts of the graph." No proof or even a proof sketch is provided. Moreover, the logical chain from orbit membership → longer hitting time → remote nodes → label difference → misclassification is never formally connected or empirically validated as a causal mechanism. Presenting this as a formal theorem when it functions as an unproven hypothesis is misleading.
+- **Missing ablations to isolate the orbit-selection contribution**: The paper compares GOttack against full attack methods (Nettack, SGA, PRBCD, FGA) that differ in multiple design choices (surrogate model, candidate selection, optimization strategy). There is no ablation that isolates whether the orbit-based candidate selection itself provides the benefit, e.g., comparing GOttack against a version with degree-based or random candidate selection while keeping the gradient-based optimization identical. Without this, it is unclear how much of the performance comes from orbit filtering vs. other design choices.
 
 ### Minor
 
-- **Incomplete runtime comparison** — Table 4 compares GOttack's runtime only against Nettack. The abstract claims GOttack completes in "approximately 55% of the time required by the fastest competing model," but the paper does not report FGA or SGA runtimes. The text notes that SGA "is more scalable" (line 199) but does not provide its runtime numbers. Without a full comparison, the efficiency claim is incomplete.
+- **Defense evaluation protocol is underspecified**: The paper describes a "direct poisoning attack" (Section 4.1) but does not explicitly state whether defense models (RGCN, GCN-Jaccard, GCN-SVD, MedianGCN) are retrained on the poisoned graph or applied post-hoc with fixed weights. In the standard poisoning attack protocol, the model is trained on the perturbed graph, and the results are likely obtained under this convention, but the paper should state this clearly.
 
-- **The group theory / Mapper philosophical framing overstates the theoretical depth** — The introduction and methodology invoke group theory, automorphisms, and the Mapper philosophy of topological data analysis, but the actual algorithm is straightforward: precompute orbit counts using ORCA, filter by top-two orbits, and apply a gradient-based surrogate loss. There is no learning of orbits, no automorphism-based reasoning beyond standard graphlet definitions, and no TDA in the attack loop. Recasting the method as a heuristic informed by topological intuition would be more accurate.
+- **Selection of orbits 15/18 specifically vs. other periphery orbits is pragmatic rather than principled**: The paper acknowledges (lines 205-206) that orbits 19, 27, and 39 "could fit the periphery definition" but excludes them due to "scarcity." This is a reasonable practical choice but limits the generality claim. The paper does not test whether alternative orbit pairs or combinations would perform similarly.
 
-- **Several presentation issues obscure the experimental reporting** — Table 2's caption includes the cryptic "1 for stds" label (line 157). The text "d\={a}r" in the time complexity formula (line 148) appears to be a LaTeX rendering artifact. Definition 2 (Graphlet) provides an example rather than a proper formal definition (lines 91-93). These do not affect the technical contribution but reduce readability.
+- **Claim of a "universal attack strategy" (lines 17, 23) overstates a correlation finding**: Table 5 shows that nodes Nettack happens to select disproportionately belong to orbits 15/18. The paper presents this as having "uncovered a universal attack strategy commonly employed by several well-known gradient-based models." This is a post-hoc correlation — the paper has not shown that Nettack or other methods explicitly or implicitly use orbit information. The finding is interesting but should be described as an observed empirical pattern, not a discovered strategy.
 
-- **The homophily assumption underlying the motivation is not systematically tested** — The attack motivation relies on the assumption that peripheral nodes (orbits 15/18) are likely to have different labels, which in turn drives misclassification when edges are added. The datasets in Table 1 include a range of homophily ratios (0.25–0.91), but the paper does not analyze how GOttack's performance correlates with homophily or degrades on heterophilic graphs.
+- **Surrogate model differs across compared methods**: GOttack and other attacks (except SGA) use GCN as surrogate, while SGA uses SGC (line 175). This is standard practice (each method uses its recommended surrogate), but the paper should at minimum discuss whether this choice could influence relative performance.
+
+- **Single-orbit vs. dual-orbit justification**: The paper notes (lines 207-208) that single-orbit experiments showed "similar efficacy" with larger time complexity. If one orbit suffices for effectiveness, the necessity of the dual-orbit (1518) scheme is unclear. The efficiency argument is plausible but the paper does not report the relative candidate set sizes or runtimes for the single-orbit vs. dual-orbit variants.
 
 ### Trivial
-- "Table 46" mentioned in Section 3 (line 59) is a garbled cross-reference that should point to the correct table number.
+
+- Line 224: The "Defenses and Availability" subsection contains a sentence fragment ("3 that can attack i) a graph of any size...") that appears to be an incomplete draft note.
+- Figure 2 caption ("Nodes u, z and w have 15 and 18 orbits respectively") is ambiguous — it is unclear whether "have 15 and 18 orbits" means these nodes are in orbit categories 15 and 18, or that they have 15 and 18 distinct orbits.
+- The name "GOttack" is used extensively without explicit definition (presumably "Graph Orbit Attack").
 
 ## Nice-to-Haves
-- An analysis of how often nodes in orbits 15/18 actually appear among the candidates selected by FGA, SGA, and PRBCD across all datasets, to substantiate or refine the "universal attack strategy" claim.
-- A plot or table showing GOttack's sensitivity to the choice of graphlet size (k=3, k=4 vs. k=5) — the current paper only uses k=5 without justification.
-- Statistical significance tests (e.g., paired bootstrap over target nodes) to indicate whether GOttack's improvements over baselines are reliable.
-- An explicit limitations paragraph discussing degradation on graphs where 1518 nodes are scarce, heterophilic graphs, and the white-box surrogate assumption.
+
+- An ablation comparing orbit-based candidate selection against degree-based, centrality-based, and random candidate selection while keeping the gradient-based optimization step identical would cleanly isolate whether the topological selection causes the observed performance.
+- Reporting runtime ratios for all datasets (not just BlogCatalog vs. Nettack) would give a more complete picture of the efficiency claim.
+- A discussion of why Theorem 1 (hitting times) relates to the surrogate loss (linearized GCN) would tighten the theoretical framing, or alternatively, dropping the theorem framing and treating the periphery orbits as an empirically discovered pattern.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution:
 
-- **Harsh critic's point about "2520GB RAM" being excessive** — This is not a technical flaw in the paper; the hardware configuration is reported as-is. Removed as a nitpick that does not affect the contribution.
-- **Harsh critic's point about time complexity "d\={a}r" typo** — This is a parser artifact from LaTeX rendering (`\bar{+}`), not an error in the original submission. Removed per formatting-nitpick rule.
-- **Harsh critic's point about missing appendix/proofs** — The parser strips appendices; they exist in the original submission. Removed.
-- **Harsh critic's suggestion that GOttack's target selection "may favor GOttack if 1518 nodes are overrepresented among correctly classified nodes with high/low margins"** — This is speculation without evidence from the paper or reviewer. Removed as unsubstantiated.
-- **Strength Finder's "Supporting Strength 1" about Theorem 1 providing theoretical grounding** — This conflicts with the verified weakness that Theorem 1 is unproven and its connection to attack success is not formally established. The weakness wins; removed.
-- **Harsh critic's point about "the baselines may not be optimally tuned for each dataset"** — The paper uses standard settings for baselines (GCN surrogate for all except SGA). This is standard practice and speculation about suboptimal tuning without evidence is not a valid weakness. Removed.
-- **Harsh critic's complaint that Definition 2 (Graphlet) is not "actually given"** — While it could be more formal, the example combined with the orbit definition provides sufficient context. This is an overly pedantic formatting/style complaint. Removed.
+- *"Results are relegated to the appendix (Section D)"*: Removed per policy — appendices exist in the original submission but are stripped by the parser.
+- *"The 55% claim is a cherry-pick"* (in the strong sense that it's fabricated): The main text correctly says "55% of the time taken by Nettack" on BlogCatalog. This is an honest statement of one data point. The issue is the abstract's overclaim, which is kept in Major.
+- *"The GOttack name is never defined"* (as a major issue): Moved to Trivial. "GOttack" clearly derives from "Graph Orbit Attack" in context.
+- *"Theorem 1 is unproven and the entire attack is a heuristic"* (framed as fatal): The paper's core contribution is empirical, not theoretical. The method's effectiveness does not depend on Theorem 1 being formally proven — the empirical results stand on their own. The theorem issue is kept in Major because of the formal framing, not because it invalidates the contribution.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one genuinely novel insight: the paper's central claim about orbits 15/18 being a "universal attack strategy" is significantly weaker than presented because the evidence (Table 5) only covers a single attack method (Nettack) on two datasets. What could be a genuinely interesting empirical finding about Nettack's behavior is rhetorically inflated into a universal principle. This pattern — where a method that works well is presented with a much broader justification than the evidence supports — is the paper's most significant meta-level issue. The orbit-based approach may well be effective (the numbers suggest it is), but the paper's framing of *why* it works (a "universal" topological strategy "discovered" in existing attacks) is not adequately supported.
+None beyond the paper's own contributions. The observation that orbits 15/18 correlate with nodes targeted by gradient-based attacks is the paper's most interesting finding, but the reviews do not identify a deeper insight the authors missed.
 
 ## Suggestions
 
-1. **Run the critical ablation**: Compare GOttack against a version where the candidate set is randomly sampled (same size as the orbit-filtered set) before applying the surrogate loss. If GOttack outperforms the random-filter version, the orbit criterion is validated. If not, the contribution reduces to the surrogate loss alone.
-2. **Expand Table 5**: Analyze the first perturbation selected by FGA, SGA, and PRBCD (not just Nettack) across all datasets. Report the proportion of 1518-node involvement for each attack. If the pattern holds, the "universal" claim gains substance; if not, remove the claim.
-3. **Resolve the 155/65 inconsistency**: Clearly enumerate what constitutes a "task" and ensure the abstract matches the body.
-4. **Rephrase Theorem 1** as an empirical hypothesis or observation, supported by measured hitting times or distance analyses on the actual datasets, rather than presenting it as a formal mathematical result without proof.
+1. Correct the abstract to state the efficiency claim relative to the specific method (Nettack) and dataset (BlogCatalog) actually measured, not "the fastest competing model."
+2. Either provide a proof sketch for Theorem 1 or re-frame it as an empirically motivated observation/hypothesis and drop the formal Theorem label.
+3. Add an ablation using the same surrogate model with different candidate-selection strategies (orbit-based, degree-based, random) to isolate the contribution of orbit filtering.
+4. Explicitly state whether defense models are retrained on poisoned graphs in the defense evaluation.
+5. Tone down the "universal attack strategy" language to reflect that this is a correlational finding, not evidence that existing attacks implicitly use orbits.
 
 ## Score and Decision
 
-**Originality**: The orbit-based candidate selection idea is moderately novel in the context of adversarial attacks on GNNs, though the building blocks (ORCA, surrogate loss) are existing. **Importance**: Understanding and exploiting topological vulnerabilities in GNNs is a relevant problem. **Claims well-supported**: The core methodological claim is not ablated; the "universal" claim is overreaching; the numerical inconsistency undermines trust. **Soundness**: The experimental setup is reasonable but missing the central ablation that would validate the claimed contribution. **Clarity**: Acceptable but marred by overclaimed framing, unclear numbers, and minor presentation issues. **Value**: If validated with proper ablations, this could be a useful attack framework; in its current form the evidence for the orbit-based contribution specifically is insufficient.
-
-Overall assessment: The paper identifies an interesting topological heuristic but does not provide adequate experimental validation for its core claim. The missing ablation, overclaimed "universal" discovery, and numerical inconsistency are significant weaknesses that require major revisions. The paper is borderline but leans toward rejection in its current form.
+The paper presents a novel and well-motivated approach to structural attacks on GNNs using graph orbit information. The empirical results show competitive or superior misclassification rates with meaningful efficiency gains. However, the abstract overclaims runtime improvements, the theoretical framing (Theorem 1) is unsupported, the evaluation lacks critical ablations to isolate the orbit-selection contribution, and several claims are overstated relative to the evidence. The contributions are real but the presentation and experimental rigor need significant improvement.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

@@ -1,20 +1,16 @@
-Now I have all the information I need. Let me compile the final review.
-
 ## Summary
 
-This paper proposes SOLD (Slot-Attention for Object-centric Latent Dynamics), a model-based RL algorithm that learns object-centric latent dynamics entirely from pixel inputs. SOLD combines a SAVi slot-based encoder, an action-conditional transformer dynamics model (extending OCVP), and a Slot Aggregation Transformer for reward/actor/critic heads within the Dreamer framework. On a suite of eight visual robotic tasks, SOLD consistently outperforms DreamerV3, especially on tasks requiring relational reasoning (Distinct variants, Specific-Relative), while also providing interpretable attention over task-relevant objects. Additional experiments on Meta-World and DM-Control demonstrate generalization beyond object-centric environments.
+SOLD integrates unsupervised object-centric representations (SAVi) into the Dreamer model-based RL framework. By structuring the latent space as object slots and using a transformer dynamics model (built on OCVP) to predict future slot states conditioned on actions, along with a Slot Aggregation Transformer for actor-critic learning, the method achieves strong results on a custom suite of robotic manipulation tasks requiring relational reasoning. The paper also demonstrates that fine-tuning SAVi during RL training (rather than freezing it after pretraining) is critical for handling state distributions unseen during random exploration.
 
 ## Strengths
 
-- **Outperforms DreamerV3 on tasks requiring relational reasoning**: Figure 4 shows SOLD achieves significantly higher success rates than DreamerV3 on the Distinct variants (Push-Distinct, PickAndPlace-Distinct) and the Specific-Relative task, which demand odd-one-out identification and perceptual color-distance reasoning. Figure 5 further shows SOLD learns faster and reaches higher returns across all eight benchmark environments, even after accounting for the data used during pre-training (dotted vertical line in Figure 5).
+1. **First fully pixel-based object-centric model-based RL algorithm.** The paper correctly identifies and addresses a gap: prior work either used object-centric representations for model-free RL, for planning without learning behaviors, or required ground-truth segmentation masks. SOLD combines unsupervised slot decomposition (SAVi), action-conditional object dynamics (extending OCVP), and Dreamer-style latent imagination into a single end-to-end framework from pixels (Section 1, lines 12-14; Section 3).
 
-- **First fully pixel-input object-centric model-based RL algorithm**: The paper introduces an end-to-end method that learns object-centric latent dynamics from pixels and uses those representations for model-based RL. Section 3.1 details how SOLD combines SAVi with an action-conditional OCVP dynamics model and a Slot Aggregation Transformer, and the abstract states it is "to the best of our knowledge, the first object-centric model-based RL algorithm that learns entirely from pixel inputs."
+2. **Consistent and often large outperformance over DreamerV3 on tasks requiring relational reasoning.** On all eight custom tasks (Figure 4, lines 144, 173), SOLD achieves higher final success rates than DreamerV3, with a particularly pronounced advantage on the *Distinct* (odd-one-out) and *Specific-Relative* variants where relational reasoning is essential. The return curves over training (Figure 5, lines 166, 175) further show faster learning and higher asymptotic returns.
 
-- **Interpretable attention automatically discovers task-relevant objects**: Figure 6 and Section 4.2 show that the actor's attention (via Attention Rollout) focuses on the robot and the target block while ignoring distractor objects, even when the target has been occluded for 15 time-steps. This demonstrates that the structured latent space yields behaviors that explicitly attend to task-relevant parts of the scene.
+3. **SAVi fine-tuning overcomes a key limitation of prior object-centric RL works.** The paper identifies that freezing the slot encoder after random-policy pretraining fails when the policy must reach states never seen under random exploration. Figure 7 (lines 179, 196) shows that a frozen SAVi cannot reconstruct a lifted block (a state unreachable by random actions), while fine-tuned SAVi recovers it, enabling task completion. This is a genuine practical insight.
 
-- **Continual fine-tuning of SAVi addresses a key limitation of prior object-centric RL**: Section 4.2 (Figure 7) shows that fine-tuning the encoder-decoder during training is essential for tasks like PickAndPlace, where lifted blocks are absent from the random-policy pre-training data. The frozen variant fails to reconstruct the lifted block, whereas the fine-tuned model maintains accurate reconstructions, enabling successful behavior learning.
-
-- **High-quality open-loop predictions showing preserved object decomposition**: Figure 3 and Section 4.1 demonstrate that SOLD's dynamics model predicts 50 frames without access to intermediate images, maintaining accurate slot-based predictions through occlusions and robot–object interactions. This confirms that the slot decomposition remains stable over multi-step rollouts.
+4. **Interpretable attention patterns.** The Attention Rollout visualization (Figure 6, line 177) shows the actor's attention focusing on task-relevant objects (robot, target block) while ignoring distractors, even maintaining focus across 15 time-steps of occlusion. This demonstrates that the structured latent space yields inspectable decision-making, a practical benefit over holistic representations.
 
 ## Weaknesses
 
@@ -22,51 +18,51 @@ This paper proposes SOLD (Slot-Attention for Object-centric Latent Dynamics), a 
 None.
 
 ### Major
-None.
+
+1. **Central claim of outperforming DreamerV3 is only partially supported.** The abstract and contributions (lines 4, 22) state that SOLD "outperforms DreamerV3 across a range of benchmark robotic environments." However, direct DreamerV3 comparisons are provided **only** on the paper's 8 custom tasks (Figure 4). On Meta-World and DM-Control (line 184), only SOLD's own scores are reported (100% on Button-Press/Hammer; returns of 497 and 645 on Cartpole-Balance/Finger-Spin) — with no baseline comparison. The paper even acknowledges in the Limitations (line 209) that SOLD "struggles to match [DreamerV3's] performance on simpler tasks like Cartpole-Balance," yet never presents DreamerV3's actual scores on these tasks. This means the reader cannot evaluate whether SOLD is competitive on standard benchmarks or whether the claimed advantage is confined to the authors' own object-centric task suite. The core claim needs either (a) explicit DreamerV3 comparisons on Meta-World and DM-Control, or (b) precise scoping to the tasks where comparison data exists. This is the single most consequential gap in the paper.
 
 ### Minor
-- **Missing DreamerV3 baselines on generalization environments**: Section 4.2 reports SOLD achieves 100% success on Meta-World's Button-Press and Hammer tasks and returns of 497/645 on DM-Control's Cartpole-Balance/Finger-Spin, but no DreamerV3 comparisons are provided for these environments. The paper's claim is about "generalization potential" (can SOLD work in these domains), not superiority — and SOLD's standalone results do support that claim. However, since DreamerV3 is the paper's primary baseline and SOLD's performance is contextualized via DreamerV3 on the main benchmark, adding comparisons on these generalization tasks would significantly strengthen the empirical picture. As it stands, the reader cannot gauge whether SOLD is competitive, worse, or better on these non-benchmark domains.
 
-- **Ablation incomplete on two advanced Reach tasks**: The "Ours w/o OCE" ablation is excluded from the Specific-Relative and Distinct-Groups tasks because "it struggled to perform the relational reasoning" (Section 4.2). While the reason is understandable, a complete table showing even failed performance across all tasks would provide a more informative ablation. The partial exclusion weakens the ability to attribute improvements specifically to the object-centric encoder on these tasks.
+2. **The "Ours w/o OCE" ablation baseline is inadequately specified for clean isolation.** The baseline is described only as "replacing the object-centric encoder-decoder modules with a standard convolutional architecture" (line 137). Several confounds are unclear: does this baseline receive the same SAVi pretraining (10⁶ frames)? Does it use the same transformer-based dynamics model and Slot Aggregation Transformer backbone, or a simpler architecture? Without this transparency, the comparison conflates the object-centric bottleneck with other engineering choices (transformer dynamics, register tokens, ALiBi). The results on the *Distinct* tasks are still *suggestive* — the baseline's near-complete failure there is hard to explain away by architecture alone — but the ablation is not as clean as it should be for a paper claiming that object-centric representations are the causal factor.
 
-- **No quantitative evaluation of dynamics prediction quality**: Figure 3 shows visually compelling open-loop predictions, but no quantitative metrics (e.g., MSE, SSIM, mask IoU) are reported to verify prediction quality over long horizons. This would help isolate the contribution of the object-centric structure to prediction accuracy.
-
-- **Loss gradient flow is underspecified**: Equation 3 defines L_dyn(ψ) with both a joint-embedding term and a reconstruction term. The paper states (line 79) that parameter groups are specified and stop-gradients are omitted to avoid clutter. However, it is not explicitly clear whether gradients from the reconstruction term flow into the dynamics model or are stopped. Clarifying this would improve reproducibility.
-
-- **No error bars or variance estimates for quantitative results**: Figures 4 and 5 report results with three random seeds, but no confidence intervals, standard deviations, or individual run values are described in the text. This makes it difficult to assess the statistical significance of reported differences.
+3. **The deterministic dynamics limitation undercuts the generality claim but is not quantified.** The paper honestly acknowledges (line 209) that the deterministic world model is a drawback on stochastic tasks like Cartpole-Balance and that this is why SOLD "struggles to match [DreamerV3's] performance" there. However, since DreamerV3's scores on these tasks are not reported, the magnitude of the gap is unknown. Combined with the missing DreamerV3 comparisons (Major weakness #1), the paper's overall claim of broad superiority over DreamerV3 is not well supported by the evidence as presented.
 
 ### Trivial
-- The paper discusses "struggles to match [DreamerV3's] performance on simpler tasks like Cartpole-Balance" in the limitations (Section 6) without providing DreamerV3's actual returns on that task. This is a minor incompleteness in a speculative limitation paragraph, not an empirical claim, but it would be cleaner to either provide the comparison or remove the comparative language.
+
+4. **Error bars in Figure 4 are not described.** The caption (line 144) and text (line 173) mention three random seeds but do not state what the error bars represent (standard deviation? standard error? min-max range?). This is a small presentational fix.
+
+5. **No quantitative metric for open-loop predictions.** The qualitative predictions in Figure 3 look good, but adding a quantitative measure (e.g., MSE of predicted vs. encoded slots, or reconstruction MSE over the prediction horizon) would strengthen the dynamics model evaluation.
 
 ## Nice-to-Haves
-- **Ablate the pre-training data size**: Showing how SOLD's final performance changes with reduced (e.g., 10⁵ or 0 frames) pre-training would clarify whether the advantage comes from object-centric structure or simply from more total data. The paper currently adjusts for the offset (Figure 5) but does not isolate the effect.
-- **Add DreamerV3 comparisons on the four generalization environments**: This is the single highest-leverage addition. If SOLD matches or exceeds DreamerV3, the generalizability claim becomes more compelling. If it does not, the claim should be scoped accordingly.
+
+- A controlled comparison on a stochastic variant of one custom task (e.g., adding action noise) would deepen the analysis of whether the deterministic dynamics limitation is fundamental or manageable.
+- Reporting the parameter count and architectural details of the "w/o OCE" baseline relative to SOLD would strengthen the ablation's interpretability.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points were flagged but removed after verification against the paper:
 
-- **Critic's "deterministic dynamics may limit applicability" (Critical Issue 3)**: The paper already discusses this limitation explicitly in Section 6 ("Limitations & Future Work") and offers a testable hypothesis about Cartpole-Balance. The criticism restates what the paper already acknowledges as a limitation without adding new insight. The issue is not a weakness of the paper — it is an appropriate, honest self-assessment.
-
-- **Critic's claim that pre-training gives "asymmetric advantage" without acknowledging the paper's offset**: The paper explicitly accounts for pre-training data via the dotted vertical line in Figure 5 and states "Even after accounting for the samples used during pre-training, our method consistently outperforms the highly sample-efficient DreamerV3 baseline." The critic acknowledges this is a "common trade-off" but still frames it as a weakness. The paper's treatment is appropriate for the class of method.
-
-- **Strength Finder's "Generalization to non-object-centric environments"**: This strength is genuine — SOLD achieves 100% success on Button-Press/Hammer and competitive returns on DM-Control. However, it partially conflicts with the verified weakness about missing DreamerV3 baselines on these tasks. Per instructions, the weakness wins, but the strength is kept here because the two do not directly contradict: the strength reports SOLD's absolute performance (which is factual), and the weakness notes the absence of comparative data. Both can coexist.
+- **"The paper cannot claim outperformance because tasks were designed by the authors"** — Removed because this is a non-issue: the paper provides DreamerV3 comparisons on those same tasks, which is standard practice when introducing a new benchmark. The tasks are documented and publicly reproducible; the comparison is fair.
+- **"Attention visualization claim about discovering task-relevant objects requires evidence beyond attention heatmaps"** — The paper also shows the model succeeding on the tasks with those attention patterns; the attention analysis is a qualitative interpretation, not a central claim of the method. Downgraded to a non-issue.
+- **"Missing statistical significance" / "Three seeds is minimal"** — Three seeds with error bars is standard for deep RL papers at major venues. This is not a reasonable criticism.
 
 ## Novel Insights
 
-The reviews converge on a clear picture: SOLD makes a solid architectural contribution by integrating slot-based dynamics into the Dreamer framework, and the evidence is strongest on the relational-reasoning benchmark tasks. The most novel insight from the cross-review is that the paper's weakest evidential point is precisely where it could be strongest — the generalization claim. The paper frames generalization as "potential" and backs it with absolute performance numbers, but the most natural reader question ("how does it compare to DreamerV3 on these tasks?") goes unanswered. This is a modest evidential gap in an otherwise well-supported paper, and addressing it would substantially raise the paper's impact.
+The synthetic review highlights a tension that the paper itself identifies but does not fully resolve: object-centric representations improve relational reasoning tasks but the deterministic dynamics harm stochastic control tasks. This creates a genuine design trade-off for object-centric MBRL — one that points toward a combined approach (object-centric latent structure + stochastic transition model) as a natural next step. The fine-tuning finding (that frozen SAVi fails on states unseen during random exploration) is a practical insight that many prior object-centric RL works overlooked.
 
 ## Suggestions
 
-1. **Add DreamerV3 comparisons on the four generalization environments** (Button-Press, Hammer, Cartpole-Balance, Finger-Spin). Even a table in the appendix would substantially strengthen the generalizability claim.
-2. **Add quantitative prediction metrics** (e.g., MSE, SSIM, or slot-tracking accuracy) for the open-loop predictions in Figure 3 to complement the qualitative visualizations.
-3. **Include variance estimates** (standard deviation or individual run values) for all three-seed results in Figures 4 and 5.
-4. **Disambiguate the gradient flow** in Equation 3 by either explicitly stating that reconstruction gradients do/do not flow into the dynamics model, or by including stop-gradient notation for clarity.
-5. **Complete the ablation table** to show all tasks, even where the non-OCE baseline fails, to present a fully informative comparison.
+- **Provide DreamerV3 comparisons on Meta-World and DM-Control.** This is the single highest-impact fix. Without it, the abstract and conclusion claims of outperforming DreamerV3 "across a range of benchmark robotic environments" are not supported by the evidence.
+- **If the Cartpole-Balance and Finger-Spin results show SOLD underperforming DreamerV3, explicitly scope the claim** (e.g., "SOLD outperforms DreamerV3 on tasks requiring relational reasoning and manipulation, while remaining competitive on tasks where object-centric structure is less advantageous").
+- **Describe the w/o OCE baseline in more detail** — specify whether it uses the same transformer dynamics, SAT backbone, and pretraining protocol.
+- **Label what Figure 4's error bars represent** in the caption.
+- **Add a brief quantitative metric** for open-loop prediction quality (e.g., MSE between predicted and encoded slots over the prediction horizon).
 
 ## Score and Decision
 
-This paper introduces the first fully pixel-input object-centric model-based RL algorithm, with strong empirical results on a challenging benchmark. The core contribution is clear and the evidence for the main claims (outperformance on relational reasoning tasks, interpretable attention, value of fine-tuning) is solid. The weaknesses are minor and addressable — missing DreamerV3 baselines on generalization environments is the most significant gap, but it does not undermine the paper's primary contributions. The paper is well-written, methodologically sound for its class, and makes a clear contribution to the model-based RL and object-centric learning communities.
+The paper proposes a sensible, well-motivated integration of object-centric representations into model-based RL. The contributions on the custom relational reasoning tasks are genuine, and the SAVi fine-tuning finding is practically useful. However, the paper's central comparative claim is not fully supported by the evidence provided: DreamerV3 comparisons are missing on the very benchmarks (Meta-World and DM-Control) that are used to argue for generalizability, and the paper's own limitations section admits SOLD underperforms on one of them. This overclaiming is a substantive issue, but it is addressable — it requires either running the comparisons or tightening the scope of the claim. The technical contribution itself is sound.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Score**: 6.0 — A decent paper with a real contribution, held back by an overextended central claim that the evidence does not fully support. The method is novel and the results on the custom benchmark are strong, but the paper would be significantly strengthened by scoping its claims to match the actual experimental evidence.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

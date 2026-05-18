@@ -1,106 +1,76 @@
-Now I have all the information needed for a thorough, well-supported final review.
-
-## Final Consolidated Review
+Now I have a thorough understanding of the paper and can verify the reviewer claims. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper proposes the neural wave equation—a non-homogeneous wave equation with a learnable neural network source function—for sequence labeling on irregularly sampled data. The key idea is to evolve hidden states continuously across both observation time and architectural depth, using the wave equation's propagative dynamics to avoid the smoothing-out of information that the authors attribute to heat‑equation–based alternatives (CDR‑NDE). The paper derives d'Alembert's analytical solution to argue for "denser connections" across hidden states, develops several source-function architectures (Single GRU, Single MLP, Double Gating, MLP+GRU), and reports empirical improvements over 14 baselines on four irregularly sampled benchmarks.
-
----
+This paper proposes the Neural Wave Equation, a sequence model that replaces discrete-depth RNN architectures and heat-equation-based continuous-depth models with a non-homogeneous wave equation PDE whose source term is a learnable neural network. The model solves the wave equation via finite difference discretization (method of lines) over a depth dimension while treating sequence time as the spatial coordinate, enabling hidden state evolution continuous in both time and depth. The paper provides theoretical motivation via d'Alembert's analytical solution and evaluates on four irregularly sampled sequence benchmarks.
 
 ## Strengths
 
-1. **Novel application of the wave equation as a sequence architecture.** While prior work (CDR-NDE) used the heat equation for continuous depth, this paper is the first to propose the wave equation, which has qualitatively different dynamics (propagative vs. diffusive). The analytical solution (d'Alembert's formula, Equation 9) provides a principled argument that each hidden state depends on source terms integrated over all previous depths and a cone of neighboring time points—a genuinely denser connectivity pattern than standard RNNs or heat‑equation models. This is a novel architectural contribution.
+- **Novel application of wave equation PDE to sequence modeling**: The paper is, to my knowledge, the first to apply a non-homogeneous wave equation with a neural source function for continuous depth–time sequence modeling. This direction is distinct from prior ODE-RNN (discrete depth) and CDR-NDE (heat equation) approaches, and the PDE formulation is principled. (Evidence: Sections 1, 4; Equation 8 defines the proposed neural wave equation.)
 
-2. **Strong empirical results across multiple irregularly sampled benchmarks.** The Neural Wave–Double Gating variant achieves the highest accuracy on Person Activity, Neural Wave–Single MLP achieves the best MSE on Walker2D, Double Gating achieves the best AUC on PhysioNet Sepsis, and the method remains competitive on Stance classification—all against 14 baselines including ODE-RNN, Neural CDE, and CDR-NDE. The paper benchmarks against a comprehensive set of baselines using standard evaluation protocols from Lechner & Hasani (2020).
+- **Consistent empirical improvements across multiple benchmarks**: The proposed Neural Wave variants (Double Gating, Single MLP) achieve the best reported performance on three of four datasets: Person Activity, Walker2d, and PhysioNet Sepsis, and remain competitive on Stance Classification. The results span diverse domains (sensor data, kinematic simulation, clinical, text). (Evidence: Table 1 and Table 2 results as reported in Sections 5.1–5.4.)
 
-3. **Ablation confirms the critical role of the learned source.** The homogeneous wave equation (no source) performs substantially worse on all datasets (e.g., 51.73% vs. ~82% on Person Activity), validating that the non-homogeneous neural source is essential. This cleanly separates the effect of the PDE structure from the effect of the learned source function.
+- **Practical advantage from implicit depth**: Figure 2 demonstrates that, unlike ODE-RNN and LSTM which require manual depth tuning, the Neural Wave Equation achieves strong performance without this model selection step, because its adaptive solver implicitly determines effective depth. This is a genuine practical benefit. (Evidence: Figure 2; discussion in Sections 3.3 and 5.1.)
 
-4. **Implicit depth eliminates manual depth tuning.** Figure 2 demonstrates that ODE-RNN and LSTM require exhaustive model selection over depth, whereas the neural wave equation achieves comparable or better performance with no depth tuning—a practical advantage for practitioners.
-
-5. **Honest discussion of the memory–speed trade-off.** The paper acknowledges that neural wave equations consume 1807–2137 MB versus 244 MB for Neural CDE, while being an order of magnitude faster. This transparency helps contextualize deployment decisions.
-
----
+- **Systematic ablation isolating source function role**: The paper experiments with four source function variants (Single GRU, Single MLP, Double Gating, MLP+GRU) and compares against the homogeneous wave equation (no source). This confirms that the learnable source network is critical for complex tasks and that the source function's receptive field (2 vs. 4 neighboring states) correlates with performance. (Evidence: Section 5.5, Table 1.)
 
 ## Weaknesses
 
 ### Fatal
-None. The paper's core contributions are novel and the experimental evidence, while imperfect, supports the claims.
+None.
 
 ### Major
 
-1. **Unclear how the finite-difference discretization handles irregularly sampled observation times.** This is the paper's most significant methodological gap. The core update (Equations in Section 4) uses the central difference term (h_{t+Δt,d} − 2h_{t,d} + h_{t−Δt,d}) with a fixed Δt, implicitly assuming a uniform grid in the observation-time dimension. For irregularly sampled sequences, the spacing between consecutive observations varies, and a fixed Δt is not consistent with the actual timestamps. The paper mentions using a "continuous, per-channel intensity as explained in Kidger et al. (2020)" for constructing input paths, but this addresses only the *input* embedding—not the hidden-state dynamics. The relationship between the irregular observation timestamps and the Δt in the finite-difference scheme is left entirely unspecified. While the model clearly *works* on irregular data empirically (the results speak for themselves), the paper must explain how the discretization accommodates non-uniform time gaps (e.g., using non-uniform finite differences, treating t as a sequential index with actual times embedded elsewhere, or some other mechanism). This is not a fatal flaw—the empirical evidence is still interpretable—but it is a significant clarity gap that weakens the methodological exposition.
+1. **Causality of the model is not addressed.** The finite difference discretization (Equation 6) uses $h_{t+\Delta t,d}$ — a hidden state at a *future* sequence time — when computing the update at depth $d+\Delta d$. The paper explicitly states that the solver "calculates $h_{t,d}$ for all values of $t$ at once for a particular $d$" (line 219), confirming the model is inherently non-causal / bidirectional in the time dimension. For several of the evaluated tasks (notably PhysioNet sepsis prediction and activity recognition at each time step), using future observations to predict the present is either inappropriate or requires explicit justification. The paper never discusses this design choice, never specifies boundary conditions for the time dimension, and compares against causal baselines (GRU-ODE, ODE-RNN) without acknowledging the asymmetry. This is a significant methodological gap that must be clarified for the paper's contribution to be properly assessed.
 
-2. **Missing key state-of-the-art baselines in the experimental comparison.** The paper cites both Contiformer (Chen et al., 2023) and structured state-space models (S4; Gu et al., 2022) in the Related Work but evaluates against neither. Given that these are prominent recent methods for irregular time series (Contiformer) and long-sequence modeling (S4), their absence from the experiments makes it difficult to gauge the proposed method's position relative to the current state of the art. The paper also could not run Neural CDE on two of four datasets (Walker2D, Stance) due to computational constraints, leaving the strongest established baseline absent from half the benchmarks.
+2. **No error bars for the proposed model's main results.** The paper reports standard deviation only for the Neural CDE baseline (75.16% ± 0.71) and the homogeneous wave ablation (51.73% ± 0.16). For all Neural Wave variants, only point estimates are reported. Without any uncertainty quantification — especially given that the model has substantially more parameters and higher memory consumption than baselines — it is impossible to determine whether the reported improvements are statistically significant or due to random seed variation. This undermines the core empirical claim.
 
-3. **The "denser connections" advantage over the heat equation is asserted but not rigorously validated.** The paper contrasts the analytical solutions of the wave and heat equations (Equations 9 and 11) to argue that the latter suffers from exponential decay of lower-depth information. However:
-   - The heat‑equation model (CDR-NDE) uses a learned source function that could learn to compensate for the homogeneous decay—the analytical comparison ignores this.
-   - No controlled experiment isolates the PDE type while keeping everything else (source function architecture, training setup) identical. The paper compares Neural Wave variants against CDR-NDE, but the source functions differ, so the performance gap cannot be cleanly attributed to the PDE choice.
-   - The wave equation's integral term in d'Alembert's solution does not decay, but boundary effects and numerical damping are not discussed as potential mitigations.
-
-   The claimed advantage is plausible but remains a motivational hypothesis rather than an established fact.
+3. **Missing explicit comparison with CDR-NDE (the heat-equation continuous-depth model).** CDR-NDE is listed among the baselines (Section 5) and serves as the paper's key point of contrast: the central motivation is that the wave equation avoids the heat equation's diffusive information loss. However, **no results for CDR-NDE are discussed in any of the results sections** (5.1–5.4). The paper claims to outperform "all established baseline models" without ever naming CDR-NDE in the results text. Given that the paper's core theoretical claim is "wave equation > heat equation for sequence modeling," the absence of a direct empirical comparison against the heat-equation-based continuous-depth model is a critical omission that leaves the central claim unsubstantiated.
 
 ### Minor
 
-1. **No error bars reported in the prose for the proposed method's main results.** The ablation study reports standard deviations (±0.16, ±0.003, ±0.001) but the main test-set numbers for the Neural Wave variants are given without uncertainty intervals in the text. (The table content was stripped by the PDF parser; if error bars appear in the original Table 1, this point is moot.) At minimum, multi-seed results should be reported.
+4. **Theoretical advantage claims are not connected to the numerical implementation.** Section 4.3 argues that the wave equation provides "denser connections" because d'Alembert's analytical solution integrates source terms over all previous depths without exponential decay. However, the actual implementation uses a local 4-point finite difference stencil (Equation 6) — the non-local integration is not what the numerical solver computes; it iterates local updates. While the stencil is genuinely denser than an RNN's 2-point dependency (contra the critic's claim that it is "not denser"), the paper overclaims based on the analytical solution without acknowledging that the numerical scheme only approximates this non-locality. The homogeneous wave ablation (51.73% on Person Activity) confirms the PDE structure alone contributes little — the source network does most of the work.
 
-2. **No parameter count comparison.** Given that the neural wave model consumes substantially more memory (1807–2137 MB vs. 244 MB for Neural CDE), it would be informative to know the number of trainable parameters—whether the memory increase reflects greater model capacity or simply the cost of solving a second-order PDE. This would help readers assess whether the performance gains are due to the wave equation dynamics or just additional parameters.
+5. **Speed claims are unsubstantiated.** The paper claims neural wave equations are "an order of magnitude faster than neural CDE" (Section 5.5) but provides no wall-clock timing numbers anywhere. Only memory consumption is reported (1807–2137MB vs. 244MB for Neural CDE). Without actual runtime comparisons, the speed claim is unsupported.
 
-3. **The source-function variant selection is not justified.** The paper proposes four neural network parameterizations of the source term (Single GRU, Single MLP, Double Gating, MLP+GRU) but tests only the homogeneous ablation (no source) and does not explain why these particular architectures were chosen over alternatives. The performance differences among variants are attributed post-hoc to the number of neighboring hidden states used, but the design space is explored without systematic reasoning.
-
-4. **The Contiformer citation in Related Work acknowledges its relevance but the paper does not explain why it was excluded from the experiments.** A brief justification (e.g., "Contiformer requires a different training setup incompatible with our evaluation protocol") would be helpful.
+6. **No statistical comparison among source function variants.** Four source function formulations are presented, with different variants performing best on different datasets (Double Gating on Person Activity, Single MLP on Walker2d). No analysis is offered for why this is the case, and the choice remains post-hoc.
 
 ### Trivial
-
-- The heat-equation analytical solution (Equation 11) uses `\exp^{(-k\lambda_n d)}` where `\exp(...)` is standard, and the variable mixing in the integral (t vs. d) is unclear due to the swapped roles of time and depth. The notational sloppiness makes the derivation harder to follow but does not affect the validity of the qualitative argument.
-- Figure 2's horizontal red line for the neural wave model is functionally informative (demonstrates no depth tuning needed) but would benefit from a brief caption note explaining that the model's performance does not depend on an explicit depth hyperparameter.
-
----
+- The claim that the model "implicitly models depth" is somewhat overstated: the integration horizon $D$ is still a hyperparameter, making it no more "implicit" than Neural ODE's integration time.
+- The wave speed parameter $c$ is learned but never analyzed; its effect on the receptive field is not studied.
 
 ## Nice-to-Haves
-
-- A controlled experiment that keeps the source function architecture identical and swaps only the PDE (wave vs. heat) would cleanly isolate the effect of the PDE choice.
-- Including Contiformer and S4 as baselines would strengthen the paper's positioning against current SOTA.
-- A visual or quantitative measure of gradient propagation through depth (e.g., gradient flow norms, effective receptive field) would substantiate the "denser connections" claim empirically.
-- The Walker2D dataset uses only 10% random dropouts—a relatively mild form of irregularity. Testing on more severely or irregularly sampled data (e.g., random observation times) would strengthen the evaluation.
-
----
+- A controlled ablation holding the source function fixed and comparing wave-equation vs. heat-equation PDE solvers would directly validate the central claim that the PDE type (rather than the source network) drives performance.
+- Reporting training time per epoch and total wall-clock time for all models would substantiate the speed claims.
+- An analysis of how the wave speed $c$ affects the effective receptive field (integration windows in time) would connect the theory to practice.
+- Multi-seed results (≥5) with standard deviations for all models would resolve the uncertainty about significance.
 
 ## Removed Points
-*These points are flagged to be removed per the review guidelines; treat them with caution.*
 
-1. **"The method cannot be applied to irregularly sampled data" (fatal framing).** The paper states this as a structural flaw that invalidates the contribution. While the handling of irregular timestamps is indeed unclearly explained, the experimental results on irregular data demonstrate that the method *does* work—the missing piece is the *explanation*, not the functionality. Downgraded from Fatal to Major.
-2. **"The extracted text does not include the content of Table 1" (parser artifact).** The table exists in the original submission; the PDF-to-text extraction process stripped it. This is not an author error.
-3. **"No error bars for the proposed method"** accusation. The ablation study (Section 5.5) does report ± values. The main results may include error bars in the stripped Table 1. Downgraded from Major to Minor.
-4. **"Boundary conditions not discussed"** — the paper explicitly references Appendix A.12 for boundary conditions, which was stripped by the parser.
-5. **"Figure 2's horizontal line is meaningless"** — the paper's point is that the wave model's performance does not depend on a tunable depth hyperparameter, which is exactly what a flat line demonstrates. This is informative, not meaningless.
-6. **General formatting/style nitpicks** (e.g., "the assumption g(z)=0 is not discussed in the context of sequence modeling") — the assumption is standard and clearly stated.
-7. **"The paper should also cover Y / additional tasks"** demands beyond scope (e.g., testing on more irregular datasets). Moved to Nice-to-Haves.
-8. **Complaint about "no empirical comparison between wave and heat equation models using the same source function"** framed as fatal omission. Downgraded to Minor as it is a reasonable suggestion but not a fatal flaw—the paper does compare against CDR-NDE (heat equation) directly.
-
----
+- **Criticism about missing appendix content (boundary conditions, solver details):** The paper states these are in Appendix A.12. Per policy, appendix-stripped content is a parser artifact, not an author omission. However, the causality concern (which is about the *stated* stencil, not missing appendix content) remains in the main review.
+- **Criticism that "the numerical scheme is not denser than a typical RNN":** This is factually incorrect. The wave equation stencil uses 4 points ($h_{t,d}, h_{t,d-\Delta d}, h_{t+\Delta t,d}, h_{t-\Delta t,d}$), while a standard RNN uses 2 ($h_{t-1,d}, h_{t,d-1}$). The critic's own admission ("it is simply a different stencil that includes a forward neighbor in time") confirms the stencil is different/denser.
+- **Criticism about "Walker2d and stance classification omit Neural CDE":** The paper explicitly acknowledges this limitation due to computational constraints, so this is not an oversight.
+- **Strength 2 from the Strength Finder ("Theoretical advantage supported by analytical solution"):** Dropped because it conflicts with verified weakness #4 (theory-implementation gap).
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one genuinely useful observation: the paper's core architectural innovation (wave equation PDE with learned source) is cleanly separable into (a) the PDE dynamics and (b) the learned source function. The ablation study (Section 5.5) shows that (b) is far more important than (a)—the homogeneous wave equation performs poorly, while all source-equipped variants perform well regardless of the specific PDE dynamics. This suggests that the primary benefit of the framework may not be the wave equation *per se* but rather the richer connectivity pattern enabled by the non-homogeneous formulation, which could potentially be achieved with other second-order PDEs as well. The paper would benefit from explicitly discussing this nuance rather than framing the wave equation alone as the source of improvement.
-
----
+None beyond the paper's own contributions. The reviewer discussion surfaces a recurring tension in PDE-based neural architectures: analytical solutions provide clean theoretical intuition, but the actual numerical solvers operate through local iterative updates, creating a gap between claimed and realized properties. The paper would benefit from explicitly addressing this gap rather than treating the analytical and numerical pictures as interchangeable.
 
 ## Suggestions
 
-1. **Clarify the irregular-sampling mechanism.** Specifically, state whether the finite-difference ∆t refers to actual time gaps (requiring non-uniform finite differences) or to sequential index spacing (with actual times used only in input/output projections). Provide the precise formula used in the implementation.
-2. **Add a controlled PDE-ablation experiment.** Compare wave vs. heat equation using identical source function architectures (e.g., the same Double Gating source for both PDEs) to isolate the effect of the PDE type.
-3. **Report multi-seed error bars for the main results** and include parameter counts for all models.
-4. **Add Contiformer and S4 baselines** or provide a clear justification for their exclusion.
-5. **Clean up the notational issues in Equation 11** and ensure consistency between the wave and heat equation derivations.
+1. **Address causality head-on.** State clearly whether the model is bidirectional or causal. If bidirectional, justify when this is appropriate (offline labeling tasks with full sequences) and add this as a limitation for online/real-time settings. If a causal version is intended, restrict the stencil to backward-only differences in time and discuss the trade-off. Specify the boundary conditions for the time dimension.
 
----
+2. **Provide error bars for all main results.** Run the proposed model and all baselines over at least 5 random seeds and report mean ± std. Without this, the claimed improvements are not evaluable.
+
+3. **Include CDR-NDE in the results tables and discussion.** The paper's central claim is that the wave equation outperforms the heat equation for sequence modeling. CDR-NDE is the only directly comparable continuous-depth PDE model. Report its performance and explicitly compare.
+
+4. **Add a controlled ablation isolating PDE type.** Hold the source function architecture fixed and compare wave-equation vs. heat-equation PDE solvers (same integration scheme, same depth, same source network). This would isolate the effect of the PDE type from the effect of the source function and directly test the paper's central hypothesis.
+
+5. **Provide timing comparisons.** Report wall-clock time per epoch and total training time for all models to substantiate the speed claim.
 
 ## Score and Decision
 
-The paper proposes a genuinely novel and interesting idea—using the non-homogeneous wave equation as a continuous-depth architecture for sequence modeling. The empirical results are strong across multiple benchmarks, and the ablation study cleanly demonstrates the necessity of the learned source function. The main weaknesses—the unclear handling of irregular timestamps in the discretization, missing SOTA baselines, and the lack of a controlled PDE-type ablation—are significant but addressable in revision. The core contribution is novel and well-motivated, and the experimental evidence on four datasets provides reasonable support for the claims.
+The paper proposes a genuinely novel architecture and demonstrates promising results across multiple benchmarks. However, the evaluation has three significant gaps that prevent acceptance in current form: the causality of the model is not addressed despite the stencil using future time steps; no error bars are provided for the main results, making statistical significance unknowable; and the most directly relevant baseline (CDR-NDE, the heat-equation-based model) is absent from the results discussion despite being the paper's central point of contrast. These issues are correctable, and the core idea has merit, but the paper as presented does not adequately support its claims.
 
-**Score:** 6.0 / 10
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

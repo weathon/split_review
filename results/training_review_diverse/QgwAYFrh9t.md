@@ -1,20 +1,24 @@
-I now have a thorough understanding of the paper and have verified each claim from the reviews against the actual paper content. Let me produce the consolidated review.
+Now I have a thorough understanding of the paper and can write the consolidated review.
 
 ## Summary
 
-This paper studies the theoretical problem of learning hierarchical polynomials of the form \( h = g \circ p \) (where \(p\) is a degree-\(k\) polynomial feature and \(g\) is a degree-\(q\) polynomial link function) using three-layer neural networks trained with layerwise gradient descent. The main result (Theorem 3.1) shows that for a structured subclass of degree-\(k\) features \(p\) with orthogonal independent components, the network learns \(h\) with \(\widetilde O(d^k)\) samples — improving over kernel methods (\(\widetilde \Omega(d^{kq})\)) and over prior three-layer results that were restricted to quadratic features. The key technical innovation is an approximate Stein lemma (Lemma 3.2) showing that the degree-\(k\) Hermite projection of \(h\) is approximately proportional to \(p\), enabling the first training stage to extract the feature in \(d^k\) samples.
+This paper studies learning hierarchical polynomials of the form \(h = g \circ p\) (where \(p\) is degree-\(k\), \(g\) is degree-\(q\)) over Gaussian inputs using a three-layer neural network with a residual connection. The main result shows that for a structured subclass of degree-\(k\) polynomials \(p\) (satisfying an independent-components decomposition), a layerwise gradient-descent algorithm learns the target with \(\widetilde O(d^k)\) samples — a strict improvement over kernel methods which require \(\widetilde\Omega(d^{kq})\) samples. For the special case of quadratic features (\(k=2\)), the paper achieves \(\widetilde O(d^2)\) sample complexity, improving over prior work (Nichani et al., 2023) that required \(\widetilde\Theta(d^4)\). The key technical innovation is an "approximate Stein's lemma" showing that the degree-\(k\) Hermite projection of \(g \circ p\) is approximately proportional to \(p\) itself.
+
+---
 
 ## Strengths
 
-1. **Sample complexity improvement over kernel methods and prior three-layer guarantees** — The paper proves that three-layer networks achieve \(\widetilde O(d^k)\) sample complexity for learning \(h = g \circ p\) under the stated assumptions, whereas kernel methods require \(\widetilde \Omega(d^{kq})\) (citing Ghorbani et al., 2021). For the quadratic case \(k=2\), the paper achieves \(\widetilde O(d^2)\), a strict improvement over Nichani et al. (2023)'s \(\widetilde \Theta(d^4)\). This is a genuine advance in the theoretical understanding of feature learning in deeper networks.
+1. **Provable sample complexity improvement over kernel methods.** Theorem 3.1 shows that the three-layer network learns the target with \(\widetilde O(d^k)\) samples, whereas kernel methods require \(\widetilde\Omega(d^{kq})\) samples (a factor exponential in the degree of \(g\)). This improvement is clearly stated and directly supported by the theorem statement (lines 213–221) and the comparison to the cited lower bound of Ghorbani et al. (2021).
 
-2. **Extension to degree-\(k\) polynomial features beyond quadratics** — Prior work on three-layer networks (Nichani et al., 2023; Allen-Zhu & Li, 2019; Safran et al., 2022; Ren et al., 2023) was restricted to specific features (quadratics, norms, ball indicators). This paper extends provable guarantees to a broader class of degree-\(k\) polynomial features, including orthogonally decomposable tensors and sums of sparse parities (Remark 3.1). The technical machinery (approximate Stein lemma, multi-step GD analysis) is meaningfully more general than prior quadratic-only analyses.
+2. **Extension from quadratic features to degree-\(k\) polynomial features.** Prior theoretical work on three-layer networks (Nichani et al., 2023; Allen-Zhu & Li, 2019) was restricted to quadratic features or required the composition strength \(\alpha\) to be vanishingly small. This paper generalizes to arbitrary constant degree \(k\) while maintaining a \(\widetilde O(d^k)\) sample complexity. The extension is driven by the approximate Stein's lemma (Lemma 3.3), which is the paper's main theoretical contribution.
 
-3. **Approximate Stein lemma as a nontrivial technical innovation** — Lemma 3.2 shows that the degree-\(k\) projection of \(h = g \circ p\) is approximately \(\mathbb{E}[g'(z)]\, p\) up to \(O(d^{-1/2})\) error, and that lower-degree projections are negligible. This generalizes the classical Stein lemma beyond linear features and is the paper's core insight enabling feature recovery with only \(\widetilde O(d^k)\) samples.
+3. **Optimal sample complexity for quadratic features (Corollary 3.2).** When \(p\) is quadratic, the algorithm achieves \(\widetilde O(d^2)\) samples, which matches the parametric dimension of the quadratic feature and improves over the \(\widetilde\Theta(d^4)\) of the prior state of the art. The paper provides a clear explanation for why multiple gradient steps in stage 1 are the source of this improvement (Section 5.1).
 
-4. **Clean two-stage analysis with transparent proof sketch** — The paper decomposes training into a feature-learning stage (kernel regression in \(d\)-dimensions to extract \(p\)) and a link-function-fitting stage (1D random feature model to learn \(g\)). The proof sketch in Section 4 is well-organized and clearly explains how the approximate Stein lemma bridges the two stages.
+4. **Two-stage feature-learning analysis.** The proof decomposes training into two interpretable stages: (i) kernel regression that recovers the feature \(p\) from the low-degree part of \(h\), and (ii) one-dimensional random-feature regression to fit the link function \(g\). This provides a concrete mechanistic explanation for how three-layer networks can exploit hierarchical structure that kernel methods cannot.
 
-5. **Clear positioning against related work** — The paper carefully quantifies improvements over kernel methods (NTK), two-layer networks, and prior three-layer guarantees, including a detailed comparison with Nichani et al. (2023) explaining why multi-step GD improves sample complexity over single-step approaches (Section 5.1).
+5. **Approximate Stein's lemma as a theoretical tool.** Lemma 3.3 is the paper's main technical contribution and is conceptually clean. It uses the Central Limit Theorem intuition that \(p\), being a sum of many independent components, is approximately Gaussian, so that Stein's lemma approximately applies. The result is a quantitative bound showing \(\|\mathcal{P}_k h - \mathbb{E}[g'(z)]\,p\| = O(d^{-1/2})\).
+
+---
 
 ## Weaknesses
 
@@ -24,65 +28,78 @@ None.
 ### Major
 None.
 
+The paper's core claims are well-supported by the theoretical analysis. The weaknesses below are real but do not undermine the central findings.
+
 ### Minor
 
-1. **Unsupported claim of "information-theoretic optimality" for the quadratic case** — The abstract and Corollary 3.2 state that the \(\widetilde O(d^2)\) sample complexity for quadratics "matches the information-theoretically optimal sample complexity" / "matches the information-theoretic lower bound." However, the paper provides neither a proof nor a citation for such a lower bound for this specific function class (learning \(g(x^\top A x)\) with Gaussian data). The only lower bound cited (Ghorbani et al., 2021) is for NTK, a different comparison class. The claim is plausible (the matrix \(A\) has \(\Theta(d^2)\) degrees of freedom), but it is not substantiated. The language should either be softened to "matches the parametric rate for a quadratic feature" or backed by a cited/proved lower bound.
+1. **Imprecise sample complexity framing in the abstract and summary statements.** The abstract and line 219 state that the target is learned in "\(\widetilde O(d^k)\) samples." However, Theorem 3.1 states that for any \(\alpha \in (0,1)\), the required sample size is \(n \ge d^{k+3\alpha}\) to achieve error \(\widetilde O(d^{-\alpha})\). Since \(\alpha\) is an absolute constant in \((0,1)\), the leading exponent is \(k+3\alpha\), not \(k\). The factor \(d^{3\alpha}\) is polynomial in \(d\) (up to \(d^3\)), not logarithmic. While one can reparameterize in terms of target error \(\varepsilon\) to recover an \(\widetilde O(d^k \cdot \text{poly}(1/\varepsilon))\) form, the current framing conflates this with a pure \(d^k\) dependence. The theorem itself is stated correctly and the imprecision is only in the summarizing language, but it is misleading enough that a reader could overestimate the tightness of the bound. **This affects the exposition, not the validity of the result.**
 
-2. **Feature class requires orthogonal independent components — a genuine but transparent limitation** — The main assumption (Assumption 3.1) requires \(p = \frac{1}{\sqrt{L}} \sum_i \lambda_i \psi_i(x)\) where each \(\psi_i\) depends on orthogonal vectors and the \(\psi_i\) are thus independent under the Gaussian measure. This is a structural restriction: it excludes interactions between the components (e.g., a generic symmetric tensor with overlapping subspaces). The paper is quite upfront about this — the abstract says "a large subclass," the introduction says "a large class," the assumption section says "a restricted class," and the future-work section explicitly states that generalizing to all degree-\(k\) polynomials is open. Nonetheless, this means the main result covers a narrower class than the paper's overall framing ("a broad class of hierarchical functions") might suggest to a casual reader. A more precise characterization of where the orthogonal-components assumption sits relative to the space of all degree-\(k\) polynomials would strengthen the paper.
+2. **"Information-theoretically optimal" claim for the quadratic case lacks a formal lower bound.** The paper states that the \(\widetilde O(d^2)\) sample complexity for \(k=2\) "matches the information-theoretically optimal sample complexity" (abstract, Corollary 3.2, line 338). However, no formal lower bound is stated, cited, or proved — not even a sketch. The heuristic justification (the quadratic \(p\) has \(\Theta(d^2)\) parameters) is plausible but does not account for the hierarchical structure \(g \circ p\) or the fact that the algorithm requires the extra constraint \(\|A\|_{op} = O(1/\sqrt{d})\). A cited lower bound or a brief information-theoretic argument would substantiate the claim. Without it, the optimality assertion is an informal observation rather than a proven result.
 
-3. **Algorithmic specificity of the layerwise training procedure** — The analysis relies on a non-standard training procedure (Algorithm 1): layerwise gradient descent with sample splitting, frozen lower layers during stage 2, weight decay on \(u\), and a polynomial activation \(\sigma_1\). The paper acknowledges this (Section 5.2) and notes that experiments with standard end-to-end training are in the appendix. However, the gap between the analyzed algorithm and practical training is larger than in some related work. This is bounded but worth noting.
+3. **The feature class (Assumption 2.2) is restrictive in ways that limit the scope of the generalization claim.** The assumption requires \(p\) to decompose as a sum of independent components \(\psi_i\) depending on orthogonal subspaces, with \(L = \Theta(d)\) balanced coefficients. While the paper provides two natural examples (orthogonally decomposable tensors and sums of sparse parities), the assumption excludes many degree-\(k\) polynomials. The paper states that the result applies to "a large subclass" but does not quantify how large this subclass is relative to all degree-\(k\) polynomials. The claim of generalizing prior work ("restricted to the case of \(p\) being a quadratic") is accurate in the sense of going from \(k=2\) to general \(k\), but both the current work and the prior quadratic-specific work impose structural restrictions on \(p\). The paper acknowledges this in the future work section but could more clearly calibrate reader expectations about the scope.
+
+4. **The training algorithm is substantially engineered and departs from end-to-end training.** Algorithm 1 uses layerwise gradient descent with sample splitting (separate datasets for each stage), frozen random features \((a,b,s,V)\), weight decay, specific heavy-tailed bias initialization, and a degree-\(k\) polynomial activation \(\sigma_1\). Each of these choices is justified by the analysis, but together they make the gap between the algorithm studied and "three-layer neural networks trained via gradient descent" as used in practice quite wide. The paper acknowledges this (lines 347–348) and references experiments in the appendix using more standard procedures, but the main text does not summarize those experiments. **This is a common gap in theoretical ML papers and is not fatal**, but readers should calibrate what the result implies about practical training.
 
 ### Trivial
 
-1. **The tunable parameter \(\alpha\) makes the concrete rate opaque** — Theorem 3.1 states error \(\widetilde O(d^{-\alpha})\) with sample complexity scaling as \(d^{k+3\alpha}\). To get a concrete error like \(d^{-1/2}\), one sets \(\alpha=1/2\) and needs \(n \approx d^{k+1.5}\). The presentation with a free parameter is flexible but somewhat obscures what rate is actually achievable. A short example (e.g., "setting \(\alpha=1/2\) gives error \(\widetilde O(d^{-1/2})\) with \(n = \widetilde O(d^{k+1.5})\)") would be helpful.
+None.
 
-2. **The bias distribution assumption (polynomial tail, bounded 8th moment) is technical but not standard** — The Student's \(t\) example helps, but the tail parameter \(p\) appears in stage-2 error bounds, making the presentation heavier. If the proof permits Gaussian biases, that would be cleaner.
+---
 
 ## Nice-to-Haves
 
-- **A concrete example illustrating the approximate Stein lemma.** Section 4.3 provides a heuristic CLT argument. A worked computation for a simple case (e.g., \(k=2\), \(p(x) = \frac{1}{\sqrt{d}}\sum_i (x_i^2-1)\)) showing why \(\mathcal{P}_2(g\circ p) \approx \mathbb{E}[g']\,p\) would make the technical centerpiece more accessible and help readers gauge the lemma's generality.
+- **Clarify the error floor from Lemma 3.3.** The approximate Stein lemma gives an \(L^2\) error of \(O(d^{-1})\) (squared) between \(\mathcal{P}_k h\) and \(c p\). The theorem's error \(\widetilde O(d^{-\alpha})\) with \(\alpha < 1\) is always larger than \(d^{-1}\) asymptotically, so there is no contradiction, but stating this explicitly would be helpful.
 
-- **A lower bound (even a simple degree-of-freedom count) for the general \(k\) case** would sharpen the contribution. The paper provides upper bounds and compares with baselines, but a lower bound contextualizing the \(\widetilde O(d^k)\) guarantee would elevate the work. This is not required but would be a valuable addition.
+- **Briefly discuss the information exponent assumption.** Assumption 2.3 requires \(\mathbb{E}[g'(z)] = \Theta(1)\) (information exponent 1). A remark connecting this to the single-index literature and explaining what changes if the information exponent is larger would improve the framing.
 
-- **Clarify how the error propagates from stage 1 to stage 2.** Lemma 4.2 (stage 2) assumes an approximation \(\hat p\) satisfying a closeness condition. A brief note on how the stage-1 error feeds through to the final guarantee would improve the proof sketch's completeness.
+- **Include a short summary of the experiments in the main text.** The paper references experiments in the appendix but does not describe them in the main body. A 2–3 sentence summary of what was tested and how it validates the theory would strengthen the paper for readers who do not read the appendix.
+
+- **Discuss the necessity of polynomial activation \(\sigma_1\).** The analysis relies on \(\sigma_1\) being exactly a degree-\(k\) polynomial. A remark on whether smooth non-polynomial activations (e.g., ReLU, erf) could be accommodated via polynomial approximation, and whether the results would degrade gracefully, would be useful.
+
+---
 
 ## Removed Points
 
-These points are flagged to be removed — treat them with caution:
+These points from the original reviews were flagged for removal with justification:
 
-- **Criticism about missing experimental figures in the main body** (Harsh Critic: "the main paper does not contain any experimental figures"): REMOVED. The paper states "simulations in Section \ref{app:experiments}" and has `\input{experiments}` at line 323. The appendix is stripped by the parser; the experiments exist in the original submission.
+- **"The present work imposes an additional structural decomposition that was not required in the quadratic case of prior work."** — This is factually incorrect. Prior work on the quadratic case (Nichani et al., 2023) also imposes restrictions on \(p\) (e.g., specific spectral properties of \(A\)). The paper shows its assumption for \(k=2\) is equivalent to \(\|A\|_F = 1, \|A\|_{op} = O(1/\sqrt{d})\), which is analogous to the restrictions in prior work. The generalization claim is about moving from \(k=2\) to arbitrary degree \(k\), not about having weaker assumptions.
 
-- **Criticism about the feature class being "narrow" and the paper not being "upfront about this gap"**: REMOVED. The paper is actually quite transparent. The abstract says "a large subclass," the introduction says "a large class," the assumption section begins with "a restricted class," and the future-work section explicitly identifies generalization to all degree-\(k\) polynomials as open. The paper cannot be faulted for insufficient disclosure.
+- **Comments about inability to verify appendix proofs / "cannot see the appendix."** — The appendix is not available in this extraction; the rules state that weaknesses about missing appendix content should be removed.
 
-- **Criticism about missing appendix, missing proofs in appendix**: REMOVED. The parser strips appendix sections from all papers; they exist in the original submission.
+- **"The proof sketch for Lemma 3.3 is heuristic" as a weakness.** — Proof sketches are by design heuristic; the full proof is in the appendix. This is not a weakness of the paper.
 
-- **Criticism about "role of constant α is somewhat artificial" as a weakness**: DOWNGRADED to trivial. This is a presentation choice, not a substantive flaw.
-
-- **Criticism that stage-2 "representational power... is assumed but not analyzed"**: REMOVED. Lemma 4.2 (stage 2) explicitly states the existence of \(c^*\) with error bounds. The analysis exists in the appendix.
-
-- **Criticism about "no lower bound for the general case" as a weakness**: MOVED to Nice-to-Haves. Absence of a lower bound does not undermine the paper's positive result.
-
-- **Criticism about initialization choices being "tailored to the Hermite expansion analysis"**: REMOVED. These are standard design choices in this line of theoretical work; no paper in this genre uses "untailored" initialization.
-
-- **Criticism about bias distribution being "exotic"**: DOWNGRADED to trivial. The Student's \(t\) example is a concrete instantiation. This is a technical condition common in theory papers.
-
-- **"The paper should also cover Y / domain Z / additional tasks" style criticisms**: REMOVED as scope creep. The paper's future-work section already acknowledges extensions.
+---
 
 ## Novel Insights
 
-The reviews surface one genuinely novel observation beyond the paper's own contributions: The key technical insight — that the approximate Stein lemma allows feature extraction in \(\widetilde O(d^k)\) samples regardless of the link function's degree \(q\) — is well-articulated by the Strength Finder. The contrast between multi-step GD (this paper) and single-step GD (Nichani et al., 2023) as the reason for the \(d^4 \to d^2\) improvement in the quadratic case is also a valuable point of comparison that the reviews correctly highlight. Otherwise, the reviews largely confirm the paper's own narrative rather than adding new perspectives.
+None beyond the paper's own contributions. The reviews primarily surface framing and presentation issues rather than uncovering new observations about the results.
+
+---
 
 ## Suggestions
 
-1. **Fix the optimality claim.** Either cite a known information-theoretic lower bound for learning \(g(x^\top A x)\) with Gaussian data, provide a brief argument (e.g., a degrees-of-freedom counting or Fano-type bound), or soften the language to "matches the sample complexity of learning a generic quadratic feature" or "is optimal among methods that do not exploit additional structure."
+1. Revise the abstract and introduction to say "\(\widetilde O(d^{k+o(1)})\) samples" or "\(\widetilde O(d^k \cdot \text{poly}(1/\varepsilon))\) for any target error \(\varepsilon\)" to accurately reflect the \(d^{3\alpha}\) factor in the theorem.
 
-2. **Add a concrete worked example for the approximate Stein lemma**, even just a 1-paragraph computation for \(k=2\) with a simple quadratic feature. This would make the paper's core technical contribution more transparent without requiring full appendix access.
+2. Either add a formal lower bound for the quadratic case (or cite an existing one) to substantiate the "information-theoretically optimal" claim, or downgrade the language to "matches the parametric dimension" / "is optimal up to logarithmic factors."
 
-3. **Consider stating Theorem 3.1 with a concrete \(\alpha\)** (e.g., \(\alpha=1\)) and noting that other rates follow by adjusting hyperparameters. This would make the achievable error/sample trade-off clearer to the reader.
+3. After stating Assumption 2.2, add an explicit sentence: "This is the main restriction of our work — we require \(p\) to be approximately Gaussian under \(\gamma\) via a CLT-type argument, which holds for polynomials decomposable into many independent components with orthogonal subspaces."
+
+---
 
 ## Score and Decision
 
-This is a solid theoretical paper with a genuine technical contribution (the approximate Stein lemma) and a clear improvement over prior work. The main weakness — an unsupported optimality claim — is minor and easily correctable. The feature class restriction is a genuine limitation but is transparently disclosed. The paper makes meaningful progress on an important problem in the theory of deep learning.
+**Originality:** Good — the approximate Stein's lemma is a new technical tool, and extending the class of learnable hierarchical features from quadratic to arbitrary degree \(k\) is a meaningful advance.  
+**Importance of question:** High — understanding feature learning in deep networks and the sample complexity advantage over kernels is a central problem in ML theory.  
+**Claims supported:** Mostly — the main theorem is precise, but the summary language (\(\widetilde O(d^k)\)) is slightly loose, and the optimality claim is asserted without proof.  
+**Soundness:** Appears sound based on the presented arguments; the core proofs are deferred to the appendix but the sketch is coherent.  
+**Clarity:** Good — the paper is well-structured and the intuition is clearly conveyed.  
+**Value to community:** Positive — a solid theoretical contribution that advances understanding of hierarchical feature learning.
+
+None of the identified weaknesses are fatal or threaten the paper's core contributions. The paper is a meaningful advance over prior work and the analysis appears technically sound. The minor issues are addressable in a revision.
+
+**Score:** 7.0
+
+**Decision:** Accept
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

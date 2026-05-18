@@ -1,22 +1,16 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
-
----
+Now I have all the information needed to write the consolidated review. Let me produce it.
 
 ## Summary
 
-This paper proposes ZO-PoG, a black-box prompt learning framework that alternates between optimizing discrete prompts (via policy gradient with Gumbel-Softmax reparameterization) and continuous prompts (via zeroth-order gradient in a low-dimensional intrinsic subspace) for language models accessed solely through APIs. The paper provides a convergence analysis establishing sub-linear convergence and evaluates the method on five GLUE tasks across three backbone models (RoBERTa-large, GPT2-XL, Llama3), showing consistent improvements over discrete-only (BDPL) and continuous-only (BBT, SSPT) baselines.
+This paper proposes ZO-PoG, a black-box prompt learning framework that alternates between optimizing discrete prompts (via policy gradient with Gumbel-Softmax) and continuous prompts (via zeroth-order gradient in a low-dimensional subspace) for pre-trained language models. The method addresses the limitation that prior black-box prompt tuning methods (BBT, BDPL) only optimize one type of prompt. Experiments on 5 GLUE datasets across RoBERTa-large, GPT2-XL, and Llama3 show that ZO-PoG outperforms existing black-box prompt-learning baselines.
 
 ## Strengths
 
-1. **First joint optimization of discrete and continuous prompts for black-box PTMs**: The paper proposes a principled framework combining both modalities of prompt optimization. The empirical results consistently validate the approach: ZO-PoG outperforms both discrete-only and continuous-only baselines in all 15 settings across three backbone models and five tasks (Tables 1–3). For example, on RoBERTa-large with WNLI (len=50), ZO-PoG achieves 77.34% vs. BDPL's 69.72% and BBT's 71.75%.
+- **First collaborative framework for discrete + continuous black-box prompt optimization.** The paper is explicitly the first to jointly optimize both discrete text prompts and continuous embeddings in a black-box setting (Section 1). The ablation study (Figure 3) validates that removing either component degrades performance across all three backbone models and both prompt lengths, confirming the collaborative design is responsible for the gains.
 
-2. **Ablation studies confirm both components contribute positively**: Figure 3 shows that removing either the policy-gradient (discrete) or zeroth-order (continuous) optimization component degrades performance across all backbone models and prompt lengths, providing clear evidence that the collaborative design, not just one component, drives gains.
+- **Consistent empirical superiority across diverse backbones and tasks.** ZO-PoG outperforms all baselines (Manual Prompt, BBT, BDPL, SSPT) on 5 GLUE datasets for all three backbone models (Tables 1–3). For example, on WNLI with RoBERTa-large and prompt length 50, ZO-PoG improves by 5.17% over the best baseline, demonstrating practical significance.
 
-3. **Gumbel-Softmax ablation demonstrates its value**: Figure 2 shows that incorporating the Gumbel-Softmax trick improves over the policy-gradient-only baseline (BDPL-style), suggesting the reparameterization meaningfully affects optimization quality.
-
-4. **Convergence guarantee with explicit complexity**: Theorem 1 establishes that ZO-PoG reaches an ε-stationary point with total query complexity O(√(nκ)/ε³). Proposition 1 provides a bounded-variance guarantee for the variance-reduced policy gradient estimator, linking stability to sample size I and mini-batch size B — a level of theoretical formality absent from most black-box prompt learning works.
-
-5. **Clean empirical methodology**: Experiments use realistic few-shot (16-shot per class) settings, report means and standard deviations over 3 seeds, and compare against appropriate baselines. The code is provided.
+- **Ablation study isolating the Gumbel-Softmax trick.** Figure 2 systematically compares ZO-PoG with and without the Gumbel-Softmax reparameterization under fixed conditions. The consistent improvement across all models and prompt lengths confirms that this specific smoothing technique (Eq. 4) reduces bias in the discrete prompt optimization, a technical refinement over the baseline BDPL method.
 
 ## Weaknesses
 
@@ -24,64 +18,49 @@ This paper proposes ZO-PoG, a black-box prompt learning framework that alternate
 None.
 
 ### Major
-None.
+
+- **The convergence analysis contains unaddressed technical gaps that undermine the theoretical claims.** Two issues compound each other:
+
+  1. **ZO gradient estimator bias:** The two-point symmetric difference (Eq. 7, line 152–153) is an unbiased estimator of the gradient of the *Gaussian-smoothed* loss ℒ_μ(z) = 𝔼_u[ℒ(z+μu)], not of the original loss ℒ(z) (Nesterov & Spokoiny, 2017, Theorem 1). The gap between ∇ℒ_μ and ∇ℒ is O(μ²) and does not vanish without explicit handling. The paper presents this estimator (Section 3.3) and builds the convergence analysis (Section 4) without mentioning a smoothed objective or bounding this bias. Theorem 1 therefore does *not* establish convergence to a stationary point of the original loss under the stated assumptions.
+
+  2. **Policy gradient baseline induces unaddressed bias:** The variance-reduced PG estimator (Eq. 6, line 140–141) uses the average of the *same* I samples as a baseline, creating dependence between the baseline and the sampled rewards. This breaks the unbiasedness property that REINFORCE with a constant baseline would enjoy. Proposition 1 bounds the variance but does not discuss the bias, and the convergence analysis relies on (near-)unbiased gradient estimates.
+
+  The theoretical contribution is advertised as a main result ("we formally establish the convergence of our framework"). These gaps mean the convergence guarantee as written is not technically supportable. The empirical contributions are unaffected, but the theory is a stated contribution and cannot be accepted in its current form without substantial revision (either fixing the analysis to handle the smoothed objective and the PG bias, or being transparently scoped as a heuristic with experimental validation only).
 
 ### Minor
 
-1. **Unclear description of the discrete gradient estimator (Section 3.2)**. The paper introduces Gumbel-Softmax as a reparameterization (Eq. 3), then computes a score-function (policy gradient) estimator `∇_{α_i} log P(t_i | α_i)` (Eq. 4) rather than a pathwise reparameterization gradient. It never clarifies: (a) whether `P(t_i | α_i)` is the Concrete (Gumbel-Softmax) distribution's probability mass or the underlying categorical's; (b) whether samples from `GS(α, τ)` in Algorithm 1 are the continuous Gumbel-Softmax relaxation (requiring an argmax to get discrete tokens) or are directly treated as discrete indices; and (c) why Gumbel-Softmax "reduces bias" relative to a standard REINFORCE on a softmax-parameterized categorical, since the score-function estimator is already unbiased. These ambiguities make the precise gradient computation difficult to reproduce from the paper alone. The method works empirically, but the methodological narrative needs rewriting for clarity.
+- **BBTv2 discussed in Related Work but omitted from the experimental comparison.** The paper mentions BBTv2 (line 144–146: "an improved version of BBT, optimizes prompts across all layers... achieving few-shot learning performance comparable to full model tuning") but does not include it among the baselines in Section 5.1. Since BBTv2 represents a stronger version of the BBT baseline, its omission weakens the claim that ZO-PoG advances the state of the art in black-box prompt tuning. The authors should either include BBTv2 or provide a clear methodological reason for its exclusion.
 
-2. **Hyperparameter values not disclosed in the paper**. While Algorithm 1 lists the input hyperparameters (subspace dimension *d*, temperature *τ*, smoothing parameter *μ*, sample counts *I₁* and *I₂*, learning rates *η_α*, *η_z*, mini-batch size *B*), the paper does not report their actual values or selection procedure for any experiment. The code is provided, but the paper itself is incomplete as a standalone reference. A brief table or footnote with these values would significantly improve reproducibility.
+- **Claim of reduced computational expense is unquantified.** The abstract and conclusion state that ZO-PoG "reduc[es] the computational expense" but no forward-pass counts, wall-clock times, or query budgets are reported. Remark 3 gives an asymptotic query complexity bound, but the actual cost for the specific experimental setups is never measured or compared against baselines. Without this data, the efficiency claim is rhetorical rather than empirical.
 
-3. **Convergence analysis, while standard, makes assumptions that are stated without justification**. Assumption 1 (block-wise smoothness of the loss w.r.t. the distribution parameters *α*) is mathematically plausible but the paper provides no reasoning or citations linking the Concrete distribution's properties to the smoothness of the composition with a neural network loss. This weakens the theory section somewhat — it follows standard block-coordinate stochastic analysis rather than deriving insight specific to the Gumbel-Softmax / alternating structure. The theory is not invalid, but its marginal contribution is incremental.
+- **Only 3 random seeds are used.** While this is somewhat common for LLM experiments given computational costs, prompt learning methods are known to exhibit variance across seeds. At minimum, the authors should acknowledge this limitation.
 
 ### Trivial
-
-1. **Task diversity limited to GLUE (NLU only)**. All five tasks are English-language natural language inference / acceptability tasks. No generation tasks (e.g., summarization, QA) are included, which limits breadth of the generalization claim.
-
-2. **No discussion of limitations or failure cases in the conclusion**. The paper does not address computational cost trade-offs (I₁+I₂ forward passes per iteration) or potential sensitivity to hyperparameters, which would help practitioners.
+None.
 
 ## Nice-to-Haves
-
-- **Sequential two-stage baseline**: The reviewer suggests comparing ZO-PoG (alternating optimization) against a simpler pipeline: first optimize discrete prompts with BDPL, then freeze them and optimize continuous embeddings with BBT/SSPT on top. This would directly test whether the alternating schedule provides synergy beyond a better initialization point. Adding this experiment would strengthen the paper's core claim about *collaborative* (rather than sequential) optimization.
-
-- **Computational cost comparison**: Reporting wall-clock time or total query budget relative to baselines would help practitioners assess the practical trade-off of using both I₁ + I₂ forward passes per iteration.
-
-- **Convergence plots**: Including empirical loss-vs-iterations curves would connect the theory (Theorem 1) to practice and make the convergence analysis more impactful.
+- A sensitivity analysis for the smoothing parameter μ and the ZO sample count I₂ (the most critical hyperparameters for the continuous optimization) would strengthen the empirical contribution.
+- If the CoLA results for decoder-only models show a known limitation, adding a small analysis or discussion of whether ZO-PoG narrows the gap compared to BBT/BDPL on that dataset would be informative.
 
 ## Removed Points
+These points from the original reviews are removed or reclassified for the following reasons:
 
-These points are flagged to be removed; treat them with caution.
-
-- **"Smoothness assumption unverified" (from Harsh Critic #3, in full)**: The reviewer argued Assumption 1 is a "methodological gap" because it is not grounded. However, block-wise smoothness (gradient Lipschitz) is a universal assumption in non-convex optimization; nearly every convergence analysis in this area makes it. The reviewer acknowledges it is "mathematically plausible." This is not a meaningful weakness of the paper — it is standard practice. *Justification for removal: the criticism holds the paper to an unrealistic standard for a theory assumption in ML optimization; the assumption is standard and well-accepted.*
-
-- **"Missing baseline to justify alternating optimization" (from Harsh Critic #2) downgraded to Nice-to-Have**: The reviewer claims this is "evidential" and the central claim is incompletely supported. However, the paper's central claim is that *jointly* optimizing both discrete and continuous prompts beats optimizing either alone — this is already demonstrated by Tables 1–3 and the ablations in Figure 3. The sequential-vs-alternating question is a finer-grained design choice. *Justification for downgrade: this is a reasonable additional experiment but does not threaten the paper's core contribution; it belongs in Nice-to-Haves.*
-
-- **"Convergence analysis not tied to innovations"**: The reviewer notes the theory "is standard and not tied to the specific algorithm's innovations." While true, this applies to most convergence analyses in ML systems papers, which typically extend existing block-coordinate frameworks. The paper's theory is a formal contribution that exceeds what most black-box prompt learning papers provide. *Justification for removal of this as a core weakness: this is a generic critique applicable to many papers and does not represent a flaw specific to this work that threatens acceptance.*
-
-- **Weaknesses complaining about task diversity / missing computational cost**: These are scope-creep or wishlist items, moved to Nice-to-Haves or Trivial.
-
-- **Generic strengths from Strength Finder**: The Strength Finder's "#4 Variance-reduced policy gradient with theoretical bound" is kept as a supporting strength but downgraded in emphasis — it is standard VR-PGE theory. Its "#3 Strong empirical results across diverse models and tasks" is merged into Strength #1 above.
+- **Missing hyperparameter values (I₁, I₂, η_α, η_z, μ, τ, subspace dimension d):** These may be present in the appendix, which is stripped by the parser. Per instructions, missing appendix content is not treated as a weakness.
+- **Missing specification of the projection matrix A construction:** Same rationale — likely in the appendix.
+- **Reproducibility concerns phrased as "cannot be reproduced or independently verified":** This conflates missing-in-main-text details (possibly in appendix) with true unreproducibility. The code is provided at an anonymous URL.
+- **Strength from Strength Finder about "formal convergence guarantee":** This strength is retained but with caveats, since the theory has verified gaps.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews do not surface a perspective on the method's implications that the paper itself does not already articulate.
+The most interesting observation from the reviews is the interplay between two distinct biases in the optimization: the ZO gradient estimator's inherent bias toward the smoothed objective (controlled by μ) and the PG baseline's dependence bias (controlled by I). These operate on different components of the alternating optimization but interact through the shared loss function. The paper's current analysis treats them independently, but a unified treatment that accounts for both biases simultaneously while bounding their combined effect on the alternating optimization dynamics could yield a genuinely non-trivial theoretical result — one that goes beyond standard ZO or PG analysis individually.
 
 ## Suggestions
-
-1. **Clarify the discrete gradient estimator in Section 3.2**. Specify (i) whether `P(t_i|α_i)` is the Concrete distribution or a categorical with softmax probabilities, (ii) whether the Gumbel-Softmax sample is discretized via argmax (and what happens during backward), (iii) explicitly state that the gradient is a score-function (REINFORCE) estimator on the Concrete distribution, not a pathwise reparameterization gradient, and (iv) clarify what "bias reduction" refers to (e.g., smoother optimization landscape vs. variance reduction vs. optimization bias from the Concrete relaxation).
-
-2. **Add a table of hyperparameter values** used in the main experiments (d, τ, μ, I₁, I₂, B, η_α, η_z, truncation threshold ε) in the main paper or appendix.
-
-3. **Include a sequential two-stage baseline** (e.g., optimize discrete prompt with BDPL → freeze → optimize continuous with ZO/BBT) to further validate the alternating design choice.
-
-4. **Add convergence plots** (loss vs. iterations) to connect the theory with practice.
+1. **Fix or drop the convergence analysis.** Either rewrite Section 4 to properly analyze convergence to a stationary point of the smoothed objective (with the bias bounded as O(μ²L²d)) and account for the PG baseline bias, or remove the theoretical claims and let the empirical work stand on its own.
+2. **Include BBTv2 as a baseline** or provide a justification for its omission.
+3. **Report forward-pass counts or wall-clock time** for all methods to substantiate the efficiency claim.
+4. **Provide a table of hyperparameter values** (I₁, I₂, η_α, η_z, μ, τ, subspace dimension d) — if not already in the appendix, add them to the main text.
+5. **Add a discussion of the PG baseline bias** (Eq. 6) and its dependence on I, even if only to note that it's O(1/I) and controlled in practice.
 
 ## Score and Decision
 
-The paper proposes a sensible combination of existing techniques (discrete prompt optimization via policy gradient + continuous prompt optimization via zeroth-order gradient) with consistent empirical validation across three models and five tasks. The ablations convincingly demonstrate that both components contribute. The convergence analysis, while standard, provides useful formal support. The main weakness is the unclear description of the discrete gradient estimator (the role of Gumbel-Softmax vs. score-function gradient), which needs clarification but does not invalidate the method or results. No fundamental issues are present. The paper represents a solid empirical contribution with adequate theory.
-
-**Score**: 6.0  
-**Decision**: Accept
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

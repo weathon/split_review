@@ -1,14 +1,22 @@
+Now I have all the information needed. Let me construct the final review.
+
 ## Summary
 
-This paper introduces Multimodal Iterative Adaptation (MIA), a gradient-based meta-learning framework for Implicit Neural Representations (INRs) that enables independent unimodal learners to exchange state information (parameters and gradients) via meta-learned State Fusion Transformers (SFTs). SFTs comprise Unimodal SFTs (model intra-modal dependencies), Multimodal SFTs (capture cross-modal interactions), and Fusion MLPs (integrate both). The method is evaluated on four multimodal regression tasks (1D synthetic, CelebA images, ERA5 climate, AV-MNIST) and consistently outperforms both unimodal baselines (CAVIA, MetaSGD, GAP, ALFA) and multimodal encoder-based methods (MTNPs, Encoder), often by wide margins.
+This paper introduces Multimodal Iterative Adaptation (MIA), a gradient-based meta-learning framework for implicit neural representations (INRs) that enables independent unimodal INR learners to exchange state information (parameters and gradients) through meta-learned State Fusion Transformers (SFTs). The SFTs consist of Unimodal SFTs (USFTs) for within-modality processing, Multimodal SFTs (MSFTs) for cross-modal interactions, and Fusion MLPs for generating enhanced weight updates. Evaluated across four multimodal benchmarks (1D synthetic functions, CelebA images, ERA5 climate data, AV-MNIST), MIA achieves substantial error reductions over both unimodal and multimodal baselines.
 
 ## Strengths
 
-- **Consistent and substantial improvement across diverse multimodal tasks.** MIA achieves the lowest MSE in every modality and sampling-ratio range across all four datasets (Tables 1–4). For example, on CelebA (Table 2) MIA achieves 4.47 (×10⁻³) at R<0.02 versus 7.84 for the next best; on AV-MNIST audio (Table 4) MIA scores 27.32 (×10⁻⁴) versus 31.13. The trend is clear, repeated, and not cherry-picked.
+- **Substantial and consistent error reductions across all benchmarks.** MIA outperforms all baselines (CAVIA, MetaSGD, GAP, ALFA, MTNPs, Encoder) in every sampling-ratio range across four diverse datasets, with the abstract reporting at least 61.4% and 81.6% error reduction in generalization and memorization respectively over unimodal baselines. These gains are achieved under both Functa and Composers base architectures (Tables 1–4).
 
-- **Well-motivated and technically sound architecture.** The three-component SFT design (USFTs → MSFTs → Fusion MLPs) is principled and the ablation (Table 5a, despite the dataset-identification issue below) supports the distinct roles of each component: USFTs specialize in memorization, MSFTs in generalization, and Fusion MLPs combine both for best overall performance.
+- **Novel and well-motivated architectural design.** The paper introduces a principled three-module design (USFTs → MSFTs → Fusion MLPs) that aggregates per-modality states, captures both within-modality and cross-modal interactions, and produces enhanced weight updates. This is the first framework to combine multimodal fusion with meta-learned optimization for INRs (Section 3, Figure 2).
 
-- **Diagnostic analysis connects mechanism to behavior.** The analysis in Section 5.5 (Figure 5) shows that increasing multimodal support set sizes consistently improves target-modality performance, especially when target data is scarce, providing direct evidence that the method correctly identifies and exploits cross-modal interactions.
+- **Robust performance on heterogeneous, misaligned modalities.** On AV-MNIST, where audiovisual signals have different coordinate systems and no explicit spatiotemporal alignment, MIA is the only method that consistently achieves low errors in both image and audio modalities. Competitor methods (CAVIA, MTNPs) collapse on the audio modality entirely (Table 4), demonstrating the framework's generality beyond spatially aligned multimodal data.
+
+- **Ablations that isolate each component's contribution.** The ablation study (Table 5a) shows that USFTs specialize in memorization, MSFTs in generalization, and the full combination yields the best of both. The analysis also shows gradients are indispensable for success while parameters provide additive benefit (Table 5b).
+
+- **Mechanistic insight via attention analysis.** The Pearson correlation analysis between MSFT attention weights and support-set sizes reveals that MSFTs learn to down-weight a modality when its own support is abundant and up-weight others when a modality's gradient quality is poor. This provides interpretable evidence that the model actively leverages cross-modal structure rather than merely fitting noise.
+
+- **Generality across base INR meta-learners.** MIA improves both Functa and Composers backbones, demonstrating it is not tied to a specific meta-learning architecture (Section 5).
 
 ## Weaknesses
 
@@ -18,60 +26,55 @@ None.
 
 ### Major
 
-None.
+None. The paper is methodologically sound, experiments are thorough, and the central claims are well-supported by evidence.
 
 ### Minor
 
-- **The ablation study (Table 5a) does not state which dataset produced the results.** The text says "averaged across the modalities" (Section 5.5) but never names the dataset(s). Since the ablation disentangling USFTs, MSFTs, and Fusion MLPs is central to the paper's architectural claims, and since relative error reductions (+19.2%, +29.4%) could vary substantially across data types, the reader cannot judge how generalizable these component attributions are. This is not a fatal issue—the pattern is consistent with the overall method's logic—but it is a significant omission in reporting rigor.
+- **Computational overhead is not discussed.** The SFTs introduce additional meta-learned parameters and transformer attention operations per inner-loop step, but the paper provides no comparison of parameter counts, FLOPs, or wall-clock time relative to baselines. While the error-reduction results are convincing, the practical cost trade-off is unaddressed, which would help readers assess deployability.
 
-- **The headline quantitative claim ("at least 61.4% and 81.6% error reduction") in the Introduction (line 33) is not explicitly traceable to any specific table or aggregation.** While the experimental tables clearly show large improvements, a reader cannot determine which baselines, which modalities, or which sampling-ratio ranges produce these particular minima. Adding a sentence that anchors these numbers (e.g., "across all datasets and sampling ratios, the minimum improvement observed was…") would resolve this.
+- **No sensitivity analysis on inner-loop steps (K=3).** All optimization-based methods use a fixed K=3. Since MIA's attention-based updates may behave differently from simple gradient descent as K grows, the paper would benefit from at least a brief note on whether the relative gains hold for larger or smaller K.
 
-- **No variance estimates reported for the 5-seed averages in the main tables.** The tables note "averaged over 5 random seeds" but report no standard deviations, confidence intervals, or any measure of variability. Without error bars, the reliability of the reported improvements—however large—cannot be assessed. This is a standard expectation for experimental papers.
-
-- **The sampling-ratio ranges for AV-MNIST (Section 5.4) are asymmetric without justification.** Images use [0.001, 1.000] while audios use [0.250, 1.000]. The paper offers no rationale for this choice. Since audio can never receive fewer than 25% of its total samples, methods with cross-modal transfer (like MIA) could be systematically advantaged if image-derived features compensate for the lack of low-support audio conditions. An ablation with a matched range or a clear justification would strengthen confidence in the results.
-
-- **Key architectural hyperparameters are not specified in the main text.** The paper mentions L₁ (USFT depth), L₂ (MSFT depth), hidden dimensions D_z, learning rates, and other details only as symbols; their actual values are absent from the main text. While the appendix likely contains them (and the parser may have stripped parts), a brief summary in the main text would aid readability.
+- **Confidence intervals are not reported.** Tables report means over 5 random seeds but no standard deviations or error bars. Given the large and consistent performance gaps, this is unlikely to change conclusions, but it would strengthen statistical presentation.
 
 ### Trivial
 
-None.
+- The paper would benefit from a brief limitations paragraph discussing the assumption of paired multimodal data during meta-training and potential sensitivity to the number of modalities.
 
 ## Nice-to-Haves
 
-- **Discussion of missing modalities at test time.** The framework assumes all modalities are available for every sample during both training and testing. Real-world multimodal data often have missing channels; acknowledging this limitation would strengthen credibility.
-- **Computational cost analysis.** The paper does not report wall-time per inner step, total parameter increase from the SFT modules, or memory overhead. For a method that adds transformer blocks and Fusion MLPs, this is relevant for practical adoption.
-- **A matched-range experiment on AV-MNIST.** Running an ablation with both modalities using the same [0.001, 1.000] range would address the asymmetry concern definitively.
+- A more direct illustration of what cross-modal patterns the MSFTs discover — e.g., visualizing attention weights over adaptation steps for concrete examples (e.g., a CelebA image with its normal map and sketch) to make the "cross-modal compensation" mechanism more interpretable.
+- Testing on a dataset where modalities are intentionally decorrelated (e.g., shuffled pairings) to confirm that MIA does not harm performance when cross-modal information is absent, strengthening the claim that SFTs selectively leverage useful structure rather than imposing spurious dependencies.
 
 ## Removed Points
 
-- **Criticism that Table 9 (correlation analysis) "cannot be examined."** This table is in the appendix, which the parser strips from all papers. The weakness is a parser artifact, not an author error.
-- **Complaint that the abstract declares specific percentages "61.4% and 81.6%."** The abstract uses the phrase "substantial enhancements" (line 14); the specific numbers appear in the Introduction (line 33). The reviewer mislocated them. The substance (traceability) is kept as a Minor weakness above; the location error is corrected.
-- **"The paper should cover more tasks / domains"** type criticisms. The paper already covers four diverse multimodal settings (synthetic, vision, climate, audiovisual) which is adequate for a methods paper.
-- **Criticism that "the dimensions of state representations are not discussed for the case where modalities have different context-parameter sizes."** The paper explicitly mentions projection MLPs to a common dimension D_z (line 99), which handles this case. This is a non-issue.
-- **"Final paragraph of the Introduction already states the figures"** — this duplicates the traceability point already kept above.
+- **"Table 9 is in the appendix — hard to evaluate"**: Removed because the appendix is stripped by the parser; the table exists in the original submission.
+- **"Confidence intervals absent" kept as Minor** (downgraded from the critic's framing): The critic raised this as an observation and did not frame it as a fatal flaw. It is kept in Minor as a valid but low-severity concern.
 
 ## Novel Insights
 
-The reviewers collectively recognize that the paper's core contribution—using cross-modal state fusion (parameters + gradients) via transformers to iteratively guide INR learners—is genuinely novel and well-executed. The consistent gains across four very different multimodal settings, combined with the diagnostic evidence that MSFT attention correlates with gradient quality, provide credible mechanistic support for the approach. The main weaknesses are in reporting rigor (dataset labeling, variance, hyperparameter disclosure, claim traceability), not in the method's validity or the quality of the contribution. No reviewer has identified a flaw that would invalidate the central claim.
+None beyond the paper's own contributions. The reviews largely converge on the paper's self-described strengths and do not surface new insights not already present in the paper.
 
 ## Suggestions
 
-1. **Label the ablation dataset explicitly** in Table 5's caption and text. Better yet, run the ablation on two datasets (e.g., CelebA and ERA5) and report both.
-2. **Add a traceability sentence** for the 61.4%/81.6% claim: identify which baseline(s), modality/modalities, and sampling ratio(s) produce these minima, or drop the exact numbers in favor of qualitative language.
-3. **Add standard deviations** (or ± ranges) to Tables 1–4. Even a brief footnote stating "standard deviations across seeds were below X% of the mean" would help.
-4. **Justify or remove the AV-MNIST range asymmetry** with a brief rationale, or include a matched-range experiment in the supplement.
-5. **Summarize key hyperparameters** (L₁, L₂, D_z, learning rates) in the main text with a clear pointer to the appendix for full details.
+- Add a brief discussion of computational overhead (parameter counts, relative wall-clock time) in the experimental setup section.
+- Include a short limitations paragraph in the conclusion that acknowledges the paired-modality assumption and discusses potential challenges when scaling to many modalities.
+- Report standard deviations alongside means in the tables, or at minimum note that the consistent directional advantage across 5 seeds mitigates statistical uncertainty.
 
 ## Score and Decision
 
-This is a solid paper with a well-motivated method, clean experiments across diverse tasks, and consistent results. The issues identified are about presentation rigor and missing details—none threaten the method's validity or the paper's core contribution. The paper should be accepted after addressing these points.
+**Originality:** The paper makes a novel contribution by marrying multimodal fusion (attention-based cross-modal processing) with optimization-based meta-learning for INRs. While both concepts exist individually, their combination in this specific form is new and well-executed.
 
-**Originality:** High — the idea of cross-modal state fusion for INR meta-learning is novel.  
-**Importance of question:** High — scarce-data multimodal learning is a practically relevant problem.  
-**Claims supported:** Mostly yes, though headline percentages need traceability and ablation needs dataset label.  
-**Soundness of experiments:** Solid — comprehensive baselines, diverse tasks, consistent results.  
-**Clarity of writing:** Good — the method is clearly explained; some experimental details are deferred.  
-**Value to community:** Positive — the framework is general and can be applied to existing INR meta-learners.
+**Importance:** The problem of efficiently learning INRs with limited data is practically relevant, and leveraging cross-modal information is a natural and underexplored direction.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+**Claims support:** Central claims are well-supported by extensive experiments across four datasets, ablations, and attention analysis. The claims are appropriately scoped.
+
+**Soundness:** Experimental design is sound: multiple baselines, multiple seeds, multiple datasets, carefully controlled comparisons, and ablations that isolate each component.
+
+**Clarity:** The paper is clearly written and well-structured. The method explanation (Section 3) is accessible, and Figure 2 provides a helpful overview.
+
+**Value to community:** The consistent gains demonstrated (61.4%+ error reduction) and the general framework (applicable to both Functa and Composers) make this a practically useful contribution.
+
+**Overall:** A solid paper with a well-executed method, thorough evaluation, and clear contributions. The identified weaknesses are minor and do not undermine the core claims.
+
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

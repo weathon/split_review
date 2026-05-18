@@ -1,91 +1,94 @@
-Now I have all the information I need. Let me compose the final consolidated review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes DMEMM, a diffusion-based planning method for offline RL that incorporates learned transition dynamics and reward models into both diffusion training (via reward-weighted diffusion loss and two auxiliary modulation losses) and sampling (via dual guidance). The motivation—that standard diffusion training ignores environment transition consistency and reward structure—is well-founded.
+This paper proposes DMEMM (Diffusion Modulation via Environment Mechanism Modeling), a diffusion-based planning method for offline RL. The key idea is to modulate standard diffusion training with two auxiliary losses derived from learned environment models — a transition-consistency loss and a reward-maximization loss — plus a reward-weighted diffusion loss and dual-guidance during sampling. Experiments on D4RL locomotion and Maze2D tasks show improvements over several baselines, and ablations confirm each component contributes.
 
 ## Strengths
 
-- **Identifies a genuine limitation in diffusion-based offline RL planning**: The paper clearly articulates that conventional diffusion models with fixed isotropic variance and reward-agnostic training can produce trajectories that are not transition-consistent or reward-optimized for RL environments (Section 1, Section 4.1). This problem framing is sound and distinguishes the work from prior diffusion planners like Diffuser (Janner et al., 2022b), which focuses mostly on sampling-time guidance.
+1. **Novel integration of environment models into diffusion training for planning.** DMEMM is among the first methods to incorporate both transition dynamics and reward functions into diffusion training losses (not just sampling guidance). The idea of directly penalizing transition inconsistency and maximizing predicted reward during training is well-motivated and goes beyond prior work that only uses guidance at test time. The ablation study (Table 3) confirms that removing either auxiliary loss degrades performance, supporting the value of both components.
 
-- **Principled modulation framework integrating environment mechanisms into diffusion training**: The method introduces three complementary loss components—reward-aware diffusion loss (Eq. 9), transition-based auxiliary loss (Eq. 7), and reward-based auxiliary loss (Eq. 8)—that together bias the diffusion model toward transition-consistent, high-reward trajectories (Section 4.1.4). This provides a general template for incorporating domain knowledge into diffusion model training for RL.
+2. **Consistent improvements across D4RL benchmarks.** DMEMM achieves an average score of 87.9 on D4RL locomotion tasks, outperforming compared baselines (next best: HD-DA at 84.6). On Maze2D, gains over Diffuser are substantial (~20 points on U-Maze). The improvements are consistent across multiple difficulty levels, not cherry-picked to a single setting.
 
-- **Strong empirical results across D4RL benchmarks**: DMEMM achieves the highest average score (87.9) on D4RL locomotion tasks, outperforming the next-best method by 3.3 points (Table 1). On Maze2D, it improves over Diffuser by nearly 20 points on U-Maze and Medium tasks (Table 2). These gains are consistent across diverse environments and dataset qualities.
+3. **Reward-aware diffusion loss is a simple but effective modification.** Weighting the standard noise-prediction loss by normalized cumulative reward biases training toward high-return trajectories. The ablation variant omitting this weighting (DMEMM-w/o-weighting) underperforms the full model, confirming its utility.
 
-- **Ablation study confirms component contributions**: Removing the reward-weighting, transition loss, reward loss, or transition guidance all degrade performance (Table 3), validating that each module contributes meaningfully.
+4. **Dual guidance during sampling.** Combining both reward gradients and transition log-probability gradients at test time (Eq. 11) is a natural extension of prior single-guidance approaches, and the ablation confirms transition guidance specifically contributes meaningfully to performance.
 
 ## Weaknesses
 
 ### Fatal
-None.
+
+1. **Proposition 1 and Eq. (6)–(7) contain a mathematically unsupported expression that the entire auxiliary loss framework depends on.** The paper claims to express the fully denoised trajectory $\widehat{\tau}^0$ as a function of a clean trajectory $\tau^0$, noise $\epsilon$, and timestep $k$ via:
+
+   $$\widehat{\tau}_{\theta}^{0}(\tau^{0},k,\epsilon)=\tau^{0}+\sqrt{\frac{1-\bar{\alpha}_{k}}{\bar{\alpha}_{k}}}\epsilon-\sum_{i=1}^{k}\frac{1-\alpha_i}{\sqrt{(1-\bar{\alpha}_i)\bar{\alpha}_i}}\epsilon_{\theta}\left(\sqrt{\bar{\alpha}_i}\tau^{0}+\sqrt{1-\bar{\alpha}_i}\epsilon,i\right)$$
+
+   The problem is that this expression evaluates the noise network $\epsilon_\theta$ at the **forward-noised** versions of $\tau^0$ (i.e., $\sqrt{\bar{\alpha}_i}\tau^{0}+\sqrt{1-\bar{\alpha}_i}\epsilon$). In the actual reverse diffusion process, the intermediate states $\tau^i$ are **partially denoised** versions obtained by recursively applying the reverse step $\tau^{i-1} = \mu_\theta(\tau^i, i)$, not the forward-noised versions. These are fundamentally different quantities — the reverse-process intermediate depends on all previous denoising steps, not on a closed-form forward corruption of $\tau^0$. The paper provides no derivation showing how the recursive reverse process simplifies to this independent sum, and the expression as given does not follow from the standard DDPM reverse equations (Eqs. 3–4). Since the auxiliary losses $L_{\mathrm{tr}}$ and $L_{\mathrm{rd}}$ (Eqs. 7–8) are defined as expectations over this expression, the core technical contribution of the paper is built on mathematically unsupported ground.  
+
+   *Why this is Fatal:* If the expression for $\widehat{\tau}^0$ is incorrect, then the auxiliary losses are computing gradients with respect to the wrong quantity, and the claimed training mechanism (modulating diffusion via transition/reward models) is not actually being implemented as described. The paper cannot be accepted without a correct derivation or a clear alternative formulation.
 
 ### Major
 
-**1. The derivation of the auxiliary losses via Equation (6) is mathematically unsound as written.**  
+2. **No error bars or standard deviations reported.** All results are reported as point estimates averaged over 5 seeds, with no variance measures. Given that reported improvements are often in the 2–8 point range (and D4RL scores can have significant seed-to-seed variance), it is impossible to assess whether the claimed improvements are statistically meaningful. Several reported margins (e.g., 2.1 points on HalfCheetah-MedExpert, 2.5 on HalfCheetah-Medium) could easily fall within one standard deviation of typical D4RL results.
 
-Proposition 1 expresses the fully-denoised trajectory mean as a recursive expansion of the reverse process:
-\[
-\widehat{\mu}_{\theta}(\tau^{k},k) = \frac{1}{\sqrt{\bar{\alpha}_{k}}}\tau^{k} - \sum_{i=1}^{k}\frac{1-\alpha_{i}}{\sqrt{(1-\bar{\alpha}_{i})\bar{\alpha}_{i}}}\epsilon_{\theta}(\tau^{i},i)
-\]
-where the \(\tau^{i}\) are the *reverse-process* intermediate states. This recursive expansion of the DDPM/DDIM reverse mean is correct.  
+3. **Baseline comparison is dated and incomplete.** The diffusion-based planning baselines are limited to Diffuser (2022) and HD-DA/PDFD (2022). The paper's own Related Works section discusses more recent diffusion planners (MetaDiffuser, 2023; Hierarchical Diffuser, 2024) but does not compare against them. Without these comparisons, the claim of "state-of-the-art" is unsubstantiated relative to contemporaneous work. At minimum, the paper should discuss why these methods are not included as baselines and acknowledge the limitation.
 
-**However**, Equation (6) then replaces the reverse-process \(\tau^{i}\) in the \(\epsilon_{\theta}\) arguments with the *forward*-process noised trajectories \(\sqrt{\bar{\alpha}_{i}}\tau^{0} + \sqrt{1-\bar{\alpha}_{i}}\epsilon\). These are not equal: the reverse-process trajectory depends on the noise predictions at each step and does not follow the same path as the forward noising process. The claim that \(\widehat{\tau}^{0}_{\theta}\) can be expressed purely as a function of \(\tau^{0}\) and a single noise sample \(\epsilon\) (without running the reverse chain) is therefore not justified.  
+4. **No analysis of generated trajectory quality beyond total score.** The paper repeatedly motivates the method by arguing that conventional diffusion models produce trajectories with "transition inconsistency" and "mismatch" with environment dynamics, yet never directly measures this. There is no quantitative metric of trajectory coherence (e.g., discrepancy between planned next states and transition-model predictions, or rollout accuracy when plans are executed). The improvements are only demonstrated via final RL returns, leaving the claimed mechanistic link between the auxiliary losses and trajectory quality unvalidated.
 
-Since the auxiliary losses \(L_{\text{tr}}\) and \(L_{\text{rd}}\) (Eqs. 7–8) are defined via this expression, the paper does not provide a correct mathematical foundation for computing them. If the authors instead compute these losses by actually rolling out the reverse process (which would be \(\mathcal{O}(K)\) per training sample and require backpropagation through many steps), this is not stated, and the computational implications are unexamined. **This is the most significant weakness**: the core training procedure as described is either mathematically incorrect or crucially underspecified.
+5. **Training procedure for the auxiliary losses is underspecified.** The paper states that "Standard diffusion training algorithm can be utilized to train the model $\theta$ by minimizing this total loss function" (Sec. 4.1.4), but the auxiliary losses require computing $\epsilon_\theta$ at all timesteps $i = 1, \dots, k$ for each training sample, which is not standard. Even if we accept Eq. (7) as correct, the computational cost is $k$ forward passes of the noise network per sample (vs. 1 in standard diffusion). For $k = 100$, this is a 100× increase. The paper does not discuss this cost, whether batched computation is used, or whether any approximation is employed. This makes the practical feasibility of the method unclear.
+
+6. **No validation of the learned transition and reward models.** The auxiliary losses and dual guidance both depend on learned $\widehat{\mathcal{T}}$ and $\widehat{\mathcal{R}}$. Errors in these models (especially in low-data regions of the offline dataset) propagate into both training and planning. The paper provides no analysis of model quality (e.g., prediction MSE on held-out data), no discussion of when the models might fail, and no robustness analysis. This is a significant gap for a method whose contribution depends on these models' accuracy.
 
 ### Minor
 
-**2. Statistical significance is not reported.** Results in Tables 1–3 are reported as point averages over 5 seeds with no standard deviations, confidence intervals, or per-seed spreads. Without variance information, it is impossible to assess whether the reported improvements (e.g., 2–8 points) are meaningful or lie within noise, especially for the medium and medium-replay datasets where variance is often high.
+7. **The "fixed isotropic variance" motivation is rhetorical rather than empirically grounded.** The paper repeatedly claims that the isotropic covariance in standard diffusion models causes a "mismatch" with transition dynamics, but provides no analysis or evidence for this specific mechanism. The proposed auxiliary losses could be justified more simply as regularizing the diffusion model toward environment-consistent trajectories, without invoking a specific critique of isotropic variance.
 
-**3. No training algorithm or implementation details for the auxiliary losses.** The paper provides Algorithm 1 for planning but only states that "standard diffusion training algorithm can be utilized" for training. It does not specify how \(L_{\text{tr}}\) and \(L_{\text{rd}}\) are computed per mini-batch—whether by running the full reverse chain (which is expensive) or by some approximation. This makes the method difficult to reproduce.
-
-**4. No analysis of learned transition/reward model quality.** The transition model \(\widehat{\mathcal{T}}\) and reward model \(\widehat{\mathcal{R}}\) are central to both training losses and sampling guidance, yet the paper reports no metrics on their accuracy (prediction error, ensemble variance, etc.). The reader cannot assess whether performance gains come from genuinely effective modulation or from idiosyncrasies of the learned models.
-
-**5. Reward weighting normalization is presented as more general than it is.** The paper claims the weight \(\sum\mathcal{R}(s_{t},a_{t})/(T_{\max}\cdot r_{\max})\) scales to \((0,1]\), but this assumes non-negative bounded rewards and knowledge of the true per-step maximum. Negative rewards, unbounded rewards, or inaccurate estimates of \(r_{\max}\) would violate this claim. The D4RL experiments use environments with bounded positive rewards, so the method works in practice, but the generality claim is overstated without further discussion.
-
-**6. Reward guidance is not ablated in sampling.** The ablation study removes transition guidance (DMEMM-w/o-tr-guide) but does not remove reward guidance. It is therefore unclear how much the reward guidance contributes to performance relative to transition guidance.
-
-**7. No discussion of computational overhead.** The auxiliary losses and dual guidance likely add significant training and inference cost, but the paper provides no runtime analysis or discussion of tradeoffs.
+8. **Hyperparameter sensitivity analysis (Figure 1) covers only two environments.** Given three tunable knobs ($\lambda_{\mathrm{tr}}, \lambda_{\mathrm{rd}}, \alpha$), showing sensitivity on just two tasks (both at the Med-Expert level) is limited evidence of robustness across the diverse settings studied in the paper.
 
 ### Trivial
-- The citation for PDFD appears as "(Author & Author, 2022)"—an incomplete placeholder, not a proper reference. (Per our rules we treat the cited work as existing, but the citation format needs completion.)
-- HD-DA is referenced in experiments without any citation.
-- The hyperparameter sensitivity analysis (Figure 1) only tests two environments, which is thin for a claimed robustness result.
+
+- None that survive filtering.
 
 ## Nice-to-Haves
-- Report standard deviations or confidence intervals for all main results.
-- Provide a training algorithm pseudocode or clarify how the auxiliary losses are actually computed (e.g., whether the reverse chain is rolled out, or whether a different approximation is used).
-- Include an analysis of learned model quality (prediction error, variance, etc.).
-- Add an ablation of the reward guidance component in sampling.
-- Discuss computational cost relative to standard diffusion baselines.
+
+- Report results with standard deviations or confidence intervals across seeds to enable proper significance assessment.
+- Include a direct metric of trajectory consistency (e.g., average MSE between planned next states and transition-model predictions for generated trajectories) to validate the claimed mechanism.
+- Discuss the computational cost of the auxiliary losses and any practical approximations used.
+- Validate learned transition/reward model quality (prediction error on held-out transitions/rewards).
+- Broaden the hyperparameter sensitivity sweep to more environments and difficulty levels.
 
 ## Removed Points
-These points were flagged by reviewers but removed per protocol:
-- **Criticism that Proposition 1 "does not correspond to the standard reverse diffusion process"** — This is factually incorrect. The recursive expansion of the DDPM reverse mean in Proposition 1 is standard and correct. The actual issue is with Equation (6), not Proposition 1.
-- **Missing comparison with Decision Diffuser** — Per policy, missing related works are not raised as weaknesses.
-- **Missing proof for Proposition 1** — Likely deferred to the appendix, which was stripped by parsing.
-- **Questioning whether PDFD / HD-DA exist** — Per policy, cited references are assumed to exist. The criticism about the incomplete citation format is retained as a Trivial weakness.
-- **Formatting/style nitpicks and parser artifacts** — Removed per policy.
-- Several generic strengths from the Strength Finder were removed (e.g., "this paper addressed an important problem") as they lacked specific content or conflicted with verified weaknesses.
+
+- **Criticism about Algorithm 1 being missing from main text**: The parser strips appendices; Algorithm 1 exists in the original submission. Removed per hard rules.
+- **Criticism about "HD-DA" reference being incomplete/unverifiable**: Hard rules forbid questioning existence or completeness of cited references. Removed.
+- **Criticism about the auxiliary losses requiring "unrolling the entire reverse process"**: This claim is factually incorrect regarding implementation. The expression in Eq. (7) evaluates $\epsilon_\theta$ at independent forward-noised inputs, not via sequential unrolling. However, the computational cost concern (k evaluations per sample) is valid and retained above. The "unrolling" framing is removed.
+- **Criticism that the losses are "ill-posed" or "cannot be obtained without a full reverse pass"**: The expression is explicit and mathematically well-defined (if one accepts Proposition 1). The issue is correctness, not well-posedness. Reframed above as a mathematical correctness concern (Fatal #1) and a computational cost concern (Major #5).
+- **Strength Finder's claim about "Hyperparameter sensitivity analysis demonstrating robustness"**: Overstated — only 2 environments tested. Kept as a minor supporting point but the specific language about "strong claim of robustness" is removed from strength framing.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews surface a genuine mathematical issue in the derivation that the paper itself does not address, but no deeper structural insight emerges beyond what the authors already claim.
+
+None beyond the paper's own contributions. The reviews surface the same concerns that a careful reader would identify: the central derivation is suspect, the empirical evaluation lacks rigor (no error bars, dated baselines, no trajectory-quality metrics), and the training procedure is underspecified. These are standard weaknesses rather than novel observations.
 
 ## Suggestions
-1. **Fix the derivation of the auxiliary losses.** Either provide a correct closed-form expression, or—more realistically—state clearly that the losses are computed by rolling out the reverse process (backpropagating through the denoising chain), and discuss the computational cost. Alternatively, adopt the simpler suggestion from the review: use the transition/reward models only for classifier-style sampling guidance and a consistency loss on the one-step noise prediction, avoiding the multi-step sum entirely.
-2. **Report standard deviations** for all results over 5+ seeds.
-3. **Replace incomplete citations** (PDFD, HD-DA) with proper references or remove them.
-4. **Add a training algorithm** or pseudocode describing how each loss term is computed per mini-batch.
-5. **Ablate the reward guidance** in sampling separately.
-6. **Analyze learned model quality** (transition prediction error, reward prediction error) to validate that the models are accurate enough to provide meaningful supervision.
+
+1. **Revisit Proposition 1 and Eq. (6)–(7) carefully.** Either provide a correct derivation showing how the recursive reverse process simplifies to the claimed sum, or reformulate the auxiliary losses using a different approach (e.g., use the one-step predicted $\tau^0$ from standard DDPM: $\widehat{\tau}^0 = \frac{1}{\sqrt{\bar{\alpha}_k}}(\tau^k - \sqrt{1-\bar{\alpha}_k}\epsilon_\theta(\tau^k, k))$, or use classifier-guided sampling techniques already established in the literature). The current expression is not adequately justified.
+
+2. **Add error bars to all experimental results.** Without variance measures, the claimed improvements cannot be evaluated. Five seeds is sufficient for meaningful standard deviations or min/max ranges.
+
+3. **Expand the baseline set** to include at least the diffusion-based planners cited in the paper's own Related Works section (e.g., MetaDiffuser, Hierarchical Diffuser) and any other standard diffusion-planning baselines available. If code is unavailable, at minimum acknowledge the limitation explicitly.
+
+4. **Add a direct trajectory-quality metric.** Measure, for example, the average prediction error of the transition model on generated trajectories, or the tracking error when the plan is executed. This validates the claimed mechanism.
+
+5. **Describe the training procedure in detail** — how the $k$ noise predictions are computed (sequentially vs. batched), the computational overhead, and whether any approximations (e.g., subsampling the sum over $i$) are used.
+
+6. **Include validation metrics for learned $\widehat{\mathcal{T}}$ and $\widehat{\mathcal{R}}$** and discuss regimes where these models may be unreliable.
+
+---
 
 ## Score and Decision
 
-The paper tackles an important problem—improving transition consistency in diffusion-based planning—and the high-level idea of modulating both training and sampling with environment models is promising. The empirical results on D4RL are strong. However, the paper contains a significant mathematical flaw in how it derives the auxiliary losses (Equation 6 incorrectly identifies reverse-process and forward-process intermediate states), and it fails to clarify how the losses are actually computed in training. These issues undermine the reader's ability to assess the method's validity. Combined with the lack of standard deviations, incomplete citations, and missing training details, the paper does not meet the standard for acceptance in its current form.
+The paper's core idea — using environment models to modulate diffusion training — is interesting, but the mathematical derivation of the central technical contribution (Proposition 1 and the auxiliary loss formulation) is unsupported and likely incorrect. This is a fatal flaw that cannot be resolved in a rebuttal. Even setting aside the mathematical issue, the experimental evaluation lacks error bars and does not compare against contemporaneous diffusion planning methods, making the SOTA claim unsubstantiated. The paper requires substantial revision: a correct derivation (or reformulation) of the core loss framework, rigorous experimental reporting with variance measures, and broader baselines.
 
-The core contribution could be rehabilitated with a major revision that fixes the derivation (or clearly specifies the actual computation procedure), adds statistical rigor, and provides sufficient implementation detail. As submitted, however, the evidence is insufficient to support the claimed state-of-the-art results.
-
-**Score**: 5.0 / 10
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>3.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

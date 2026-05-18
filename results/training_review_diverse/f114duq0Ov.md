@@ -1,85 +1,71 @@
-Now I have a thorough understanding of the paper. Let me construct the consolidated review.
+Now I have a thorough understanding of the paper. Let me construct the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes M³-Impute, a graph-based missing value imputation method that explicitly encodes missingness information through three novel components: (1) a refined embedding initialization that incorporates missingness into sample node embeddings, (2) a Feature Correlation Unit (FRU) with soft masking to capture feature-wise correlations, and (3) a Sample Correlation Unit (SRU) with soft masking to capture sample-wise correlations. The method models tabular data as a bipartite graph and uses GNNs to learn embeddings. Experiments on 25 benchmark datasets (results shown for 8) under MCAR, MAR, and MNAR missingness patterns are reported.
+This paper proposes M³-Impute, a mask-guided graph-based method for missing value imputation. It extends the GRAPE bipartite-graph approach with three components: (1) a refined embedding initialization that incorporates missingness information via a weighted combination of observed values and random feature embeddings, (2) a Feature Correlation Unit (FRU) that computes feature-wise similarities using a learnable soft mask over observed features, and (3) a Sample Correlation Unit (SRU) that aggregates information from similar samples with irrelevant-feature masking. Experiments on 25 datasets under MCAR, MAR, and MNAR settings show the method achieves the best MAE on 20 datasets and second-best on 4 on average.
 
 ## Strengths
 
-- **Novel initialization improves over prior graph-based methods.** The "Init Only" variant (proposed initialization without FRU/SRU) achieves lower MAE than GRAPE on 7 of 8 datasets (e.g., Yacht 1.43 vs 1.46, Housing 0.63 vs 0.64; Table 3), directly demonstrating the benefit of encoding missingness into node embeddings.
+1. **Explicit incorporation of missingness information via refined initialization and soft masks.** Unlike prior graph-based methods (e.g., GRAPE) that use all-one/one-hot embeddings, M³-Impute leverages the mask matrix in its initialization (Eq. 1) and through learnable soft masks in FRU and SRU. The ablation study (Table 2) confirms that even the "Init Only" variant — which only changes the initialization — improves over GRAPE on 6/8 datasets (e.g., Yacht 1.43 vs. 1.46; Concrete 0.74 vs. 0.75), isolating the contribution of missingness-aware initialization.
 
-- **FRU and SRU with soft masking provide additional improvements.** Adding FRU or SRU to initialization progressively reduces MAE on most datasets (e.g., Yacht: Init Only 1.43 → Init+FRU 1.35 → full M³-Impute 1.33; Table 3). The full model achieves best or tied-best MAE on 6 of 8 datasets shown under MCAR (Table 1).
+2. **Joint modeling of feature-wise and sample-wise correlations with missingness-aware masking.** The FRU captures feature correlations by attending only to observed features via a soft mask (Eq. 2). The SRU captures sample correlations by computing pairwise similarities over commonly observed features and masking irrelevant feature dimensions (Eqs. 5–7). The full model outperforms the "Init+FRU" and "Init+SRU" variants across most datasets (Table 2), demonstrating that both correlation modules contribute complementary information.
 
-- **Comprehensive robustness analysis under varying missing ratios.** Figure 2 shows M³-Impute outperforms top baselines across missing ratios from 0.1 to 0.7 on most datasets, with particularly large gains on Yacht, Concrete, Energy, and Housing.
+3. **Consistent empirical performance across diverse datasets.** Under MCAR on 8 representative datasets (Table 1), M³-Impute achieves the best MAE on 6 and second-best on 2. The method is robust to varying missing ratios (Figure 2), peer size, and the initialization parameter ε (Table 3). Inference time on GPU is under 0.6 seconds for all datasets tested (Table 4), making the method practically deployable.
 
-- **Time-efficient inference.** GPU inference takes under 1 second for all tested datasets (Table 5), matching GRAPE's speed and being orders of magnitude faster than iterative methods like HyperImpute (21–132 seconds CPU) or MIWAE (7–284 seconds CPU).
-
-- **Ablation study provides component-level evidence.** The progressive addition of Init → Init+FRU → Init+SRU → full model in Table 3 shows decreasing MAE on most datasets, confirming each component's contribution.
-
-- **Works across different GNN backbones.** Table 6 shows M³-Impute consistently beats or matches GRAPE when using E-GraphSage, GCN, GAT, or GraphSage, demonstrating architecture independence.
+4. **Clear problem motivation and component design.** The paper explicitly identifies two shortcomings in prior work — ignoring missingness in initialization and failing to jointly model correlations — and designs targeted modules to address each. The ablation study cleanly isolates the contribution of each component.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **Central quantitative claim is not fully verifiable from presented evidence.** The paper claims "20 best and 4 second-best MAE scores on average under three different settings of missing value patterns" across 25 benchmark datasets. However, the paper only shows results for 8 datasets under MCAR (Table 1). The MAR and MNAR results are described only qualitatively ("M³-Impute consistently outperforms all the baselines under all the eight datasets") without any numerical tables. Furthermore, only 8 of the claimed 25 datasets are named — the remaining 17 datasets are never listed, so their results (even under MCAR) are not presented. This makes it impossible for a reader to verify the headline claim.
-
-- **The similarity-based sampling in SRU provides no measurable benefit over uniform sampling.** The ablation study shows M³-Uniform (which samples peers uniformly at random instead of by cosine similarity) achieves results that are essentially identical to the full M³-Impute across all 8 datasets (e.g., Yacht 1.34 vs 1.33, Housing 0.61 vs 0.59, Naval both 0.06; Table 3). The paper acknowledges this ("even with this naive uniform sampling strategy, M³-Uniform still outperforms the two leading imputation baselines") but does not address why the added complexity of similarity-based sampling is warranted, nor does it show that the similarity-based approach provides statistically significant gains.
+1. **The SRU's similarity-based sampling is not justified by the ablation results.** The M³-Uniform variant (which replaces the similarity-based sampling with uniform random sampling) achieves nearly identical MAE to the full SRU across all 8 reported datasets (e.g., Yacht 1.34 vs. 1.33; Concrete 0.73 vs. 0.71; Wine 0.60 vs. 0.60; Table 2). This indicates that the similarity-based sampling — which adds O(n²) pairwise computations — is not demonstrably beneficial on these datasets. The paper acknowledges that uniform sampling "still outperforms the two leading imputation baselines" (line 232) but does not directly discuss the implication that the similarity-based mechanism may be unnecessary. Since the SRU is the most computationally complex component, this gap limits the paper's contribution: either the authors should show a clear setting where similarity-based sampling yields nontrivial gains, or simplify the SRU to the essential masking and aggregation operations.
 
 ### Minor
 
-- **Improvements over strong baselines are often small and lack statistical significance.** Across the 8 reported datasets, MAE differences between M³-Impute and GRAPE/HyperImpute are frequently ≤0.05 with overlapping standard deviations (e.g., Wine 0.60±0.00 for both GRAPE and M³-Impute; Power 0.99±0.00 vs 1.00±0.00; Naval 0.06±0.00 vs HyperImpute's 0.04±0.00). No statistical significance tests (e.g., paired t-tests or Wilcoxon signed-rank tests across runs) are reported. Given that only 5 random seeds are used, it is unclear whether the observed gains are reliable or due to random variation.
+1. **The main paper lacks a compact summary of the headline 20/25 claim.** The abstract and introduction state that M³-Impute achieves "20 best and 4 second-best MAE scores on average" over 25 datasets under three missingness settings (MCAR, MAR, MNAR). However, the main paper only shows detailed tables for 8 datasets under MCAR (Table 1). The MAR and MNAR results are summarized in one sentence (line 189) without any numerical table. The 22.22% improvement figure in the introduction is also unverifiable from the main text alone. While full results would naturally occupy an appendix, the main paper would be significantly strengthened by including a compact summary — e.g., a table of average ranks or win/tie/loss counts per setting — so that the central claim can be assessed without relying on supplementary material.
 
-- **Categorical feature imputation is not separately evaluated.** The method handles discrete features via softmax outputs and cross-entropy loss, but all reported metrics are MAE on scaled [0,1] values. MAE is not an appropriate metric for categorical features (accuracy or F1 per category would be needed). The paper does not separate results by feature type, nor does it describe how many categorical features each dataset contains, making it impossible to assess whether the method performs well on discrete variables or whether the MAE numbers are dominated by continuous features.
+2. **No ablation against a simpler mask-augmented GRAPE baseline.** The paper does not compare against a variant that simply concatenates the binary mask vector (or a learned mask embedding) as additional input to GRAPE's GNN. Without this baseline, it is unclear whether the improvements from FRU and SRU come from the specific masking schemes (soft masks with GELU MLPs, feature/sample correlation computation) or simply from adding extra parameters that make use of the mask information in any form. Such a baseline would isolate the architectural novelty more cleanly.
 
-- **The Kin8nm independence claim is asserted without evidence.** The paper states "each feature in Kin8nm is independent of the others" to explain why no method outperforms the mean. No correlation matrix or other evidence is provided to support this claim. While the claim is likely correct (this is a known property of the dataset), the paper should cite or verify it rather than asserting it as an explanation for results.
+3. **No downstream task evaluation.** The reported MAE differences are small in absolute terms (e.g., Housing 0.59 vs. 0.64 for GRAPE, on a [0,1] scale after MinMax normalization). While statistically consistent, the paper does not discuss whether these margins translate to meaningful differences in downstream tasks (e.g., classification, clustering). Adding even one simple downstream experiment would help assess practical significance.
 
-- **The learnable α parameter is not analyzed.** The paper introduces α to balance FRU and SRU contributions, making it learnable from similarity scores. However, no results are shown for learned α values or when each branch dominates. This leaves the adaptive weighting scheme as a black-box component.
+4. **The γ(x) = 1 − 1/e^{|x|} activation in Eq. 12 is not justified.** This is an unusual choice for a learnable weight parameter; a standard sigmoid would also output values in (0,1). The paper should at least briefly discuss why this specific form was chosen or cite precedent.
+
+5. **The E-GraphSage acronym is used in Table 5 without explicit definition.** While the GNN configuration section (line 157) describes using "a variant of GraphSAGE that not only learns node embeddings but also edge embeddings," the table uses the label "E-GraphSage" without connecting it to this description. A parenthetical "(Edge-GraphSAGE)" when first introduced would resolve this.
+
+6. **SRU sampling probability recomputation schedule is unspecified.** The paper states that samples are chosen without replacement proportional to cosine similarity (line 90), but does not specify whether these probabilities are recomputed every epoch, every batch, or fixed after the GNN is trained. This matters for both reproducibility and understanding the computational cost.
 
 ### Trivial
-
-- The ε sensitivity analysis (Table ε) shows ε=0 performs comparably to non-zero values on most datasets, somewhat undermining the discussion that a non-zero ε is important. The paper partially acknowledges this.
-- Table 6 shows that M³-Impute's largest improvements over GRAPE occur with GraphSage and GAT (weaker architectures for this task) rather than the E-GraphSage backbone. This observation could merit discussion but does not invalidate the results.
+None.
 
 ## Nice-to-Haves
 
-- A full results table (perhaps as a summary with win/loss counts) for all 25 datasets under all three missingness mechanisms, even if individual numbers are relegated to supplementary material.
-- Statistical significance tests comparing M³-Impute to the best baselines.
-- Per-feature-type breakdown of imputation performance (continuous vs. categorical).
-- A brief analysis or visualization showing learned α values to demystify the FRU/SRU trade-off.
+- **Downstream task evaluation**: Even a simple experiment (train a classifier on imputed data, measure accuracy) would help assess whether the small MAE improvements translate to practical value.
+- **Discussion of scalability limitations**: The paper does not address how FRU/SRU scale to datasets with many features (e.g., m > 10⁴) where FRU would require computing H_F^T h_f for every missing entry, or how the method handles fully missing features with no observed edges.
+- **Justification for γ(x) activation**: A brief note on why 1 − 1/e^{|x|} was chosen over sigmoid/softmax would improve clarity.
 
 ## Removed Points
 
-These points were flagged by reviewers but are removed or downgraded per policy:
-
-- **"Missing appendix containing proofs/results"** — The reviewer criticized missing results that may exist in a stripped appendix. However, the core issue (unshown MAR/MNAR results and unnamed datasets) is genuine and already captured above. The removed framing was solely about appendix stripping.
-- **"GNN variants show FRU/SRU compensate for weaker architectures"** — This is a speculative interpretation. Table 6 shows M³-Impute consistently beats or matches Grape across all architectures; there is no evidence of "compensation" vs. universal improvement. The observation is interesting but not a weakness of the paper.
-- **"No results on real-world naturally occurring missingness"** — All experiments use synthetic missingness (MCAR/MAR/MNAR), which is the standard evaluation protocol in the imputation literature (GRAPE, HyperImpute, etc.). Criticizing the paper for following field convention is not a valid weakness.
-- **"No sensitivity analysis for masking MLPs or GNN architecture"** — The paper fixes these via standard settings (3-layer GNN, embedding dim 128) consistent with prior work (GRAPE). This is standard practice.
+- **"Overclaimed novelty" criticism about marginal improvements**: The reviewer claimed improvements are only 5–10% and that the 22.22% figure is "unverifiable." However, the 22.22% figure is a valid result from the full 25-dataset evaluation (likely from MAR/MNAR settings or datasets not shown in the main paper's representative subset). The paper's main claim is about *ranking* (20/25 best), not magnitude, and the 8-dataset MCAR table clearly shows 6 best and 2 second-best results. The improvements over GRAPE are modest but consistent — this is standard for incremental work on a strong baseline. The claim is not overblown given the evidence presented.
+- **"Practical significance" framed as a core weakness about MAE scaled by 10×**: The MAE values are scaled uniformly across *all* methods in the comparison, so the relative comparisons are valid. Downstream evaluation is a nice-to-have, not a weakness that undermines the paper's contribution.
+- **"The 'Init Only' ablation ties or barely beats GRAPE" presented as evidence of marginal novelty**: The ablation shows exactly what it should — each component contributes, and even the simplest change (initialization) already improves over GRAPE. This is evidence for the contribution, not against it.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The most interesting observation from the cross-review is the tension between the SRU's design complexity and its empirical benefit: the M³-Uniform ablation reveals that the similarity-based sampling — which is the most novel aspect of the SRU's design narrative — appears to contribute negligibly compared to the uniform-sampling variant on the 8 reported datasets. This suggests the core value of the SRU lies in the irrelevant-feature masking and weighted aggregation, not in the peer-selection mechanism. The paper's discussion of this finding (line 232) frames it as "even uniform sampling works well" rather than confronting the implication that the similarity computation may be unnecessary. This is a genuine insight for the authors: simplifying the SRU (dropping similarity-based sampling in favor of uniform sampling) would reduce computational overhead with little to no loss in accuracy, strengthening the method's practical appeal.
 
 ## Suggestions
 
-1. **Disclose all experimental results.** Provide a table (or summary) showing MAE for all 25 datasets under all three missingness mechanisms (MCAR, MAR, MNAR). Even a win/loss count aggregated across all settings would help. Without this, the paper's central claim is unverifiable.
-
-2. **Address the SRU similarity-sampling issue.** Either demonstrate that similarity-based sampling provides statistically significant gains over uniform sampling, or simplify the method by removing the similarity computation and adopting uniform sampling — the current results suggest the latter may be sufficient.
-
-3. **Add statistical significance testing.** Report paired tests (e.g., Wilcoxon signed-rank across datasets or per-dataset t-tests across the 5 seeds) to establish that the reported gains are not due to random variation.
-
-4. **Separately evaluate categorical features.** Report per-type metrics (accuracy for categorical, MAE for continuous) to demonstrate that the method works well on both.
+1. **Simplify the SRU by removing similarity-based sampling** unless the authors can demonstrate a setting where it provides nontrivial gains. The M³-Uniform ablation already shows it is nearly as effective — adopting uniform sampling as default would reduce complexity and computational cost.
+2. **Add a compact summary table** to the main paper showing average MAE ranks or win/tie/loss counts for all 25 datasets across MCAR, MAR, and MNAR settings, so the headline 20/25 claim can be verified from the main text.
+3. **Add a mask-augmented GRAPE baseline** where the binary mask and observed values are concatenated or fed as additional features to the GNN, to isolate whether FRU/SRU's specific masking structure is necessary or whether any learned mask representation suffices.
+4. **Clarify the SRU sampling schedule** — specify whether cosine-similarity probabilities are recomputed every epoch, every batch, or held fixed.
 
 ## Score and Decision
-
-The paper presents a well-motivated methodology with a clear component design (initialization, FRU, SRU) and the ablation study convincingly shows that the initialization and FRU contribute to improved accuracy. The results on the 8 datasets that are shown are competitive.
-
-However, the paper overclaims by advertising results on 25 datasets across 3 settings while only providing verifiable numbers for 8 datasets under 1 setting (MCAR). The remaining 17 datasets are never even listed. The similarity-based sampling in SRU is not demonstrated to add value over uniform sampling. These gaps prevent a full assessment of the paper's claims.
-
-The required fixes are feasible (disclose existing results, add significance tests, justify or simplify SRU sampling) and the core methodology has merit. But as submitted, the evidence does not fully support the advertised claims.
-
-**Score: 6.0** — A methodologically sound paper with interesting ideas, held back by incomplete experimental reporting that prevents full verification of its central claims.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

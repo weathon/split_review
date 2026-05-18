@@ -1,18 +1,18 @@
-Now I have all the information I need. Let me synthesize the final review.
+Now I have a thorough understanding of the paper. Let me write the final consolidated review.
 
 ## Summary
 
-This paper studies how sharing a single source network across multiple target models (ensembles, MoEs) can reduce memory in Strong Lottery Ticket (SLT) constructions. The authors prove that sharing a source does not increase the width requirement beyond a log factor compared to separate sources, identify that independently optimizing each mask for sparsity is suboptimal for joint memory, and propose several mask selection algorithms (Partition, Local-bin, Local-bin+opt) along with an (m+1) storage scheme that decomposes masks into shared overlap and individual planes. Experiments on synthetic subset-sum approximation problems (n ≤ 17, m = 4) show that Local-bin+opt with a shared source reduces total bits compared to baseline selection methods.
+This paper studies the memory footprint of representing multiple models as Strong Lottery Tickets (SLTs) — i.e., as binary masks applied to a shared random source network. The authors show that sharing a source does not increase the required source width over the single-target case (theoretically), formulate the joint memory minimization objective as minimizing the union of masks, propose the $(m+1)$ storage scheme (overlap plane + extra planes), and develop algorithms (Partition, Local-bin, Local-bin+opt) that select approximating subsets to optimize sparsity or joint overlap. Experiments on synthetic multi-subsetsum problems validate that the Local-bin+opt algorithm with a shared source reduces total bits and computations compared to independent sparsification approaches.
 
 ## Strengths
 
-- **Theoretical proof that sharing a source avoids width overhead for model families (Theorem 3.3).** The paper correctly extends the Pensia et al. SLT construction to show that a shared source requires width ~ C d log(1/δ) while m separate sources require ~ C d log(m/δ). This formalizes a non-obvious advantage of source sharing and connects it to existing SLT theory.
+1. **Problem formulation and joint optimization objective.** Identifying that the *union* of masks (rather than individual sparsity) is the correct objective for joint memory minimization in shared-source SLTs is a useful conceptual contribution. The $(m+1)$ storage scheme (overlap plane + extra planes) and the translation of mask overlap into a concrete encoding savings is a clean formulation that prior SLT work has not explicitly addressed.
 
-- **Identification that individual mask sparsity optimization is suboptimal for joint memory (Theorem 3.5).** While the inequality itself is a simple union bound, the insight that minimizing each mask independently is only an upper bound on minimizing the union of masks motivates the paper's joint optimization approach and is a valid observation about subset-sum approximation.
+2. **Formal width comparison for shared vs. separate sources.** Theorem 3.3 formalizes that sharing a source yields source width $d' \sim C d\log(1/\delta)$ versus $d' \sim C d\log(m/\delta)$ for separate sources, showing the width penalty is only logarithmic in $m$. While the underlying proof is a direct adaptation of Pensia et al. (2020), the explicit comparison is a useful reference point for practitioners considering shared-source SLTs.
 
-- **The (m+1) storage scheme and Local-bin+opt algorithm.** The decomposition of masks into an overlap plane plus m extra planes provides a concrete encoding that can exploit mask overlap. The Local-bin+opt algorithm that minimizes total length (overlap + extra bits) is a principled approach, and the experiments confirm it reduces total bits compared to independent sparsity optimization under this scheme.
+3. **Algorithmic instantiation of joint mask optimization.** The Local-bin+opt algorithm, which explicitly minimizes overlap+extra bits within the $(m+1)$ scheme, is a concrete proposal that goes beyond independent sparsification. The experimental results in Figure 1 demonstrate that this approach yields measurable reductions in total bits and average computations compared to Partition and Local-bin when using the $(m+1)$ scheme.
 
-- **Experimental evidence that shared sources increase mask overlap.** Figure 1 shows that under joint optimization (Local-bin+opt), using a shared source yields higher overlap and lower extra bits than different sources, confirming the theoretical intuition about shared sources enabling more memory-efficient representations.
+4. **Empirical confirmation that source sharing promotes overlap.** Figure 1 shows that shared sources yield higher overlap bits and fewer extra bits than different sources for Local-bin+opt, directly supporting the theoretical intuition of Theorem 3.4.
 
 ## Weaknesses
 
@@ -21,62 +21,50 @@ None.
 
 ### Major
 
-- **Abstract overclaims about experimental validation.** The abstract states "To validate these theoretical findings, we provide explicit SLT constructions in experiments." The experiments contain no actual neural network SLT constructions — they only simulate subset-sum approximation on synthetic data (n ≤ 17, m = 4). While the theoretical connection between subset-sum approximation and SLTs is already established by Pensia et al., claiming "explicit SLT constructions in experiments" is misleading and sets false expectations. This should be corrected to accurately describe what is validated (subset-sum approximation algorithms, not end-to-end neural network lottery tickets).
+1. **Experiments are restricted to synthetic multi-subsetsum problems; no actual neural network is constructed or evaluated.** The paper motivates the work with reference to large-scale MoEs, ensembles, and foundation models, and the abstract promises "explicit SLT constructions in experiments." However, the experiments (Section 5) only test on random scalar targets and sources ($n \leq 17$, $m=4$). No actual neural network — not even a small MLP on MNIST — is ever built, pruned, or evaluated. While the subsetsum approximation is indeed the foundational primitive of SLT constructions, the paper would require validation on actual derived target networks to support its claimed relevance to practical model families. The gap between the motivating applications (billions of parameters, edge-device deployment) and the validated setting (scalars drawn uniformly at random) is substantial.
 
-- **Theorem 3.4's justification of the mask overlap probability is incomplete.** The theorem claims that with reshuffled (separate) sources, the probability of perfect index-level overlap between M¹ and M² is 1/C(n,k). The proof simply states "This follows from the probability of permutations" and describes drawing k-subsets without replacement. This calculation would be correct for uniformly random k-subsets, but the masks are not uniformly random — they are determined by the subset-sum approximation problem, which depends on the specific values in the source sets. No argument is given that the distribution of approximation solutions is uniform. The first part of the theorem (same source → M¹ = M² when the same z approximates both targets) is straightforward and correct, but the probability claim lacks a rigorous justification. This weakens the theoretical argument for why shared sources are advantageous for mask overlap.
+2. **The mask optimization algorithms do not scale to realistic network sizes.** Algorithm 1 enumerates all $2^n$ subsets of each source set (line: "Initialize each element of subsetSums of size $2^n$ to 0; for $i\in\{1,2,...,2^n\}$ do subsetSums[$i$] $\leftarrow X\odot binary(i)$"). For $n=17$ this is $131K$ evaluations per source element — feasible for scalar targets but prohibitive when scaled to millions of parameters. The paper acknowledges the exponential search space in the Discussion ("the space of all potential subsetsum approximations increases exponentially") but does not provide any approximation algorithm, heuristic, or complexity analysis to address this. Without a scalable approach, the proposed optimization framework cannot be applied to the settings that motivate the paper. This is the most significant barrier to the paper's practical relevance.
 
 ### Minor
 
-- **Experiments are limited to very small source sizes (n ≤ 17) and do not demonstrate scaling.** The experiments use exhaustive enumeration over 2ⁿ possibilities, which is only feasible because n is tiny. For n=17, 2ⁿ=131,072; for real neural network settings (n could be much larger), this approach is intractable. The Discussion acknowledges this exponential complexity, but the paper does not provide any heuristic or approximation strategy for larger n, nor does it show results beyond n=17. A reader cannot assess whether the approach has practical relevance for the large models cited in the introduction.
+1. **Theoretical novelty is modest; core results are straightforward extensions of existing work.** Theorem 3.2 is a simple union bound extending the single-target subsetsum bound to $m$ targets. Theorem 3.3's proof is stated as "analogous to the one of Theorem 1 (Pensia et al., 2020)." Theorem 3.4's first statement (identical targets $\implies$ identical masks) is definitional; the second statement (probability of overlap under reshuffled sources is $1/\binom{n}{k}$) is a basic combinatorial calculation. Theorem 3.5 (individual sparsity minimization is an upper bound on union minimization) follows directly from $|\bigcup M^k| \leq \sum |M^k|$ via the union bound. The paper's genuine contribution lies in *identifying and formulating* the joint memory optimization problem rather than in deep new theory, but the theorems are presented with weight disproportionate to their technical depth.
 
-- **Experiments test average-case behavior with randomly sampled X each iteration, not a fixed source.** The 10,000 iterations each resample both the source set X and the target vector Z (line 157). This tests average-case behavior but does not directly validate that the optimized masks work for a single fixed random source — which is the scenario most relevant to actual SLT deployment where a source network is fixed and targets are approximated from it. Some analysis with a fixed source would strengthen the connection to the claimed application.
+2. **No comparison against standard baselines for memory footprint.** The paper compares only between its own mask-selection strategies (Partition vs. Local-bin vs. Local-bin+opt) and between shared vs. separate sources. There is no comparison against simply storing the target model weights in a standard format (e.g., float16, int8, quantized) or against other model compression techniques mentioned in the related work. The central claim of "memory savings" is never quantified against a straightforward non-SLT alternative, making it difficult for the reader to assess whether the savings are practically significant.
 
-- **No comparison to simple baselines outside the proposed method family.** The paper compares Partition, Local-bin, and Local-bin+opt against each other. There is no comparison to a baseline such as "store masks without any optimization" (e.g., random mask selection or storing the full target weights) or standard sparse encoding methods. This makes it difficult to contextualize the claimed memory savings.
+3. **Limited exploration of the relationship between source size $n$ and memory savings.** The paper notes in the Discussion that "larger source sizes...can achieve higher memory savings" and hypothesizes saturation, but experiments only use $n=14,15,16,17$. A systematic study of how total memory scales with $n$ (and where the hypothesized trade-off becomes unfavorable) is absent.
 
 ### Trivial
-- Theorem 3.4's statement contains a formatting artifact ("$z_{1}$ $\mathrm{i},z_{2}$") in the extracted text.
-- Section 3 would benefit from a clearer distinction between what is existing result (Theorem 3.1 from Pensia et al.) and what is novel (Theorems 3.3–3.5).
+
+1. The pseudocode in Algorithm 1 could be clearer: the algorithm is presented with parser artifacts and the `OptAlgorithm` branching is embedded inline, making it harder to distinguish the core multi-subsetsum routine from the specific optimization strategies.
+2. Some notation is overloaded (e.g., $M$ used for masks, sets of masks, and the set of masks under different schemes).
 
 ## Nice-to-Haves
-- A heuristic or approximate (e.g., greedy) variant of Local-bin+opt that works for larger n (e.g., n=100) would substantially strengthen the practical claims. The paper acknowledges exponential complexity but provides no path forward.
-- A concrete example of how the framework applies to a small MLP (e.g., a 3-layer network with width 50), even just theoretically tracing the parameter counts, would help bridge the gap between the subset-sum abstraction and the neural network claims.
+
+- An analysis or heuristic for approximating the optimal subset selection without exhaustive $2^n$ enumeration (e.g., greedy, dynamic programming, or randomized approaches) would substantially strengthen the practical relevance.
+- Providing an estimate of total memory (source + masks) in the SLT framework and comparing it to the memory required to store the target models directly (e.g., in float16) would help calibrate the claimed savings.
+- A small-scale validation on a real neural network (e.g., a 2-layer MLP on MNIST with $m=2$ targets) would significantly bolster the claim of "explicit SLT constructions."
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-1. **Harsh critic's claim that "The paper never verifies that the masks found by its proposed algorithms actually yield functional lottery tickets"** — The connection between subset-sum approximation and SLT construction is already proven by Pensia et al.; the paper's algorithms only select masks that satisfy the approximation bound, so the construction is valid by existing theoretical results. Verifying subset-sum approximation is sufficient for the theoretical claim.
-
-2. **Harsh critic's demand for "neural-network experiment" (MLP layer test) as a requirement for acceptance** — This paper is primarily theoretical; its experiments validate the subset-sum algorithms which are the building blocks of the SLT construction. Evaluating against standards for an empirical systems paper is inappropriate for a theory+methodology paper.
-
-3. **Harsh critic's complaint about "no measurement of actual compression ratios, no comparison with standard encoding schemes (run-length encoding, compressed sparse row)"** — These are demands for a broader empirical study that would change the paper's nature. The paper proposes and evaluates a specific framework (mask overlap optimization + (m+1) scheme) and compares different selection strategies within that framework. Adding standard compression baselines could enrich the paper but their absence is not a structural flaw.
-
-4. **Harsh critic's claim that "Theorem 3.2 is a standard union bound and Theorem 3.3 is a direct corollary" — "correct but not novel"** — Novelty is not required for every theorem; applying existing techniques to establish a new result (shared source doesn't increase width) is a valid contribution. Papers routinely extend prior proofs.
-
-5. **Harsh critic's criticism about overlapping masks not being verified for neural network approximation error** — The algorithm only selects subsets that satisfy the per-parameter approximation guarantee |subsetSum - target| < ε. Since SLT constructions decompose to independent parameter-level subset-sum approximations (per Pensia et al.), the joint optimization does not affect the approximation error guarantee for any individual parameter.
-
-6. **Harsh critic's criticism about "inference speed" not being measured** — The paper uses set bits as a proxy for computations (which it states), and measuring actual inference speed on a fabricated neural network is outside the scope of a paper whose experimental focus is subset-sum approximation.
+- The critic's claim that "subtraction with bitwise xor operator" is incorrect: in $GF(2)$, addition and subtraction are identical, and for the bit-level operation described (extracting non-overlapping bits), XOR is correct. This is a misunderstanding, not a paper error. **Removed.**
+- Several formatting/style nitpicks about paper structure and the schematic diagram description. **Removed per hard rules.**
+- The critic's comment that the paper "does not even test on a single target network derived from a standard dataset" is noted and preserved as a valid weakness, but the characterization that the paper's claims are "purely speculative" is an overstatement — the experiments validate the claims at the subsetsum level, which is the appropriate abstraction for the paper's theoretical contributions. **Downgraded from "fatal" to "major."**
+- The critic's complaint that Theorem 3.5 is "not a theorem but an elementary inequality" is accurate, but the paper's framing is as an observation about suboptimality of independent optimization, which is a valid point even if the inequality itself is basic. **Kept as minor weakness (point 1 in Minor).**
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The key insight — that the multiple valid subset-sum solutions for each target can be jointly selected to maximize overlap and reduce memory — is the paper's own novel observation, and the reviewer analyses do not add substantially to it beyond identifying that the experimental validation of this insight on neural networks is incomplete.
+The key insight that emerges from the reviews — one that the paper itself states but does not fully capitalize on — is the fundamental trade-off triangle between source size $n$, mask sparsity, and mask overlap. Larger $n$ gives more subset choices and can improve joint memory efficiency (more overlap opportunities), but simultaneously increases the per-mask bit-width and the search complexity. The paper identifies this trade-off qualitatively but provides neither a theoretical characterization (e.g., the optimal $n$ as a function of target statistics and $m$) nor an empirical map of the Pareto frontier. This is a genuinely interesting direction that the paper opens but does not resolve.
 
 ## Suggestions
 
-1. **Correct the abstract and framing.** Replace "we provide explicit SLT constructions in experiments" with an accurate description of what is validated (e.g., "we validate the subset-sum approximation component of SLT constructions with synthetic experiments").
-2. **Fix the proof of Theorem 3.4** by either (a) providing a rigorous justification for the 1/C(n,k) probability, (b) explicitly stating the uniformity assumption, or (c) removing the probability claim and keeping only the qualitative statement that overlap is unlikely with separate sources.
-3. **Add at least one experiment with a fixed source set** (not resampled each iteration) to match the SLT deployment scenario.
-4. **Include a concrete estimate** translating the n=17, m=4 bit savings to approximate parameter counts for a small neural network (e.g., an MLP with the architecture from Theorem 3.3) to help readers understand the practical implications.
-5. **Discuss or propose a way forward for larger n** — even a simple greedy heuristic or random sampling approach would address the scalability concern.
+1. **Address the scalability bottleneck.** The $2^n$ enumeration is the single largest barrier to practical relevance. Even a brief complexity analysis or a sketch of a polynomial-time approximation (e.g., greedy subset selection or relaxed optimization) would be valuable.
+2. **Validate on at least one small neural network.** Constructing SLTs for a small MLP (e.g., MNIST, $m=2$ targets) using the proposed algorithms would substantially close the gap between the theoretical claims and practical validation.
+3. **Add a baseline memory comparison.** Quantify the total storage (seed + masks) under the best (m+1)-scheme encoding against the size of the target weights in a standard compressed format (e.g., fp16 or int8) to give the reader a concrete sense of the savings magnitude.
+4. **Systematically study the effect of source size $n$** on total memory to validate the hypothesized trade-off and saturation discussed in Section 6.
 
 ## Score and Decision
 
-**Originality:** Moderate. The core observation (joint mask selection can reduce memory) is novel, though several theoretical building blocks adapt existing results.  
-**Importance of research question:** High. Memory-efficient representation of model families is a practically relevant problem.  
-**Claims well supported?** Partially. The theoretical claims are sound (except Theorem 3.4's probability claim), but the experiments are too small-scale to support the large-model framing.  
-**Soundness of experiments:** Adequate for a theory paper but limited in scope and scale.  
-**Clarity of writing:** Generally clear, though the abstract overstates what is experimentally demonstrated.  
-**Value to the community:** Moderate. The theoretical insights about joint mask optimization could inform future SLT-based compression work, but the lack of scaling analysis limits near-term impact.
+The paper identifies a genuinely underappreciated problem (joint memory optimization in shared-source SLTs) and provides a clean formulation and proof-of-concept algorithms. However, the validation is confined to synthetic subsetsum problems with $n\leq 17$, the optimization algorithms do not scale to realistic network sizes, and no baseline comparison against standard weight storage is provided. The theoretical results, while correctly stated, are straightforward extensions of existing work. These limitations are significant enough that the paper in its current form does not establish its claimed practical relevance.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

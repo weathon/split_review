@@ -1,84 +1,76 @@
-Now I have all the evidence needed. Let me compose the final consolidated review.
+Now I have all the information I need. Let me construct the final consolidated review.
 
 ## Summary
 
-The paper introduces Corruption2Self (C2S), a score-based self-supervised MRI denoising framework. Its core theoretical contribution is the Generalized Ambient Denoising Score Matching (GADSM) loss (Theorem 1), which extends denoising score matching to settings where only noisy observations are available and subsumes DSM, ADSM, and Noisier2Noise as special cases. The method incorporates a reparameterization of noise levels for training stability, mentions a detail refinement extension for fine-feature preservation, and supports multi-contrast inputs. Experiments on M4Raw (real noise) and fastMRI (simulated noise) show C2S achieving state-of-the-art results among self-supervised methods and competitive performance with supervised methods trained on multi-repetition-averaged labels.
+This paper introduces Corruption2Self (C2S), a score-based self-supervised MRI denoising framework. The core contribution is a Generalized Ambient Denoising Score Matching (GADSM) loss that extends denoising score matching to settings where only noisy observations are available, unifying DSM, ADSM, and Noisier2Noise as special cases. C2S achieves state-of-the-art self-supervised results on M4Raw (32.77/0.919 PSNR/SSIM on T1) and competitive performance on fastMRI, with a multi-contrast extension that surpasses supervised baselines.
 
 ## Strengths
 
-- **Novel theoretical unification via GADSM loss.** Theorem 1 provides a clean generalization of denoising score matching to the ambient noise setting, with explicit coefficients γ and δ that correctly reduce to DSM, ADSM, and Noisier2Noise as edge cases (Section 3.1, lines 58–68). This is a principled foundation for self-supervised score-based denoising, not an ad-hoc engineering trick.
+- **GADSM provides a principled theoretical unification.** Theorem 1 shows that GADSM reduces to DSM, ADSM, and Noisier2Noise as special cases, establishing a rigorous connection between score matching and self-supervised denoising. This is a genuine theoretical contribution.
 
-- **Strong empirical performance on real and simulated MRI data.** On M4Raw (Table 2), C2S outperforms all compared self-supervised methods (Noise2Void, Noise2Self, PUCA, LG-BPN, Noisier2Noise, Recorrupted2Recorrupted) across T1, T2, and FLAIR contrasts, with PSNR gains of 1–4 dB depending on the baseline. On fastMRI (Table 3), it achieves the best or tied-best SSIM at both noise levels (σ=13/255, σ=25/255), demonstrating consistent detail preservation.
+- **State-of-the-art self-supervised results on M4Raw across all contrasts (Table 2).** C2S with detail refinement achieves 32.77/0.919 (T1), 32.33/0.890 (T2), and 32.92/0.876 (FLAIR), consistently outperforming all compared self-supervised methods (Noise2Void, Noise2Self, PUCA, LG-BPN, Noisier2Noise, Recorrupted2Recorrupted) and matching or exceeding supervised methods on higher-SNR test data.
 
-- **Reparameterization demonstrably stabilizes training.** Figure 2 and Table 4a show that the reparameterization of noise levels (mapping t→τ for uniform sampling) yields smoother convergence and measurable PSNR/SSIM improvements across all three M4Raw contrasts. The benefit is validated both visually and quantitatively.
+- **Multi-contrast C2S exceeds supervised baselines (Table 6).** Using T1 & T2 as inputs, C2S achieves 33.19/0.923 on T1, outperforming single-contrast C2S (32.77/0.919) and supervised Noise2Noise (31.08/0.895) and BM3D (30.04/0.888). This demonstrates practical value beyond what theoretical justification alone would suggest.
 
-- **Multi-contrast extension works and is well-motivated.** Table 6 shows multi-contrast C2S (using T1&T2 or T1&FLAIR as inputs) outperforms single-contrast C2S, BM3D, and Noise2Noise on all target contrasts, with improvements of 0.5–2 dB PSNR. This addresses a clinically relevant scenario where multiple contrasts are routinely available.
+- **Reparameterization improves training stability (Figure 2, Table 4a).** The reparameterization from \(t\) to \(\tau\) combined with EMA yields smoother and faster convergence, with PSNR gains of ~0.4 dB across contrasts on M4Raw.
+
+- **Consistent performance on fastMRI across contrasts and noise levels (Table 3).** C2S achieves best or comparable self-supervised results on PD, PDFS, and T1 at both \(\sigma=13/255\) and \(25/255\), demonstrating generalizability beyond the primary dataset.
+
+- **Ablation studies validate key architectural choices (Table 4b).** Time conditioning and NVC-MSA provide substantial improvements (T1 PSNR from 30.46 to 32.59), confirming that the architectural design choices are well-motivated.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-None.
+- **Noise-level estimation robustness is asserted without supporting evidence.** The paper claims (line 153) that C2S "demonstrates strong robustness to noise level estimation errors" and can function as a blind denoising model using standard noise estimation tools. However, no experiment varies the estimated noise level or compares performance when \(\sigma_{t_{\mathrm{data}}}\) is intentionally mis-specified. Since the method requires knowledge of the input noise level, this claim directly affects the practical applicability claim but is entirely unsupported. The paper should either provide such an experiment or temper the claim.
+
+- **Multi-contrast extension is presented without theoretical or methodological justification.** The paper adds other contrasts as inputs (line 155) but does not discuss how this affects the GADSM loss derivation, the conditional expectation being learned, or whether the ambient-score-matching theory remains valid when additional contrasts are not simply noisier versions of the same underlying image. The empirical results in Table 6 show it works, but there is no reasoning about input formation (concatenation? separate processing?), loss adjustments, or architectural changes. This makes a claimed contribution feel incomplete.
 
 ### Minor
 
-- **Detail refinement extension is mentioned but not described.** The paper repeatedly invokes "detail refinement" as a key contribution (abstract, intro, Section 3.2, conclusion) and Table 1 attributes statistically significant gains of up to +0.49 dB PSNR to it (p<0.05). Yet the mechanism—what it is, how it integrates with the C2S loss, its architectural implications—is never explained in the main text. If this is detailed in a (potentially parser-stripped) appendix, it should still be summarized in the main body given its prominence in the claimed contributions. A reader cannot evaluate, reproduce, or build upon a method whose core component is opaque.
+- **No statistical significance or confidence intervals for main quantitative results (Tables 2, 3, 5, 6).** Only the detail refinement comparison (Table 1) includes a paired t-test. Given the limited number of test subjects in M4Raw, variance across samples could be non-negligible. Reporting standard deviations or confidence intervals would strengthen the reliability of the claimed improvements.
 
-- **Baseline comparison conditions are underspecified.** The paper does not state whether SwinIR, Restormer, PUCA, LG-BPN, etc. were retrained from scratch on the same data splits or used pre-trained weights (and if so, on what data). Training epochs, learning rates, optimizer choices, and data augmentation for each baseline are absent. While some of these details may reside in a stripped appendix, the main text lacks the transparency needed to rule out configuration bias in the comparisons.
-
-- **Blind denoising claim is asserted without direct evidence.** The paper states (line 153) that C2S "effectively functions as a blind denoising model" by using standard noise estimation tools (skimage). However, no experiment compares C2S' performance with estimated vs. ground-truth noise levels, nor evaluates degradation under misestimation. This claim is currently unsupported.
-
-- **Noise-level handling on real data lacks analysis.** For the M4Raw dataset (real noise), the paper does not state the estimated σ_t_data values, how noise estimation was validated, or how sensitive results are to estimation error. The one-sentence claim of robustness (line 153) is not backed by any sensitivity experiment.
+- **The reparameterization approximation \(T' \approx T\) and uniform sampling over \(\tau\) are justified only empirically.** The mapping changes the sampling distribution over noise levels, and the approximation cuts off the upper tail, but there is no connection to importance-weighting or variance-reduction techniques from the score-matching literature. The empirical evidence (Figure 2, Table 4a) is convincing, but the theoretical grounding is thin.
 
 ### Trivial
 
-- **Weighting function hyperparameter α is introduced but never specified or ablated** (line 98). Since α controls the relative contribution of different noise levels to the loss, its value (or at least a brief sensitivity check) would help practical adoption.
-
-- **Main results lack error bars.** Tables 2, 3, and 6 report single-run metrics without confidence intervals or standard deviations. Given stochasticity in neural network training and the fact that some reported differences are small (e.g., 30.91 vs. 30.95 dB PSNR on fastMRI PDFS at σ=13/255), readers cannot assess whether gaps are meaningful.
-
-- **Multi-contrast architecture is not specified.** The paper simply states "incorporating additional MRI contrasts as inputs" without describing how contrasts are fused (channel concatenation? attention? separate encoders?). For a U-Net this is likely input-channel stacking, but stating this explicitly would aid reproducibility.
+None that survive filtering.
 
 ## Nice-to-Haves
 
-- A noise-level sensitivity study on fastMRI (where ground-truth σ is known) misestimating σ_t_data by ±20%, ±50%, etc. would substantiate the robustness claim and guide practitioners.
-- An ablation of the weighting parameter α and the choice of loss weighting function w(τ).
-- Reporting mean ± std over 3 random seeds for the main tables would strengthen confidence in the reported improvements.
+- Justify the exclusion of DDM2, Coil2Coil, and Patch2Self from quantitative comparisons. These are cited in the background but target different MRI settings (4D diffusion MRI, multi-coil data, diffusion MRI respectively); a brief explanation would preempt reader confusion.
+- Add a short intuitive paragraph before Theorem 1 explaining why the linear combination \(\gamma h_\theta + \delta X_t\) yields a prediction of \(X_{t_{\mathrm{target}}}\) and how Tweedie's formula connects — this would improve accessibility for readers unfamiliar with ambient score matching.
+- Provide a sensitivity analysis of the weighting function hyperparameter \(\alpha\) and the choice of \(\sigma_{t_{\mathrm{data}}}\), as these are the knobs practitioners would need to tune.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **Criticism about missing proof/sketch for Theorem 1 "assumed in appendix."** The paper never references an appendix in the parsed text; proofs are standardly deferred to supplementary material, which the parser strips. Removed per instruction that parser-stripped appendix content should not be held against the paper.
-
-- **Strength about detail refinement providing statistically significant gains.** While the empirical numbers in Table 1 are present, the strength is inherently qualified because the method is not described. Rather than list it as a strength the reader cannot evaluate, it is moved here with a note: if the detail refinement is described in the appendix, this can be reinstated as a supporting strength; if not, the corresponding weakness stands.
-
-- **Criticism about "the paper should also cover Y / domain Z."** The reviewer's suggestion to evaluate supervised methods on the same noise level as training labels is a valid deeper analysis but not a required comparison for the paper's stated scope.
+- **Detail refinement extension not described (Critical Issue 1 from the harsh reviewer).** This criticism concerns content that may reside in the appendix, which is stripped by the parser. Per policy, weaknesses about missing appendix content are removed. If the detail refinement is not described in the appendix either, this would be a major issue — the authors should verify it is fully specified in the full submission.
+- **Missing baselines (DDM2, Coil2Coil, Patch2Self).** These methods target different MRI subdomains (4D diffusion MRI, multi-coil, diffusion MRI) with different data requirements, and the paper's experiments use low-field brain MRI and knee MRI where these methods may not be directly applicable. The criticism is weakened by the domain mismatch.
+- **Strength Finder claim about robustness to noise estimation errors being "supported by experimental validation."** This claim from the strength finder is factually incorrect — no such experiment exists in the paper. This strength conflicts with a verified weakness and is dropped.
+- **Generic/superficial strengths from Strength Finder** (e.g., "this paper addressed an important problem") — dropped per filtering rules.
+- **Various formatting/style nitpicks and reproducibility nitpicks** — removed per hard rules.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews largely converge on the paper's own framing: GADSM is a legitimate theoretical contribution, the empirical results are solid, but the detail refinement extension—a component credited with significant gains—is absent from the main text, creating a disconnect between claimed contributions and what the reader can evaluate.
+The most interesting observation across the reviews is the tension in the multi-contrast results: the empirical performance is strong enough to surpass supervised methods, yet the theoretical grounding for why the GADSM loss remains valid across different contrasts is absent. This suggests either (a) the method is more general than the authors theoretically justify, or (b) the empirical success is driven by the network's capacity to exploit correlated features rather than by the score-matching theory. Either case would be valuable to disambiguate. Additionally, the fact that C2S matches supervised methods trained on 3-repetition-averaged labels when tested on 6-repetition-averaged data (Table 2) reveals a subtle but important point about supervised MRI denoising: the "clean" labels used to train supervised methods are themselves noisy, which limits their ceiling. This insight is worth emphasizing beyond the paper's current framing.
 
 ## Suggestions
 
-1. **Describe the detail refinement extension in Section 3.2** (or at minimum summarize its key design choices if full details remain in the appendix). A diagram or a short paragraph explaining the mechanism and how it interacts with the GADSM loss would resolve the paper's most significant weakness.
-2. **Add a table of training hyperparameters** for both the proposed method and all baselines (epochs, learning rate, optimizer, batch size, data splits, pre-trained vs. from-scratch status). This would greatly increase trust in the comparisons.
-3. **Include a brief noise-level sensitivity experiment** (e.g., on fastMRI) showing PSNR/SSIM vs. σ_t_data misestimation, even as a supplementary figure. This is inexpensive and would substantiate the robustness claim.
-4. **Remove or soften the "blind denoising model" claim** unless supported by a blind-evaluation experiment, or explicitly qualify it as "blind with respect to noise level via standard estimation tools."
+1. **Add a noise-level sensitivity experiment.** Vary \(\sigma_{t_{\mathrm{data}}}\) by \(\pm 10\%, \pm 20\%, \pm 50\%\) from the estimated value and report PSNR/SSIM. This directly addresses the practical blind-denoising claim.
+2. **Clarify the multi-contrast input mechanism.** State explicitly how multiple contrasts are combined (channel concatenation? separate encoders?); discuss whether the GADSM loss derivation extends or requires modification when conditioning on a different contrast's image.
+3. **Add confidence intervals or standard deviations to the main tables** (Tables 2, 3, 5, 6) using bootstrap or multiple test-sample splits.
+4. **Provide a brief sketch of the detail refinement mechanism in the main text** (even 2–3 sentences) so the reader understands whether it is a loss term, a second network, a post-processing step, or a feature-matching objective — even if the full details are in the appendix.
 
 ## Score and Decision
 
-**Originality:** Good. The GADSM theoretical framework is novel and cleanly generalizes prior score-matching approaches.  
-**Importance of question:** High. Self-supervised MRI denoising is practically important given the difficulty of acquiring clean ground truth.  
-**Claims support:** Moderate. The empirical claims are well-supported, but the detail refinement contribution is unverifiable and the blind-denoising claim lacks evidence.  
-**Soundness of experiments:** Good overall, with gaps in baseline transparency and sensitivity analysis.  
-**Clarity of writing:** Good for the described parts, but the missing detail-refinement description undermines completeness.  
-**Value to community:** Moderate to high, assuming the method is fully described and reproducible.
+The paper makes a genuine theoretical contribution (GADSM unification), is well-motivated, and presents strong empirical results that are useful to the MRI community. The two major weaknesses — an unsupported robustness claim and a gap in multi-contrast justification — are real but addressable and do not invalidate the core contribution. The noise robustness claim needs either experimental backing or tempering, and the multi-contrast extension needs methodological clarification. Neither issue is fatal.
 
-The paper makes a genuine theoretical contribution (GADSM) and demonstrates strong empirical results. The primary weakness—an absent description of the detail refinement extension—is addressable in a revision. The remaining issues (baseline transparency, missing ablations) are common limitations in conference papers of this type and do not individually threaten the core claims.
+**Originality:** Good — GADSM is a novel framework.  
+**Importance of question:** High — self-supervised MRI denoising is practically significant.  
+**Claims well supported:** Mixed — main results are solid, but the robustness claim is unsupported.  
+**Soundness of experiments:** Good for core claim; missing sensitivity analyses.  
+**Clarity:** The GADSM derivation is rigorous but could be more accessible; the detail refinement not being in main text is a concern (though likely in appendix).  
+**Value to community:** High — practical method with strong results and clear theoretical grounding.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

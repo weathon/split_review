@@ -1,86 +1,78 @@
-Now I have all the information needed to write the final consolidated review. Let me produce it.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the consolidated review.
 
 ## Summary
 
-This paper studies the connection between flat reward landscapes in policy parameter space and robustness in reinforcement learning. It defines ℰ-flat reward maxima and Δ-action robust policies (Definitions 1 and 2), proposes a theoretical bound linking them (Proposition 1: Δ* ≤ ‖J(θ*)‖ℰ + O(ℰ²)), and empirically validates the connection by augmenting PPO with Sharpness-Aware Minimization (SAM+PPO) across three MuJoCo tasks under action noise, transition dynamics perturbations (mass/friction), and reward noise. The paper's core thesis is that flatter reward landscapes imply more robust policies.
+This paper proposes that flat reward maxima in policy parameter space formally imply robustness in reinforcement learning. It introduces definitions of ℰ-flat reward maxima and Δ-action robust policies, states Proposition 1 linking the two via the Jacobian of the mean action, and provides empirical evidence in MuJoCo environments showing that SAM+PPO (a PPO variant enhanced with Sharpness-Aware Minimization) achieves flatter reward surfaces and outperforms PPO, RNAC, and RARL under action noise, transition probability perturbations, and reward noise.
 
 ## Strengths
 
-- **Formal theoretical link between flatness and action robustness.** Proposition 1 provides a rigorous bound connecting ℰ-flat reward maxima to Δ-action robust policies via the Jacobian of the mean action. Remark 1.1 further connects this to the Max-Min objective of action-robust MDPs. This moves beyond the merely empirical observations of prior work (e.g., Lee et al., 2024; Sullivan et al., 2022) by providing a concrete formal statement.
+- **Comprehensive empirical evaluation across multiple perturbation types**: The paper tests three categories of environmental perturbations (action noise in Figure 3, mass/friction variations in Figures 4–6/Table 1, reward noise in Table 2) across three distinct MuJoCo environments (HalfCheetah, Hopper, Walker2d). SAM+PPO consistently outperforms or ties with PPO, RNAC, and RARL. This breadth of evaluation is a genuine contribution.
 
-- **Comprehensive multi-perturbation empirical validation.** The paper evaluates robustness under three distinct perturbation types—action noise (Figure 3), transition dynamics via mass and friction variations (Figures 4–6), and reward noise during training (Table 2)—across three MuJoCo environments (HalfCheetah, Hopper, Walker2d). SAM+PPO consistently outperforms PPO, RNAC, and RARL across most conditions, demonstrating robustness benefits.
+- **Reward surface visualization and quantitative flatness metrics**: Figure 7 provides visual evidence that SAM+PPO converges to a flatter reward landscape than PPO, and Table 3 reports two complementary flatness measures (maximum Hessian eigenvalue λ_max and LPF flatness). These measurements directly support the claim that SAM+PPO finds flatter reward maxima.
 
-- **Quantitative and qualitative flatness verification.** Table 3 reports two flatness metrics (maximum Hessian eigenvalue and LPF flatness measure), directly showing that SAM+PPO finds flatter minima than PPO. Figure 7 provides reward surface visualizations confirming the flatness difference qualitatively.
-
-- **Motivating preliminary experiment.** The 2D navigation example (Figure 1) clearly and intuitively demonstrates the intuition that flatter reward maxima lead to safer, more robust behavior under action perturbations.
-
-- **Joint-variation analysis.** Figure 6 presents reward heatmaps for combined mass and friction perturbations, offering a holistic robustness view that goes beyond single-factor ablations.
+- **Motivating preliminary experiment**: The 2D navigation task (Figure 1) provides an intuitive, concrete demonstration of how flat reward pursuit (SAM+PPO) avoids catastrophic failures under action perturbations, making the paper's core idea accessible before the formal development.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **Definitions 1 and 2 require exact equality, which is unrealistic for neural network policies.** Both ℰ-flat reward maxima and Δ-action robust policies are defined by requiring the expected return to be *exactly* r* for all perturbations within a radius. This never holds for neural network policies in practice. In the supervised learning literature that inspired this work, "flat minima" refer to regions where the loss is low and changes slowly—not regions where the loss is exactly constant. The paper provides no relaxation (e.g., approximate equality, bounded degradation) that would make the definitions applicable to realistic RL settings. While Proposition 1's bound (Δ* ≤ ‖J(θ*)‖ℰ + O(ℰ²)) is mathematically valid under these definitions, the definitions themselves are so strong that the theoretical result does not establish a practically meaningful connection between flatness and robustness as they are understood in real RL.
+1. **The inequality direction in Proposition 1 is wrong for the intended claim.** The paper states Δ* ≤ ‖J(θ*)‖ℰ + O(ℰ²), which is an *upper bound* on the action-robustness radius. To support the claim that "flat reward maxima rigorously lead to robustness against action perturbations," the paper needs a *lower bound* — i.e., Δ* ≥ something (showing that a flatter reward guarantees at least a certain degree of action robustness). An upper bound only says the robustness radius cannot exceed this expression; it could be zero. As written, the proposition is vacuous with respect to the paper's narrative: every policy is trivially 0-action robust, and the upper bound does not rule this out. This is not a nitpick — the inequality direction is at odds with the paper's central theoretical claim. (Verified from line 147–148: the paper explicitly uses ≤.)
 
-- **The experiments do not directly test the theoretical bound.** Proposition 1 predicts a relationship between the flatness radius ℰ and the action robustness radius Δ*. The paper does not attempt to measure ℰ or Δ* from trained policies and check whether the inequality holds or correlates. Instead, the empirical validation is entirely correlational: it shows that SAM (a method that promotes flatness) leads to better robustness under perturbations. This supports the high-level claim but does not validate the specific theoretical mechanism. The gap between the formal theory and the empirical design weakens the paper's central narrative that the *theory* explains the empirical observations.
+2. **Definition 1 (ℰ-flat reward maxima) is unrealistically strong and mismatched with the empirical measurements.** The definition requires that the expected return remains *exactly* r* for *all* parameter perturbations ‖ε‖ ≤ ℰ. In any continuous parameter space with a non-constant reward landscape, this zero-measure condition is almost never satisfied. The paper's own flatness metrics (λ_max, LPF) and reward surface visualizations (Figure 7) measure *continuous* variation — the reward declines gradually, not staying constant over a ball. There is a fundamental disconnect between the all-or-nothing definition used in the theory and the continuous measures used in the experiments. The paper would need a definition capturing approximate constancy (e.g., return within δ of r*) for the theory to apply to the policies being studied. Without this, the theoretical framework is not validated by the experiments. (Verified from lines 126–130: the definition indeed requires exact equality.)
+
+3. **The link from parameter perturbations to action perturbations via the mean-action Jacobian is not justified for stochastic policies.** The theory uses the mean action μ_θ(s) and its Jacobian J(θ*) to bound action perturbations, but the policy π_θ(a|s) is stochastic — actions are sampled from a distribution, not equal to the mean. Even if μ_{θ+ε}(s) ≈ μ_θ(s), the actual distribution of sampled actions can shift in ways not captured by the mean, and the effect on reward depends on the full distribution. The action robustness evaluation (Section 5.2) perturbs the *sampled* action a by adding Gaussian noise, not the mean. The paper provides no argument that controlling the mean shift suffices to control reward under action perturbations for a stochastic policy. (Verified from lines 145–151: Proposition 1 uses J(θ*) = ∇_θ μ_θ(s), while the policy formulation throughout is π_θ(a|s).)
+
+4. **The empirical evaluation does not disentangle flatness from other properties of the SAM optimizer.** The paper uses SAM+PPO as the sole method for achieving flatter reward maxima and concludes that "flat reward implies robust RL." However, SAM modifies training in multiple ways (implicit regularization, gradient smoothing, entropy effects), any of which could contribute to robustness independently of flatness. To support a causal claim, the paper would need to either (a) demonstrate that flatness mediates the improvement across multiple flatness-inducing methods, (b) show a within-algorithm correlation between flatness and robustness (e.g., varying SAM's ρ), or (c) provide a tight analytical argument. Without this, the contribution is an empirical observation about SAM+PPO rather than a validated general principle that flatness causes robustness. (Verified from lines 169–177: only SAM+PPO is used as the flatness-inducing method.)
 
 ### Minor
 
-- **The method for computing Hessian-based flatness metrics in RL is not described.** The paper reports λ_max (maximum Hessian eigenvalue) and LPF flatness measure (Table 3), but does not explain how the Hessian of the *expected return*—a function over trajectories, not a simple supervised loss—is computed or approximated. Standard approaches from supervised learning do not trivially extend to the RL setting. This makes the flatness measurements difficult to interpret or reproduce.
+- **Remark 1.2 is acknowledged as informal but still too vague to count as part of the theoretical contribution.** The remarks about transition probability and reward function robustness are plausible intuitions but not developed or formalized. (Verified from line 163: the paper itself calls it "an informal link.")
 
-- **Reward function robustness evaluation is limited.** Only one noise level (σ_r = 0.1) and one scenario (training with noisy rewards, testing in the nominal environment) are tested. Additionally, the paper tests robustness to reward noise *during training* rather than robustness to reward function *perturbations at test time* (which would be a more direct analog to the theoretical claim about reward robustness).
+- **The definition of Δ\* in Proposition 1 is ambiguous.** It is unclear whether Δ\* is the *maximum* radius for which the policy is Δ-action robust or merely some specific value satisfying the condition. This ambiguity makes it hard to interpret the bound. (Verified from lines 145–148: Δ\* is introduced without explicit definition.)
 
-- **Error bars / confidence intervals are absent from figures.** The paper reports 5 independent trials and 100 evaluation runs per trial, which is a reasonable experimental setup, but the figures (Figure 3, 4, 5) and Table 3 do not display error bars, standard deviations, or confidence intervals. This makes it difficult to assess the statistical significance of the observed improvements, especially when the gaps between methods are small (e.g., in some mass/friction conditions).
+- **Flatness metrics are not reported for RNAC and RARL.** Measuring flatness for all baselines would help determine whether robustness correlates with flatness across methods, strengthening the paper's causal narrative.
 
-- **The connection between mass/friction perturbations and "transition probability perturbations" in the RMDP sense is not explained.** The paper changes physical parameters (mass, friction) of the MuJoCo simulator and equates this to transition probability perturbations, but does not describe how these changes map to the formal transition probability uncertainty sets used in Robust MDP theory.
+- **Standard errors or confidence intervals are not reported for flatness metrics in Table 3.** Five independent trials were run (stated in Section 5.1), but the flatness table lacks error bars. This is important to assess whether the flatness differences between PPO and SAM+PPO are statistically significant.
+
+- **Computational cost of SAM is not discussed.** SAM adds an inner gradient step per iteration, increasing per-step computation. Given the paper's claim of "gains in computational efficiency" (line 29), the absence of runtime or sample-efficiency comparisons is a gap.
 
 ### Trivial
-
-- The sentence ending "Importantly," in Section 5.2 appears truncated—likely a parser artifact from the figure insertion.
+None.
 
 ## Nice-to-Haves
 
-- **Additional flatness-promoting baselines.** Comparing SAM+PPO against other flatness-promoting optimization methods (e.g., Stochastic Weight Averaging, explicit regularization, or SAM variants with different ρ) would help isolate whether flatness *per se* drives robustness, versus the specific SAM optimization mechanism.
-
-- **Explicit action-noise training baseline.** Including a variant of PPO trained with injected action noise (a simple robust RL baseline) would help contextualize the gains.
-
-- **Direct estimation of ℰ and Δ on trained policies.** A natural follow-up to directly test Proposition 1 would be to estimate the flatness radius ℰ (e.g., the largest perturbation that keeps reward within some threshold) and action robustness radius Δ from actual trained policies and check whether their relationship follows the predicted bound.
+- Include cross-validation with other flatness-inducing methods (e.g., entropy regularization, weight decay, SWA) to separate the effect of flatness from SAM-specific properties.
+- Replace Definition 1 with a more realistic notion (e.g., expected return stays within δ of r* for ‖ε‖ ≤ ℰ) and re-derive the proposition accordingly.
+- Extend the theoretical link to handle stochastic policies directly, rather than relying solely on the mean action.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed; treat them with caution:
 
-- *"The paper does not report hyperparameters (e.g., ρ in SAM, learning rates, network sizes)."* — Removed per hard rule (nitpicks about undisclosed hyperparameters are considered minor formatting/reproducibility nitpicks that the paper could address in a camera-ready version; the paper does specify a 3-layer MLP architecture and states that PPO and SAM+PPO use identical hyperparameters).
-
-- *"Section 5.2 ends abruptly with 'Importantly,'"* — Removed as a parser/formatting artifact from figure insertion; this does not reflect on the paper's scientific content.
-
-- *"The theoretical contribution is incomplete because only action robustness is formally treated"* — Removed because the paper explicitly scopes its formal treatment to action robustness and provides informal remarks (Remark 1.2) about other factors. Criticizing it for not doing more than it scoped is inappropriate.
-
-- *"The paper does not isolate which aspects of SAM cause improvements"* — Downgraded from the critic's framing because the paper explicitly states it does not pursue algorithmic advances and positions itself as providing understanding, which empirically comparing methods already does.
-
-- *"The introduction overstates the gap"* — A judgment call without clear factual basis; removed as it does not rise to the level of a verifiable weakness.
+1. **"Proof of Proposition 1 is not included"** — REMOVED because the parser strips appendix content from all papers. The proof was part of the original submission.
+2. **"The paper's definition requires reward to remain exactly at r*"** (framed as "so strong it likely cannot be satisfied") — KEPT as Major Weakness #2 above (the definition is indeed unrealistic and mismatched with empirical measures). However, the reviewer's framing that "the experiments do not attempt to verify it" is softened: the mismatch between binary definition and continuous metrics is the real issue, not that the paper failed to check an impossible condition.
+3. **References to "not yet released" or "cannot be independently verified"** — No such claims were present in the reviews, so nothing to remove on this count.
 
 ## Novel Insights
 
-The reviews surface the fundamental tension between the paper's idealized theoretical definitions (exact reward constancy under perturbation) and the practical RL setting where such conditions never hold. The most interesting observation from cross-referencing the reviews is this: the paper would be substantially stronger if it acknowledged this gap explicitly and offered approximate/relaxed definitions (e.g., "the reward degradation within a ball of radius ℰ is bounded by some ε"), then proved a *relaxed* bound. Such a relaxed formulation would not only be more realistic but would also enable direct empirical testing by estimating ℰ and Δ from trained policies—closing the current gap between the theory and the experiments. None of the individual reviews identify this synthesis; it emerges from reading the theoretical critique and the empirical critique together.
+None beyond the paper's own contributions. The reviews collectively identify that the paper's core theoretical apparatus is directionally unsound: Proposition 1 provides an upper bound where a lower bound is needed, Definition 1 is too strong to be applicable, and the mean-action Jacobian does not bridge the gap for stochastic policies. This suggests the paper's claimed "formal link" is not yet established, even though the empirical observation that SAM+PPO is robust across multiple perturbation types remains interesting.
 
 ## Suggestions
 
-1. **Relax Definitions 1 and 2** to use approximate equality (e.g., the return is within ε of r* for all perturbations ≤ ℰ, or the worst-case degradation is bounded). Prove a corresponding relaxed version of Proposition 1. This would make the theoretical contribution both rigorous and practically meaningful.
+1. **Fix the theoretical core before resubmission.** Replace Definition 1 with a realistic flatness notion (e.g., the return remains within ε of r*), re-derive Proposition 1 as a *lower* bound on the action-robustness radius, and extend the analysis to handle stochastic policies (e.g., via the KL divergence or Wasserstein distance between action distributions). Without these corrections, the paper's central claim is unsupported by its own theory.
 
-2. **Describe the Hessian computation methodology** for RL: how the Hessian of the expected return is estimated (e.g., finite differences, automatic differentiation through the policy and environment dynamics, or approximations). Without this, the flatness metrics in Table 3 are unverifiable.
+2. **Strengthen the causal evidence for flatness → robustness.** Add at least one additional flatness-inducing method (e.g., explicit entropy regularization, weight decay, or SAM with varying perturbation radii ρ) and show that flatter policies are consistently more robust. Report flatness metrics for RNAC and RARL as well.
 
-3. **Add error bars** to Figures 3–5 and Table 3, or at minimum report standard deviations in the text/captions.
+3. **Report standard errors** for flatness metrics (Table 3) and, where possible, for the robustness evaluations.
 
-4. **Acknowledge the idealized nature of the definitions** explicitly in a limitations section, and discuss when the bounds might approximately hold in practice.
+4. **Clarify the definition of Δ\*** in Proposition 1 and the intended direction of the bound. If the bound is meant to be a lower bound, correct the inequality sign; if it is meant to be an upper bound, explain what claim it actually supports.
 
 ## Score and Decision
 
-The paper tackles an important and timely question—whether flat reward landscapes imply robustness in RL—and makes two real contributions: a formal theoretical bound (Proposition 1) and extensive empirical evidence across multiple perturbation types and environments. The weaknesses are significant but not fatal: the theoretical definitions are too strong for practical applicability, and the experiments do not directly validate the proposed bound. With revisions to relax the definitions and tighten the theory–experiment alignment, the paper could be substantially strengthened. In its current form, the contributions are above the acceptance threshold but would benefit from the suggested revisions.
+The paper identifies a genuinely interesting direction — linking reward-surface flatness to robustness in RL — and provides reasonably broad empirical evidence that SAM+PPO is more robust than PPO and existing robust RL methods across multiple perturbation types. However, the theoretical foundation that the paper presents as its main contribution is flawed: Proposition 1 uses the wrong inequality direction for its intended claim, Definition 1 is too strong to be applicable, and the link via the mean-action Jacobian does not account for policy stochasticity. These are not minor presentation issues — they undermine the paper's central claim of having established a "formal" or "rigorous" connection between flatness and robustness. The empirical findings about SAM+PPO are useful but do not, on their own, constitute a validated general principle. A substantially revised version that corrects the theoretical framework and provides tighter causal evidence could become a meaningful contribution.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

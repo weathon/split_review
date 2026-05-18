@@ -1,20 +1,22 @@
-Now I have a thorough understanding of the paper. Let me produce the consolidated review.
+Now I have all the information I need. Let me synthesize the final review.
 
 ## Summary
 
-This paper systematically investigates camera bias in person ReID models, focusing on the overlooked problem of bias on unseen domains. It provides empirical analysis of why camera-specific feature normalization has a debiasing effect (showing that camera-sensitive dimensions dominate the effect), extends the analysis to detailed bias factors (low-level image properties, body angle), and identifies camera bias risks in unsupervised learning, proposing simple mitigation strategies that yield large improvements. The paper is primarily an empirical analysis/study rather than a new method paper.
+This paper provides an empirical study of camera bias in person re-identification (ReID) models across three threads: (1) quantifying camera bias on unseen domains across diverse model architectures and training paradigms, (2) analyzing why camera-specific feature normalization removes this bias via a dimensional-sensitivity mechanism, and (3) identifying and mitigating camera bias in unsupervised learning. The paper demonstrates that camera bias is large on unseen domains for nearly all ReID models, reveals that the debiasing effect of normalization is driven primarily by centering high-variance feature dimensions, and shows that simple strategies (debiased pseudo labeling + discarding single-camera clusters) yield substantial improvements on unsupervised benchmarks.
 
 ## Strengths
 
-1. **First systematic quantification of camera bias on unseen domains**: While prior work focused on training-domain bias, this paper measures camera bias via NMI across four datasets (Market-1501, CUHK03-NP, PersonX, MSMT17) using models trained on MSMT17, showing that all model types—supervised, unsupervised, camera-aware, and domain-generalizable—exhibit substantial bias on unseen domains (Table 1). This establishes a previously overlooked problem.
+- **First systematic quantification of camera bias on unseen domains across diverse models**: Table 1 reports NMI between cluster labels and camera labels for six state-of-the-art models on four datasets, showing that bias on unseen domains is large and consistent regardless of model architecture or training paradigm. This goes well beyond prior work, which focused on seen-domain bias only.
 
-2. **Mechanistic explanation of why feature normalization debiases**: The paper analyzes the 384-dimensional embedding space and shows that features move consistently in camera-sensitive dimensions under camera changes (Figure 2b). Camera-specific centering on just the top-50 sensitive dimensions (~13%) achieves roughly half the total mAP gain, while bottom-50 dimensions contribute almost nothing (Figure 2c). This goes beyond the ad-hoc use of normalization in prior work (Gu et al., 2020; Luo et al., 2021a) by revealing the underlying mechanism.
+- **Mechanistic explanation for why feature normalization debiases**: Figures 2(a)–(c) decompose the embedding space and show that (i) dimensions have heterogeneous sensitivity to camera variations, (ii) features move consistently along sensitive dimensions under camera changes, and (iii) centering on just the top-50 high-variance dimensions (~13% of total) achieves roughly half the total mAP gain. This provides a principled understanding that was missing in prior empirical uses of camera mean subtraction.
 
-3. **Comprehensive evaluation across architectures and methods**: Camera-specific feature normalization is tested on 12 different ReID models including ResNet-50, ViT, domain-generalized (ISR, PAT), and unsupervised (CC, PPLR) methods on three unseen domains (Table 3), consistently improving mAP and reducing bias. The ablation (Table 4) cleanly isolates that camera-specific mean centering is the dominant factor, with scaling providing small additional gain and ZCA rotation offering no definite benefit.
+- **Demonstrates that normalization generalizes to other bias factors**: Figure 3(b) shows group-specific normalization on brightness, sharpness, and area improves mAP, and Table 2 shows angle-specific normalization works. Combining camera labels with these factors yields further gains, revealing that camera bias is intertwined with other nuisance factors.
 
-4. **Identification of camera bias risk in unsupervised learning with actionable mitigation**: Toy experiments (Figure 6) demonstrate that pseudo labels with higher camera bias degrade performance despite having higher accuracy, and that single-camera clusters are harmful. The proposed simple strategies (debiased pseudo labeling via feature normalization, discarding single-camera clusters) yield substantial gains on MSMT17 (Table 6). This is a practical contribution that can be easily integrated into existing USL pipelines.
+- **Identifies severe camera bias in unsupervised models and proposes effective mitigation**: Table 1 shows unsupervised models have NMI camera bias >50 on the seen MSMT17 dataset. Table 6 reports that debiased pseudo labeling + discarding single-camera clusters improves CC by +19.3 mAP on MSMT17 and PPLR by +8.0 mAP. The toy experiments (Figure 6) provide causal evidence that camera-biased pseudo labels are harmful, even when they have higher accuracy than less-biased alternatives.
 
-5. **Generalizability of debiasing to detailed bias factors**: The paper shows that feature normalization extends to low-level image properties (brightness, sharpness, area) and body angle (Table 2), and that combining property groups with camera labels yields further gains (Figure 3c). This demonstrates broader applicability and suggests that camera bias is just one component of a larger family of feature-space biases in ReID.
+- **Strong ablation isolating the dominant component**: Table 4 decomposes normalization into camera-specific centering, scaling, and ZCA whitening, showing centering alone yields the vast majority of the gain (44.7→60.7 mAP vs. full 44.7→62.1). This gives practitioners a clear recipe.
+
+- **Analysis of sample volume requirements and compatibility with postprocessing**: Figure 5 shows ≥25 samples per camera suffices, and Table 5 shows normalization adds ~9 mAP on top of re-ranking and query expansion, confirming it addresses residual bias orthogonal to conventional postprocessing.
 
 ## Weaknesses
 
@@ -22,55 +24,44 @@ This paper systematically investigates camera bias in person ReID models, focusi
 None.
 
 ### Major
-None.
+
+- **The dimensional analysis explaining *why* normalization works is a single case study**: Section 4.2 performs the dimensional sensitivity analysis on *one* model (TransReID-SSL) evaluated on *one* unseen dataset (CUHK03-NP). While Section 4.4 confirms that the normalization procedure improves results across many models and datasets, it does *not* confirm that the same dimensional-sensitivity mechanism is at work in those other cases. The paper's central explanatory claim — that features move consistently along camera-sensitive dimensions and that centering those dimensions drives the gain — thus rests on one setup. Replicating this analysis on at least one additional model-dataset combination would substantially strengthen the claim. Without it, the reader cannot assess whether the mechanism is general or specific to this particular configuration. **Why it matters**: This is the paper's core analytical contribution; its evidentiary base is narrower than the narrative suggests.
 
 ### Minor
 
-1. **Body-angle label acquisition method unspecified**: The paper defines three body angle classes (front, back, side) and constructs angle-labeled datasets from Market-1501 (Section 4.3, Table 2), but never describes how these labels were obtained—whether via manual annotation, an automatic pose estimator, camera geometry, or another method. This is a reproducibility gap for the analysis experiments. The paper should specify the labeling procedure so readers can assess the reliability of the angle-based results.
+- **No discussion of failure modes for discarding single-camera clusters**: The paper discards single-camera clusters during USL training under the assumption they are "likely" incorrect groupings driven by camera bias. However, identities that genuinely appear in only one camera view in the training data would produce valid single-camera clusters that get discarded, removing useful positive pairs. The paper does not discuss this failure mode or analyze its frequency. The strong empirical results suggest the strategy is net beneficial, but an honest accounting of its limitations is missing.
 
-2. **Unsupervised learning gains lack adequate baseline context in text**: The paper reports a "19.3% mAP increase for CC" on MSMT17 (Section 5.4) and similar large gains. While Table 6 contains the before/after numbers and the paper states baselines are reproduced with official code, the text does not quote the absolute baseline mAP/Rank-1 values, making it difficult for a reader to contextualize whether these are large relative or absolute gains. Given that these improvements are unusually large for simple post-hoc modifications, providing baseline numbers in the text (e.g., "CC improves from X% to Y% mAP") would substantially improve credibility. The current presentation forces readers to rely solely on the (image-embedded) table.
+- **Body angle label acquisition method is unspecified**: Section 4.3 states that the authors "define three body angle classes (front, back, and side) and construct four angle-labeled datasets from Market-1501" but does not explain how these labels were obtained. Market-1501 does not have native body angle annotations. Whether this required manual annotation, was inferred from camera positions, or used some other method matters for reproducibility and for assessing the practical utility of angle-specific normalization.
 
-3. **No variance or statistical significance reporting**: The main results (Tables 3, 6) are reported as single numbers without standard deviation across runs. For an empirical claims paper where some improvements are large (e.g., +19.3% mAP), reporting at least mean and std over multiple runs would increase confidence that the gains are not artifacts of a single seed.
-
-4. **Clustering method for NMI measurement not justified**: The paper uses InfoMAP (Section 3) for clustering to compute NMI bias scores. InfoMAP is not standard in ReID; a brief justification or a note that the qualitative conclusions are robust across clustering methods would strengthen the analysis. As the reviewer notes, this is unlikely to change the main message since the conclusions are qualitative (bias exists), but a brief justification would be helpful.
-
-5. **The "detailed bias factors" analysis acknowledges applicability limitations only implicitly**: The analysis on low-level image properties (brightness, sharpness, area) and body angle (Section 4.3) requires property-group labels that are not available at inference time in standard deployment. The paper could more clearly state that these experiments are diagnostic (to understand *what* the normalization captures) rather than providing a ready-to-use technique. The current framing could be read as implying broader applicability than is justified for practitioners.
-
-6. **Element-wise operations in normalization formula could be more precise**: Equation 1 in Section 4.1 uses `√(·)` over an element-wise product, and it would benefit from clarifying that the square root is applied element-wise and that an epsilon smoothing term is needed for numerical stability in dimensions where a camera has near-zero variance.
+- **Framing of novelty could be sharper**: The paper acknowledges prior use of camera mean subtraction and camera-specific batch norm (Gu et al. 2020, Luo et al. 2021a, Zhuang et al. 2020), and positions its contribution as a "revisit" focused on analysis and generalizability. However, some phrasing (e.g., abstract: "we revisit feature normalization") risks being read as claiming more methodological novelty than the paper delivers. A more explicit upfront statement that the normalization operation itself is not new, and that the contribution is the analysis of its mechanism and breadth, would eliminate ambiguity.
 
 ### Trivial
-
-1. **Section 4.2 dimension analysis**: The dimension ordering by variance of camera means is an approximate proxy for camera-sensitivity; a direct measure (e.g., mutual information between dimension value and camera label) would be cleaner. The paper could note this approximation.
+None.
 
 ## Nice-to-Haves
 
-- Comparison to global (non-camera-specific) feature normalization: Does subtracting the global mean and dividing by global std achieve a similar debiasing effect, or is per-camera treatment necessary? This would strengthen the motivation for camera-specific treatment.
-- A limitations paragraph covering: (a) the need for camera labels at test time, (b) potential harms when few samples per camera are available, (c) trade-offs of discarding single-camera clusters on small datasets.
-- Discussion of whether the USL improvements are robust across different clustering algorithms (DBSCAN vs. others).
+- A comparison to camera-specific batch normalization re-estimated on the test set would be informative for situating the normalization approach among existing test-time debiasing alternatives, though this would require architectural modification beyond simple postprocessing.
+- A breakdown of which improvement comes from debiased pseudo labeling alone (vs. discarding single-camera clusters alone) beyond the ablation in Figure 7(a) would help practitioners choose between the two strategies.
+- An analysis of cluster purity (against identity labels) for discarded single-camera clusters would directly validate the assumption that these clusters are incorrect.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-- **Color coding lost / garbled tables**: Parser extraction artifacts, not author errors. The original submission contains these correctly.
-- **"Implausibly large gains" framed as structural/fatal flaw**: The reviewer's concern about baseline quality is partially addressed by the paper stating results are reproduced with official code. The issue is real but minor (presentation clarity), not fatal. The paper provides baseline numbers in Table 6 (image-embedded) and discusses experimental setup.
-- **"Domain shift already known to degrade performance"**: The paper already acknowledges this; the novelty is measuring the camera-specific component of that degradation.
-- **Missing related work on normalization**: The paper already discusses prior normalization work (Gu et al., 2020; Luo et al., 2021a; Zhuang et al., 2020) and frames its contribution as analyzing *why* it works.
-- **Formatting/style nitpicks about specific sentences or figures**: These are subjective or cosmetic and do not affect the contribution.
+- **"The paper does not compare normalization to... using only centering without scaling"**: This is factually incorrect. Table 4 explicitly evaluates camera-specific mean centering vs. full centering+scaling, and the text (line 106) notes that "camera-specific mean centering has a dominant effect and the scaling operation provides a small but additional gain." The comparison is already present.
+- **"Re-estimated camera-specific BN comparison"**: Moved to Nice-to-Haves — this is a suggestion, not a weakness, and would require architectural modification beyond the paper's postprocessing scope.
 
 ## Novel Insights
 
-The reviews surface an important tension: the paper's strongest contribution (mechanistic analysis of why feature normalization debiases, Sections 4.2–4.3) is the most defensible and original part, while the most practically striking results (USL improvements in Section 5.4) are the least verified from a reproducibility standpoint. This asymmetry means the paper does not need the USL results to stand as a valuable empirical study—the core analysis of camera bias across domains and the dissection of normalization's effect on camera-sensitive dimensions is a genuine contribution regardless. Conversely, if the USL gains are genuine, they substantially raise the paper's practical impact. The reviews correctly identify that the paper would be strengthened by transparently contextualizing the USL gains so readers can assess them, without undermining the rest of the work.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. In Section 5.4, add a sentence quoting the exact baseline mAP/Rank-1 numbers (e.g., "CC improves from X% to Y% mAP (+19.3%)") so readers can immediately contextualize the gains without consulting the table.
-2. Specify how body-angle labels were obtained (manual annotation, pose estimator, camera geometry) in Section 4.3.
-3. Add a brief limitations paragraph discussing the need for camera labels at test time, the diagnostic (not deployment-ready) nature of the detailed bias factor analysis, and the potential trade-off of discarding single-camera clusters on small datasets.
-4. Clarify whether "mAP increase" refers to absolute percentage points or relative improvement in Section 5.4.
+- **Replicate the dimensional analysis of Section 4.2 on at least one additional model-dataset combination.** The strongest version would pair a different model architecture (e.g., ResNet-based) with a different unseen dataset (e.g., Market-1501) to show the camera-sensitive dominance pattern holds beyond the TransReID-SSL/CUHK03-NP setup. If the pattern replicates, the paper's central explanatory claim becomes much more credible. If it does not replicate cleanly, the paper should acknowledge the boundary conditions.
+- **Add a paragraph in Section 5.3 explicitly discussing the failure mode** where discarding single-camera clusters removes legitimate positive pairs (identities appearing in only one camera), and ideally provide a quantitative estimate of how often this occurs.
+- **Clarify how body angle labels were obtained** for the Market-1501 experiments in Section 4.3.
 
 ## Score and Decision
 
-This paper makes a solid empirical contribution. The core analysis (Sections 3–4) is well-executed and reveals genuinely novel insights about camera bias on unseen domains and the mechanism of feature normalization. The USL section (Section 5) identifies a real problem and proposes sensible solutions, though the presentation of the large gains could be more transparent. There are no fatal or major flaws, and the weaknesses identified are addressable presentation issues. The paper would be a valuable addition to the ReID literature and is ready for acceptance with minor revisions.
+This is a solid empirical paper with well-executed experiments, clear writing, and practical findings. The main weakness — that the mechanistic explanation rests on a single case study — is real but does not invalidate the paper's core contributions: the systematic quantification of unseen-domain camera bias, the practical demonstration that normalization works broadly, and the effective USL mitigation strategies. The paper makes a clear contribution to the ReID literature. I recommend acceptance.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

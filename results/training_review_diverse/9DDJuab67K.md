@@ -1,24 +1,18 @@
-Now I have all the information needed. Let me compose the final consolidated review.
-
----
+Now I have a thorough understanding of the paper and all reviewer claims. Let me construct the final review.
 
 ## Summary
 
-This paper proposes SUMMER, a framework for Multimodal Emotion Recognition in Conversations (MERC) that combines three components: Sparse Dynamic Mixture of Experts (SDMoE) for local-to-global token-wise interaction, Hierarchical Cross-Modal Fusion (HCMF) with Global MoE for contextual understanding, and a novel "retrograde distillation" strategy (Interactive Knowledge Distillation, IKD) where a frozen unimodal (text) teacher guides a multimodal student. The method achieves strong results on IEMOCAP and MELD, with notable gains on minority and semantically similar emotion categories.
-
----
+This paper proposes SUMMER, a framework for Multimodal Emotion Recognition in Conversations (MERC) combining three components: a Sparse Dynamic Mixture of Experts (SDMoE) for token-wise interaction, a Hierarchical Cross-Modal Fusion (HCMF) module with global MoE for context modeling, and a "retrograde" knowledge distillation strategy where a pre-trained unimodal (text-only) teacher guides a multimodal student. Experiments on IEMOCAP and MELD show consistent SOTA results, with particularly strong gains on minority and semantically similar emotion classes.
 
 ## Strengths
 
-- **Strong empirical results on two standard benchmarks.** On IEMOCAP, SUMMER achieves a 2.61% w-ACC improvement over prior methods. On MELD, the student model shows a 15.5% relative gain on "Fear" over CORECT and distinct improvements on "Anger" (+3.5%) and "Disgust" (+5.81%) compared to SDT (Tables 1–2). These gains are demonstrated across both majority and minority emotion classes.
+- **Consistent SOTA results on two benchmarks with substantial gains on minority emotions.** On IEMOCAP, SUMMER improves w-ACC by 2.61% and w-F1 by 2.15% over prior best (Table 1), with gains of 9.76% w-ACC for "happy." On MELD, the model improves "Fear" by 15.5% over CORECT (Table 2). These results directly validate the core claim of superior performance.
 
-- **Ablation studies confirm the contribution of each component.** Table 4 shows that removing SDMoE (replacing with standard MoE), replacing HCMF with self-attention, or removing IKD all cause performance declines on both datasets. Figure 5 further shows that residual structures in HCMF improve training stability. This systematic ablation supports the architectural claims for SDMoE and HCMF.
+- **Comprehensive ablation studies isolate the contribution of each component.** Tables 3 and 4 systematically ablate SDMoE, HCMF, IKD, residual connections, and teacher modality choice on both datasets. The IKD component causes the largest single performance drop when removed (Table 4), convincingly supporting its importance.
 
-- **t-SNE visualization provides qualitative support.** Figure 6 shows that SUMMER's learned features produce more distinct emotion category boundaries compared to raw features, with reduced overlap between semantically similar pairs (e.g., "happy" vs. "excited").
+- **The retrograde distillation direction (unimodal teacher → multimodal student) is a well-motivated and empirically validated design choice.** The paper shows that a text-only teacher outperforms audio or visual teachers (Table 3), and the t-SNE visualizations (Figure 6) confirm that the distillation improves feature clustering. This is a non-obvious finding — that a simpler unimodal model can more effectively guide multimodal fusion than self-distillation or cross-modal distillation.
 
-- **The paper addresses a relevant and well-motivated problem.** The running example (Figure 1a) clearly illustrates the issue of local-context overemphasis in MERC, and the motivation for dynamic expert selection (Figure 1b) is grounded in a real limitation of fixed Top-K MoE.
-
----
+- **The SDMoE dynamic routing with Gumbel noise is a concrete technical contribution** that addresses the known limitation of fixed top-k MoE in complex MERC environments (Figure 1b). The ablation (Table 4) confirms it outperforms standard MoE, which is a meaningful improvement over the prior SDT work.
 
 ## Weaknesses
 
@@ -26,59 +20,53 @@ This paper proposes SUMMER, a framework for Multimodal Emotion Recognition in Co
 None.
 
 ### Major
-
-- **The central claim about retrograde distillation is not properly ablated.** The paper's key novelty is the "retrograde" direction of distillation (unimodal teacher → multimodal student), motivated as addressing "fusion disorientation" and gradient conflicts that arise in self-distillation. However, the ablation in Table 4 only compares the full SUMMER (with IKD) against "w/o IKD" (no distillation at all). This conflates two questions: (a) whether *any* distillation helps, and (b) whether the *retrograde direction specifically* provides benefits over standard alternatives. A proper ablation would compare (i) no distillation, (ii) standard KD with a multimodal teacher → multimodal student, and (iii) the proposed unimodal teacher → multimodal student. Without (ii), the paper cannot support the claim that the retrograde direction is what helps, nor the claim that it mitigates gradient conflicts better than existing alternatives. Since this is listed as a core contribution, this gap is significant.
+None that threaten the core claims. All issues are addressable.
 
 ### Minor
 
-- **The dynamic routing mechanism is under-specified, affecting reproducibility.** The Dynamic Routing Mechanism (Eqs 3–5) has several ambiguities. The hard threshold in Eq (3) checks whether gating weights \(W_g\) fall within \((\mu-2\sigma, \mu+2\sigma)\), but it is not specified whether \(\mu\) and \(\sigma\) are computed per sample, per batch, or globally over all experts, nor what \(W_g\) represents (raw logits before softmax?). Additionally, the relationship between Eq (3)'s hard threshold and Eq (4)'s Gumbel softmax is not reconciled: the hard threshold creates a non-differentiable step that the Gumbel softmax is supposed to address, but the paper does not specify whether the threshold is applied *before* the Gumbel softmax (operating on \(W_g\)), *after* (operating on \(\hat{G}_{dyn}\)), or in parallel. This makes faithful reimplementation difficult without guessing critical design choices.
+- **The teacher-guided cross-modal fusion mechanism (Section 3.5) is underspecified.** The DynAttn mask M_ij in Eq. 6–7 is computed from dot products of teacher Q/K (text-only) and student Q/K. The paper then applies DynAttn to cross-modal pairs in Eq. 9 (e.g., Q_st^t with K_st^a, V_st^a). It is unclear whether M_ij is recomputed for cross-modal pairs (and if so, how, given the teacher has no audio/visual representations) or computed once from the text branch and frozen. The concept — using the teacher's text attention patterns as a prior to modulate cross-modal attention — is coherent, but the description must be precise. This is a clarity issue, not a structural flaw.
 
-- **No statistical significance or variance reporting.** Results in Tables 1 and 2 report single-run metrics without standard deviations or confidence intervals. For datasets of this size (IEMOCAP: ~12 hours of conversation), variance across random seeds or data splits can be non-negligible. Without this information, it is impossible to assess whether the claimed improvements (especially the smaller ones, e.g., 1.86% on "sadness") are statistically meaningful.
+- **No error bars or statistical significance for main results.** Tables 1 and 2 report single-run numbers without standard deviations. Given the modest overall gains (+2.61% w-ACC on IEMOCAP), confidence intervals are needed to assess reliability. While multi-run reporting is not universal in this field, the paper would be substantially strengthened by it.
 
-- **The teacher model's comparison against baselines is not apples-to-apples.** The paper notes that the text-only teacher model "outperforms prior approaches" and "surpasses all existing models" (Section 4.4). However, the teacher uses RoBERTa for text encoding, while many baselines (e.g., DialogueRNN, DialogueGCN) were originally published with older text features (GloVe, BERT). The relative advantage may partly reflect a stronger text backbone rather than anything specific to the proposed methodology. The student model's main results are the more important comparison, but the teacher comparison should be stated with appropriate qualification.
+- **Feature parity with baselines is not explicitly stated.** The paper does not clarify whether baseline numbers are reproduced using the same feature extractors (RoBERTa, OpenSMILE, LFNet_3D) or taken from original papers using different features (e.g., GloVe, 3D-CNN). This is a standard concern for MERC papers and should be addressed.
+
+- **The SDMoE threshold (μ±2σ) is heuristic and its sensitivity is unexamined.** No analysis varying the threshold (e.g., 1σ, 3σ) or comparing against learned top-k selection is provided. The ablation against standard MoE (Table 4) confirms SDMoE's benefit overall, but does not isolate the contribution of the dynamic routing criterion itself from the Gumbel noise and global MoE.
+
+- **No direct comparison against standard knowledge distillation** (KL divergence on logits with the same teacher). The ablation shows IKD outperforms its absence (Table 4), but does not disentangle whether the benefit comes from the interactive KD design or simply from having a strong unimodal teacher available. A comparison against vanilla KD would strengthen the paper.
 
 ### Trivial
-None.
 
----
+- Notation inconsistency in Eq. 1: S_j is defined (with j for speaker identity), but S_i is used in the formula U_e = H_i^m + S_i + P_i.
+- The term "Quantative" in Table 1/2 captions should be "Quantitative."
+- The appendix sections (A.1, A.2) referenced in the paper body are missing from the main text (likely due to PDF parser stripping).
 
 ## Nice-to-Haves
 
-- **Comparison of computational cost.** The SDMoE and HCMF modules add parameters and inference overhead. Reporting FLOPs, parameter count, or runtime against baselines would help assess practical tradeoffs.
-- **Gradient analysis.** The paper motivates IKD by saying it "mitigates gradient conflicts from modal heterogeneity" but provides no gradient-based analysis (e.g., gradient alignment metrics, loss landscape visualization) to substantiate this claim.
-- **Hyperparameter sensitivity.** The method introduces several hyperparameters (temperature \(\tau\), the \(2\sigma\) threshold factor, adjustment factor \(\phi\), KD scalars \(\kappa_1\)–\(\kappa_4\)). An ablation or sensitivity study for these would strengthen the paper.
-- **Confusion matrices.** The error analysis (Section 4.5) honestly acknowledges underperformance on "Sad" but would benefit from quantitative evidence such as confusion matrices.
-
----
+- A brief hyperparameter sensitivity analysis for the SDMoE threshold (e.g., varying μ±1σ, μ±2σ, μ±3σ).
+- A dedicated limitations section discussing failure modes related to distillation and MoE components (the current error analysis in Section 4.5 is brief).
+- Comparison against standard KL-divergence-based KD using the same teacher to isolate the benefit of the interactive design.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"The paper does not properly cite or discuss prior work on unimodal-to-multimodal distillation in other domains."** — Removed per hard rule: missing related work claims are not permitted without external verification of the cited literature.
-- **"Eq (2) for Speaker Embeddings: notation uses a typographical symbol (†) that is not defined."** — Removed per hard rule: formatting/parsing artifacts are not author errors.
-- **"Missing appendix, missing proofs in appendix"** — No such criticism was made, but references to Sections A.1 and A.2 exist in the paper; these sections were stripped by the parser and are presumed to exist in the original submission.
-
----
+- **"retrograde distillation is misleading"** — The term "retrograde" captures the reversed direction (unimodal teacher → multimodal student, versus the typical larger→smaller). This is a valid and descriptive naming choice.
+- **"little attention has been given" claim is false because CLIP uses text teacher for vision"** — CLIP-style training uses contrastive learning, not knowledge distillation. The paper's claim is specifically about KD for multimodal fusion in MERC, where a unimodal teacher guiding a multimodal student is indeed underexplored. The reviewer conflates two distinct paradigms.
+- **"Equation S_i/S_j inconsistency reflects broader lack of polish"** — This is a single minor notation issue; the claim of broader sloppiness is unsupported.
+- Several other generic or scope-creep criticisms from the harsh reviewer were filtered out per the review guidelines.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a key evaluation gap (unablated distillation direction) that the paper's own claims did not anticipate, but this is a weakness in the paper's experimental design rather than a novel observation about the problem domain.
-
----
+None beyond the paper's own contributions. The reviews surface two useful observations: (1) the HCMF description needs precision to avoid ambiguity about how a text-only teacher generates masks for cross-modal attention; (2) modest absolute gains (~2–3%) make the absence of error bars a more significant concern than it would be for a 10%+ improvement. Neither insight changes the paper's overall positive evaluation.
 
 ## Suggestions
 
-1. **Add a comparison against standard (non-retrograde) distillation**: train a multimodal teacher model using the same architecture and compare: (a) no distillation, (b) multimodal teacher → multimodal student, (c) unimodal teacher → multimodal student (proposed). This directly tests whether the retrograde direction is beneficial.
-2. **Clarify the dynamic routing mechanism**: specify what \(\mu\) and \(\sigma\) are computed over (per-sample, per-batch, or global), what \(W_g\) represents, and how the hard threshold (Eq 3) interacts with the Gumbel softmax (Eq 4). Include pseudocode if needed.
-3. **Report standard deviations** across at least 3–5 random seeds for all main results.
-4. **Qualify the teacher model comparison**: note that the teacher uses a stronger text backbone (RoBERTa) than some baselines, and that this may contribute to its superior performance.
-
----
+- **Rewrite Section 3.5** to unambiguously specify how M_ij is computed and applied for cross-modal attention pairs. If the mask is computed once from the text branch and reused, state this explicitly. If the mask is recomputed, specify the teacher's role in that computation.
+- **Add standard deviations** (3–5 runs) for main results and ablations, or at minimum state that single-run evaluation follows field conventions.
+- **Clarify baseline comparison methodology** — state which numbers are reproduced with shared features and which are cited from original papers.
+- **Add a brief sensitivity analysis** for the SDMoE threshold (μ±1σ, μ±2σ, μ±3σ) to show performance stability.
 
 ## Score and Decision
 
-The paper proposes a plausible method with strong empirical results and ablation studies that validate SDMoE and HCMF. However, the evaluation of its central novelty—the retrograde distillation direction—is incomplete: the paper shows that distillation helps but does not show that the *retrograde direction* is what matters, which is the claimed contribution. This is a significant gap that requires additional experiments rather than simple clarification. Combined with under-specification of the dynamic routing mechanism and missing variance estimates, the paper in its current form does not convincingly support all its claims.
+The paper makes a solid contribution to MERC with a well-motivated architecture, thorough ablation studies, and consistent SOTA results. The weaknesses are all minor/clarity issues that can be addressed in revision; none threaten the core claims. The HCMF ambiguity is the most significant concern but is a matter of exposition rather than a fundamental error.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

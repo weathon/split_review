@@ -1,80 +1,72 @@
-Now I have all the information needed to produce a thorough final review. Let me synthesize everything.
+Now I have verified everything. Let me produce the consolidated review.
 
 ## Summary
 
-DexTrack proposes a generalizable neural tracking controller for dexterous manipulation that learns to follow kinematic human hand-object references. The core innovation is an iterative data flywheel that alternately trains the controller (via combined RL + imitation learning) and improves demonstration quality/diversity through a homotopy optimization scheme with a learned homotopy path generator. The method achieves substantial gains over baselines on GRAB and TACO datasets, with over 10% absolute improvement in success rates, and demonstrates sim-to-real transfer.
+This paper presents DexTrack, a neural tracking controller for dexterous manipulation that learns to track kinematic human-object manipulation references with a robotic hand. The core innovation is an iterative data flywheel that alternates between (1) training a tracking controller via a synergistic combination of reinforcement learning and imitation learning, and (2) mining higher-quality and more diverse demonstrations using a homotopy optimization scheme (with a learned diffusion-based generator for efficient path finding). Evaluated on the GRAB (1,269 sequences) and TACO (2,316 sequences) datasets in simulation, and validated on a real LEAP hand+Franka arm setup, the method achieves >10% improvement in success rate over strong baselines (DGrasp adapted to tracking, two PPO variants).
 
 ## Strengths
 
-- **Large and consistent performance gains.** The method achieves a 72.4% success rate on the challenging TACO dataset (strict threshold), outperforming the best baseline (PPO with tracking reward) by a large margin. Consistent gains are also observed on the GRAB dataset and across two threshold settings in Table 1. These results are the single strongest piece of evidence supporting the paper's central claim.
+1. **Iterative data flywheel that demonstrably improves controller performance.** The paper's central idea — bootstrapping controller improvement by alternating training with demonstration mining — is novel and supported by ablation (Table 1). The full method significantly outperforms "Ours (w/o data)" which lacks the iterative data flywheel, confirming the loop's value.
 
-- **Well-motivated and novel data-flywheel design.** The paper's core idea — iteratively improving the tracking controller and the demonstration set in a bootstrapping loop (Section 3.3) — is clearly articulated and addresses a real bottleneck in learning from human references. The homotopy optimization scheme using a learned conditional diffusion model to generate effective training paths (Section 3.2) is a creative technical contribution that goes beyond simple data augmentation.
+2. **Synergistic combination of RL and IL for tracking control.** The careful integration of RL (for robustness to disturbances) with IL (for distilling diverse tracking knowledge from demonstrations) goes beyond pure-RL or pure-behavior-cloning approaches. The >10% improvement over PPO-only baselines (which use only RL or only tracking rewards) on both datasets provides strong evidence this integration is effective.
 
-- **Component contributions validated by ablation.** The paper compares two ablated variants: one without the iterative flywheel and homotopy ("w/o data, w/o homotopy") and one without the iterative flywheel only ("w/o data"). Both underperform the full method despite matching demonstration counts, confirming that each component contributes positively.
+3. **Strong empirical results across two large-scale datasets.** The method is evaluated on 1,269 (GRAB) and 2,316 (TACO) robot manipulation sequences, with consistent >10% improvement over the best baselines under both threshold settings. The ablation also shows a clear scaling trend with dataset size that has not plateaued (Figure 5), suggesting further room for improvement.
 
-- **Demonstrated generalization to challenging scenarios.** The method handles subtle in-hand re-orientations (Figures 4a, 4c), thin objects with missing CAD geometry (Figure 4b, 4e), and functional tool-use trajectories from TACO. Real-world transfer on a LEAP hand with Franka arm is demonstrated.
-
-- **Scaling-law trend.** Figure 5 shows clear monotonic improvement in success rate as the number of high-quality demonstrations increases, with no saturation observed — validating the rationale for building larger demonstration datasets.
+4. **Real-world validation on a physical robot.** The paper transfers the controller to a real LEAP hand + Franka arm and reports per-object success rates, going beyond pure simulation evaluation. Qualitative examples (Figure 4) show the controller handling challenging manipulations with thin objects and in-hand reorientations.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None.
+
+1. **The learned homotopy path generator — a claimed contribution — is not empirically validated.**  
+   The paper's third contribution includes "a data-driven way to generate homotopy paths" (a conditional diffusion model), presented as enabling efficient path planning for novel trajectories. However, there is no ablation isolating the generator's effectiveness. Specifically: (a) there is no comparison of paths found by the generator vs. brute-force search, (b) no inference-time cost comparison, and (c) no ablation that removes only the generator while keeping the rest of the homotopy scheme intact. The ablation "Ours (w/o data)" still uses homotopy optimization (presumably search-based), making it an ablation of the iterative data flywheel rather than of the generator. Because the generator is listed as a contribution, its lack of validation is a real gap. *Why it matters*: The generator could be ineffective or unnecessary, and the reader cannot assess this from the presented evidence. This does not invalidate the paper's main tracking performance claims (which depend on the homotopy optimization *scheme*, not specifically the generator), but it means the third contribution is only partially supported.
 
 ### Minor
 
-- **Combined RL + IL training objective is not explicitly specified.** The paper states that the policy is optimized using both the RL reward and the imitation loss "simultaneously" (Section 3.1, last paragraph), and the imitation loss ℒₐ is defined (Eq. 12). However, the overall objective function — e.g., ℒ = ℒ_RL + λ·ℒₐ — is never written down, and the weighting term λ is not provided. This is a gap in reproducibility for a key design detail. (Note: the paper does provide source code in the supplementary materials, which mitigates this concern but does not eliminate it.)
+2. **Stage-by-stage iterative improvement is not demonstrated.**  
+   The method alternates between mining demonstrations and training the controller in three stages (Section 3.3), yet only final performance is reported. There is no comparison of the controller's success rate after stages 1, 2, and 3. While the ablation "Ours (w/o data)" shows that removing the iterative data flywheel hurts performance, it removes both iteration and data quantity simultaneously, so it does not cleanly isolate the benefit of multiple iterations vs. a single improved pass. This is noteworthy because the claim that "iteratively enhances the controller's performance" (abstract) specifically invokes bootstrapping across iterations.
 
-- **Robustness analysis (Section 4.3) is qualitative only.** The paper claims "strong robustness towards large kinematics noises and unexpected reference states" (Abstract, Introduction), yet Section 4.3 contains only two paragraphs of qualitative description and cross-references to figures. No quantitative robustness metrics (e.g., success rate under controlled noise injection levels) are reported, leaving the robustness claim less supported than the core performance claims.
+3. **Composite success metric thresholds lack unit clarity.**  
+   The success condition uses `0.5E_wrist + 0.5E_finger < threshold` (0.8 or 1.2). `E_wrist` is defined as `0.5·DiffAngle + 0.5·||translation error||` — mixing angular and positional units — and `E_finger` is a per-joint position error. The effective units of the combined threshold (0.8, 1.2) are therefore unclear. While composite thresholds are common in robotics, the lack of explicit unit specification makes the metric harder to interpret and reproduce.
 
-- **Real-world evaluation description is thin in the main paper.** The real-world results are reported in Table 2 (presumably in the appendix) and the main text contains only a few sentences describing a single object example (apple lift). While the quantitative data likely exists in the appendix, the main paper's treatment is too brief to convey the breadth and rigor of the real-world validation. The absence of trial counts, variance statistics, or a detailed protocol in the main text weakens the otherwise compelling sim-to-real claim.
+4. **Real-world evaluation details are thin.**  
+   The paper reports per-object success rates (Table 2) and qualitative comparisons, but does not state how many trials were conducted per object, whether trials were repeated with different initial conditions, or how state estimation noise (FoundationPose) was handled. Real-world validation is important for this type of work, but the current presentation does not allow the reader to assess statistical reliability.
 
-- **The homotopy ablation does not perfectly isolate the homotopy generator's contribution within the full pipeline.** The two ablated variants ("w/o data, w/o homotopy" and "w/o data") both lack the iterative flywheel. This means the comparison isolates homotopy's value in a setting without iterative mining, but does not answer: how much does the homotopy generator add *on top of* a full iterative pipeline that uses brute-force neighbor search instead of the learned generator? A cleaner ablation would keep the iterative flywheel constant and toggle only the homotopy path generator.
-
-- **Architectural and training details of the homotopy path generator (conditional diffusion model) are underspecified.** The paper describes learning a conditional diffusion model as a "tracking task transformer" (Section 3.2) but does not provide architecture details, input/output representations, training data size, or inference procedure. While code is provided in the supplementary, the main paper is too sparse for understanding this novel component without reading code.
-
-- **Success threshold "0.8" and "1.2" for the combined wrist+finger error lack clear units or justification.** The paper defines the third success condition as `0.5E_wrist + 0.5E_finger` being below 0.8 (strict) or 1.2 (loose). Since E_wrist combines translation (cm) and rotation (degrees) and E_finger is joint position error (radians or degrees), the resulting combined quantity has mixed units. The threshold values need interpretation to be meaningful to readers.
+5. **Limited discussion of retargeting quality.**  
+   Human-to-robot hand retargeting (via PyTorch Kinematics) is mentioned as a preprocessing step, but there is no discussion of retargeting failures, kinematic mismatches (e.g., human thumb vs. Allegro hand DOF differences), or how these affect tracking difficulty. Since the quality of the input references directly affects the tracking problem, some transparency about retargeting would be helpful.
 
 ### Trivial
 
-- The "over 10% improvement" claim in the abstract is technically correct but notably understated — on TACO (strict) the absolute gain is >20 percentage points (72.4 vs 51.1). This is a presentation choice rather than an error, but more precise reporting (absolute percentage point gain) would strengthen the first impression.
+- The claim that model-based TO "depends on accurate dynamics models with known contact states" (Introduction) oversimplifies: methods like contact-implicit optimization handle unknown contacts. Acknowledging this would be more precise.
+- The paper does not discuss compute requirements (training time, wall-clock time for the iterative pipeline) despite using 8192 parallel environments.
 
 ## Nice-to-Haves
 
-- **Adapt a motion-imitation method (PHC, DTC) as an additional baseline.** The paper's chosen baselines (DGrasp, OmniGrasp variants) are defensible as the most directly related dexterous manipulation methods. However, since PHC and DTC are cited in related work, comparing against an adapted version would further strengthen the claim that DexTrack's specific designs are necessary. This is a significant engineering undertaking (adapting full-body humanoid trackers to dexterous hands with objects) and is not a fair expectation for acceptance, but would improve the paper's breadth.
-
-- **Add a variant that uses the iterative flywheel with brute-force neighbor search (no learned homotopy generator)** to cleanly isolate the value of the learned generator over brute-force search alone.
+- **Validate the homotopy generator directly.** An ablation comparing the controller trained with demonstrations mined via the learned generator vs. via brute-force search, with runtime statistics, would substantiate contribution #3.
+- **Show intermediate performance after each stage.** Even a simple comparison of stage-1-only vs. final would demonstrate the value of iteration.
+- **Clarify the third threshold's units** (0.8, 1.2 for `0.5E_wrist + 0.5E_finger`). If space permits, a sweep over thresholds would strengthen robustness claims.
+- Report the absolute number of demonstrations used in the scaling plot (Figure 5) alongside the percentages.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-1. **"Insufficient comparison to PHC/DTC as motion imitation baselines"** — REMOVED as scope creep. The paper works in the dexterous manipulation domain with object interactions; PHC and DTC are full-body humanoid motion trackers designed for a fundamentally different setting (no object manipulation, no hand-object contact dynamics). The paper's baseline choices (DGrasch, OmniGrasp variants) are the state of the art in the dexterous manipulation tracking literature. Demanding adaptation from a different domain would change the paper's evaluation scope. Moved to Nice-to-Haves.
-
-2. **"Table 2 not included in the paper"** — REMOVED. The parser strips appendices; Table 2 exists in the original submission. The broader criticism about thin real-world textual description is retained as Minor.
-
-3. **"No baseline uses trajectory optimization"** — REMOVED. The paper explicitly and reasonably explains why model-based TO methods are not directly applicable: "no prior model-based methods have directly tackled tracking control for dexterous manipulation" and they "focus on single goal-driven trajectory optimization with simplified dynamics models."
-
-4. **"The '10% improvement' claim is imprecise (should note >100% relative)"** — REMOVED as a presentation nitpick. "Over 10% improvement in success rates" is factually correct (21.3% > 10%) and standard phrasing for absolute percentage point gains. The reviewer's preferred framing (relative improvement) is an alternative presentation choice, not an error.
+- **Criticism about missing DTC/PHC baselines** — DTC and PHC are designed for humanoid/quadruped whole-body tracking, not dexterous manipulation. Adapting them would require significant changes to action spaces, state representations, and dynamics, which is beyond the paper's scope and a disproportionate ask. *Justification: Scope creep / asks for adaptation beyond paper's domain.*
+- **Criticism that "only two thresholds are shown for the third measure"** — This is factually incorrect. Both thresholds sets explicitly include the third value (10cm-20°-0.8 and 10cm-40°-1.2), showing both 0.8 and 1.2 for the combined wrist+finger measure. The real issue is unit clarity (kept in Minor). *Justification: Factually wrong.*
+- **Criticism about homotopy generator "centrality"** — The paper presents the homotopy optimization *scheme* (which is validated) as the core contribution, not the generator specifically. The generator is presented as an efficiency tool. The underlying concern (lack of validation for the generator) is kept in Major, but the framing as a "central" unvalidated component is overwrought. *Justification: Overstated severity relative to paper's actual claims.*
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a consistent picture: the method is novel and the core results are strong, but the paper cuts corners on specification depth (combined loss, homotopy generator architecture, robustness quantification) and real-world experimental detail. The most valuable observation across reviews is that the ablation isolates homotopy's benefit only in the absence of the iterative flywheel, leaving a gap in understanding whether the learned homotopy generator is better than simpler brute-force alternatives within the full pipeline.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-- Add the combined loss function explicitly: ℒ = ℒ<sub>PPO</sub> + λ·ℒ<sub>a</sub>, with the value of λ and whether it is annealed.
-- Expand the robustness analysis (Section 4.3) with quantitative metrics: report success rate or tracking error under several levels of injected noise (position perturbations, joint angle noise, penetration depth).
-- Augment the real-world discussion in the main paper with trial counts, per-object success rates, and variance.
-- Provide architecture and training details for the homotopy path generator in the main paper (or a clear pointer to the appendix/supplementary).
-- Clarify the units and derivation of the success thresholds (0.8 and 1.2).
+1. Add a dedicated ablation comparing the learned homotopy generator against brute-force search-based path finding, reporting both tracking success rates and inference-time cost.
+2. Report controller success rates after stages 1, 2, and 3 to demonstrate iterative improvement.
+3. Clarify the units of the third success threshold (0.8 and 1.2) — specify what each number represents in physical units.
+4. Include the number of real-world trials per object and any variance statistics in a future version.
 
 ## Score and Decision
 
-The paper presents a well-motivated, technically sound framework with substantial empirical gains over reasonable baselines across two datasets and real hardware. The weaknesses are genuine but minor — they concern presentation depth and experimental granularity, not the validity of the core claims. The combined RL+IL training, the data flywheel, and the homotopy optimization are clearly novel contributions. The quantitative simulation results are strong, consistent, and properly ablated. The paper is above the acceptance bar.
+**Overall assessment**: This paper makes a solid, well-motivated contribution to dexterous manipulation. The iterative data flywheel and synergistic RL+IL training are genuinely novel, and the >10% improvement over baselines on two large datasets is credible evidence of effectiveness. The main weakness is that the learned homotopy generator (contribution #3) is not separately validated — while this does not undermine the core performance claims, it means the paper's third contribution is only partially supported. The remaining issues (stage-by-stage analysis, metric clarity, real-world detail) are minor and addressable. The paper is a clear accept with revisions addressing these gaps.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

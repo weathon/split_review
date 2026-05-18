@@ -1,0 +1,511 @@
+\title{Maestro: Uncovering Low-Rank Structures via Trainable Decomposition}
+
+\begin{abstract}
+
+
+\red{Deep Neural Networks (DNNs) have been a large driver for AI breakthroughs in recent years.
+However, these models have been getting increasingly large as they become more accurate and safe. This means that their training becomes increasingly costly and time-consuming and typically yields a single model to fit all targets.
+Various techniques have been proposed in the literature to mitigate this, including pruning, sparsification, or quantization of model weights and updates. While achieving high compression rates, they often incur significant computational overheads at training or lead to non-negligible accuracy penalty. Alternatively, factorization methods have been leveraged for low-rank compression of DNNs. Similarly, such techniques (e.g.,~SVD) frequently rely on heavy iterative decompositions of layers and are potentially sub-optimal for non-linear models, such as DNNs.}
+\red{We take a further step in designing efficient low-rank models and propose \tool, a framework for trainable low-rank layers. Instead of iteratively applying a priori decompositions, the low-rank structure is baked into the training process through \technique,
+a low-rank ordered decomposition. Not only is this the first time importance ordering via sampling is applied on the decomposed DNN structure, but it also allows selecting ranks at a layer granularity.
+Our theoretical analysis demonstrates that in special cases \technique recovers the SVD decomposition 
+and PCA 
+. Applied to DNNs, \tool enables the extraction of lower footprint models that preserve performance. Simultaneously, it enables the graceful trade-off between accuracy-latency for deployment to even more constrained devices without retraining.}
+
+\end{abstract}
+
+\section{Introduction}
+
+
+
+\label{sec:introduction}
+Deep Learning has been experiencing an unprecedented uptake, with models achieving a \mbox{(super-)human} level of performance in several tasks across modalities, giving birth to even more intelligent assistants~\citep{radford2023robust} and next-gen visual perception and generative systems~\citep{radford2021learning}. However, the price of this performance is that models are getting significantly larger, with training and deployment becoming increasingly costly~\citep{laskaridis2024melting}. Therefore, techniques from Efficient ML become evermore relevant~\citep{wan2023efficient}, and a requirement for deployment in constrained devices, such as smartphones or IoT devices~\citep{laskaridis2022future}.
+
+Typical techniques to compress the network involve \textit{i)~quantization}, i.e.,~reducing precision of the model~\citep{wang2019deep} or communicated updates~\citep{seide20141, alistarh2017qsgd}, \textit{ii)~pruning} the model during training, e.g.,~through Lottery Ticket Hypothesis (LTH)~\citep{frankle2018the}, \textit{iii)~sparsification} of the network representation and updates, i.e.,~dropping the subset of coordinates~\citep{suresh2017distributed, alistarh2018convergence} or \textit{iv)~low-rank approximation~\citep{wang2021pufferfish,shrinkml2019}}, i.e.~keeping the most relevant ranks of the decomposed network. Despite the benefits during deployment, that is a lower footprint model, in many cases, the overhead during training time or the accuracy degradation can be non-negligible. Moreover, many techniques can introduce multiple hyperparameters or the need to fine-tune to recover the lost accuracy.
+
+
+In this work, we focus training low-rank factorization. Specifically, we pinpoint the challenges of techniques~\citep{wang2021pufferfish,wang2023cuttlefish} when decomposing the parameters of each layer in low-rank space and the need to find the optimal ranks for each one at training time. To solve this, we \red{propose \technique (Low-rank ordered Decomposition), a non-trivially extended version of Ordered Dropout technique from~\citet{horvath2021fjord}, applied to progressively find the optimal decomposition for each layer of a DNN while training (Fig.~\ref{fig:tool}).} Critical differences to prior work include \textit{i)}~the non-uniformity of the search space (i.e. we allow for different ranks per layer), \textit{ii)}~the trainable aspect of the decomposition to reflect the data distribution, and \textit{iii)}~the gains to training and deployment time without sacrificing accuracy. Nevertheless, we also provide a latency-accuracy trade-off mechanism to deploy the model on even more constrained devices.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[trim={0 18cm 0 18cm}, clip, width=0.99\textwidth]{images/MaestroPipiline_wOD.pdf}
+    \captionsetup{font=small,labelfont=bf}
+    \caption{\rebb{\tool's construction. To obtain low-rank approximation, the given linear map is decomposed and trained with \red{\technique} to obtain an ordered representation that can be efficiently pruned. 
+    }}
+    \label{fig:tool}
+\end{figure*}
+Our contributions can be summarized as follows:
+\begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
+ 
+    We fuse layer factorization and ordered dropout \red{into \technique, an extended variant of the ordered dropout}, \rebb{in a novel manner}, by embedding \red{ordered importance} directly into the factorized weights. By decomposing layers and training on stochastically sampled low-rank models, we apply ordered importance decomposed representation of each layer. We combine this with a \emph{ hierarchical group-lasso} term~\citep{yuan2006model} in the loss function to zero out redundant ranks and \emph{progressively shrink} the rank space. This way, we enable computationally efficient training achieved by the proposed decomposition  without relying on inexact and potentially computationally expensive \red{iterative decompositions} such as Singular Value Decomposition (SVD).
+    \item \tool is \red{fundamentally} a theoretically motivated approach that embeds decomposition into training. First, we show that our new objective can recover \textit{i)}~the SVD of the target linear mapping for the particular case of uniform data distribution and \textit{ii)}~the Principal Component Analysis (PCA) of the data in the case of identity mapping.
+    \item As \tool's decomposition is part of the training \red{process}, it also accounts for data distribution and the target function, contrary to SVD, which operates directly on learned weights. We show that this problem \emph{already arises} for a simple linear model and empirically generalize our results in the case of DNNs, by applying our method to different types of layers (including fully-connected, convolutional, and attention) spanning across three datasets and modalities. 
+    \item \red{We illustrate that our technique achieves better results than SVD-based baselines at a lower cost. Indicatively, \tool can achieve on par or better results than low-rank SOTA methods on vision datasets (CIFAR-10, ImageNet) with lower training overhead due to progressive shrinking, while at the same time it reaches 6\% lower perplexity at a quarter of the computational cost and half of the parameters of SVD-variants in  Transformer models.}
+\end{itemize}
+
+    
+    
+
+
+\section{Related Work}
+
+\label{sec:related_work}
+The topic of Efficient ML has received a lot of attention throughout the past decade as networks have been getting increasingly computationally expensive. We distinguish between training and deployment time, with the latter having a more significant impact and thus amortizes the potential overhead during training. Nevertheless, \red{cost optimisation is evermore relevant for training large models, and the advent of} Federated Learning~\citep{mcmahan2017communication}, efficient training becomes increasingly relevant to remain tractable.
+
+\noindent \textbf{Efficient inference.}
+For efficient deployment, \rebb{various techniques have been proposed that either optimize} the architecture of the DNN in a hand-crafted~\citep{howard2017mobilenets} or automated manner (i.e.~NAS)~\citep{tan2019efficientnet}, they remove redundant computation by means of pruning parts of the network~\citep{han2015deep,carreira2018learning,frankle2018the, chen2021only,sreenivasan2022rare,li2016pruning, wen2016learning, hu2016network, wen2016learning, zhu2017prune, he2017channel, yang2017designing, liu2018rethinking, yu2019universally}, \rebb{in a structured or unstructured manner}, or utilise low-precision representation~\citep{wang2019deep} of the neurons and activations. \rebb{However, such techniques may involve non-negligible training overheads or lack flexibility of variable footprint upon deployment.}
+Closer to our method, there have been techniques leveraging low-rank approximation (e.g.~SVD) for efficient inference~\citep{xue2013restructuring, sainath2013low, jaderberg2014speeding, wiesler2014mean,shrinkml2019}. Last, there is a category of techniques that dynamically resize the network at runtime for compute, memory or energy efficiency, based on early-exiting~\citep{laskaridis2021adaptive} or dynamic-width~\citep{yu2018slimmable} and leverage the accuracy-latency tradeoff.
+
+\noindent \textbf{Efficient training.}
+On the other hand, techniques for efficient training become very relevant nowadays when scaling DNNs sizes~\cite{hu2021lora} or deploying to embedded devices~\citep{lin2022ondevice}, and oftentimes offer additional gains at deployment time. Towards this goal, there have been employed methods where part of the network is masked~\citep{sidahmed2021efficient} or dropped~\citep{alam2022fedrolex,caldas2019expanding,Wu_2018_CVPR} during training, with the goal of minimizing the training footprint. Similarly to early-exiting, \rebb{multi-exit variants for efficient training~\citep{kim2023depthfl,liu2022federated} have been proposed}, and the same applies for width-based scaling~\cite{horvath2021fjord,diao2021heterofl}. Last but not least, in the era of transformers and LLMs, where networks have scaled exponentially in size, PEFT-based techniques, such as adapter-based fine-tuning~\citep{houlsby2019parameter} (such as LoRA~\citep{hu2021lora}), become increasingly important and make an important differentiator for tackling downstream tasks.
+
+\textbf{Learning ordered representation.} Ordered Dropout (OD) was proposed as a mechanism for importance-based pruning for the easy extraction of sub-networks devised to allow for heterogeneous federated training~\citep{horvath2021fjord}. \red{Similar constructions were proposed to be applied in the representation layer of autoencoders~\citep{rippel2014learning} to enforce identifiability of the learned representation or the last layer of the feature extractor~\citep{horvath2021hyperparameter} to learn an ordered set of features for transfer learning.}
+\red{Contrary to prior work, \tool's \technique non-trivially extends ordered representation in three meaningful ways. First, it is the first work that is applied to the decomposed network, which gets progressively shrunk as redundant ranks converge to zero. This is achieved through hierarchical group lasso penalty, as described in Sec.~\ref{sec:training}. Second, \technique allows for heterogeneous (non-uniform) ranks per layer, yielding a much richer operating space. Last, through \technique we can leverage the ordered representation of ranks at inference time to further compress the model, allowing a graceful accuracy-latency tradeoff for deployment on more constrained devices, without the need to retrain.}
+
+
+
+
+
+\section{\tool}
+
+\label{sec:tool}
+In this work, we focus on low-rank models as a technique to reduce the neural network model's computational complexity and memory requirements. The main challenge that we face is the selection of the optimal rank or the trade-off between the efficiency and the rank for the given layer. Therefore, we devise an \emph{importance-based} training technique, \tool, which learns not only a mapping between features and responses but also \emph{learns the decomposition} of the trained network. This is achieved by factorizing all the layers in the network.
+
+\subsection{Formulation}
+
+\noindent
+\textbf{Low-rank approximation.} Our inspiration comes from the low-rank matrix approximation of a matrix $A \in \R^{m \times n}$. For simplicity, we assume that $A$ has {rank at most $r = \min\cbr{m, n}$ with $k \leq r$} distinct non-zero singular values $\tilde{\sigma}_1 > \tilde{\sigma}_2 > \hdots > \tilde{\sigma}_k > 0$, with corresponding left and right singular vectors $\tilde{u}_1, \tilde{u}_2, \hdots, \tilde{u}_k \in R^m$ and $\tilde{v}_1, \tilde{v}_2, \hdots, \tilde{v}_k \in R^n$, respectively. For such a matrix, we can rewrite its best $l$-rank approximation as the following minimization problem
+{%
+\begin{align}
+    \label{eq:svd_optim}
+    & \textstyle\min_{U \in \R^{m \times l}, V \in \R^{n \times l}} \norm*{\textstyle\sum_{i=1}^l u_i v_i^\top - A}_F^2
+\end{align}}
+where $c_i$ denotes the $i$-th column of matrix $C$ and $\norm{\cdot}_F$ denotes Frobenius norm. We note that Problem~\eqref{eq:svd_optim} is non-convex and non-smooth. However, \cite{ye2021global} showed that the randomly initialized gradient descent algorithm solves this problem in polynomial time. In this work, we consider the best rank approximation across all the ranks. Eckart–Young–Mirsky theorem leads to the following objective
+{%
+\begin{align}
+    \label{eq:od_optim}
+    \begin{split}
+        &\textstyle\min_{U \in \R^{m \times r}, V \in \R^{n \times r}} \frac{1}{r} \sum_{b=1}^r \norm*{U_{:b}V_{:b}^\top - A}_F^2,
+    \end{split}
+\end{align}}
+where $C_{:b}$ denotes the first $b$ columns of matrix $C$. This objective, up to scaling, recovers SVD of $A$ exactly, and for the case of distinct non-zero singular values, the solution is, up to scaling, unique~\cite{horvath2021fjord}. This formulation, however, does not account for the data distribution, \textit{i.e., 
+it cannot tailor the decomposition to capture specific structures that appear in the dataset.}
+
+\textbf{LoD for data-dependent low-rank approximation.}
+Therefore, the next step of our construction is to extend this problem formulation with data that can further improve compression, reconstruction, and generalization and incorporate domain knowledge. We assume that data comes from the distribution $x \sim \cX$ centered around zero, i.e., $\EE{x \sim \cX}{x} = 0$.\footnote{We make this assumption for simplicity. It can be simply overcome by adding a bias term into the model.}, and the response is given by $y = Ax$. In this particular case, we can write the training loss as
+{%
+\begin{align}
+    \label{eq:low_rank_optim}
+    \begin{split}
+    \textstyle
+        &\min_{U \in \R^{m \times r}, V \in \R^{n \times r}} \EE{x, y \sim \cX}{\sum_{b=1}^r \frac{1}{r}\norm*{U_{:b}V_{:b}^\top x - y}^2}.
+    \end{split}
+\end{align}}
+\red{It is important to note that the introduced problem formulation~\eqref{eq:low_rank_optim} for the neural network with a single hidden layer and no activations can be solved using stochastic algorithms by sampling from the data distribution $\cX$ (subsampling) and rank distribution $\cD$. When we apply \technique to DNNs, contrary to any prior work \citep{horvath2021fjord,rippel2014learning,diao2021heterofl}, our formulation is the first one to apply importance-based ordered dropout to the decomposed representation of each layer, thus preserving the dimensionality. More importantly, we decompose each layer \emph{independently} and allow for finding the optimal rank per layer in a data-informed manner. We discuss details in the next paragraph.}
+
+\textbf{DNN low-rank approximation.} For Deep Neural Networks (DNNs), we seek to uncover the optimal ranks for a set of $d$ linear mappings $W^1 \in \R^{m_1 \times n_1}, \hdots, W^d \in \R^{m_d \times n_d}$ , where $W^i$'s are model parameters and {$d$ is model depth}, e.g., weights corresponding to linear layers\footnote{We can apply our decomposition on different types of layers, such as Linear, Convolutional and Transformers as shown in Sec.~\ref{sec:layer_factorization}.}, by decomposing them as $W^i = U^i\left(V^i\right)^\top$. 
+We discuss how these are selected in the next section. To decompose the network, we aim to minimize the following objective
+\begin{align}
+    \label{eq:low_rank_ful}
+    \begin{split}
+    \textstyle\mathbf{E}_{x, y \sim \cX}&\left[\frac{1}{\sum_{i = 1}^d r_i} \sum_{i=1}^d \sum_{b=1}^{r_i}l(h(U^1\rbr*{V^1}^\top, \hdots, \right. \\
+        &\left. U^i_{:b}\rbr*{V^i_{:b}}^\top, \hdots, U^d\rbr*{V^d}^\top, W^{o}, x), y)\right],
+    \end{split}
+\end{align}
+where $r_i = \min\cbr*{m_i, n_i}$, $l$ is a loss function, $h$ is a DNN, and $W^{o}$ are the other weights that we do not decompose. We note that our formulation aims to decompose each layer, while decompositions across layers do not directly interact. The motivation for this approach is to uncover low-rank structures within each layer that are not affected by inaccuracies from other layers due to multiple low-rank approximations.
+\SetArgSty{textnormal} %
+\begin{algorithm2e}[t]
+    \footnotesize
+    \SetAlgoLined
+	\LinesNumbered
+	\DontPrintSemicolon
+	\KwIn{epochs $E$, dataset $\cD$, model $h$ parametrized by $U^1 \in \R^{m_1 \times r_1}$, $V^1 \in \R^{n_1 \times r_1}, \hdots, U^d \in \R^{m_d \times r_d}, V^d \in \R^{n_d \times r_d}$, $W^o$, and hyperparameters $\lambda_{gl}$, $\epsilon_{ps}$}
+	
+	\For( // \textit{Epochs}){$t \gets 0$ \KwTo $E-1$}{
+	    \For( // \textit{Iterate over dataset}){$(x,y) \in \cD$}{
+                Sample $(i, b) \sim \cbr*{\cbr*{(i, b)}_{b=1}^{r_i}}_{i=1}^d$; // \textit{LoD} \;
+                $L = l(h(U^1\rbr*{V^1}^\top, \hdots, U^i_{:b}\rbr*{V^i_{:b}}^\top, \hdots, U^d\rbr*{V^d}^\top, W^{o}, x)$,
+                $\quad y) $
+                $+ \lambda_{gl} \sum_{i=1}^d \sum_{b=1}^{r_i}  \rbr*{\norm*{U^i_{b:}} + \norm*{V^i_{b:}}}$ // \textit{Loss}\; 
+                L.backward() // \textit{Update weights}\;
+                }
+            \For {$i \gets 1$ \KwTo $d$} {
+                \For {$b \gets 1$ \KwTo $r_i$} {
+            // \textit{rank importance thresholding} \;
+            \If{$\norm*{V^i_{b:}} \norm*{U^i_{b:}} \leq \epsilon_{ps}$} { 
+                $r_i = b-1$ // \textit{progressive shrinking} \;
+                \textbf{break}\;
+                }
+            }
+        }
+    \caption{\footnotesize \mbox{\textbf{\tool} (Training Process)}}
+    \label{alg:training}
+	}
+\end{algorithm2e}
+
+\subsection{Layer Factorization}
+\label{sec:layer_factorization}
+The following sections discuss how we implement model factorization for different architectures. 
+
+\noindent\textbf{FC layers.}
+A 2-layer fully connected (FC) neural network can be expressed as $f(x) = \sigma(\sigma(x W_1) W_2)$, where $W$s are weight matrices of each FC layer, and $\sigma(\cdot)$ is any arbitrary activation function, e.g., ReLU. The weight matrix $W$ can be factorized as $U V^\top$.
+
+\noindent\textbf{CNN layers.} 
+For a convolution layer with dimension, $W\in \mathbb{R}^{m \times n \times k \times k}$ where $m$ and $n$ are the number of input and output channels, and $k$ is the size of the convolution filters. Instead of directly factorizing the $4$D weight of a convolution layer, we factorize the unrolled $2$D matrix. Unrolling the 4D tensor $W$ leads to a 2D matrix with shape $W_{\text{unrolled}} \in \mathbb{R}^{mk^2 \times n}$, where each column represents the weight of a vectorized convolution filter. Factorization can then be conducted on the unrolled 2D matrix; see \citep{wang2021pufferfish} for details.
+\noindent\textbf{Transformers.}
+A Transformer layer consists of a stack of encoders and decoders~\cite{vaswani2017attention}. The encoder and decoder contain three main building blocks: the multi-head attention layer, position-wise feed-forward networks (FFN), and positional encoding. We factorize all trainable weight matrices in the multi-head attention (\rebb{MHA}) and the FFN layers. {The FFN layer factorization can directly adopt the strategy from the FC factorization.} A $p$-head attention layer learns $p$ attention mechanisms on the key, value, and query ($K, V, Q$) of each input token:
+{\setlength{\abovedisplayskip}{0pt}\setlength{\belowdisplayskip}{0pt}
+\begin{align*}
+\texttt{MHA}(Q, K, V) = \texttt{Concat}(\text{head}_1, \dots, \text{head}_p) W^O.
+\end{align*}
+}
+Each head performs the computation of: 
+{\setlength{\abovedisplayskip}{0pt}\setlength{\belowdisplayskip}{0pt}
+\begin{align*}
+\texttt{head}_i &= \texttt{Attention}(Q W^{(i)}_Q, K W^{(i)}_K, V W^{(i)}_V) \\
+                &= \texttt{softmax}\left(\frac{Q W^{(i)}_Q W^{(i)\top}_K K^\top}{\sqrt{d/p}}\right) V W^{(i)}_V.
+\end{align*}}
+where $d$ is the hidden dimension. The trainable weights $W^{(i)}_Q, W^{(i)}_K, W^{(i)}_V, i \in \{1, 2, \dots, p\}$ can be factorized by simply decomposing all learnable weights $W{\cdot}$ in an attention layer and obtaining $U{\cdot} V^\top{\cdot}$~\cite{vaswani2017attention}.
+
+\subsection{Training Techniques}
+\label{sec:training}
+Having defined the decomposition of typical layers found in DNNs, we move to formulate the training procedure of our method, formally described in Algorithm~\ref{alg:training}. 
+Training the model comprises an iterative process of propagating forward on the model by \emph{sampling a rank} $b_i$ per decomposed layer $i$ up to maximal rank $r_i$ (line 3). We calculate the loss, which integrates an additional \emph{hierarchical group lasso} component (lines 4) and \emph{backpropagate} on the sampled decomposed model (line 5). At the end of each epoch, we \emph{progressively shrink} the network by updating the maximal rank $r_i$, based on an importance threshold $\epsilon_{ps}$ (line 11). We provide more details about each component below.
+
+\noindent \textbf{Efficient training via sampling.} In Sec.~\ref{sec:theory}, we show that for the linear case \eqref{eq:low_rank_optim}, the optimal solution corresponds to PCA over the linearly transformed dataset. This means that the obtained solution contains \rebb{orthogonal} directions. This property is beneficial because it directly implies that when we employ gradient-based optimization, not only is the gradient zero at the optimum, but the gradient with respect to each summand in Equation \eqref{eq:low_rank_optim} is also zero. The same property is directly implied by overparametrization~\cite{ma2018power} or strong growth condition~\cite{schmidt2013fast}. 
+As a consequence, this enables us to sample only one summand at a time and obtain the same quality solution. When considering \eqref{eq:low_rank_ful} as an extension to \eqref{eq:low_rank_optim}, it is unclear whether this property still holds, which would also imply that the set of stationary points of \eqref{eq:low_rank_optim} is a subset of stationary points of the original objective without decomposition. However, in the experiments, we observed that sampling is sufficient to converge to a good-quality solution. If this only holds approximately, \rebb{one} could leverage fine-tuning to recover the loss in performance. 
+
+\noindent\textbf{Efficient rank extraction via hierarchical group-lasso.} By definition, \eqref{eq:low_rank_optim} leads to an ordered set of ranks for each layer. This ordered structure enables efficient rank extraction and selection. To effectively eliminate unimportant ranks while retaining the important ones, thus leading to a more efficient model, we consider Hierarchical Group Lasso (HGL)~\cite{lim2015learning} in the form
+{%
+\begin{align}
+    \label{eq:group_lasso}
+    \lambda_{gl} \sum_{i=1}^d \sum_{b=1}^{r_i}  \rbr*{\norm*{U^i_{b:}} + \norm*{V^i_{b:}}},
+\end{align}
+}
+where $C_{b:}$ denotes the matrix that contains all the columns of $C$ except for the first $b-1$ columns.
+\noindent\textbf{Progressive shrinking.} HGL encourages that unimportant ranks become zero and can be effectively removed from the model. To account for this, for each layer we remove $V^i_{b:}$ and $U^i_{b:}$ (i.e., set $r_i = b - 1$) if $\norm*{V^i_{b:}} \norm*{U^i_{b:}} \leq \epsilon_{ps}$, where $\epsilon_{ps}$ is a pre-selected threshold -- and a hyperparameter of our method.
+
+\noindent\camready{\textbf{Hyperparameter optimization.} We provide an algorithm for finding the optimal value for the hyperparameter $\lambda_{gl}$ in Alg.~\ref{alg:hpo}. From the evaluation of Tab.~\ref{tab:lenet_gp_lambda}-\ref{tab:resnet50_gp_lambda}, this strategy typically requires at most 2-3 times the computational effort (in terms of FLOPs) compared to a single training loop with an optimally chosen $\lambda_{gl}$. This is significantly easier than tuning the per-layer maximal rank and the pretraining steps, where the full-rank model is being pretrained, as is the case in other low-rank baselines. Equivalently, the value of $\epsilon_{ps}$ represents the effective zero-point in our algorithm, typical value of which was $1e-7$ in our experiments.}
+
+\SetArgSty{textnormal} %
+\begin{algorithm2e}[h]
+    \footnotesize
+    \SetAlgoLined
+	\LinesNumbered
+	\DontPrintSemicolon
+	\KwIn{constraints (e.g., min required accuracy, max \#parameters), epochs $E$, dataset $\cD$, model $h$, evaluation frequency $E^\text{eval}_\text{every}$, $\epsilon_{ps}$, limits for HPO: \textit{largeValue}, \textit{smallValue}}
+        $\lambda_{gl}$ = \textit{largeValue} \;
+        old\_model = NULL \;
+        \While{$\lambda_{gl}$ > \textit{smallValue}} {
+            model = RandInit(model) \;
+            \For( // \textit{Epochs}){$t \gets 0$ \KwTo $E-1$} {
+                Train(model, dataset, $\lambda_{gl}$)\;
+                \If {$t$ mod $E^\text{eval}_\text{every}$ == 0} {
+                    acc = CalculateAcc(model, dataset)\;
+                    flops, params = MeasureFootprint(model, $\epsilon_{ps}$)\;
+                    \If {acc $\geq$ constraints[`acc'] \textbf{and} params $\leq$ constraints[`params']} {
+                        \Return model \textit{// model satisfying constraints was found} \;
+                    }
+                    \If{params $<$ few\_params}{
+                        \textbf{break} \textit{// model too sparse} \;
+                    }
+                }
+            }
+            flops, params = MeasureFootprint(model, $\epsilon_{ps}$)\;
+            \If{params > constraints[`params']} {
+                \textit{/** no model satisfies constraints, return the last model satisfying parameters constraints**/} \;
+                \Return old\_model  \;
+            }
+            old\_model = Copy(model)\;
+            $\lambda_{gl}$ = $\lambda_{gl}$ / 2\;
+        }
+
+    \caption{\footnotesize \mbox{\textbf{\tool} (Hyper-parameter optimization)}}
+    \label{alg:hpo}
+\end{algorithm2e}
+
+
+
+
+\noindent\textbf{Initialization.}
+Initialization is a key component of the training procedure~\cite{he2015delving, mishkin2015all}. To adopt the best practices from standard non-factorized training, we follow a similar approach to \cite{khodak2021initialization, wang2021pufferfish}, where we first initialize the non-factorized model using standard initialization. For initializing factorized layers, we use the \rebb{Singular Value Decomposition} of the non-factorized initialization -- in a full-rank form -- to ensure that the resulting product matrix is the same as the original parameter decomposition. In addition, SVD is an optimal decomposition for the linear case with uniform data. {However, in contrast with the adaptive baseline method~\citep{wang2023cuttlefish} we only decompose once, rather than on every training iteration.} \red{As such, we only run decomposition once and progressively shrink the ranks in a data-centric manner. This is contrary to related work~\cite{wang2021pufferfish,wang2023cuttlefish} that requires manual rank and layer selection and full-rank warmup to achieve the desired performance, at the cost of training overhead, of course.}
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=.7\textwidth]{images/svd_decomposition.pdf}
+    \captionsetup{font=small,labelfont=bf}
+    \caption{Verification that \tool recovers SVD for linear mapping with uniform data. We display the L2 distance between the best rank $k$ and \tool's approximation of mapping $A$. 
+    The target matrix was randomly generated $9 \times 6$ matrix with rank $3$. $p$ and $k$ represent relative and actual rank.}
+    \label{fig:svd}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.48\textwidth}
+    \centering
+    \includegraphics[width=.7\textwidth]{images/pca.pdf}
+    \captionsetup{font=small,labelfont=bf}
+    \caption{Verification that \tool recovers PCA for identity mapping. The plot displays the estimates of singular values. The data distribution has only 3 directions. It is expected that the top $3$ ranks will converge to value one and the rest to zero. $p$ and $k$ stand for relative and actual rank, respectively.}
+    \label{fig:pca}
+  \end{subfigure}
+  \captionsetup{font=small,labelfont=bf}
+  \caption{Empirical showcase of theoretical properties of the \tool's formulation.} %
+  \label{fig:both_figures}
+\end{figure*}
+
+\subsection{Train-Once, Deploy-Everywhere}
+\label{sec:deploy}
+
+Up until now, we have described how our method works for training low-rank models, which yield computational, memory, network, and energy~\citep{wu2022sustainable} bandwidth benefits during training.
+At deployment time, one can directly deploy the final model (rank $r_i$ for each layer) on the device, which we acquire from performing a threshold sweep of $\epsilon_{ps}$ over the effective range of rank importance across layers.
+However, in case we want to run on even more constrained devices, such as mobile or embedded~\citep{almeida2021smart} systems, the learned decomposition also gives us the flexibility to further compress the model in a straightforward manner, effectively trading off accuracy for a smaller model footprint. Inspired by \cite{yu2019autoslim}, we propose to use \emph{greedy search}. We begin with the current model and compare model performance across various low-rank models, each created by removing a certain percentage of ranks from each layer. We then eliminate the ranks that cause the least decrease in performance. This process is iterated until we reach the desired size or accuracy constraint. To make this approach efficient, we estimate the loss using a single mini-batch with a large batch size (e.g.,~2048). This also avoids issues with BatchNorm layers; see \cite{yu2019autoslim} for details. 
+In summary, \tool comprises a technique for trainable low-rank approximation during training time that progressively compresses the model, reflecting the data distribution, and a method that enables a graceful trade-off between accuracy and latency for embedded deployment, by selecting the most important parts of the network. We validate these claims in Sec.~\ref{sec:performance_comparison} and~\ref{sec:tradeoff}, respectively.
+
+
+
+
+\section{Theoretical Guarantees}
+
+\label{sec:theory}
+\begin{table*}
+\begin{minipage}{0.6\linewidth}
+    \centering
+    \centering
+    \begin{subfigure}[t]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\textwidth]{plots/ResNet18_plot.pdf}
+        \captionsetup{font=small,labelfont=bf}
+        \caption{ResNet18.}
+        \label{fig:accuracy_size_resnet18}
+    \end{subfigure}
+    \begin{subfigure}[t]{0.49\linewidth}
+        \centering
+        \includegraphics[width=\textwidth]{plots/VGG-19_plot.pdf}
+        \captionsetup{font=small,labelfont=bf}
+        \caption{VGG-19.}
+        \label{fig:accuracy_size_vgg19}
+    \end{subfigure}
+    \captionsetup{font=small,labelfont=bf}
+    \captionof{figure}{Maestro vs. baselines on CIFAR10. Spectral-Init results is taken from the original work; For XNOR-Net each weight is quantized from 32 to 1-bit. Thus, we report a compression rate of $3.125\%$; 
+}
+    \label{fig:cifar10_baselines}
+\end{minipage}
+\begin{minipage}{0.35\linewidth}
+        \begin{minipage}[t]{\linewidth}
+        \centering
+        \captionsetup{font=small,labelfont=bf}
+        \caption{Datasets and models for evaluation. The footprints depict the vanilla models.}
+        \begin{adjustbox}{width=1.1\linewidth}
+        {
+            \begin{tabular}{llrrl}
+                \toprule
+               \rowcolor{Gray} Dataset     & Model                          & \# GMACs      & \# Params (M)     & Task \\ \midrule
+                \textbf{MNIST}       & LeNet       & $2e^{-4}$              & $0.04$                   & Image classification \\
+                \textbf{CIFAR10}     & ResNet-18              & $0.56$           & $11.18$               & Image classification \\
+                \textbf{CIFAR10}     & VGG-19              & $0.40$           & $20.00$               & Image classification \\
+                \textbf{\red{ImageNet}}    & ResNet-50       & $4.12$          & $25.56$               & Image classification      \\
+                \textbf{Multi30k }      & 6-layer Transformer & $1.37$              & $48.98$               & Translation (en-ge) \\
+                \bottomrule
+            \end{tabular}
+        }
+        \end{adjustbox}
+        \label{tab:datasets-models}
+    \end{minipage}
+    \begin{minipage}[b]{\linewidth}
+    \centering
+    \captionsetup{font=small,labelfont=bf}
+    \caption{Maestro vs. baselines on Multi30k.}
+    \label{tab:transformer_baselines}
+    \scalebox{0.6}{
+        \begin{tabular}{lllll}
+            \toprule
+            \rowcolor{Gray} Variant                         & Model       & Perplexity         & GMACs & Params. ($M$) \\ 
+            \midrule
+            Non-factorized                  & Transformer & 9.85{\tiny$\pm0.10$} & 1.370 & 53.90 \\
+            Pufferfish$^*$                  & Transformer & 7.34{\tiny$\pm0.12$} & 0.996 & 26.70\\
+            \tool{}$^\dagger$ & Transformer & 
+            \textbf{6.90{\tiny$\pm0.07$}} & \textbf{0.248} & \textbf{13.80} \\
+            \bottomrule
+            \multicolumn{5}{l}{{$^*$Results from original work; $^\dagger$ tuned $\lambda_{gp}$ from $\{2^{i}/100; i \in {0, \hdots, 9}\}$}} 
+        \end{tabular}}
+        \end{minipage}
+\end{minipage}
+
+\end{table*}
+
+In this section, we further investigate the theoretical properties of \tool for the linear mappings, i.e., the setup of the problem formulation~\eqref{eq:low_rank_optim}. 
+\begin{theorem}[Informal]
+\label{thm:linear_tool_is_pca}
+Let $A = \tilde{U} \tilde{\Sigma} \tilde{V}^\top$ be a SVD decomposition of $A$. Then, the minimization problem \eqref{eq:low_rank_optim} is equivalent to PCA applied to the transformed dataset $x \rightarrow \tilde{\Sigma} \tilde{V}^\top x$, $x \sim \cX$ projected on the column space of $\tilde{U}$. 
+\end{theorem}
+ Theorem~\ref{thm:linear_tool_is_pca} shows that \tool can adapt to data distribution by directly operating on data $x \sim \cX$ and also to the target mapping by projecting data to its right singular vectors scaled by singular values. In particular, we show that in the special case, when $\cX$ is the uniform distribution on the unit ball, \eqref{eq:low_rank_optim}, i.e., \tool, exactly recovers truncated SVD of $A$, which is consistent with the prior results~\cite{horvath2021fjord}. In the case $A$ is the identity, it is straightforward to see that \tool is equivalent to PCA. We can see that \tool can efficiently extract low-rank solutions by filtering out directions corresponding to the null space of the target mapping $A$ and directions with no data.
+We also numerically verify both of the special cases--PCA and SVD, by minimizing \eqref{eq:low_rank_optim} using stochastic gradient descent (SGD) with $\cD$ being the uniform distribution. These experiments are provided in Fig.~\ref{fig:svd} and \ref{fig:pca}.}
+
+We showed that \tool could recover SVD in a particular case of the linear model and the uniform data distribution on the unit ball. We note that in this case, SVD is optimal, and we cannot acquire better decomposition. Therefore, it is desired that \tool is equivalent to SVD in this scenario. More generally, we argue that \tool decomposition should be preferable to SVD due to the following reasons:
+\begin{itemize}[leftmargin=1em,noitemsep,topsep=-1pt]
+    \item \tool formulation is \emph{directly built into the training} and tailored to obtain the best low-rank decomposition, while SVD relies on linearity assumption.
+    \item SVD does not account for data, and even in the linear NN case, the learned singular vectors might exhibit wrong ordering. We demonstrate this issue using a simple example where we take matrix $A$ with rank $3$. We construct the dataset $\cX$ in such a way that the third singular vector is the most important, the second one is the second, and the first is the third most important direction. Clearly, SVD does not look at data. Therefore, it cannot capture this phenomenon. We showcase that \tool \emph{learns the correct order}; see Fig.
+    \item Pre-factorizing models allow us to apply \emph{hierarchical group-lasso penalty}~\citep{yuan2006model} for decomposed weights to directly regularize the rank of different layers.
+    \item SVD is computationally expensive and can only run rarely, while \tool is \emph{directly built into the training} and, therefore, \emph{does not require extra computations.} In addition, \tool supports rank sampling so training can be made computationally efficient. 
+\end{itemize}
+
+
+
+\section{Experiments}
+
+We start this section by describing the setup of our experiments, including the models, datasets and baselines with which we compare \tool. We then compare \tool against the baselines on accuracy and \rebb{training Multiply-Accumulate operations (MACs)} and discuss the results.
+Subsequently, we analyze the behaviour of our system in-depth and provide additional insights on the performance of our technique, along with an ablation study and sensitivity analysis to specific hyperparameters. Finally, we showcase the performance of models upon deployment and how we can derive a smaller footprint model with some accuracy trade-off, without the need to fine-tune.
+
+\subsection{Experimental Setup}
+
+\noindent\textbf{Models \& datasets.}
+The datasets and models considered in our experiments span across four datasets, concisely presented along with the associated models on Tab.~\ref{tab:datasets-models}. We have implemented our solution in PyTorch~\citep{paszke2017automatic}(v1.13.0) trained our models 
+on NVidia A100 (40G) GPUs.
+
+\noindent\textbf{Baselines.}
+We have selected various baselines from the literature that we believe are closest to aspects of our system. On the \textit{pruning} front, we compare with the {IMP}~\citep{paul2023unmasking} and {RareGems}~\citep{sreenivasan2022rare} techniques.
+On the \textit{quantization} front, we compare with {XNOR-Net}~\citep{rastegari2016xnor}. With respect to \textit{low-rank} methods, we compare with {Spectral Initialisation}~\cite{khodak2021initialization}, {Pufferfish}~\citep{wang2021pufferfish} and {Cuttlefish}~\citep{wang2023cuttlefish}. 
+
+\begin{figure*}[t]
+  \centering
+  \hfill
+  \begin{subfigure}[t]{0.32\linewidth}
+    \includegraphics[width=\textwidth]{plots/resnet_svd_ss_hierarchical_rank.pdf}
+    \captionsetup{font=small,labelfont=bf}
+    \caption{Total rank ($\sum_{i=1}^d r_i$).}
+    \label{fig:training_dynamics_a}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{plots/resnet_svd_ss_hierarchical_final_rank.pdf}
+    \captionsetup{font=small,labelfont=bf}
+    \caption{Ranks $r_i$'s after training.}
+    \label{fig:training_dynamics_b}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{plots/resnet_svd_ss_train_loss.pdf}
+    \captionsetup{font=small,labelfont=bf}
+    \caption{Convergence for $\lambda_{gl} = 0$.}
+    \label{fig:training_dynamics_c}
+  \end{subfigure}
+  \captionsetup{font=small,labelfont=bf}
+  \caption{Training dynamics of \tool for ResNet18 on CIFAR10.}}
+  \label{fig:training_dynamics}
+\end{figure*}
+
+\subsection{Performance Comparison}
+\label{sec:performance_comparison}
+
+We start off by comparing \tool with the \red{mentioned baselines from the literature across the datasets and models of Tab.~\ref{tab:datasets-models}}\footnote{{The operating points we select for \tool are the closest lower to the respective baseline in terms of footprint. Where the result is not present in the Fig.~\ref{tab:resnet_gp_lambda}, \ref{tab:vgg_gp_lambda}.}}. Results are depicted in Fig.~\ref{fig:cifar10_baselines} and Tab.}
+\noindent\textbf{Comparisons with low-rank methods.}
+The low-rank methods we are comparing against are Pufferfish~\citep{wang2021pufferfish} and Cuttlefish~\citep{wang2023cuttlefish}. These methods try to reduce training and inference runtime while preserving model accuracy by leveraging low-rank approximations. 
+For ResNet-18, we achieve 94.19$\pm$0.07\% for 4.08M parameters and 93.97$\pm$0.25\% for 2.19M parameters compared to the 94.17\% of Pufferfish at 3.3M parameters. For VGG-19, we achieve +0.41pp (percentage points) higher accuracy compared to Pufferfish and -0.29pp to Cuttlefish at 44.8\% and 93.2\% of the sizes, respectively. Finally, comparing with the spectral initialization~\citep{khodak2021initialization} for VGG-19, we achieve +5.26pp higher accuracy for 87.5\% of parameter size. Detailed results are shown in Tab.~\ref{tab:cifar10_baselines}. This performance benefits also apply in the case of Transformers (Tab.~\ref{tab:transformer_baselines}), where \tool performs 6\% better in terms of perplexity at 25\% of the cost (MACs) and 51.7\% of the size (parameters) compared to Pufferfish. \red{It is worth noting that both Pufferfish and Cuttlefish, by default, do not decompose all layers and have warm-up full-training rounds, both of which cause training \camready{and hyperparameter optimization} overheads. \camready{In contrast, our technique only introduces two hyperarameters, namely $\lambda_{gl}$ and $\epsilon_{ps}$, which govern the whole training process.}} \camready{We have scaled up our experiments to ImageNet-1k levels (Tab.~\ref{tab:imagenet_baselines}) and for the same setup of full decomposition, we achieve slightly higher accuracy (+0.51pp) at 97.8\% of the size of Pufferfish. For partial decomposition, \tool performs on par with Pufferfish and Cuttlefish at a lower training and inference cost.}
+
+\begin{table}
+\centering
+\captionsetup{font=small,labelfont=bf}
+\caption{\camready{Maestro vs. baselines on ImageNet-1k.}}
+\label{tab:imagenet_baselines}
+\scalebox{0.8}{
+    \begin{tabular}{lllll}
+        \toprule
+        \rowcolor{Gray} Variant         & Model       & Acc. (\%)         & Params. ($M$) & GMACs \\
+        \midrule
+        \multicolumn{5}{l}{\textbf{No decomposition}} \\
+        Non-factorized & ResNet-50 & 75.32 & 25.26 & 4.12 \\
+        \midrule
+        \multicolumn{5}{l}{\textbf{Not decomposing first four blocks and last layer}} \\
+        Pufferfish$^\dagger$     & ResNet-50 & 75.99 & 15.2  & 3.6  \\
+        Cuttlefish$^\dagger$     & ResNet-50 & 76.00 & 14.9  & 3.6  \\ 
+        \tool$^*$          & ResNet-50 & \textbf{76.04} & \textbf{14.0}  & \textbf{3.4}  \\
+        \midrule
+        \multicolumn{5}{l}{\textbf{Decomposing all layers}} \\
+        Pufferfish$^\dagger$     & ResNet-50 & 71.03 & 9.4   & 2.1  \\
+        \tool$^*$          & ResNet-50 & \textbf{71.54} & \textbf{9.2}   & \textbf{2.0}  \\
+        \bottomrule
+        \multicolumn{5}{p{9.8cm}}{$^*$$\lambda_{gl}$ chosen such that the final number of parameters and accuracy is similar to the baseline models; $^\dagger$ without label smoothing (same as our setup for Maestro)}. \\
+    \end{tabular}}
+\end{table}
+\noindent\textbf{Comparisons with pruning methods.}
+The next family of baselines is related to the LTH~\citep{frankle2018the}. Specifically, we compare against IMP~\citep{paul2023unmasking} and witness that \tool can achieve +1.25pp ($\lambda_{gp} = 128e^{-6}$) and +0.24pp ($\lambda_{gp} = 32e^{-6}$) higher accuracy for ResNet-18 and VGG-19 respectively. \red{The detailed results are shown in Tab.}
+Although we cannot scale to the size that RareGems~\citep{sreenivasan2022rare} for ResNet-18, the sparsity that they achieve is unstructured, which most modern hardware cannot take advantage of. In contrast, our technique performs ordered structured sparsity compatibly with most computation targets. On the other hand, for VGG-19, we achieve +6.82pp higher accuracy at 43.6\% of the footprint.
+\noindent\textbf{Comparisons with quantized models.}
+We also compare against XNOR-Net~\citep{rastegari2016xnor}, which binarizes the network to achieve efficient inference. Training continues to happen in full precision, and inference performance is dependent on the operation implementation of the target hardware. Nonetheless, assuming a compression rate of 3.125\%, for the same model size, we achieve +1.08pp ($\lambda_{gp} = 512e^{-6}$) and +2.18pp ($\lambda_{gp} = 256e^{-6}$) higher accuracy on ResNet-18 and VGG-19.
+
+\begin{table}[t]
+    \centering
+    \captionsetup{font=small,labelfont=bf}
+    \caption{Ablation study for ResNet18 on CIFAR10}
+    \label{tab:ablation}
+    \setlength{\tabcolsep}{2pt}
+    \scalebox{0.85}{
+        \begin{tabular}{llccc}
+            \toprule
+            \rowcolor{Gray} Variant                   & Acc. (\%)         & Rel. GMACs (Train.) & Params. ($M$) \\ \midrule
+            \textbf{\tool}            & \textbf{94.19{\tiny$\pm$0.39}}        &  \textbf{1.00$\times$}      &   \textbf{4.08{\tiny$\pm$0.020}}           \\
+            \textbf{w/out GL}         & 94.04{\tiny$\pm$0.10}        &  1.33$\times$      &   11.2{\tiny$\pm$0.000}           \\
+            \textbf{w/out PS}         & 94.12{\tiny$\pm$0.36}        &  1.33$\times$      &   4.09{\tiny$\pm$0.027}           \\
+            \textbf{w/ full-training} & 94.05{\tiny$\pm$0.32}        &  1.97$\times$      &   4.09{\tiny$\pm$0.032}           \\
+            \bottomrule
+        \end{tabular}
+    }
+\end{table}
+
+\begin{figure*}[t]
+  \centering
+  \begin{subfigure}[t]{0.3\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{plots/vgg_svd_ss_maestro_vs_svd_macs.pdf}
+    \captionsetup{font=small,labelfont=bf}
+    \caption{\tool vs. SVD.}
+    \label{fig:acc_latency_trade_off_a}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.3\textwidth}
+    \includegraphics[width=\textwidth]
+    {plots/vgg_svd_ss_hierarchical_macs.pdf}
+    \captionsetup{font=small,labelfont=bf}
+    \caption{Varying HGL.}
+    \label{fig:acc_latency_trade_off_b}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.3\textwidth}
+  \centering
+    \includegraphics[width=\textwidth]{plots/vgg_svd_ss_prune_based_on_lower_rank_macs.pdf}
+    \captionsetup{font=small,labelfont=bf}
+    \caption{Nested \tool.}
+    \label{fig:acc_latency_trade_off_c}
+  \end{subfigure}
+  \captionsetup{font=small,labelfont=bf}
+  \caption{\tool accuracy-latency trade-off under different settings for VGG19 on CIFAR10.}}
+  \label{fig:acc_latency_trade_off}
+\end{figure*}
+
+\subsection{Training Behaviour of \tool}
+\label{sec:tool_behaviour}
+
+Having shown the relative performance of our framework to selected baselines, we now move to investigate how our method behaves with respect to its convergence and low-rank approximations. 
+
+\noindent\textbf{Model and rank convergence.} In Fig.~\ref{fig:training_dynamics}, we present the training dynamics for \tool. Fig.~\ref{fig:training_dynamics_a} illustrates the evolution of total rank throughout the training steps. We observe that the ranks are pruned incrementally. This aligns with the observations made during Pufferfish~\cite{wang2021pufferfish} training, where the authors suggest warm-start training with full precision to enhance the final model performance. In our situation, we do not need to integrate this heuristic because \tool automatically prunes rank. Fig.~\ref{fig:training_dynamics_b} reveals the ranks across layers after training. We notice an intriguing phenomenon: the ranks are nested for increasing $\lambda_{gl}$. This could imply apart from a natural order of ranks within each layer, a global order. We briefly examine this captivating occurrence in the following section, and we plan to investigate it more thoroughly in future work, as we believe this might contribute to a superior rank selection and sampling process. Lastly, Fig.~\ref{fig:training_dynamics_c} depicts the progression of training loss. We find that our hypothesis that sampling does not adversely impact training is also supported empirically. 
+\subsection{Ablation Study}
+\label{sec:ablation}
+In this section, we examine the impact of each component on the performance of \tool. Specifically, we run variants of our method \textit{i)}~without the \textit{hierarchical group lasso regularization (HGL)}, \textit{ii)}~without progressive\textit{ shrinking (PS)}. Additionally, we integrate \textit{iii)}~an \textit{extra full low-rank pass} ($b=r_i$) into the training at each step to assess whether extra sampling would be beneficial. The results are displayed in Tab.~\ref{tab:ablation}. As anticipated, our findings confirm that neither the inclusion of hierarchical group lasso with a tuned $\lambda_{gl}$ nor progressive shrinking impair the final performance, but they do significantly enhance the efficiency of \tool. Moreover, sampling more ranks at each training step does not improve the final performance, and, in fact, it hampers training efficiency, making it approximately twice as computationally demanding.
+
+
+
+
+\subsection{Accuracy-Latency Trade-Off at Training and Deployment Time}
+\label{sec:tradeoff}
+In Fig.~\ref{fig:acc_latency_trade_off}, we illustrate various approaches to balance latency (proxied through MACs operations) and accuracy in model training and deployment. Fig.~\ref{fig:acc_latency_trade_off_a} demonstrates how \tool ($\lambda_{gl}=0$) can be pruned effectively for deployment using the greedy search method discussed in Section~\ref{sec:deploy}. We contrast this with the greedy pruning of a non-factorized model that has been factorized using SVD. We reveal that this straightforward baseline does not measure up to the learned decomposition of \tool and results in a significant performance decrease.
+Next, Fig.~\ref{fig:acc_latency_trade_off_b} portrays the final accuracy and the number of model parameters for varying hierarchical group lasso penalties. This leads to the optimal latency-accuracy balance for both training and inference. However, it is crucial to point out that each model was trained individually, while greedy pruning only necessitates a single training cycle.
+Lastly, we delve into the observation of nested ranks across increasing $\lambda_{gl}$. Fig.~\ref{fig:acc_latency_trade_off_c} displays the performance of \tool ($\lambda_{gl} = 0$) across different ranks selected by smaller models \tool ($\lambda_{gl} > 0$). Intriguingly, we observe that \tool ($\lambda_{gl} = 0$) performs very well—for instance, we can decrease its operations in half (and parameters by 10$\times$) and still maintain an accuracy of $87.7\%$ without fine-tuning, just by reusing rank structure from independent runs. As aforementioned, we intend to further explore this in the future.
+
+
+
+\section{Conclusion and Future Work}
+
+In this work, we have presented \tool, a method for trainable low-rank approximation of DNNs that leverages progressive shrinking by applying a generalized variant of Ordered Dropout to the factorized weights. We have shown the theoretical guarantees of our work in the case of linear models and empirically demonstrated its performance across different types of models, datasets, and modalities. Our evaluation has demonstrated that \tool outperforms competitive compression methods at a lower cost. In the future, we plan to expand our technique to encompass more advanced sampling techniques and apply it to different distributed learning scenarios, such as Federated Learning, where data are natively non-independent or identically distributed (non-IID).
+
+
+
+

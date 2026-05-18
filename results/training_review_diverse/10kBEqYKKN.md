@@ -1,97 +1,83 @@
-Now I have all the information needed. Let me produce the consolidated review, carefully cross-checking each claim.
-
----
+Now I have a thorough understanding of the paper and can verify each reviewer claim against the actual text. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper investigates how zero-shot prompts affect the latent representation geometry of autoregressive LLMs. Using IsoScore (a measure of effective dimensionality) and KMeans clustering across four model families (Gemma, Phi, Zephyr, Bloomz) and three binary sentiment datasets, it shows that prompt formulation measurably alters the distribution of EOS token representations across layers, and that clustering reveals groupings that do not cleanly align with surface-level semantic prompt similarity.
+This paper investigates how zero-shot prompt variation affects latent representations in LLMs, focusing on two aspects: (1) whether prompts modify the effective dimensionality of representations (measured via IsoScore), and (2) whether prompts can be grouped by their representational geometry rather than semantic similarity (via KMeans clustering). The study covers four model families (Gemma, Phi, Zephyr, Bloomz) across three sentiment datasets. The paper reports that prompt choice influences hidden-state geometry in a model-dependent way and that clustering yields groupings that do not always align with natural-language prompt similarity.
 
 ## Strengths
 
-1. **Demonstrates that prompt formulation systematically alters latent geometry, measured by effective dimensionality.**  
-   Table 3 reports standard deviations of IsoScore across prompts that are 13–37% of the mean IsoScore (e.g., up to 37% for Gemma 2B on YELP). This directly supports HP1 — prompt choice changes how dimensions are used. The effect is non-negligible in relative terms, and the paper correctly acknowledges that absolute IsoScore values are expectedly small (line 133) because only EOS tokens are analyzed.
+- **First systematic study of zero-shot prompt impact on latent geometry.** The paper explicitly identifies that "no works have studied the impact of zero-shot prompting approaches on the geometry of latent representation" (Section 1). It fills this gap by analyzing hidden-state distributions across layers using IsoScore and clustering, providing an initial empirical characterization of how prompt formulation modifies geometric properties of representations.
 
-2. **Provides layer-wise analysis across multiple model families and datasets.**  
-   Unlike many prompt studies that examine only outputs, this paper tracks IsoScore through every layer (Figures 1, 2) across four model families on three datasets. This reveals that prompt influence evolves through the model and is family-dependent — a genuinely informative observation.
+- **Demonstration of stable, model-dependent clustering patterns.** The clustering methodology (KMeans with majority vote) shows that prompts produce groups that are consistent across layers (Figure 4, with reported RIS values), and Table 4 reveals that semantically similar prompts (e.g., "Movie Expressed Sentiment" vs. "Text Expressed Sentiment") are not always grouped together. This provides preliminary evidence that the model's internal grouping criteria differ from human semantic intuition.
 
-3. **Combines PCA and IsoScore to mitigate dimensionality-estimation pitfalls.**  
-   The paper acknowledges PCA's instability in high dimensions (Section 3) and complements it with IsoScore, a rotation-invariant, mean-agnostic metric. This methodological thoroughness strengthens reliability of the dimensionality results.
+- **Multi-model, multi-dataset empirical scope.** The study covers four model families (Gemma 2B/7B, Phi 3, Zephyr 1.6B/3B, Bloomz 560M-1.7B) across three sentiment datasets (Rotten Tomatoes, IMDB, YELP), allowing the paper to document that prompt effects on latent geometry are model-family dependent — e.g., "the evolution is smoother for the Bloomz family" (Section 5.1) and smaller models tend to have higher IsoScore.
 
-4. **Attempts a novel clustering-based analysis of prompt grouping.**  
-   The idea of using KMeans on latent representations to group prompts (RQ2) and checking whether those groupings align with semantic similarity is creative and addresses an interesting question, even if the current evidence is incomplete.
+- **Combined use of IsoScore and clustering for complementary analysis.** The dual approach — IsoScore quantifying effective dimensionality and clustering revealing structural grouping of prompts — provides both a distribution-level and a representation-level view. This combination goes beyond prior work that studies performance or single metrics in isolation.
 
 ## Weaknesses
 
 ### Fatal
-None. The paper's core claim — that prompts measurably affect latent geometry — is supported by the evidence, albeit with gaps in statistical rigor. No weakness invalidates the central contribution.
+
+None. The paper's core claims are not invalidated by any single catastrophic flaw, though they are less strongly supported than the writing suggests.
 
 ### Major
 
-1. **Missing statistical rigor undermines the stronger claims about isotropic/extreme behavior.**  
-   The IsoScore values are very small (0 to 0.006, max 0.6% of dimensions used), and the paper acknowledges this is expected (line 133). However, the claim that "bad prompts tend to destabilize internal representations, yielding either too concentrated or too diffuse representation" (line 143) and that "bad performance seems to be correlated with extreme isotropy" (line 154) are made without any statistical test — no correlation coefficient (e.g., Spearman's ρ between accuracy and IsoScore), no null model (e.g., IsoScore variation from shuffling prompt assignments), and no confidence intervals. Given the near-zero absolute values, it is not established that the visual patterns in Figure 2 reflect meaningful geometric differences rather than measurement noise. This is an **evidential gap**: the conclusions may be correct, but the current analysis does not rule out trivial explanations.
+1. **IsoScore analysis lacks noise baselines and statistical rigor.** The IsoScore values are very small (0–0.006; line 133), and while Table 3 reports standard deviation as a percentage of the mean to argue the effect is "sturdy," there is no noise baseline (e.g., random splits of the same prompt condition, or repeated runs with different seeds) against which to compare observed across-prompt variation. Without knowing whether the between-prompt differences exceed what random subsampling or inherent variability would produce, the central claim that prompts "significantly modify" geometry in a "non-negligible way" is not quantitatively established. The paper also acknowledges "we cannot link the IsoScore to the performance" (line 143), yet the whole motivation for studying isotropy was its purported link to performance (Section 1, citing Ethayarajh 2019, Cai et al. 2021). This undermines the explanatory value of the IsoScore analysis.
 
-2. **Clustering analysis lacks baselines for the "unexpected" claim.**  
-   The paper claims that prompts are grouped "counter-intuitively" and that models use "more geometrical features than only semantic characteristics" (lines 23, 179). The evidence for this is Table 4, which shows that "Movie Expressed Sentiment 2" and "Text Expressed Sentiment" co-occur ~20% of the time across layers and models. However, there is no baseline — chance-level co-occurrence, or a similarity metric based on prompt surface form — against which 20% is judged "unexpected." Without knowing what grouping would occur by chance or by semantic similarity, the central claim for RQ2 is **unsupported by the presented evidence**. Similarly, the RIS values (Figure 4) are not compared to any random baseline, so it is unclear whether the observed consistency is above chance.
+2. **Clustering analysis lacks crucial baselines to support the "counter-intuitive" claim.** The paper interprets k' < k after majority vote as evidence that prompts are grouped by non-semantic features. However, this pattern is also what one would expect if representations are simply not perfectly separable by KMeans (which is likely given all prompts direct the model toward the same binary task). The paper does not compare against baselines such as: (a) random assignment of examples to prompts, (b) representation-level baselines from shuffled labels, or (c) an independent measure of semantic similarity between prompts (e.g., sentence-encoder embeddings). Without these, the claim that "geometrical features weakly correspond to semantic attributes" (line 179) is suggestive but not well-supported. Additionally, Table 4 reports raw co-occurrence counts (e.g., 1,525) without stating the total number of clustering trials (layers × models × runs), making it impossible to assess whether the observed co-occurrence is above chance expectation.
+
+3. **Exact prompts are not enumerated.** The paper states prompts are based on Promptsource templates with "minor modifications" (line 115) but does not list the exact prompts, their number, or how they differ. This is a significant reproducibility gap — a reader cannot determine which prompt formulations were tested or reconstruct the experiments.
+
+4. **No connection between RQ1 and RQ2.** The IsoScore analysis and clustering analysis are presented independently. The paper does not test whether prompts that cluster together share similar IsoScore profiles, which would strengthen the claim that geometric properties are shared and that the two analyses corroborate each other.
 
 ### Minor
 
-1. **Incomplete experimental details hinder reproducibility.**  
-   The prompt set is described only as "default templates … duplicated with minor modifications" (line 115). The number of prompts per dataset is never stated, the specific modifications are not enumerated, and no complete list of prompt strings is provided. (The full template list may be in the appendix stripped by the parser, but the number of prompts and the nature of the "minor modifications" are basic methodological information that should appear in the main text.)
+1. **Title scope exceeds experimental scope.** The title "Impact of Prompt on Latent Representations in LLMs" suggests a general study, but experiments are limited to binary sentiment classification. The abstract appropriately scopes this ("binary classification tasks"), but the title remains overbroad.
 
-2. **Bloomz appears in main results despite being "prototyping only."**  
-   The paper states that Bloomz is "only used for prototyping purposes" due to data contamination (line 80), yet it is included in the main figures (Figures 1, 2) alongside the other model families without clear visual separation or explicit caveats in the result analysis. This inconsistency undermines the clarity of the model survey.
+2. **Qualitative performance-isotropy link without statistical backing.** The paper states "according to the figure 2 bad performance seems to be correlated with extreme isotropy" (line 154) but provides no statistical test of this claim. Given the earlier concession that "we cannot link the IsoScore to the performance" (line 143), the claim about "bad prompts destabilizing representations" remains an observational remark rather than a supported conclusion.
 
-3. **Confusing description of clustering methodology.**  
-   The sentence "When the value of k is equal to itself, this signifies that the clusters are identical" (line 64) is poorly phrased. The distinction between k (number of prompts = number of clusters) and k′ (number of clusters after majority vote) is important but the explanation could be much clearer. Additionally, KMeans is non-deterministic, but no mention is made of clustering stability across different random seeds.
+3. **Analysis limited to EOS token representations.** While the paper acknowledges this choice (line 50: "only the last generated representation is able to capture all contextual information"), the analysis is scoped to EOS tokens at each layer. Claims about "how prompts modify the vector distribution" should be understood as specifically about the EOS representation, not about the internal processing of prompt tokens themselves.
 
-4. **Duplicate sentence in Section 4.1.**  
-   The sentence "It is also noteworthy that other models provide minimal information regarding their pre-training data, which increases the likelihood of data contamination" appears twice verbatim (line 80).
+4. **No check for label leakage in clustering.** If some prompt phrasings systematically encode the ground-truth label words, the EOS representation might encode class information rather than prompt identity. The paper does not discuss or control for this confound.
 
-5. **Limited novelty of the headline conclusion.**  
-   The paper's concluding statement — "the internal representation of models is highly dependent on small changes in the input" (line 190) — is acknowledged by the authors themselves as "a reasonable and expected statement." While this self-awareness is honest, it underscores that the paper's core finding is not particularly surprising. The value lies in the specific geometric characterization, not in the high-level conclusion.
+5. **Table 4 would benefit from normalized reporting.** Reporting raw co-occurrence counts without the denominator (total clustering trials across all models and layers) limits interpretability — the reader cannot gauge whether 1,525 is large or small relative to chance.
 
 ### Trivial
 
-- "Exemple" in Table 4 caption should be "Example" (line 175).
-- The paper uses inconsistent capitalization ("Isoscore" vs. "IsoScore"; line 52 vs. line 126).
+- Table 2 caption ("Mean standard deviation computed over the models and the prompts for each DataSet") is ambiguous about which variance component is being reported.
+- No computational budget is stated, though this is a minor omission for an empirical analysis paper.
+- Some redundant phrasing (e.g., the repetition about data contamination concerning Bloomz in Section 4.1).
 
 ## Nice-to-Haves
 
-- **Null model for IsoScore differences:** Plotting IsoScore distributions for random splits of the same prompt to capture measurement noise, then comparing cross-prompt differences. Reporting Cohen's d or similar effect sizes for the most different prompt pairs would substantially strengthen RQ1.
-- **Baseline for clustering:** A simple random baseline (e.g., shuffling example–prompt assignments) to contextualize RIS values. For Table 4, comparing co-occurrence rates against semantically-matched pairs would directly test whether models use "geometrical features beyond semantic characteristics."
-- **Discussion of why null results matter:** The finding of no monotonic relation between isotropy and performance is scientifically interesting but underexplored — the paper would benefit from discussing what this negative result implies for prompt engineering or model interpretability.
-- **Clustering stability:** Report whether the KMeans results are stable across different random initializations.
+- **Noise baseline for IsoScore:** Compute IsoScore on random halves of the same prompt condition; the variation gives a lower bound on detectable differences, making it possible to assess whether across-prompt differences are meaningful.
+- **Semantic similarity baseline for clustering:** Embed the prompt templates using a standard sentence encoder and compare the resulting similarity matrix to the co-clustering matrix. If the two align poorly, that directly supports the "geometric features beyond semantics" claim.
+- **Permutation test for Table 4:** Report the distribution of co-occurrence counts under random prompt-label permutations, so the reader can assess whether the observed groupings are above chance.
+- **Link RQ1 and RQ2:** Check whether prompts that cluster together also have similar IsoScore profiles across layers.
 
 ## Removed Points
 
-These points are flagged to be removed — treat them with caution:
+These points are flagged to be removed; treat them with caution.
 
-- **"Abstract/Introduction over-claim novelty"**: The harsh critic claims the framing is imprecise because the paper cites existing isotropy literature. However, the novelty claim is specifically about *applying these tools to study zero-shot prompting* — a distinct niche. The paper does not claim the tools themselves are novel. Not a weakness.
-- **"Section 2 is verbose"**: Pure style nitpick. Removed per rule.
-- **"Model selection not justified / missing LLaMA"**: The choice of four open-weight families (Gemma, Phi, Zephyr, Bloomz) is defensible, and requesting LLaMA is scope creep. Removed per rule about evaluating papers against their own choices.
-- **"The 'k is equal to itself' sentence is a parser artifact"**: The reviewer claimed this sentence is garbled due to parser issues. In the actual extracted text (line 64), the sentence reads: "When the value of k is equal to itself, this signifies that the clusters are identical." This is poorly written but not a parser artifact. Moved to Minor weakness #3 as a clarity issue rather than a formatting artifact.
-- **"Missing supplementary/appendix material (full prompt list)"**: The parser strips supplementary sections from all papers. The full list may exist in the original submission's appendix.
-- **"Section 2 misses opportunity to test isotropy-performance correlations"**: This is a suggestion for additional work, not a weakness of the existing study, whose stated scope does not include this test.
+- **"Central contribution is trivially true"** (Harsh Critic Point 3, first paragraph): This mischaracterizes the paper's contribution. The paper does not merely assert that prompts affect representations (which would indeed be trivial) — it characterizes *how* they affect geometry (IsoScore patterns, layer-wise evolution, model-dependency, counter-intuitive clustering). The paper's actual contributions on lines 23–24 are more specific than the critic allows. The valid sub-concern (insufficient evidence for the claims) is already captured in Major weaknesses 1 and 2 above; the "trivially true" framing is a strawman and is removed.
+- **"The paper would be more convincing if..." framing paragraphs** (Strengthening the Paper on Its Own Terms section): These are suggestions, not weaknesses of the current paper. The actionable ones are migrated to Nice-to-Haves and Suggestions above.
+- **"The writing is at times redundant and contains odd phrasings"**: These are stylistic judgments that do not affect scientific content; the specific example cited ("we cannot totally state on the hypothesis since Zephyr is also trained on the datasets") is actually the paper appropriately noting a confound, not an error.
 
 ## Novel Insights
 
-The reviews surface two key tensions in the paper that go beyond the paper's own self-assessment. First, the absolute scale of IsoScore values (0–0.006) creates an inherent tension: the paper argues these differences are "non-negligible" by reporting relative standard deviations of 13–37%, yet without a null model to calibrate what constitutes a meaningful difference at this near-zero scale, it is impossible to separate signal from noise. Second, the paper's most surprising claim — that models group prompts based on non-semantic geometric features — is simultaneously its most interesting and its least supported finding, because the evaluation lacks the very baseline that would define "surprising." The clustering analysis would be far more persuasive if it systematically compared co-clustering rates across prompts grouped by semantic similarity vs. prompts grouped by syntactic modifications, directly testing the "geometric > semantic" hypothesis.
+The primary novel insight across the two reviews is the convergence that the paper identifies a genuinely underexplored question (how prompt formulation affects the *geometry* of latent space, not just performance), but that the current evidence is observational and preliminary rather than confirmatory. The two analyses (IsoScore and clustering) are each missing the baselines that would turn description into explanation. A stronger version of the paper would pick one claim (e.g., the counter-intuitive clustering) and test it with the appropriate baselines and statistical controls, rather than spreading thin across two under-supported analyses. The observation that Table 3 (std as % of mean) provides the paper's best quantitative evidence for a prompt effect is worth highlighting — this is where the paper comes closest to a rigorous demonstration, and future work should build on this approach with formal statistical testing.
 
 ## Suggestions
 
-1. **Quantify the "bad prompts" claim.** Compute a correlation (e.g., Spearman's ρ) between prompt accuracy and IsoScore (or IsoScore variance) with confidence intervals, or provide a null distribution via permutation testing. This would either support or refute the visual claim in Figure 2.
-
-2. **Add a baseline to the clustering analysis.** Define "expected" grouping via a simple semantic similarity measure (e.g., BERTScore or n-gram overlap between prompt templates) and compare to the clustering-based co-occurrence rates. This would directly test whether models deviate from semantic grouping.
-
-3. **State the number of prompts per dataset and enumerate the modifications made.** Even a brief table in the main text would significantly improve reproducibility.
-
-4. **Either remove Bloomz from the main figures or clearly separate it** (e.g., with a distinct linestyle) and explain in the caption how the prototyping usage differs from the other models.
-
-5. **Clarify the clustering methodology.** Replace the confusing "k is equal to itself" phrasing with an explicit statement: "Let k be the number of prompts. After majority voting, the number of distinct clusters is k′ ≤ k. When k′ = k, each prompt maps to a unique cluster; when k′ < k, some prompts share a cluster."
+- For the clustering analysis, add a permutation baseline: shuffle the prompt labels of each example and re-run the clustering; compare the observed k' and RIS against the distribution under random labels. This directly tests whether the "superclusters" reflect genuine structure.
+- For the IsoScore analysis, add a within-prompt noise baseline: split the examples of each prompt into two random halves, compute IsoScore on each half, and report the within-prompt variance. Compare this to the across-prompt variance to establish effect size.
+- List the exact prompt templates in a public repository or appendix (the paper states they derive from Promptsource, but "minor modifications" need to be specified).
+- Add a semantic similarity baseline for the clustering: embed prompt texts with a standard sentence encoder (e.g., Sentence-BERT) and correlate the resulting similarity matrix with the prompt co-clustering matrix.
+- Either link RQ1 and RQ2 explicitly (e.g., do prompts in the same cluster have similar IsoScore curves?) or restructure the paper to present them as independent exploratory analyses to avoid promising integration that is not delivered.
 
 ## Score and Decision
 
-This paper addresses an interesting question — how prompting affects the internal geometry of LLM representations — and provides a layer-wise analysis across multiple model families that is genuinely informative. The core evidence for RQ1 (prompts modify latent geometry) is suggestive, with relative standard deviations of 13–37% reported in Table 3. However, the paper makes two stronger claims — that "bad prompts destabilize representations" and that models group prompts based on "geometrical features beyond semantic characteristics" — without the statistical support or baselines needed to substantiate them. These gaps are major but not fatal: they weaken the paper's headline claims rather than invalidating its core observational contribution. With additional rigor (null models, baselines, statistical tests) and fuller experimental disclosure, the paper could be a solid contribution to the understanding of prompt effects on LLM internals. In its current form, the evidence does not fully support the stronger interpretive claims, and the missing baselines for the clustering analysis leave RQ2 unconvincing.
+The paper tackles an interesting and underexplored question, and the multi-model, multi-dataset experimental scope is commendable. However, the evidence falls short of the claims: the IsoScore analysis lacks the statistical baselines needed to show the observed variation is systematic rather than noise, the clustering analysis lacks the baselines needed to support the "counter-intuitive" interpretation, and the two analyses operate independently without the promised integration. The contribution is preliminary — a descriptive report of interesting measurements — rather than a demonstrated finding. Major methodological additions would be required to make the results convincing. In its current form, the paper does not meet the bar for acceptance at a venue expecting rigorous empirical support for causal claims about model internals.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

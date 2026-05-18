@@ -1,75 +1,81 @@
-Now I have all the information needed. Let me produce the consolidated review.
+Now I have all the information needed. Let me synthesize the final review.
 
 ## Summary
 
-This paper proposes a teacher-student framework for training GFlowNets (amortized samplers). The teacher is itself a GFlowNet trained to sample regions where the student has high loss (i.e., regions the student models poorly). This generates an adaptive training curriculum that improves mode coverage beyond existing off-policy methods (prioritized replay, epsilon-exploration, etc.). Experiments span deceptive grid worlds, diffusion-based continuous sampling (25GMM, Manywell), and four biochemical sequence/molecule design tasks.
+The paper proposes training GFlowNets (amortized samplers) with a secondary "teacher" GFlowNet that is trained to generate trajectories where the primary "student" has high trajectory balance loss. The teacher's reward mixes student loss (with a weighting favoring positive discrepancy regions) and the original task reward. Experiments on deceptive grid worlds, diffusion-based sampling (25GMM, Manywell), and four biochemical discovery tasks show consistent and often substantial improvements over baselines including on-policy TB, ε-exploration, GAFN, reward-prioritized replay (PRT), and loss-prioritized replay (PER).
 
 ## Strengths
 
-1. **Consistent and substantial empirical improvement across diverse benchmarks.** The teacher method discovers significantly more modes than all baselines across all tested domains. On the 2D H=256 deceptive grid, the teacher discovers 2452.6 modes vs. 2165.2 for the next best (PRT) and achieves L1 distance of 0.94 vs. 1.55. On the Manywell diffusion task (d=32), the teacher achieves EUBO 165.80 — nearly matching the true log-partition (164.70) — while the best baseline (PER) yields 210.44. On all four biochemical tasks (QM9, sEH, TFbind8, L14-RNA1), the teacher improves mode discovery and EUBO metrics.
+1. **Large and consistent improvements in mode coverage across diverse domains.** The teacher discovers dramatically more modes than all baselines, especially in harder settings. On the d=4, H=32 grid, it finds 246.6±14.7 modes vs. 120.4±19.1 for the next-best baseline (PRT) and 16.6±4.8 for on-policy TB (Table 1). This is a multi-fold improvement, not an incremental gain.
 
-2. **Well-motivated method with a clear conceptual contribution.** The idea of using a secondary amortized model to explicitly sample high-loss regions, thereby "amortizing" an ideal prioritized experience replay over the entire sample space, is novel and principled. The paper correctly identifies that existing off-policy methods (PER, replay buffers) are limited to previously visited states, and the teacher addresses this gap via generalization.
+2. **State-of-the-art results on diffusion-based sampling.** On 25GMM and Manywell (Table 2), the teacher achieves the best scores across all metrics. The EUBO gap is particularly striking — 0.115 vs. 1.833 (PER) on 25GMM and 165.800 vs. 210.440 (PER) on Manywell, with the true log Z being 164.7. The KDE plots in Figures 3 and 4 provide compelling visual evidence that baselines miss modes the teacher captures.
 
-3. **Rigorous experimental design with comprehensive baselines.** The paper compares against on-policy TB, ε-exploration, GAFN, reward-prioritized replay (PRT), and loss-prioritized replay (PER) across three distinct domains (discrete, continuous, biochemical). It also demonstrates complementarity with local search and tests flexibility across different GFlowNet objectives (TB and DB). Results are reported with standard deviations over multiple runs.
+3. **Consistent gains across all four biochemical discovery tasks.** The teacher improves mode discovery and convergence speed over PER, PRT, and on-policy TB on QM9, sEH, TFbind8, and L14-RNA1 (Figure 4). On the largest task (L14-RNA1), the teacher surpasses both PER and PRT in ELBO, EUBO, and number of modes, suggesting the method scales with problem difficulty.
 
-4. **Training dynamics visualization supports the proposed mechanism.** Figure 5 (fig:diffusion-teacher-student) shows KDE plots at intermediate training stages, revealing that the teacher adaptively concentrates probability mass on modes the student is missing, which directly illustrates the intended behavior.
+4. **Principled and well-motivated algorithm design.** The teacher's reward design (student loss weighting with a positive-discrepancy indicator, reward mixing) is clearly motivated by the goal of directing exploration toward undersampled high-reward regions. The joint training procedure (Algorithm 1) with a mixed behavior policy sampling from student, teacher, and prioritized buffer is concrete and reproducible.
+
+5. **Robustness across objective functions and hyperparameters.** The method is validated with both trajectory balance and detailed balance objectives, and the paper includes ablations on key hyperparameters (C, α) showing the method is not narrowly tuned.
 
 ## Weaknesses
 
-### Fatal
+### Major
 
-None.
+1. **The claim that the teacher "generalizes across unexplored modes" is insufficiently supported.** The paper states in the abstract that the teacher "can generalize across unexplored modes" and in the introduction that it "has the potential to generalize across the high-loss regions of the \student, without regard for whether they have previously been sampled." However, the experiments only show that the *combination* of teacher + student discovers more modes than baselines — they do not demonstrate that the teacher specifically assigns probability to *genuinely unvisited* modes via neural generalization (as opposed to exploring new regions through the teacher's own sampling process and then training the student there). The teacher is trained on trajectories from the behavior policy (student + teacher + buffer); if neither the student nor the teacher has visited a mode, there are no high-loss training signals from that mode. The paper provides no analysis (e.g., controlled experiment with a held-out mode, nearest-neighbor checks, or generalization gap measurements) to distinguish between (a) the teacher exploring a new region and the student subsequently learning from it, and (b) the teacher assigning probability to a never-visited region through network interpolation before any sample from that region exists. These are different mechanisms, and only (b) constitutes "generalization" in the sense claimed. The empirical results are strong, but the mechanistic claim is not substantiated.
+
+2. **The experimental design does not control for increased model capacity and compute.** The teacher adds a second GFlowNet of equal capacity, effectively doubling the parameter count and training cost compared to every baseline (all single-network). The paper acknowledges this as a limitation in the Discussion but provides no compute-matched or capacity-matched ablation — e.g., training a single wider student with the same total parameter count, training a single student for twice as many iterations, or increasing the replay buffer capacity. Without such controls, it is difficult to attribute the gains specifically to the teacher's adaptive curriculum mechanism rather than simply having more model capacity and training signal. This is a serious confound for a paper whose core claim is about a *mechanism* (adaptive prioritization via a teacher) rather than just a capability result.
 
 ### Minor
 
-1. **Generalization to unexplored modes is not directly isolated.** The central mechanistic claim — that the teacher generalizes to modes *never before visited*, rather than simply providing better loss-weighted sampling of near-visited regions — is supported only by indirect evidence (superiority over PER, visualizations). A direct analysis tracking mode novelty over training (e.g., on the grid world, measuring what fraction of teacher-sampled modes were absent from the replay buffer) would strengthen the paper's narrative. This does not undermine the empirical contribution — the method clearly works — but leaves the *explanation* for why it works partially unverified.
+1. **Joint training dynamics are acknowledged but uncharacterized.** The teacher's reward depends on the student's parameters and is therefore non-stationary. The paper provides a stationary-point analysis (Theorem 1 in appendix) but this only characterizes a point where the student is already an exact sampler — it says nothing about convergence from random initialization. The paper proposes local search as a mitigation but shows its effect only in one grid-world setting (Figure 5/Fig. grid_ls). The main paper does not show the teacher's own loss over training, making it hard to assess whether the teacher-training loop is well-behaved. While this is common in two-network setups and the empirical results suggest stability, the analysis is thin.
 
-2. **Hyperparameter sensitivity for C and α is deferred to the appendix.** The reward design introduces free parameters C (weighting constant for positive δ, set to 19 universally) and α (reward mixing coefficient). While the paper references appendix ablations, the main text does not report sensitivity. Given that these are design choices specific to the method, some main-text robustness demonstration (even a brief statement) would increase confidence that success does not depend on careful tuning. (Note: the paper references these ablations — they are not absent, just deferred.)
+2. **No ablation that isolates the value of amortization vs. a better priority function.** The critic suggests that the teacher's reward design (loss weighting with positive-discrepancy indicator + reward mixing) could be implemented as a replay buffer priority function without a second network. The paper compares against PER (priority = loss) and PRT (priority = reward), but not against a baseline that uses the *same priority function* as the teacher's reward (Eq. 5 mixed with Eq. 6) applied to sampling from the replay buffer. Such an ablation would isolate whether the gains come from the specific reward design or from the fact it is amortized into a generative policy. Given that the teacher's improvements over PER are very large (e.g., 246 vs. 47 modes on the hardest grid), it is unlikely a better priority function alone would close the gap, but the experiment is missing.
 
-3. **Theoretical analysis is lightweight.** Theorem 1 (appendix) asserts existence of a stationary point where the student is exact and the teacher samples proportional to εR(x)^α. This is unsurprising (if student is exact, loss is zero everywhere and teacher reward reduces to εR(x)^α) and does not address convergence, stability under coupled non-stationary optimization, or whether the dynamics actually drive the system toward this point. The local search mechanism partially mitigates non-stationarity concerns, but the theoretical framing provides limited guidance. This is not a fatal weakness — the paper is primarily empirical — but the theory section is somewhat thin relative to the rhetorical weight placed on it.
+3. **Behavior policy mixing proportions are not given in the main text.** The ratios governing how often the behavior policy samples from the student vs. the teacher vs. the prioritized buffer (Algorithm 1, line 3) are relegated to the appendix. These are significant hyperparameters that could strongly affect results. While it is standard to put implementation details in an appendix, a brief summary or justification in the main text would help the reader assess the method's sensitivity.
 
-4. **Behavior policy mixing rule is unspecified in main text.** Algorithm 1 (line 3) mixes student, teacher, and buffer with unspecified probabilities. The paper defers this to the appendix. While this is standard practice, the reader cannot assess how the balance between these three sources affects performance without consulting the appendix. A brief summary of the mixing rule in the main text would improve self-containedness.
+4. **Local search's role in non-stationarity mitigation is demonstrated only for grid worlds.** The paper shows that local search accelerates mode discovery in the d=4, H=32 grid (Fig. grid_ls), but does not test it in the diffusion or biochemical tasks. The reader cannot tell whether local search would further improve the teacher's results in these settings, or whether the teacher's gains in Tables 2 and Figure 4 are (in part) attributable to local search effects that could be replicated with other methods.
 
 ### Trivial
 
-- The paper uses "modes discovered" as a metric across experiments but does not define the threshold for what counts as a "mode" in the main text (though this follows prior work conventions). A brief definition would help readers not already familiar with the GFlowNet literature.
-- The biochemical results are presented as training curves (Figure 5) rather than final-value tables, which would be more precise for comparison. However, curves are informative and standard for this type of experiment.
+- The Manywell W2 result for the teacher (5.46) is actually very strong (vs. the ground-truth W2 of 5.36 and PER's 5.91). The paper could briefly note how close the teacher gets to the ground-truth lower bound, to preempt confusion.
 
 ## Nice-to-Haves
 
-- A direct mode-novelty tracking experiment on the grid world (e.g., measuring what fraction of teacher-sampled terminal states are "new" w.r.t. the buffer) to directly verify the generalization claim.
-- A wall-time or computational cost comparison (the paper acknowledges added complexity but does not quantify the overhead).
-- A unimodal or easy task where the teacher does *not* help, to validate the "judicious application" claim made in the limitations section.
+- A controlled experiment with an explicitly held-out mode (e.g., a grid world with one mode that the student cannot reach during initial training) to directly test whether the teacher assigns probability to it before the student has ever sampled it.
+- A compute-matched baseline (e.g., a wider single network or double training steps) to disentangle the teacher mechanism from added capacity.
+- An ablation where the teacher's full reward function (Eq. 5 + Eq. 6) is used as a sampling priority in the replay buffer without a separate teacher network.
+- Wall-clock time comparisons alongside the main results.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed — treat them with caution:
 
-- **Critical Issue 1 overstated as "evidential gap weakening the paper's central contribution."** The empirical results consistently show the teacher outperforming PER by large margins. This *is* evidence of the mechanism — if the teacher merely reweighted visited states, it could not outperform PER, which already does loss-weighted replay. Downgraded to Minor.
-
-- **"Teacher uses local search in this task (Fig 4) but the main results (Table 1) do not state whether local search was used."** The paper clearly separates these: Table 1 results do not use local search, and the local search experiment is presented separately in its own paragraph and figure. The critic misread the paper structure. Removed.
-
-- **"Grid world mode counts not contextualized."** The paper follows standard evaluation conventions from the GFlowNet literature. The exact number of "modes" depends on the reward threshold definition, which is standard. Removed.
-
-- **"High-variance estimator could cause instability."** The paper explicitly justifies single-sample estimation as an unbiased gradient estimator that SGD will average over. This is standard practice in GFlowNet and variational inference. Removed.
-
-- **"Reward mixing could equally be achieved by loss-based reward alone."** This is speculative and contradicts the paper's deliberate design choice. The reward mixing is a design decision with ablations in the appendix. Removed as unsupported speculation.
-
-- **Strength Finder Strength 2 ("generalizes beyond visited states"):** This partially restates the mechanism claim rather than providing independent evidence. However, the paper's consistent outperformance of PER across all tasks does constitute reasonable support. Kept as a strength but noted that the evidence pattern is consistent with multiple interpretations.
+- **Criticism about the teacher's W2 being "worse" than the target W2 (5.46 vs. 5.36) being hard to interpret.** Removed because it reflects a misunderstanding: the target W2 of 5.36 is the W2 distance computed from ground-truth samples (lower bound for any method). The teacher achieves 5.46, which is extremely close to this bound and much better than PER's 5.91. This is a strength, not a confusion point.
+- **"The paper uses the term 'teacher' throughout, but the teacher does not teach the student in the typical sense."** Removed as a terminology nitpick that does not affect the technical content.
+- **"It is unclear how the method would perform when modes have fundamentally different structure."** Removed as speculation about untested scenarios, not a concrete weakness of the presented experiments.
+- **EUBO question about mode coverage connection.** Removed — the paper cites Blessing et al. (2024) for EUBO as a mode coverage metric, which is appropriate; the connection is established in that reference.
+- **"Fixed backward policy might limit the teacher's ability."** Removed as speculation without evidence.
+- **Criticism about "The paper does not discuss how often the teacher's reward is recomputed for local search steps."** The teacher's reward depends on student parameters and is recomputed each training iteration as shown in Algorithm 1 (line 8). This is implicit in the algorithm.
+- **"Figure 6" references / claims about missing teacher loss curves.** Removed — these figures exist in the appendix (which was stripped by the parser). The critic's claim that "we do not see the teacher's loss" is incorrect for the full submission.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The reviews surface a recurring tension: the paper claims a specific *mechanism* (generalization across unexplored modes via amortization) but only provides *capability-level* evidence (the method discovers more modes). The distinction between capability claims and mechanistic claims is an important structural observation about how empirical ML papers should be evaluated, but it is not a novel insight about the paper's content.
 
 ## Suggestions
 
-- For camera-ready, add a short paragraph or figure in the main paper directly measuring whether the teacher's samples lead to modes not present in the replay buffer, at least on the grid world. This would directly substantiate the "generalization beyond visited states" claim that distinguishes the method from PER.
-- Report the behavior policy mixing fractions (student vs. teacher vs. buffer) in the main text, not just the appendix.
-- Include a brief sensitivity note for C and α, even if just stating the range over which performance is stable.
+1. Add a controlled experiment to directly test whether the teacher generalizes to truly unvisited modes (e.g., a grid where one mode is initially unreachable by the student's policy, and check whether the teacher's policy assigns probability to it before any trajectory from that mode enters the training set).
+2. Add a compute-matched ablation (single wider student with same total parameters, or same student trained for twice as many steps) to disentangle the teacher mechanism from added model capacity.
+3. Add an ablation where the teacher's reward function (Eq. 5 + Eq. 6) is used as a PER priority directly, to isolate the value of amortizing the priority distribution.
+4. Include a brief summary of the behavior policy mixing ratios in the main text.
+5. Note the Manywell W2 result's proximity to the ground-truth lower bound explicitly in the results discussion.
 
 ## Score and Decision
 
-This is a high-quality paper with a novel, well-motivated method and strong, consistent empirical results across diverse and practically relevant domains. The weaknesses are minor — they concern the strength of the mechanistic evidence and the placement of ablations, not the validity of the empirical contributions. The paper is clearly written, the method is reproducible, and the contribution is significant for the GFlowNet and amortized inference communities.
+This paper proposes a genuinely useful method for improving exploration in GFlowNets, with large and consistent empirical gains across diverse and challenging tasks. The core idea — training a secondary GFlowNet to target high-loss regions of the primary model — is novel, well-motivated, and clearly presented. The experiments are extensive (grid worlds, diffusion sampling, four biochemical tasks) and the results are striking, particularly in the harder settings where the teacher discovers 5-15× more modes than the next best baseline.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+However, the paper has two significant weaknesses that prevent it from being fully convincing in its current form. First, the strongest mechanistic claim — that the teacher *generalizes* to unexplored modes (as distinct from simply exploring new regions through its own sampling) — is not supported by the evidence presented. Second, the lack of compute/capacity-matched baselines means the gains cannot be cleanly attributed to the teacher's adaptive curriculum rather than to simply having more model capacity. These are addressable but non-trivial gaps.
+
+The paper is on the borderline: the empirical contributions are strong enough to warrant acceptance at a competitive venue, but the unsupported mechanistic claims and missing controls weaken the argument. With revisions that add the suggested ablations and temper the generalization claim, the paper would be a clear accept.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

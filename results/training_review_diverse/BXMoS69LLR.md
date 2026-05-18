@@ -1,76 +1,74 @@
-Now I have all the information I need. Let me write the consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper demonstrates that current evaluation datasets for membership inference (MI) attacks on foundation models suffer from systematic distribution shifts between members and non-members across all eight examined benchmarks (spanning LLMs and diffusion models). The authors design simple "blind" attacks (date thresholding, bag-of-words classifiers, greedy n-gram selection) that completely ignore the target model yet outperform all reported state-of-the-art MI attacks on every dataset — often by dramatic margins (e.g., 94.4% vs. 43.2% TPR@5%FPR on WikiMIA). The paper concludes that existing evaluations measure distribution differences rather than actual membership leakage, and proposes using datasets with proper random train-test splits (the Pile, DataComp, DataComp-LM) as a path forward.
+This paper demonstrates that all eight published membership inference (MI) evaluation datasets for foundation models suffer from distribution shifts between members and non-members. Using simple "blind" attacks that never query the target model (date detection, bag-of-words classifiers, greedy n-gram selection), the authors outperform state-of-the-art model-based MI attacks on every dataset — in some cases more than doubling prior results (e.g., 94.4% vs. 43.2% TPR@5%FPR on WikiMIA). The paper argues that existing MI evaluations conflate genuine membership leakage with spurious distribution-shift artifacts, and proposes a constructive path forward using models trained on random data splits (the Pile, DataComp, DataComp-LM).
 
 ## Strengths
 
-- **Systematic evidence across 8 diverse MI datasets**: The paper analyzes all major published MI evaluation benchmarks for foundation models (text and vision) and finds distribution shifts in every one. This breadth — temporal shifts, replication biases, distinguishable tails — makes the critique definitive rather than anecdotal.
+1. **Systematic demonstration across all existing MI evaluation datasets.** The paper identifies and empirically characterizes three categories of distribution shift (temporal shifts, replication biases, distinguishable tails) across 8 datasets spanning text and vision-language domains (Table 2). The evidence is consistent: blind attacks beat model-based MI attacks in every case, including on datasets where prior work acknowledged a temporal shift and attempted to control for it.
 
-- **Blind attacks dramatically outperform SOTA MI attacks on 6 of 8 datasets**: The margins are enormous on WikiMIA (94.4% vs. 43.2% TPR@5%FPR), Multi-Webdata (83.5% vs. 40.3% TPR@1%FPR), Gutenberg (59.6% vs. 18.8% TPR@1%FPR), BookMIA, LAION-MI, and ArXiv-1 month. This directly proves that current evaluations cannot measure true membership leakage.
+2. **Blind attacks outperform state-of-the-art MI attacks on every dataset with large margins on most.** The central empirical result (Table 2) is unambiguous. On WikiMIA, a blind bag-of-words classifier achieves 94.4% TPR@5%FPR vs. the best reported 43.2%. On Multi-Webdata, 83.5% vs. 40.3% TPR@1%FPR. On Gutenberg, 59.6% vs. 18.8% TPR@1%FPR. The margins are so large that the conclusion — that existing evaluations are confounded by distribution shifts — is robust even without statistical significance tests.
 
-- **Simplicity of blind attacks underscores the severity of the flaw**: The attacks use trivial features — regex date extraction, bag-of-words classifiers, character-level n-grams — and still beat sophisticated model-based attacks. This makes the point concrete and hard to dismiss as a methodological edge case.
+3. **Demonstration that existing attacks exploit shifts sub-optimally.** On Temporal Wiki and Temporal arXiv, where prior work explicitly attempted to control for temporal shifts, blind bag-of-words attacks still achieve slightly higher AUC and TPR@1%FPR than the best reported MI attacks. This shows that even the best prior attacks do not fully leverage available distributional cues, further undermining claims that they extract genuine membership information.
 
-- **Per-dataset case studies with detailed root-cause analysis**: For each dataset, the paper explains the specific source of distribution shift (e.g., temporal cutoff, non-English translation artifacts, metadata formatting changes) and designs a tailored blind attack. The ablation on Gutenberg (removing formatting still yields 16.6% TPR@1%FPR) is particularly thorough.
+4. **Fine-grained analysis of subtle biases.** The analysis of LAION-MI (character-level artifacts such as non-English characters and special characters appearing only in members due to translation pipeline differences) and Gutenberg (formatting changes in Project Gutenberg metadata like `.htm` vs. `.html` extensions) provides concrete, interpretable examples of how even careful replication attempts fail. These micro-level analyses strengthen the central argument by showing exactly what the blind attacks exploit.
 
-- **Constructive path forward**: Section 5 identifies concrete alternatives (the Pile, DataComp, DataComp-LM) with available pool sizes and pretrained models, giving the community a clear direction for fixing the evaluation methodology rather than just critiquing it.
+5. **Constructive path forward.** Section 5 identifies concrete datasets (the Pile, DataComp, DataComp-LM) that provide random train-test splits with models trained on those splits, enabling properly controlled MI evaluations. This gives the community a clear alternative to the flawed a-posteriori datasets.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
 None.
 
 ### Minor
 
-- **Marginal margins on two temporal datasets with no confidence intervals**: On Temporal Wiki (AUC 79.9% vs. 79.6%, +0.3pp) and Temporal arXiv (AUC 75.6% vs. 74.5%, +1.1pp), the blind attack's advantage is small. The paper reports no confidence intervals, standard deviations, or significance tests despite averaging over cross-validation runs. For these two datasets, the "outperform" claim would be more honest as "essentially ties." The central claim of the paper (evaluation is flawed) is not harmed — a near-tie on a temporally controlled dataset where the shift has been minimized is still problematic for the evaluation — but the presentational inflation of these two results should be corrected.
+1. **Abstract overclaims relative to what the evidence strictly shows.** The abstract states that "Existing evaluations thus tell us nothing about membership leakage of a foundation model's training data." The evidence shows that blind attacks *dominate* MI attacks, which means the distribution-shift signal swamps any membership signal. But it does not prove that MI attacks extract *zero* membership information — an attack could exploit both membership leakage *and* a spurious distribution shift, with the latter being larger. The paper itself acknowledges this nuance (line 46: "we cannot rule out that they are (poorly) inferring membership based on data features"), making the abstract and conclusion's stronger framing slightly inconsistent with the paper's own qualifications. This does not undermine the contribution, but a more precise claim — "existing evaluations cannot distinguish genuine membership leakage from distribution-shift exploitation, so they are uninformative as currently constructed" — would be more defensible.
 
-- **Inconsistency between Table 1 and Table 2 for Temporal arXiv AUC values**: Table 1 reports the best prior attack as 72.3% (ours: 73.1%), while Table 2 reports the best prior attack as 74.5% (ours: 75.6%) for the same metric and dataset. This discrepancy is not explained and could confuse readers about which baseline is being compared against.
-
-- **Greedy n-gram FPR stopping criterion not fully explicit**: Section 3.2 describes selecting n-grams sorted by TPR-to-FPR ratio on "part of the data" and evaluating on a "held-out set," but does not state that the 1% FPR threshold is calibrated on the training split. This detail is clear in the LAION-MI case study (line 272) but should be stated in the general methodology section.
+2. **No confidence intervals or measures of variability.** The paper reports point estimates only, even for the bag-of-words and greedy n-gram methods that use 10-fold cross-validation. This is consequential primarily on Temporal Wiki and Temporal arXiv, where the blind attack's margin over the best MI attack is small (79.9% vs. 79.6% AUC on Temporal Wiki; 75.6% vs. 74.5% on Temporal arXiv). Without standard errors or significance tests, these particular results are consistent with the margin being noise. The conclusion still stands (the larger-margin datasets are sufficient), but the claim of "strictly higher" performance on these two datasets is weaker than presented.
 
 ### Trivial
 
-- The abstract's claim that blind attacks "outperform state-of-the-art MI attacks" is technically true for all 8 datasets but creates an expectation of large margins; a caveat for the two temporal datasets with near-ties would improve accuracy.
+1. **The phrase "worse than chance" could be misinterpreted.** The paper uses "worse than chance" (lines 42, 96) to mean "worse than a blind baseline that should perform at chance in a valid evaluation." A reader skimming could misinterpret this as "below 50% AUC" or "below random guessing." The paper clarifies the intended meaning in context, but a short definition upon first use would prevent confusion.
+
+2. **Terminology clarification for "blind."** The paper consistently defines "blind" as "without looking at the target model" (lines 17–18, 51, 346). However, the blind attacks do use membership labels to train classifiers. Explicitly distinguishing "blind (no model access)" from "unsupervised (no labels)" would prevent the misimpression that the attacks require no information about the membership structure at all. The paper already describes the methods transparently, so this is a presentation clarity issue rather than a substantive flaw.
 
 ## Nice-to-Haves
 
-- **Correlation analysis between MI attack scores and blind attack features**: The paper's argument is logically complete without this — if a blind attack with no model access outperforms a model-based attack, the evaluation is invalid regardless of what the MI attack is doing. However, showing that, e.g., Min-K%++ scores on WikiMIA correlate with publication year would directly confirm that MI attacks are exploiting temporal features rather than extracting genuine membership signal, making the argument even tighter.
-
-- **Demonstration on a clean dataset**: Showing that a blind attack achieves chance performance on a properly randomized split (e.g., a random subset of DataComp) would validate the proposed path forward experimentally. The paper argues conceptually but does not demonstrate that the proposed evaluation methodology avoids the flaws it identifies.
+- A brief discussion of whether the proposed path forward (controlled datasets like DataComp) addresses the original practical motivation — detecting copyrighted training data or auditing unlearning in production models like GPT-4 and Gemini, whose training sets and weights are not public. The paper could note that its findings on controlled models may still inform expectations for opaque models, or that the field may need complementary approaches for closed models.
+- A deeper quantitative analysis of *which* features drive the blind attacks on each dataset (e.g., top distinguishing words for the bag-of-words classifier on WikiMIA, or what fraction of the arXiv one-month attack's signal comes from citation years vs. other dates). This would further concretize the distribution-shift mechanisms for readers.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+These points are flagged to be removed; treat them with caution.
 
-- **"Comparison against prior results may not be apples-to-apples (train-test split)"**: The critic argues that the blind attack uses 80/20 train-test split while prior work reports on full data. This concern is weakened because the blind attack has *less* training data, making the comparison conservative (harder for the blind attack). For datasets with large margins, this is irrelevant; even for the marginal cases, the asymmetry favors the baseline, not the authors' method. Per the hard rule on asymmetric comparisons that favor the baseline, this criticism is removed.
-
-- **"ViT-B/32 duplicated for CommonPool Medium and Small"**: This concerns a cited entity from the DataComp paper which cannot be verified without external sources. The paper reports what is available; any discrepancy belongs to the cited work, not this paper. Per the rule on questioning cited references and formatting nitpicks, this is removed.
+- **"Blind Baselines could mislead readers into thinking the attacks use no information at all about the membership structure."** The paper consistently defines "blind" as "without looking at any trained model" (lines 17–18, 51, 346) and never claims the attacks are unsupervised or "zero-shot." The methods (bag-of-words training on 80% split, greedy n-gram selection on training data) are described transparently. This is a reader comprehension concern, not a paper flaw.
 
 ## Novel Insights
 
-The most novel observation that emerges from synthesizing the reviews is a potential *meta-flaw* in MI evaluation research: the very process of constructing *a posteriori* evaluation datasets for foundation models may be *inherently* susceptible to distribution shifts because the attacker necessarily knows the construction procedure (e.g., cutoff dates, data sources). The critical structural insight is that blind attacks serve as an *upper bound* on what any model-based MI attack could plausibly claim: if a blind attack performs at a given level, any MI attack that performs below that level is provably *worse than useless* (it extracts less signal than a method with no model access), while any MI attack that performs *above* the blind attack may still be exploiting weaker auxiliary features. This means that the relevant baseline for MI evaluation is not 50% AUC/chance, but rather the blind attack's performance — a point the paper implies but does not fully formalize.
+The observation that confidence intervals are missing (especially on the Temporal datasets where margins are razor-thin) combined with the abstract's strong "tell us nothing" claim creates a subtle tension that neither the harsh critic nor the strength finder fully articulated: the paper's *rhetorical* framing is often more aggressive than what the evidence strictly supports, but the *core evidence* (large-margin results on 6 out of 8 datasets) is robust enough to carry the conclusion regardless. The weak-margin results on the two Temporal datasets are the least interesting scientifically anyway — they were already known to have temporal shifts from Duan et al. — so the paper would lose nothing by presenting them more cautiously.
 
 ## Suggestions
 
-1. **Add confidence intervals or standard deviations** for the main results in Table 2, especially for Temporal Wiki and Temporal arXiv where the margins are small. This would clarify whether the differences are meaningful.
-
-2. **Reconcile the Temporal arXiv AUC values** between Table 1 (72.3% best) and Table 2 (74.5% best). If these come from different experimental settings (e.g., different temporal splits), state this explicitly.
-
-3. **In Section 3.2, explicitly state** that the 1% FPR for greedy n-gram selection is calibrated on the training split and then evaluated on the held-out test split.
-
-4. **Hedge the abstract slightly** for the two temporal datasets where the blind attack essentially ties rather than clearly beats the prior state of the art.
-
-5. **(Optional) Add a brief correlation analysis** for one dataset (e.g., WikiMIA: plot Min-K%++ score vs. publication year) to directly demonstrate that MI attack scores track the features the blind attack uses. This would preempt the skeptical reader's objection.
+1. Soften the abstract's "tell us nothing" to something like "cannot be trusted to measure membership leakage as opposed to distribution-shift artifacts" or "are uninformative about genuine membership leakage because blind attacks dominate."
+2. Add standard errors or confidence intervals for the blind attack results, particularly for the bag-of-words and greedy n-gram methods that use cross-validation.
+3. Upon first use of "worse than chance," add a brief parenthetical definition: "i.e., worse than a blind baseline that should perform at chance under a valid evaluation."
+4. Consider explicitly noting that the small margins on Temporal Wiki/arXiv do not weaken the overall conclusion because the other six datasets show overwhelming margins, and the result on Temporal datasets simply confirms that even acknowledged temporal shifts are exploited sub-optimally by existing attacks.
 
 ## Score and Decision
 
-The paper makes a clear, significant, and timely contribution. The demonstrated flaw in MI evaluation methodology is broad (8 datasets across modalities) and deep (per-dataset root-cause analysis), and the results are decisively supported for 6 of 8 datasets. The identified weaknesses are minor and easily addressable: adding confidence intervals, reconciling a between-table numeric inconsistency, and clarifying one methodological detail. None threaten the core conclusion.
+The paper makes an original, important, and well-supported contribution. It convincingly demonstrates a fundamental flaw in all existing MI evaluation datasets for foundation models, backed by consistent empirical evidence across 8 datasets. The weaknesses are confined to framing precision and missing confidence intervals — none threaten the central claim. The paper is clearly written and provides a constructive path forward.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+**Originality:** High. The core insight — that all existing MI evaluations for foundation models are confounded by distribution shifts — is novel and important.  
+**Quality of claims:** Good, with minor overreach in the abstract that does not undermine the contribution.  
+**Soundness:** Strong. The experiments are simple, transparent, and convincingly executed.  
+**Clarity:** Good. The paper is well-structured and the methodology is clearly described.  
+**Value to community:** High. This paper should shift how the community evaluates MI attacks for foundation models.
+
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

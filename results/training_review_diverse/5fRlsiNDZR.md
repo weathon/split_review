@@ -1,84 +1,85 @@
-Now I have a thorough understanding of the paper and all claims. Let me compose the final consolidated review.
-
----
+Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the consolidated review.
 
 ## Summary
 
-This paper introduces FARV, a unit-based vocoder for Video-to-Speech (V2S) synthesis that integrates facial image embeddings (from FaRL) with acoustic unit embeddings inside a HiFiGAN generator. The core idea is to address the known weakness of unit-based vocoders in preserving speaker identity by injecting visual speaker information, while retaining the advantage of unit-based methods in bridging the domain gap between V2S frontend and vocoder without finetuning. Experiments on LRS3-TED, LRS2-BBC, and VoxCeleb2 evaluate intelligibility, speaker identity preservation, and adaptation capability.
+This paper proposes FARV, a unit-based vocoder for Video-to-Speech (V2S) synthesis that fuses facial embeddings (from the pretrained FaRL encoder) with acoustic units (from HuBERT) in a unit-HiFiGAN framework. The core idea is two-fold: (1) sharing the unit vocabulary between the frontend encoder and vocoder bridges the domain gap that plagues mel-based vocoders, and (2) injecting visual speaker information via FaRL preserves speaker identity that standard unit-based vocoders lose. Experiments compare FARV against mel-based HiFiGAN and unit-based ReVISE on LRS2-BBC, LRS3-TED, and VoxCeleb2.
 
 ## Strengths
 
-- **Novel integration of facial embeddings into a unit-based vocoder for V2S:** The paper proposes fusing visual speaker embeddings (FaRL image encoder) with acoustic unit embeddings inside the HiFiGAN generator (Section 3.3). This design directly targets a known limitation of unit-based vocoders — loss of speaker-specific information — and is the first such integration in a V2S vocoder to the best of available evidence. The approach is well-motivated and technically sound.
+1. **Novel and well-motivated architecture**: FARV is the first V2S vocoder to explicitly incorporate a pretrained facial representation extractor (FaRL) into the unit-HiFiGAN framework, directly addressing the known limitation that unit-based vocoders discard speaker-specific information (Sec. 3.3). The additive fusion of broadcasted visual embeddings with unit embeddings is simple but effective.
 
-- **Strong intelligibility among visual-only V2S methods:** Across LRS3-TED and LRS2-BBC (Table 1), FARV achieves top-1 or top-2 performance on intelligibility metrics (WER, ESTOI, MCD, LSE-C/D) among methods using only visual input — including those that rely on additional speaker embeddings or textual supervision. This demonstrates that integrating the facial embedding does not compromise content recovery.
+2. **Demonstrably better speaker preservation than unit-HiFiGAN on same-training-data comparisons**: In the dataset adaptation experiments (Table 3, Sec. 4.3.1), where both FARV and vanilla unit-HiFiGAN are finetuned on the same multi-speaker datasets (LRS2, VoxCeleb2), FARV consistently outperforms unit-HiFiGAN on speaker matching metrics. This is the cleanest evidence that the facial embedding contributes beyond simply training on more speakers.
 
-- **Demonstrated zero-shot robustness to V2S frontend outputs:** Section 4.3.2 (Table 4, Figure 3) shows that while mel-based HiFiGAN suffers severe degradation (e.g., −47.44% NISQA drop) when applied to V2S frontend predictions without finetuning, FARV maintains much more stable performance. This is a genuine advantage arising from the shared acoustic unit vocabulary and is convincingly supported by the controlled frontend-adaptation experiments.
+3. **Superior zero-shot adaptation to the V2S frontend without finetuning**: Table 4 and Figure 3 show that when vocoders are applied to frontend encoder predictions without any finetuning, FARV's performance drop is far smaller than that of mel-based HiFiGAN across nearly all metrics (e.g., WER drop ~10% vs. >100% for HiFiGAN on LRS3-TED). This resilience stems from the shared unit vocabulary and is a practically meaningful result.
 
-- **Systematic two-sided adaptation analysis:** The paper separately evaluates dataset adaptation (Section 4.3.1) and V2S frontend adaptation (Section 4.3.2) with relative percentage drop rates, providing a rigorous comparison of unit-based vs. mel-based vocoder generalizability. This experimental design cleanly isolates the effect of the shared unit vocabulary.
+4. **Top-2 intelligibility among visual-only methods despite competing against supervised baselines**: In Table 1, FARV ranks among the top two across all evaluated metrics (ESTOI, MCD, LSE-C, LSE-D) on both LRS3-TED and LRS2-BBC, outperforming several methods that rely on additional speaker embeddings or textual information. This is notable because FARV uses only visual input.
+
+5. **Empirical verification of the embedding's speaker-relevant content**: The linear probe experiments (Table 6) show that FARV's fused embedding achieves 100% gender classification accuracy vs. ~76% for unit-HiFiGAN, and significantly higher emotion accuracy. This confirms that the visual component enriches the latent representation with speaker-related cues.
 
 ## Weaknesses
 
 ### Fatal
-None.
+None. The paper's core claims are plausible and partially supported. The issues below are major but addressable.
 
 ### Major
 
-1. **Unfair comparison in the main V2S tables (Tables 1 and 2) undermines the core claim about speaker identity.** FARV is trained/finetuned on multi-speaker datasets LRS3-TED and LRS2-BBC, while unit-HiFiGAN (used by ReVISE) is evaluated zero-shot from the single-speaker LJSpeech corpus *without any finetuning* on the target datasets. The authors acknowledge this asymmetry (Section 4.2, "Given that finetuning on new datasets can significantly compromise the acoustic quality of Unit-HiFiGAN...") and justify it by noting that finetuning degrades unit-HiFiGAN's quality. However, this justification does not resolve the core problem: the speaker-identity gains observed for FARV (e.g., SECS 0.42 vs. 0.24, EER 8.71% vs. 17.50% on LRS2-BBC) could be substantially driven by training on more speaker-diverse data rather than by the facial embedding itself. The paper's headline results therefore conflate two factors (training data + facial embedding) and do not provide a clean test of whether the facial embedding is responsible for the improvement.
+1. **Training data confound in the main V2S synthesis comparison (Table 2) undermines the central speaker-preservation claim**. In the V2S synthesis evaluation, FARV is trained on multi-speaker datasets (LRS2-BBC, LRS3-TED) *with* facial embeddings, while the unit-HiFiGAN baseline is evaluated only in its LJSpeech-trained form (single-speaker) without finetuning. The paper explicitly avoids finetuning unit-HiFiGAN on the multi-speaker data (line 158), arguing that finetuning hurts quality. But this choice conflates two variables: the facial embedding *and* the multi-speaker training data. The paper *does* provide a cleaner comparison in the dataset adaptation experiments (Table 3, where both models are finetuned on the same data with ground-truth inputs), but the V2S synthesis results in Table 2 — the most direct evidence for the paper's main claim — remain confounded. A controlled experiment (unit-HiFiGAN finetuned on LRS2/LRS3 without facial embeddings, evaluated in the V2S pipeline) is needed to attribute the SECS/EER improvements to the visual modality. *Why it matters*: Without this control, the central contribution (facial embeddings improve speaker preservation) is unsubstantiated for the paper's primary evaluation setting.
 
-2. **Missing essential ablation: FARV without the FaRL embedding, trained on the same multi-speaker data.** There is no experiment in the paper that trains the unit-HiFiGAN backbone on LRS3-TED or LRS2-BBC *without* the FaRL facial embedding and compares it against FARV. Without this ablation, the reader cannot distinguish between two explanations for FARV's speaker-identity improvements: (a) the FaRL facial embedding provides useful speaker information, or (b) simply training a unit-based vocoder on multi-speaker data (regardless of facial input) improves speaker preservation. Given that the paper's central contribution is the integration of facial embeddings, this omission is significant and directly weakens support for the paper's primary claim.
+2. **Incomplete comparison with speaker-conditioned mel vocoders**. The paper argues that FARV strikes a better balance than mel-based vocoders between speaker preservation and domain adaptability. But the mel vocoder used for comparison (plain HiFiGAN) has no speaker conditioning whatsoever, while FARV benefits from FaRL's speaker-relevant features. A mel-based vocoder augmented with the same facial embedding (or another speaker embedding) would be the proper ablation to test whether FARV's advantage is due to the acoustic representation (units vs. mel) or the added conditioning. Without this, the claim that unit-based approaches are superior for this trade-off is not properly isolated. *Why it matters*: The paper frames part of its contribution as addressing mel vocoders' limitations, but the comparison is asymmetric.
 
 ### Minor
 
-1. **Ambiguity in the dataset-adaptation experimental protocol (Section 4.3.1).** The paper states that FARV is "further trained on the LRS3-TED dataset" (Section 4.3) but earlier says FARV is trained on "LRS3-TED and LRS2-BBC datasets respectively" (Section 4.1.3). It is not explicitly stated which checkpoint is used for zero-shot evaluation on LRS2-BBC (the LRS3-TED-trained model? or the LRS2-BBC-trained model evaluated on held-out test data?) and which for the finetuned condition. While the intended setup can be inferred, the lack of explicit specification makes it harder to interpret the relative performance drops in Figure 2.
+1. **No ablation on the choice of facial encoder**. The paper uses FaRL exclusively and does not test alternatives (e.g., ArcFace, a simple face recognition embedding). Given that FaRL is a large vision-language model, a lighter face embedding might work as well or better at lower cost. The 100% gender accuracy (Table 6) raises the question of whether the embedding captures coarse cues rather than nuanced speaker identity. This does not invalidate the approach but limits insight into *why* the facial embedding helps.
 
-2. **Vague description of which video frame provides the facial embedding.** Section 3.3 states only that the vocoder takes "a visual frame cropped from the input video as input." It is not specified whether this is the first frame, a randomly sampled frame, the center frame, or an averaged representation. This is a reproducibility gap.
+2. **The "leading intelligibility" claim is slightly too strong for the evidence presented**. The paper states "leading performance in acoustic intelligibility" (abstract) and "consistently ranks among the top two across all evaluated metrics" (Section 4.2.1). "Top-2" is specific and supportable, but "leading" implies first place across the board. Given that half the baselines use additional supervision (speaker embeddings, text), the framing could be more precise. A minor wording revision would suffice.
 
-3. **Embedding capability experiment (Section 4.4) is on a small, controlled dataset and provides limited support.** The linear classification on RAVDESS (24 speakers, controlled recording conditions) showing 100% gender accuracy for FARV's embedding is not strong evidence of practical benefit. The near-perfect accuracy is unsurprising for a FaRL-derived embedding on a small set, and the experiment does not directly measure whether this embedding information translates to improved synthesis quality on large-scale, in-the-wild V2S test sets.
+3. **100% gender classification accuracy in the embedding probe (Table 6) is unexplained**. Perfect accuracy on a multi-class (8 emotions, presumably balanced) dataset raises reasonable questions about potential speaker overlap between FARV's training set and the RAVDESS probe set, or whether the embedding simply memorizes a very coarse visual cue. The paper should clarify the speaker split and discuss whether this result generalizes.
 
-4. **No statistical significance or variance reporting.** All metrics are reported as point estimates without standard deviations or confidence intervals. Given the moderate size of V2S test sets and the natural variability of speaker identity metrics (EER, SECS), the significance of observed differences is unknown. This is a common gap but nonetheless limits confidence in the rankings.
+4. **Visual frame selection is underspecified**. Section 3.3 says "a visual frame cropped from the input video" is used, but it is not described how this frame is selected (random, first frame, centered on face?), whether the crop is the face region or mouth region, or whether the embedding is averaged across multiple frames. This level of detail matters for reproducibility.
+
+5. **Mel-based frontend uses a different training objective (L1 regression on Mel spectrograms) than the unit-based frontend (cross-entropy on units)**, as described in Section 3.2. The comparison between mel and unit pipelines is therefore coupled with a difference in the frontend's learning problem. The paper acknowledges this setup explicitly, but it remains a factor that should be noted when interpreting the mel vs. unit vocoder comparison in V2S adaptation.
 
 ### Trivial
-None.
+- "characterisitcs" (typo, line 4) → "characteristics"
+- "evalutate" (typo, line 145) → "evaluate"
+- "comparsion" (typo, line 81) → "comparison"
+- "interfers" (typo, line 35) → "interferes"
 
 ## Nice-to-Haves
-
-- **Human listening study (MOS):** The paper relies entirely on NISQA-MOS (an automated predictor). A small-scale listening test comparing FARV, finetuned unit-HiFiGAN, and ReVISE on speaker similarity and naturalness would strengthen the claims about the "balance between speaker characteristics preservation and acoustic quality."
-
-- **Failure case analysis:** Discussion of conditions where FARV's facial embedding may hurt performance (e.g., occluded faces, non-frontal poses, mismatched speaker identity between the image and the utterance) would improve the paper's thoroughness and help practitioners understand limitations.
-
-- **Computational cost reporting:** Model size, inference speed, and training GPU-hours are not reported, which would be useful for practical deployment assessment.
+- Testing on more diverse conditions (different languages, recording environments) beyond LRS2/LRS3 for V2S synthesis. The VoxCeleb2 experiments are a good start but focus on EER, not intelligibility.
+- A brief discussion of computational cost/latency introduced by the FaRL encoder, since this is relevant for practical deployment.
+- An ablation comparing additive fusion (used in the paper) with concatenation or cross-attention between unit embeddings and visual features.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the input reviews have been removed or downgraded. They are listed here for transparency but should not be weighted in evaluation:
 
-- **"Tables 1 and 2 are not visible in the extracted text":** This is a PDF parser artifact, not an author error. The original submission contains these tables.
-- **"No human evaluation (MOS)" — framed as a core weakness rather than a nice-to-have:** While a listening study would strengthen the paper, NISQA-MOS is a standard automated metric in the V2S literature, and its absence is not a structural flaw in a conference paper with sufficient automatic evaluation.
-- **"Missing related works":** Not included as no reviewer raised this, and I cannot independently verify claimed omissions.
-- **"No analysis of failure cases" — framed as a weakness:** This is a scope-creep expectation; failure analysis is valuable but not a standard requirement for this type of paper.
-- **Pure formatting nitpicks:** None present in the original input from reviewers.
+- **"Zero-shot terminology is misleading"** (Harsh Critic Point 2): *Removed* — The paper explicitly defines two types of adaptation in Section 4.3 ("dataset adaptation" = cross-dataset zero-shot; "V2S adaptation" = no-finetuning on frontend outputs). The term "zero-shot" for V2S adaptation means "without finetuning on frontend predictions," which is a standard and valid usage. The vocoder has not seen the specific error distribution of the frontend, even if training data comes from the same dataset. The paper's definitions are clear.
+- **"The paper should note that sync metrics could be affected by both stages"** (Harsh Critic "Other Observations"): *Removed* — This is self-evident for any two-stage pipeline and is not a meaningful gap.
+- **"The comparison with mel-based vocoders is incomplete because the mel vocoder is not given speaker conditioning, while FARV is"**: *Kept as Major* (modified from the harsh critic's framing) — This is a valid point, but the harsh critic's phrasing implied the entire mel comparison is invalid. The paper's adaptation claim (shared vocabulary helps domain gap) is independently supported even with unconditioned mel vocoders. The conditioning concern specifically affects the *speaker preservation vs. quality* comparison, not the adaptation claim. Kept as Major weakness #2.
+- **Strength Finder's claim that FARV achieves "leading" intelligibility**: *Downgraded* — The paper says "top-2 across all metrics," which is specific and supportable. "Leading" is a minor wording issue (see Minor weakness #2).
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The key insight — that facial embeddings can be fused with acoustic units in a vocoder to improve speaker identity preservation in V2S — is clearly stated by the authors. The reviews surface a methodological gap (lack of controlled ablation) but do not introduce any new conceptual insight that the paper itself does not articulate.
+Beyond the paper's own contributions, a genuinely interesting observation emerges from the combination of Table 4 and Table 5: while mel vocoders (HiFiGAN) catastrophically degrade when applied zero-shot to V2S frontend outputs (NISQA-MOS dropping to near zero), they recover fully after only 20k finetuning steps on frontend-generated Mel spectrograms. This suggests the domain gap for mel vocoders is large in *distribution* but shallow in *complexity* — a small amount of adaptation data suffices. This raises the question of whether a lightweight adaptor between the mel frontend and vocoder could match the unit-based approach without requiring a shared vocabulary, which is left unexplored.
 
 ## Suggestions
 
-1. **Add a controlled ablation:** Train a version of FARV without the FaRL embedding on exactly the same multi-speaker data (LRS3-TED or LRS2-BBC) using the same training schedule, and compare its speaker-identity metrics (SECS, EER) against the full FARV. This would directly test whether the facial embedding contributes beyond simply having access to more speaker-diverse training data.
+1. **Run the controlled experiment**: Finetune unit-HiFiGAN on LRS2/LRS3 (without facial embeddings) and evaluate its SECS/EER in the V2S pipeline alongside FARV. Report the acoustic quality as well — even if quality degrades, the trade-off illuminates what the facial embedding contributes. This single experiment would resolve the most damaging confound.
 
-2. **Replace or supplement the main V2S comparison:** Compare FARV against unit-HiFiGAN finetuned on LRS3-TED/LRS2-BBC (the same multi-speaker data, under the same training budget) as a secondary comparison in the main tables, even if its acoustic quality degrades — the relative trade-off would still be informative. Place the zero-shot comparison in a separate table with explicit caveats.
+2. **Add a speaker-conditioned mel baseline**: Augment HiFiGAN with FaRL (or any speaker embedding) and compare on the V2S frontend adaptation experiments. This isolates whether FARV's advantage is due to units or the added conditioning.
 
-3. **Clarify the evaluation protocol:** Precisely specify which exact model checkpoint (trained on which dataset) is used for each zero-shot and finetuned condition in the dataset-adaptation experiments. Specify how the input video frame for FaRL is selected.
+3. **Clarify the visual frame processing**: Specify how the input frame is selected, cropped, and whether the embedding is averaged across frames. Also clarify speaker overlap between FARV training splits and the RAVDESS probe set to address the 100% gender accuracy question.
 
-4. **Report error bars** (e.g., standard deviation across non-overlapping test splits or bootstrap confidence intervals) for at least the primary speaker-identity metrics (SECS, EER) and NISQA-MOS.
+4. **Tone down the "leading" language**: Replace "leading performance" with "competitive performance, ranking among the top two across all metrics despite using only visual input."
 
 ## Score and Decision
 
-The paper addresses a real problem in V2S (speaker identity loss in unit-based vocoders) with a well-motivated and technically sound approach. The frontend-adaptation experiments (Section 4.3.2) are a genuine strength and convincingly demonstrate the advantage of unit-based methods over mel-based ones for V2S deployment. The intelligibility results are competitive.
+The paper addresses a real problem and proposes a sensible, novel approach. The core architectural idea (facial embeddings as speaker conditioning for unit-based V2S vocoders) is well-motivated and has practical potential. The paper's strengths include clear evidence that unit-based vocoders outperform mel-based ones for V2S frontend adaptation (Table 4), and that FARV beats vanilla unit-HiFiGAN when both are trained on the same data (Table 3). However, the main V2S synthesis comparison (Table 2) — which is supposed to demonstrate that facial embeddings improve speaker preservation — is confounded by training data differences. The mel vocoder comparison is also asymmetric. These weaknesses are major but not fatal; they require additional controlled experiments to resolve. In its current form, the central claim is insufficiently supported.
 
-However, the central contribution — that facial embeddings improve speaker identity preservation — is **not adequately supported** by the experiments as presented. The two major weaknesses (unfair comparison confounded by training data differences, and missing ablation controlling for data) mean the paper's primary claim cannot be cleanly validated from the provided evidence. The secondary experiments (embedding classification on RAVDESS) are on too small a scale to fill this gap.
+**Score**: 4.5 / 10 (major revisions needed)
 
-The paper has clear merit and the idea is worth pursuing, but the experimental validation needs substantial revision before the core claim can be accepted. With fair comparisons and a proper ablation, this could become a solid contribution.
+**Decision**: Reject (but encouragement to resubmit with controlled experiments)
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

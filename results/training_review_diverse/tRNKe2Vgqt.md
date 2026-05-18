@@ -1,90 +1,69 @@
-Now I have all the information needed. Let me produce the consolidated review.
+Now I have all the verification I need. Let me compose the final review.
 
 ## Summary
 
-MMWorld introduces a new multi-discipline, multi-faceted video understanding benchmark for evaluating MLLMs' world-model capabilities. It comprises a human-annotated subset (417 videos, 1,559 QA pairs across 7 disciplines and 61 subdisciplines) and synthetic subsets for modality-specific analysis (5,068 additional QA pairs). The work evaluates 12 MLLMs, finding that even the best model (GPT-4o) achieves only 62.54% accuracy, and reveals interesting divergences between model and human performance patterns.
+MMWorld introduces a multi-discipline, multi-faceted video understanding benchmark spanning seven broad disciplines (69 subdisciplines) with 1,910 videos and 6,627 QA pairs. The benchmark combines a human-annotated main subset (417 videos, 1,559 QA pairs) targeting multi-faceted reasoning (explanation, counterfactual thinking, future prediction, domain expertise, temporal understanding, attribution understanding, procedure understanding) with synthetic subsets isolating audio-only and visual-only perception. The paper evaluates 14 MLLMs and finds that even the best proprietary model reaches only 62.54% accuracy, with most open-source models performing far worse. The benchmark's core contribution—being the first video benchmark to simultaneously cover multi-discipline breadth and multi-faceted reasoning—is genuine and fills an identified gap.
 
 ## Strengths
 
-- **Genuinely novel multi-discipline coverage**: MMWorld spans 7 broad disciplines and 69 subdisciplines (Art & Sports, Business, Science, Health & Medicine, Embodied Tasks, Tech & Engineering, Games), requiring domain expertise that prior video benchmarks (MVBench, Perception Test) do not cover. Table 1 substantiates this uniqueness.
+- **Multi-discipline coverage is a genuine differentiator**: Table 1 shows MMWorld is the first video benchmark to check "Multi-Discipline"—it covers Art & Sports, Business, Science, Health & Medicine, Embodied Tasks, Tech & Engineering, and Games across 69 subdisciplines. Prior benchmarks (Perception Test, MVBench, Video-Bench) do not offer this breadth.
 
-- **Multi-faceted reasoning beyond perception**: The benchmark includes 7 reasoning types (explanation, counterfactual thinking, future prediction, domain expertise, temporal understanding, attribution understanding, procedure understanding) that go well beyond the perception-level or single-task evaluations in existing benchmarks. Concrete examples are provided in Figure 2.
+- **Multi-faceted reasoning beyond perception**: The benchmark includes counterfactual thinking, future prediction, explanation, domain expertise, temporal understanding, attribution understanding, and procedure understanding. Table 1 shows MMWorld is the only video benchmark covering all four of Explain., Counter., Future., and Domain.—prior benchmarks cover at most three of these.
 
-- **First-party human annotations as the core asset**: Unlike benchmarks that repurpose existing datasets entirely, MMWorld's main subset is manually annotated and reviewed by humans, resulting in 1,559 carefully crafted QA pairs across diverse disciplines. This human-annotated set is the paper's strongest and most defensible contribution.
+- **Controlled synthetic subsets for modality isolation**: The automatic pipeline (Section 3.2, Figure 3) generates audio-only and visual-only QA subsets. Table 6 provides informative modality-specific comparisons (e.g., Video-Chat excels at audio perception, Gemini Pro at visual perception) that would be confounded in a single-modality benchmark.
 
-- **Comprehensive evaluation revealing large MLLM gaps**: 12 MLLMs (2 proprietary, 10 open-source) are evaluated with 3-run averages and standard deviations. The finding that GPT-4o achieves only 62.54% accuracy and several open-source models perform below random chance (Table 2) convincingly demonstrates that existing models lack the required world-modeling capabilities, establishing the benchmark's value for driving future progress.
-
-- **Interesting human-model divergence finding**: The observation that models like GPT-4V can answer some expert-level questions that humans fail while stumbling on easier questions (Figure 4, Section 4.4) is a genuinely novel insight, though the strength of this finding is qualified by the noisy difficulty labels (see Weaknesses).
+- **Comprehensive model evaluation with interesting findings**: The evaluation of 14 MLLMs (4 proprietary, 10 open-source) reveals that Video-LLaVA-7B outperforms GPT-4V and Gemini Pro on Embodied Tasks and matches them on Art & Sports, suggesting spatiotemporal training data confers advantages that raw scale does not. This is a non-obvious finding.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Modality-specific evaluation is not properly controlled**: The paper claims the synthetic subsets allow "analyzing MLLMs within single visual or audio modalities" (Abstract, Section 3.2). However, the evaluation setup gives four of the five tested models (Video-Chat, ChatUnivi, Video-LLaMA, Otter) full multimodal input for both conditions—only Gemini Pro receives text-only input in the audio setting. The QA pairs are generated from single-modality content, but when multimodal models receive both audio and visual streams, there is no guarantee they are using only the intended modality to answer. The paper does not discuss this cross-modal leakage threat or attempt to control for it (e.g., muting audio for visual tests, blanking frames for audio tests). The conclusions about audio vs. visual perception abilities (e.g., "Video-Chat exhibited better audio perception than ChatUnivi") may reflect differential internal fusion strategies rather than genuine audio perception ability. This is a **methodological gap in the ablation study**—it does not invalidate the human-annotated core benchmark, but the claims about modality-specific analysis are not well-supported.
+- **Text–table inconsistency about model rankings undermines trust in the narrative**. The abstract states "GPT-4V performs the best with only 52.3% accuracy" (line 10). The contributions list says "Even the best performer, GPT-4o, can only achieve a 52.30% overall accuracy" (line 35)—but the table shows GPT-4o at 62.54%, not 52.30%. Section 4.3 (line 254) opens with "GPT-4V emerges as the top performer, closely followed by Gemini Pro," completely ignoring that GPT-4o (62.54%) and Claude-3.5-Sonnet (54.54%) both outperform GPT-4V (52.30%) in the very same table. This is not a single typo; the abstract, contributions list, and two discussion paragraphs all contain claims inconsistent with the results table. The abstract also says "2 proprietary and 10 open-source MLLMs" (12 total), but the table includes 4 proprietary and 10 open-source (14 total). These inconsistencies force the reader to question which results to trust and whether the analysis (e.g., comparisons to GPT-4V as the "best model") was actually written against the data presented. The benchmark contribution remains valuable, but the paper's reporting of its own results is unreliable in its current form.
 
-- **Difficulty-level analysis rests on only 3 annotators per question**: The four difficulty tiers (easy/medium/hard/expert) are defined by the performance of exactly 3 turkers per question. With n=3, a single annotator's guess shifts a question between categories, producing enormous variance. The paper draws conclusions about "different skill sets" between models and humans and claims models "can answer reasonable amount of difficult questions that humans completely fail" (Section 4.4), but the human difficulty labels are too noisy to support findings at this granularity. The turkers are also non-experts, so "expert"-level questions are simply those three random people all got wrong—not questions validated as requiring genuine expertise. This undermines the confidence in the human-MLLM comparison results, though the overall trend (some correlation, some divergence) is still suggestive.
-
-- **The main results text contains a numerical inconsistency**: The abstract correctly states that GPT-4V achieves 52.3% accuracy (matching Table 2), and Table 2 shows GPT-4o at 62.54%. However, the contributions list (Section 1, bullet 3) states "Even the best performer, GPT-4o, can only achieve a 52.30% overall accuracy"—this number (52.30%) contradicts the actual table value (62.54%). This is not a parser artifact; it is a factual error in the paper's own summary of its results.
+- **The "expert" difficulty level is misleading and the human–model comparison is overstated**. Difficulty levels are defined solely by the performance of 3 non-expert turkers per question: "Expert" = 0/3 correct by these same turkers (Figure 4 caption, line 284). Calling this level "expert" conflates "hard for a handful of non-experts" with "genuinely requires domain expertise." The paper then claims (line 268) that MLLMs "can correctly answer expert-level questions that humans often get wrong." This overstates what the evidence supports. A more faithful claim would be that MLLMs sometimes answer questions that 3 non-expert raters all missed—which is interesting but different from showing models handle genuinely expert-level content. The underlying observation (different patterns of correctness) has value, but the framing needs adjustment.
 
 ### Minor
 
-- **No inter-annotator agreement reported for human annotations**: The paper describes a two-stage annotation process (Section 3.1) but does not report any inter-annotator reliability statistics (e.g., Cohen's kappa, agreement rates) for question creation or validation. This is a standard quality metric for benchmark papers and its absence makes it difficult to assess annotation consistency.
+- **Per-type question counts are not reported**, making the per-reasoning-type accuracy comparisons (Figure 4) difficult to interpret. If some reasoning types (e.g., Procedure Understanding) have only a handful of examples, the per-type accuracy numbers become unreliable. The paper should report exact counts for each of the seven reasoning types in the human-annotated subset.
 
-- **Synthetic dataset quality control is under-specified**: The automated pipeline generates 5,068 QA pairs, which constitute the majority of the benchmark. The paper states only that "Human evaluators were engaged to ascertain the reasonableness of automatically generated questions and answers" (Section 3.2). No details are given: number of evaluators, inter-annotator agreement, filter rate (what fraction were deemed unreasonable), or examples of rejected QAs. Since LLM-generated data is known to hallucinate, this gap reduces confidence in the synthetic subset's quality.
+- **The error analysis methodology is underspecified**. The caption (Figure 5, line 323) says "For each error type, 10 examples were evaluated," but it is unclear whether this means 10 examples per model per type or 10 total across all models. With 7 error types and 14 models, the difference matters greatly. The sample size for a multi-model frequency comparison is not clearly stated and may be too thin to support the conclusions drawn.
 
-- **Error analysis is based on a very small sample**: The error analysis (Section 4.5, Figure 5) evaluates only 10 examples per error type across all models. With 70 total examples for seven error types across multiple models, the frequency distributions are at best anecdotal. No error bars or confidence intervals are reported. The paper does not draw strong conclusions from this analysis, but the figure's format implies quantitative frequency comparisons that are not supported by the data.
+- **Synthetic dataset quality is asserted but not quantified**. The paper states (line 174) that "human evaluators were engaged to ascertain the reasonableness of automatically generated questions and answers," but reports no inter-annotator agreement, no acceptance/rejection rate, and no validity statistics. Without these, the quality of the synthetic subsets used for modality ablation is hard to assess.
 
-- **No discussion of cultural/geographic bias**: The benchmark title includes "World," and videos are sourced from YouTube under Creative Commons licenses and from Western-centric datasets (SportsQA, IKEA Assembly, Ego4D). The paper does not discuss cultural, geographic, or demographic coverage of its video selection, which is a relevant consideration for claims about world-model evaluation.
-
-- **GPT-4 evaluator validation set is modest**: The GPT-4-as-evaluator method is validated on 189 examples (4.76% error rate). While this is acceptable, 189 represents only ~12% of the human-annotated QA pairs. A larger validation would be more convincing, especially given the diversity of question types and disciplines.
+- **Minor model count inconsistency**: The abstract says "2 proprietary and 10 open-source MLLMs" (12 total), but Table 3 evaluates 4 proprietary and 10 open-source = 14 models. This further confirms that the narrative text was not updated to match the expanded evaluation table.
 
 ### Trivial
-- The "temporal information" design principle (Section 3.1) is somewhat redundant with the overall goal of video understanding for world modeling; the paper's own examples do not compellingly demonstrate why this needed to be a separate criterion.
-- The 53 videos sourced from existing datasets (SportsQA, IKEA Assembly, RT-1, Ego4D) inherit biases from those sources; the paper should note this briefly.
+
+- None beyond those already noted in Minor (the presentation issues above are minor but substantive enough to list there).
 
 ## Nice-to-Haves
-- Show rule-based mapping results alongside GPT-4 evaluation results for consistency checking.
-- Expand the limitations section in the conclusion to discuss annotation subjectivity, coverage gaps, and cultural biases in video selection, rather than focusing primarily on misuse risks.
-- Provide a more detailed breakdown of why specific questions are "hard" (domain difficulty vs. video complexity vs. framing issues) beyond the turker-based difficulty tiers.
+
+- The human study would be strengthened by either (a) using independent domain experts to define difficulty, or (b) renaming the difficulty levels (e.g., "Easy/Medium/Hard/Hardest for non-experts") to avoid overclaiming what "expert" means.
+- Including a table with exact per-discipline video counts and per-type question counts would aid interpretation.
+- Reporting acceptance rates or inter-annotator agreement for the synthetic dataset quality check would increase confidence.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-- **Abstract conflates total and human-annotated numbers**: The reviewer claimed the abstract's "1,910 videos" conflates with the human-annotated set. Upon verification, the abstract reports the total (1,910 videos, 6,627 QAs), and the introduction separately states "1,559 question-answer pairs" for the human-annotated set. The statistics table also cleanly separates these. No conflation exists; **removed as a misreading**.
-- **Controlled synthetic subsets for isolating perception modalities (Strength Finder, Supporting Strength 2)**: Claims the synthetic subsets enable "controlled evaluation of single-modality perception." This conflicts with the verified weakness that the modality evaluation setup does not isolate modalities. **Removed — weakness wins**.
-- **Detailed error analysis across seven failure categories (Strength Finder, Supporting Strength 4)**: Cited as a strength, but the error analysis is based on only 10 examples per type, which the reviewer correctly identifies as inadequate for quantitative conclusions. **Removed — weakness wins**.
-- **Open-source release details not in main text**: The reviewer noted missing link/license, attributing this to the appendix. **Removed per missing-appendix rule**.
-- **Katna footnote garbled sentence**: The reviewer noted a garbled sentence structure but acknowledged it is a parser artifact. **Removed per formatting-artifact rule**.
-- **"The paper should cover Y / additional domains" type suggestions** that would turn the paper into a different, broader work: removed where they amount to scope creep.
+
+- **Criticism about "small size of human-annotated subset"** (417 videos, 1,559 QAs): This is a scope-appropriate size for a manually annotated benchmark spanning 7 disciplines. The paper does not claim to be the largest benchmark, and 1,559 manually curated QAs with two-stage review is a solid contribution. Keeping this as a weakness would punish the paper for not being something it never claimed to be. Moved to minor observation at most.
+
+- **Criticism about benchmark not being large enough for statistical power per discipline**: This conflates "small" with "insufficient." The paper reports standard errors across 3 runs, which is the accepted practice in MLLM evaluation. No statistical claims are made that would require larger samples. Moved to Nice-to-Haves.
+
+- **Criticism that the paper should report per-type question counts**: This is already listed as a Minor weakness rather than being removed entirely. Kept as Minor.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the most interesting insight from the review process is that the paper's two most attention-grabbing auxiliary analyses (modality-specific perception and human-model skill comparison) are both methodologically weaker than the core human-annotated benchmark, yet these are precisely the analyses that the paper uses to argue for deeper conclusions about MLLM capabilities. This pattern—where the headline findings rest on shakier methodological ground than the core data contribution—is a recurring structure in benchmark papers and one that meta-reviewers should weigh carefully. The core contribution (a new multi-discipline, multi-faceted human-annotated video benchmark) is solid and independently valuable; the secondary analyses need either stronger controls or more cautious framing.
+The reviews surface an interesting tension: the paper's core benchmark design (multi-discipline taxonomy, multi-faceted reasoning types, modality-controlled subsets) is genuinely novel and well-executed, but the textual reporting of evaluation results contains an unusually high concentration of inconsistencies—abstract, contributions list, and analysis text all contradict the results table. This suggests the evaluation was expanded (adding GPT-4o and Claude-3.5-Sonnet) after the main narrative was written, without corresponding updates to the text. The benchmark itself would be more valuable if the narrative were aligned with the actual results, because several interesting comparative claims (e.g., about Video-LLaVA's relative strengths against GPT-4V) hold for GPT-4V but shift or weaken when GPT-4o is considered. The human study design is also notable: the paper's most striking claim (MLLMs handle "expert-level" questions) rests on a definition of "expert" that is actually "hard for non-experts," which is a framing gap rather than a data gap—the data still shows interesting model–human disagreement patterns.
 
 ## Suggestions
 
-1. **Fix the numerical inconsistency**: The contributions section states GPT-4o achieves 52.30% but Table 2 reports 62.54%. Correct this to match the table (62.54% for GPT-4o) or update the abstract/contributions to reflect whichever version is accurate.
-
-2. **Acknowledge the modality experiment limitation explicitly**: Add a paragraph in Section 4.2 or 4.3 explaining that most models receive full multimodal input for both synthetic subsets, so the results reflect answerability from the intended modality rather than isolated modality perception. Discuss what cross-modal leakage is possible and why it is or is not a threat to the conclusions drawn.
-
-3. **Hedge the difficulty-level conclusions or collect more annotators**: With only 3 annotators per question, the four-tier difficulty system is unstable. Either (a) collect more annotators, (b) report difficulty as a continuous score (fraction correct) rather than discrete buckets, or (c) clearly state in the main text that the difficulty labels are preliminary due to the small annotator pool and that the model-human comparison should be interpreted cautiously.
-
-4. **Report inter-annotator agreement statistics** for the human annotation process and for the synthetic data quality control. This is standard practice for benchmark papers.
-
-5. **Expand the error analysis or remove it**: With only 10 examples per type, the current presentation (showing frequency distributions with bars) implies more confidence than the data supports. Either sample many more examples (at least 50–100 per type) or reframe as a qualitative case study without quantitative frequency claims.
-
-6. **Add a limitations paragraph to the conclusion** that covers benchmark-specific issues (annotation subjectivity, cultural/geographic coverage of videos, the modest size of the human-annotated subset for some disciplines) rather than focusing only on hallucination risks and misuse.
+1. **Align all narrative text with the results table**: The abstract, contributions, and Section 4.3 must be rewritten so that GPT-4o (62.54%) is correctly identified as the best model, GPT-4V's 52.30% is contextualized accordingly, and the abstract's model count (12→14) is corrected. Every comparison that currently uses GPT-4V as the reference point should be re-evaluated against GPT-4o.
+2. **Rename "Expert" difficulty level** to something like "Hardest (for non-experts)" or "All-humans-missed" to accurately reflect the methodology, and adjust the claim that models handle "expert-level questions" accordingly.
+3. **Report per-reasoning-type question counts** for the human-annotated subset in a table or figure.
+4. **Clarify the error analysis sample size** and, if the sample is small, dial back the definitiveness of the conclusions.
 
 ## Score and Decision
 
-**Originality**: Good. The multi-discipline + multi-faceted reasoning combination is genuinely novel for video understanding benchmarks.  
-**Importance of research question**: High. Evaluating MLLMs' world-model capabilities is timely and important.  
-**Claims support**: Mixed. The core benchmark contribution is well-supported; the modality and difficulty analyses are not as well-supported as claimed.  
-**Soundness of experiments**: Adequate for the main benchmark, with methodological gaps in the auxiliary experiments.  
-**Clarity**: Generally clear, with minor inconsistencies (the GPT-4o number mismatch).  
-**Value to the community**: Solid. The human-annotated subset fills a real gap, and the evaluation results are useful for benchmarking.
+The MMWorld benchmark is a solid contribution that fills a real gap in video understanding evaluation. However, the paper in its current form contains a cluster of textual inconsistencies that make its own results reporting unreliable. These issues are fixable (rewriting narrative text, adjusting difficulty naming, adding per-type counts), but they are not trivial: a reader cannot currently trust whether the authors' analysis was written against the data presented. The core benchmark contribution warrants acceptance, but only with the expectation that these reporting issues will be corrected.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

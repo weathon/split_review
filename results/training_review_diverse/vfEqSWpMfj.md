@@ -1,78 +1,70 @@
-Now I have a thorough understanding of the paper and can verify each claim. Let me construct the final review.
+Now I have all the information I need. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes a word-level masking method, inspired by permutation importance, to measure how individual words in system prompts affect LLM outputs according to user-defined text scores (readability, verbosity, topic similarity). The method is model-agnostic (no internal access needed) and score-agnostic. The primary validation tests whether the maximum word importance within a suffix positively correlates with the suffix's overall impact, observed across 2 models (GPT-3.5 Turbo, Llama2-13B), 2 datasets (artificial, SQuAD 2), and 3 suffixes.
+This paper proposes a word-level importance method for LLM system prompts: mask each word, re-run the model with the masked prompt, compute the absolute change in a user-defined text scoring function (e.g., reading level, word count, topic similarity), and average across multiple completions and user inputs. To validate, the paper checks whether the impact of adding a multi-word suffix to a system prompt correlates with the maximum word-importance score among words in that suffix. The method is model-agnostic (works on both GPT-3.5 Turbo and Llama2-13B), text-score agnostic, and computationally lightweight.
 
 ## Strengths
 
-- **Model-agnostic with no internal access required**: The method works on closed-source models like GPT-3.5 Turbo because it only needs output text, overcoming a key limitation of attention-based or gradient-based explainability methods (Section 2, Section 5). This is a genuine practical advantage.
+- **Model-agnostic and applicable to black-box models**: The method requires only API access to generate completions and does not rely on internal model states (attention weights, gradients, etc.). The paper demonstrates this on both GPT-3.5 Turbo (closed-source) and Llama2-13B (open-source). This is a genuine advantage over many explainability methods that require white-box access.
 
-- **Score-agnostic and customizable**: The method accepts arbitrary scoring functions (Flesch reading-ease, word count, topic similarity), enabling decomposition of word impact into specific properties of interest such as reading level, verbosity, or topical bias (Section 3, Eq. 1). The three selected scores are diverse enough to demonstrate this flexibility.
+- **Text-score agnostic, enabling decomposition of prompt influence into specific output properties**: Importance can be computed with respect to any user-defined scoring function (Flesch reading-ease, word count, topic similarity), and the paper suggests extensions to reward models or factual accuracy estimates. This goes beyond attention-based methods, which do not directly indicate how a word influences a particular output property.
 
-- **Positive correlations observed across diverse conditions**: The paper shows consistent positive Pearson correlations between suffix impact and maximum word importance across 2 models × 2 datasets × 3 suffixes (Figures 3–6). While the validation is preliminary, the consistency across conditions provides some evidence that the method captures real signal.
-
-- **Identifies an interesting multi-word interaction case**: The "Respond in the form of a long story" suffix for GPT-3.5 Turbo on SQuAD 2 yields suffix impact exceeding maximum word importance (Section 5.2), revealing a synergistic effect where the full suffix matters more than any single word. This demonstrates the method's diagnostic potential.
+- **Practical simplicity and low computational cost**: The method requires only \(N=3\) completions per masked word and masks one word at a time, without requiring a surrogate model or extensive hyperparameter tuning. The paper discusses cost-reduction strategies such as hierarchical masking.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Indirect validation that doesn't directly test word-level explanation quality**: The paper claims to "improve the explainability of LLMs" by measuring word-level importance, but the experiments only test a correlational hypothesis: that max word importance within a suffix correlates with the suffix's overall effect. This does not directly validate whether (a) the correct words are identified as important, (b) importance scores are proportional to actual causal influence, or (c) the scores are human-interpretable. The correlation test shows the method captures *some* signal, but this is a necessary rather than sufficient condition for an explanation method. No head-to-head comparison against baselines (random attribution, attention weights, leave-one-out) is provided, so it is unclear whether the scores carry information beyond what would be expected by chance. The paper frames the method around explainability but validates only a derived property of suffix aggregation.
+- **"Impact of the suffix as a whole" is never formally defined.** The y-axis of every scatterplot is labeled "impact of the suffix as a whole" (line 183), and the figures use "Actual suffix importance," but no equation or prose defines how this quantity is computed. The reader must guess whether it is computed by masking the entire suffix (analogous to the per-word importance formula) or by comparing outputs with vs. without the suffix added. For a method paper that relies on this quantity as its central validation target, leaving it undefined is a significant clarity gap.
 
-- **Suffix impact (the y-axis in all figures) is never defined with an explicit formula**: The paper defines word importance w(k) for individual words in Eq. 1, but the "impact of the suffix as a whole" (y-axis in Figures 3–6) is never given a precise equation. The reader must infer whether it is computed by masking the entire suffix at once, aggregating word-level scores, or something else. This is a reproducibility gap — the central quantitative result cannot be exactly reproduced without this definition.
-
-- **Thin experimental design undermines reliability of the reported correlations**: (a) Only **M=1 user input per system prompt** is used, even though the method (§3) is defined to aggregate over multiple user inputs. This means the results are specific to a single query per prompt and cannot speak to generalization across queries. (b) **N=3 completions at temperature 1** means high variance, yet no error bars, confidence intervals, or significance tests (p-values) are reported for any correlation coefficient. (c) The scatter plots show raw points with a fitted line and a Pearson r, but without any measure of uncertainty, the stability of these correlations across draws is unknown. These issues collectively mean the evidence is suggestive rather than conclusive.
+- **No comparison to any alternative or baseline explainability method.** The paper discusses limitations of attention (Section 2) but never compares word-importance scores to attention gradients, integrated gradients, LIME, or even a simpler baseline like random word removal. Without any comparison, the reader cannot assess whether the method provides unique, complementary, or even useful signal relative to existing approaches. A baseline as simple as "random word masking" would help establish that the observed correlations are not just an artifact of the perturbation procedure.
 
 ### Minor
 
-- **No qualitative illustration or human grounding of importance scores**: The paper contains no example outputs comparing masked vs. unmasked generations, no case study showing which specific words receive high/low importance and whether that makes intuitive sense, and no human evaluation of whether the scores align with human judgment. For an explainability method, such grounding would substantially strengthen the plausibility of the claims. An example table or figure showing word-level importance scores for a sample prompt with brief interpretation would make the method tangible.
+- **The validation is an internal consistency check, not a direct ground-truth evaluation.** The paper checks whether the max word importance in a suffix correlates with the suffix-level impact. However, this does not directly validate that individual word-importance scores correctly rank words by their causal influence on outputs. A stronger validation would use synthetic prompts where ground-truth influential words are known by construction, or human judgments of expected word importance. The current correlation shows the method is internally coherent but does not establish per-word accuracy. (Note: The reviewer's claim that this validation is "circular" or a "near-tautology" is incorrect—the paper explicitly acknowledges on line 181 that words within a suffix can have opposing effects, making the correlation an empirical finding, not a mathematical necessity.)
 
-- **Absolute values in Eq. 1 discard directionality**: The method uses |f(m(s, u)) − f(m(s_k, u))|, which treats a word that consistently *increases* a score the same as one that consistently *decreases* it. Practitioners often care about directional effects (e.g., "this word makes the output more biased" vs. "less biased"). The paper does not discuss this design choice or propose a signed variant.
+- **Limited experimental scale.** The experiments use only 3 suffixes, 3 text scores, 1 user input per prompt for the artificial data, and 2 models (with the Llama2-13B results acknowledged as "too few to claim with certainty," line 215). This is a proof-of-concept demonstration rather than a thorough validation. The paper would benefit from more suffixes, multiple user inputs per prompt, and additional models.
 
-- **Llama2-13B results are too sparse to support the claims**: The paper acknowledges having "too few results to claim with certainty" for Llama2-13B, yet these results are presented alongside GPT-3.5 results in Figures 4 and 6 as if they support the same conclusions. Either more data should be collected for Llama2-13B, or the Llama experiments should be presented only as preliminary observations with a clear caveat in the figures themselves.
+- **The artificial dataset generation procedure is underspecified.** The paper states that GPT-4 generated "three impersonations as system prompts and three questions as user input for each topic" from 112 topics (line 120), but does not provide the exact prompt(s) used to generate this data. Since the method's behavior may depend on prompt quality and diversity, providing the generation prompt would aid reproducibility.
+
+- **The use of absolute values in Equation (1) discards directional information.** The importance score \(w(k)\) is always non-negative, so the method cannot distinguish between words that increase vs. decrease the scoring function. While this is a design choice, it limits the interpretability of the scores, especially for the suffix-level analysis where competing positive/negative effects are relevant.
 
 ### Trivial
 
-- The "world importance" typo in Algorithm 1 caption ("schematic illustration of the world importance algorithm") — should be "word importance."
+- None.
 
 ## Nice-to-Haves
 
-- **Controlled word-level ablation study**: Beyond the suffix-level correlation, a direct validation would be to insert a word known to be decisive for a particular score (e.g., "concisely" for word count) and verify that the method assigns high importance to that specific word, then compare against masking a control word.
-- **Multiple user inputs per prompt**: Running the method with M > 1 user inputs (as the method itself specifies) would show that importance scores generalize across queries.
-- **Comparison against simple baselines**: Comparing the method's top-k important words against random word ordering or uniform importance would strengthen the claim that the scores carry information.
+- **Confidence intervals or statistical tests** for the reported Pearson correlations would strengthen the quantitative claims.
+- **A random-word-masking baseline** would help establish that the method captures signal rather than noise.
+- **Varying the masking token** (e.g., substituting words rather than using underscores) could test robustness.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed — treat them with caution:
 
-- **"The paper does not discuss whether the method would work for more complex scores (e.g., sentiment, toxicity)"** — Scope creep. The paper demonstrates the method on three diverse scores and claims general applicability. Demanding demonstrations on every possible score class is not a reasonable requirement for a first paper on the method.
-
-- **"The paper does not discuss why masking-as-underscore is appropriate versus other perturbations"** — The limitations section (p. 7) explicitly mentions "substituting words rather than merely masking them" as future work. The choice is acknowledged, and the method is clearly described. The critic's concern is addressed.
-
-- **"Llama2-13B results... presented alongside GPT-3.5 results as if they support the same conclusion"** — The paper explicitly states "we have too few results to claim with certainty" (p. 6) and notes the trend is consistent with no conflicting results. Presenting tentative results with an honest caveat is appropriate. This is not a weakness.
-
-- **"The paper does not position the method relative to existing word-level attribution techniques (e.g., input gradients, LIME for text)"** — The Related Works section (Section 2) discusses SHAP, attention, activation analysis, probing classifiers, and perturbed masking approaches (wu2020perturbed, kim2019probing). The method is positioned as most similar to masking/perturbation approaches. The critic's claim is inaccurate.
+- **"The core validation is circular and does not test what the paper claims."** — REMOVED (factually incorrect). The paper explicitly acknowledges (line 181) that words within a suffix can have opposing positive/negative effects on the scoring function, so the correlation between suffix impact and max word importance is an *empirical* finding, not a tautology. The paper even identifies a case where the relationship breaks down (line 213: suffix impact > max word importance for "Respond in the form of a long story"). This contradicts the claim of circularity.
+- **"The reported positive correlations could arise even if the individual word scores were essentially random."** — REMOVED (speculative, unsupported by evidence; the paper shows systematic patterns across suffixes and scoring functions that align with expectations).
+- **"N=3 generations is too few."** — REMOVED (standard for perturbation-based methods at reasonable compute budgets; the paper discusses adjusting N in a footnote).
+- **Formatting/nitpick criticisms** about typos, broken characters, misplaced wrapfig padding — REMOVED (parser artifacts, not author errors, per instructions).
+- **Stopwords criticism** — REMOVED (the paper addresses this directly in the footnote on line 81, giving a clear rationale).
 
 ## Novel Insights
 
-The main novel observation beyond the paper's own contributions is the identification of the "Respond in the form of a long story" case where the whole suffix exerts greater impact than any individual word, which serves as a diagnostic signal for multi-word synergies. This is already in the paper. No further novel insight emerges from the reviews.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Explicitly define "suffix impact"** with a formula analogous to Eq. 1, so the central correlation result is reproducible.
-2. **Add error quantification** — report confidence intervals or bootstrap estimates for all Pearson correlations, and consider using multiple user inputs per prompt.
-3. **Include a direct word-level sanity check**: Insert controlled words (e.g., "concisely") into prompts and verify the method assigns highest importance to those words for the corresponding score (e.g., word count). This would directly test word-level attribution quality rather than only the derived suffix-level correlation.
-4. **Provide at least one qualitative example** showing word-level importance scores for a sample prompt with the actual generated outputs, so readers can assess plausibility.
-5. **Discuss the directional-sign limitation** of using absolute differences and consider adding a signed variant for practitioners who care about direction of influence.
-6. **Collect more data for Llama2-13B** or explicitly label those figures as preliminary with reduced visual weight.
+- Formally define the "impact of the whole suffix" with an equation analogous to Equation (1), clarifying whether it is computed by masking the entire suffix or by comparing with/without the suffix.
+- Add at least one baseline comparison: e.g., compare the correlation between suffix impact and max word importance against the correlation with a randomly selected word's importance, or against importance scores from a different perturbation strategy.
+- Extend the experimental scope to include more suffixes (5–10), multiple user inputs per prompt, and a model where the paper has sufficient data to draw confident conclusions.
+- Consider a direct validation experiment: construct synthetic prompts where ground-truth influential words are known (e.g., inserting "concisely" should affect verbosity) and verify that word importance correctly identifies those words.
+- Report confidence intervals or p-values for the Pearson correlations shown in the scatterplots.
 
 ## Score and Decision
 
-The paper presents a simple, intuitive, model-agnostic method with clear practical advantages. The core idea is sound and the method is well-described. However, the experimental validation has significant gaps: (1) it tests only an indirect correlational property rather than directly validating word-level attribution quality, (2) the y-axis measure ("suffix impact") is never formally defined, and (3) the thin experimental design (M=1 user input, N=3 completions, no error bars or significance tests) makes the reported correlations less reliable than they appear. These issues collectively mean the paper's central claim — that the method improves explainability by measuring word-level influence — is not yet convincingly supported. The paper would benefit substantially from a direct word-level validation study before it can support its claims.
+The paper proposes a simple, practical method with clear advantages (model-agnostic, score-agnostic). However, the validation is indirect and lacks baseline comparisons, a key metric ("suffix impact") is undefined, and the experimental scope is limited. These are addressable issues, but they weaken the paper's central claims about "explaining how prompts affect outputs." The contributions are real but modest, and the current evidence is insufficient to support the paper's framing. With substantial strengthening of the validation, addition of baselines, and clearer methodological definitions, this work could become a solid contribution.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

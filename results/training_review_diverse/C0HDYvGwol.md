@@ -1,68 +1,86 @@
-Here is my synthesized final review.
-
----
+Now I have all the information needed. Let me write the final consolidated review.
 
 ## Summary
 
-This paper introduces 3D-Adapter, a plug-in module for multi-view diffusion models that improves geometry consistency via *3D feedback augmentation*: at each denoising step, intermediate features are decoded into a 3D representation (via feed-forward GRM or online NeRF/mesh optimization), rendered as RGBD views, and re-encoded back into the base model through ControlNet-style feature addition. This design preserves the base model's residual connections and avoids the score-averaging/mode-collapse issues attributed to prior I/O sync methods. Two variants are presented — a fast feed-forward version and a training-free optimization-based version — and evaluated across text-to-3D, image-to-3D, text-to-texture, and text-to-avatar tasks, consistently outperforming prior state-of-the-art methods.
+This paper introduces 3D-Adapter, a plug-in module that improves geometric consistency in multi-view diffusion models through "3D feedback augmentation": during each denoising step, intermediate features are decoded into a coherent 3D representation (via feed-forward GRM or optimization), rendered as RGBD views, and fed back into the base model through a ControlNet-like feature addition branch. This design preserves the base model's residual connections and avoids the score-averaging problem of prior I/O sync methods. Two variants are presented — a fast feed-forward version and a flexible training-free version — and evaluated across text-to-3D, image-to-3D, text-to-texture, and text-to-avatar tasks, achieving SOTA results on all four.
 
 ## Strengths
 
-1. **Well-motivated architecture with clear diagnosis of prior limitations.** The paper identifies two concrete problems with I/O sync (disrupted residual connections and score averaging leading to mode collapse) and designs 3D feedback augmentation to directly address them. This diagnosis is supported both theoretically and by the ablation in Table 1: I/O sync baselines (A1/A2) produce MDD values of 1239.7/1.7 but with catastrophic visual quality (CLIP 24.62/22.57, FID 63.22/70.35), while 3D-Adapter (B0) achieves MDD 4.7 with strong visual metrics (CLIP 27.31, FID 32.81).
+- **Novel architecture with clear advantages over I/O sync.** The key insight — preserving the base model's residual connections by attaching a parallel 3D-aware branch rather than overwriting inputs/outputs — is well-motivated and empirically validated. Ablations (Table 1) show I/O sync degrades performance (CLIP 27.02→24.62, MDD 232.4→1239.7), while 3D-Adapter improves geometry dramatically (MDD 232.4→4.7) without sacrificing visual quality (CLIP 27.02→27.31). The bias-canceling guidance (Eq. 6) is also cleanly validated (C1 vs B0).
 
-2. **Bias-canceling guidance (Eq. 4) is clever and empirically validated.** The classifier-free-guidance-style formulation for the feedback ControlNet, trained with 20% zero-tensor inputs, is shown to be critical. Ablation C1 (w/o bias canceling) degrades CLIP from 27.31→25.49, Aesthetic from 4.54→4.36, and FID from 32.81→42.20, demonstrating the mechanism effectively counters ControlNet overfitting.
+- **SOTA performance across multiple 3D generation tasks.** 3D-Adapter sets new benchmarks in text-to-3D (Table 2: CLIP 27.7, Aesthetic 4.61), image-to-3D (Table 3: PSNR 20.38, SSIM 0.840, FID 20.2), text-to-texture (Table 5: CLIP 26.40, Aesthetic 4.85), and text-to-avatar (Table 4), surpassing prior methods including the strong two-stage GRM baseline.
 
-3. **Two complementary variants provide both speed and flexibility, demonstrated across four tasks.** The feed-forward GRM variant enables fast inference (text-to-3D, image-to-3D), while the optimization-based variant is training-free and supports arbitrary camera layouts (text-to-texture, text-to-avatar). Each variant achieves or improves upon SOTA in its respective setting (Tables 2–6). This dual-design strategy strengthens the paper's claim of generality.
+- **Two complementary variants demonstrating generality.** The feed-forward version (~0.5 min per object) works for standard multi-view diffusion models with fixed camera layouts, while the training-free version (using off-the-shelf ControlNets and per-sample optimization) handles diverse camera configurations and base models. Showing both variants working on 4 distinct tasks convincingly demonstrates the approach's flexibility.
 
-4. **Consistent improvements across a broad evaluation.** The paper reports results on 4 tasks with 6–7 metrics per task, using standardized test splits (379-object validation set, 200-prompt text-to-3D benchmark, 248-object GSO image-to-3D test set, 92-object text-to-texture set). 3D-Adapter consistently outperforms prior methods — e.g., text-to-3D CLIP 28.0 vs. GRM 26.6; image-to-3D PSNR 20.38 vs. GRM 20.10, FID 20.2 vs. 27.4.
-
-5. **Training efficiency.** The feed-forward variant requires only lightweight finetuning (2–4K iterations for GRM, 5K for ControlNet) on a single 4×A6000 setup, contrasting with methods that require full diffusion model retraining.
+- **Comprehensive ablation and parameter analysis.** The ablation study (Table 1) systematically sweeps the guidance scale (λ_aug = 0, 1, 2, 4, 8), disables feedback (C0), removes bias canceling (C1), and compares against I/O sync (A1, A2), cleanly isolating the contribution of each component.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None. The weaknesses below are genuine but do not invalidate the paper's core contributions.
+
+None.
 
 ### Minor
-1. **Ablation conflates GRM finetuning with the feedback mechanism.** The "w/o feedback" condition (C0, λₐᵤₖ=0) achieves MDD 7.6 versus 232.4 for the two-stage baseline (A0). The paper acknowledges this improvement is "thanks to our robust GRM fine-tuning," but no baseline exists that uses the *finetuned* GRM in a simple two-stage pipeline (i.e., without the 3D-Adapter architecture at all). Such a baseline would isolate whether the improvement from A0→C0 comes from GRM finetuning, the architectural changes, or both. Without it, the contribution of the feedback loop itself is best measured by B0 vs. C0 (MDD 4.7 vs. 7.6), which is a meaningful but smaller gap than A0 vs. C0. This does not undermine the overall contribution — 3D-Adapter (B0) clearly improves over both A0 and C0 — but it weakens the precision of the ablation narrative.
 
-2. **No geometry-specific metric in the main SOTA comparison tables.** The paper's central motivation is improving *geometry consistency*, yet Table 2 (text-to-3D SOTA) reports only CLIP and Aesthetic scores — both primarily measure appearance and text alignment. Table 3 (image-to-3D) uses PSNR/SSIM/LPIPS/FID, which are image-quality metrics. The MDD metric is introduced in the ablation but not applied to competitors. While computing MDD for methods using different output representations (mesh, NeRF, 3DGS) may require conversion, even a proxy like CLIP t-less score (used in text-to-avatar) or a user study on geometry quality would substantially strengthen the case that the method advances the geometry-consistency frontier relative to prior work.
+- **Lack of uncertainty quantification across main results.** The paper reports single values for all metrics without standard deviations, confidence intervals, or significance tests. While single-run evaluation on fixed test sets is common in the 3D generation field, several comparisons involve small differences (e.g., CLIP 27.31 vs 27.18 in B0 vs C0; 27.7 vs 26.6 vs GRM in Table 2) where the reader cannot assess stability. The main geometry claims (MDD 232.4→4.7) are so large that noise is not a concern there, but the visual quality metrics would benefit from variance reporting.
 
-3. **No variance or confidence intervals.** Given that several gains are modest (e.g., PSNR 20.38 vs. 20.10, CLIP 27.7 vs. 26.6), the absence of any statistical significance measure makes it difficult to assess the reliability of these improvements across runs.
+- **Ablation does not fully disentangle finetuned GRM from feedback contribution.** The comparison C0 (λ_aug=0, ControlNet with zero input) vs B0 (full feedback) shows the effect of feedback, but C0 is not a pure two-stage pipeline — it still includes the ControlNet architecture (trained with 20% zero-input examples). A cleaner separation would compare (a) original GRM alone, (b) finetuned GRM + no ControlNet, (c) finetuned GRM + ControlNet with feedback. The current design means the gain from A0 to C0 bundles both "finetuned GRM" and "presence of ControlNet," making it harder to attribute the total improvement over the two-stage baseline. The paper does acknowledge that C0 benefits from finetuned GRM, but this attribution gap remains.
 
-4. **Some implementation details are underspecified.** The optimization-based variant uses "a combination of 'tile' and depth ControlNets" without specifying how the two are fused or weighted. The text also does not fully specify how NeRF optimization is interleaved with the denoising steps beyond a high-level description. These details would aid reproducibility for the training-free variant.
+- **No explicit statement about train/test data separation for Objaverse-based evaluations.** The validation set (379 objects) and text-to-texture test set (92 objects) are both "sampled from a high-quality subset of Objaverse," while the training data uses 47k–80k objects from the same source. The paper does not state whether these sets are disjoint. The main SOTA comparisons use the GRM test set (200 prompts) and GSO objects (image-to-3D), which mitigate this concern, but the ablation/validation results lack explicit separation guarantees.
 
-5. **No failure case analysis.** The paper discusses limitations (computation overhead, ControlNet overfitting) but does not analyze specific failure modes — e.g., objects with thin structures, heavy self-occlusion, or extreme viewpoints where geometry consistency might still break down. Adding such analysis would improve completeness.
+- **MDD metric, while cited, could use more contextual justification.** Mean Depth Distortion is not a standard metric in the broader 3D generation literature (where Chamfer distance, F-score, and normal consistency are more common). The paper defines MDD and explains that lower values indicate fewer floaters, but the massive MDD reductions (232.4→4.7) would be more interpretable with human judgment correlation or a visual comparison of objects at different MDD levels.
+
+- **Inference time for the feed-forward variant is missing.** The paper reports inference times for the optimization-based variants (text-to-texture: ~1.5 min, text-to-avatar: ~7 min), but the text-to-3D section contains "The inference time is around 0" (clearly a parser artifact). The per-step overhead of VAE decoding, GRM forward pass, rendering, and ControlNet encoding should be quantified.
+
+- **Text-to-texture comparisons are confounded by base model and optimization choices.** As the paper itself acknowledges, even the two-stage baseline outperforms prior SOTAs, attributed to "texture field optimization and community-customized base model" (DreamShaper 8). This makes it hard to isolate how much of 3D-Adapter's advantage comes from the feedback mechanism vs. these other factors. The paper is transparent about this, but it weakens the comparative claims in that task.
 
 ### Trivial
-- The claim that "input sync is essentially equivalent to output sync, assuming linearity and synchronized initialization" (Sec. 3) is stated without justification or reference to a concrete construction. This is a minor hand-wavy claim that does not affect the paper's main contribution but could confuse readers.
+
+- None beyond what is listed in Minor.
 
 ## Nice-to-Haves
-- **Comparison of the two variants on a common task** (e.g., text-to-3D). The paper presents the feed-forward and optimization-based variants on different tasks, making it hard for readers to judge the speed–quality trade-off directly.
-- **A controlled baseline using the finetuned GRM in a standard two-stage setup** (no feedback ControlNet), to cleanly isolate the feedback effect.
+
+- Test on held-out object categories or prompts unlikely to appear in Objaverse training data, to better assess generalization beyond the finetuning distribution (the paper already notes the ControlNet overfits in the Limitations).
+- For the text-to-texture benchmark, a comparison using a common base model across all methods would more cleanly isolate the benefit of the feedback architecture.
+- Error bars or ranges from running the pipeline with multiple random seeds would help assess the reliability of the smaller metric differences.
 
 ## Removed Points
-*These points are flagged to be removed; treat them with caution.*
 
-1. **"The claim that I/O sync inevitably leads to mode collapse is supported by only one instantiation."** — The paper compares against SyncMVD (an existing I/O sync method) in text-to-texture and discusses DMV3D and SyncDreamer in related work. The theoretical argument about score averaging is provided as motivation for the architecture, not as an empirically proven universal claim about all I/O sync variants. The paper does not claim to have proven this experimentally for every possible design; rather, it observes that existing I/O sync methods exhibit the problem and offers a theoretical explanation. This criticism overstates the paper's burden.
-2. **"MDD metric formulation is not shown in the paper."** — The definition is succinctly provided and references are cited. The full formulation was likely in the appendix, which is stripped by the PDF parser; it exists in the original submission.
-3. **"The paper should also cover Y / domain Z."** — Not applicable; the paper covers four diverse tasks, which is already broad.
+These points are flagged to be removed; treat them with caution.
+
+- **"Plug-in framing understates required investment"** — Removed because the paper clearly describes both variants and their training requirements. The feed-forward variant requires finetuning (2k–5k iterations at low LR), which is accurately described as "minimal training." The training-free variant genuinely requires zero training. "Plug-in" is a standard term for a module added to an existing base model, and the paper is transparent about what each variant involves.
+
+- **"Missing version using original (non-finetuned) GRM with feedback"** — Removed because this ask is technically infeasible: the paper explicitly states the original GRM "is not robust to low-quality intermediate views" (line 98) and was specifically finetuned to handle noisy inputs. The ControlNet was also trained on finetuned GRM outputs; feeding original GRM outputs would not be a meaningful comparison.
+
+- **"Generalization to unseen semantics" (abstract shapes / other domains)** — Removed as a required weakness; moved conceptually to Nice-to-Haves. The paper's scope is Objaverse-scale 3D object generation, and asking for cross-domain evaluation is a scope extension, not a flaw in the existing experiments.
+
+- **"The two-stage baseline even outperforms prior SOTAs in text-to-texture"** — The paper itself acknowledges this and attributes it to the base model and optimization choices. This is an observed fact about the experimental setup, and the paper is transparent about it. The comparison between 3D-Adapter and the two-stage baseline (26.40 vs 25.82 CLIP) still shows the feedback mechanism's added value.
+
+- **Formatting/parser artifacts** (e.g., "The inference time is around 0") — These are parser errors, not author errors; the original submission contains the correct number.
 
 ## Novel Insights
-None beyond the paper's own contributions. The core observation — that I/O sync methods disrupt residual connections and induce score averaging, and that a parallel ControlNet-like feedback branch avoids both problems — is the paper's own novel insight, well-articulated in the text. The reviews do not surface additional insights beyond what the paper already presents.
+
+The reviews do not surface any observation about the paper that the paper itself does not already state. The core insight — that preserving residual connections via a parallel feedback branch is superior to overwriting inputs/outputs as in I/O sync — is the paper's own contribution, and the reviews correctly identify this as its main strength.
 
 ## Suggestions
-1. Add a "two-stage + finetuned GRM" baseline to Table 1 to cleanly separate the contribution of GRM finetuning from the feedback mechanism.
-2. Include at least one geometry-aware metric (e.g., MDD where applicable, or CLIP t-less) in the main SOTA comparison tables, even if it requires converting competitor outputs to a common representation.
-3. Report variance or confidence intervals (e.g., over three random seeds) for key metrics, especially where gains are modest.
-4. Clarify how the tile and depth ControlNets are combined in the optimization-based variant and provide pseudocode or more detailed step-by-step description of the NeRF/mesh optimization loop.
+
+1. Add error bars or standard deviations to the main metric tables (Tables 1–5), at least for the key comparisons (e.g., B0 vs C0, SOTA comparisons). Even running each condition with 3 random seeds and reporting ranges would substantially strengthen the quantitative claims.
+
+2. Explicitly state in the paper that the validation/test sets are disjoint from the training data for all components (base models and 3D-Adapter training), or clarify the degree of overlap if absolute separation is not achievable.
+
+3. Add a sentence or brief paragraph contextualizing MDD: show a visual example contrast of high vs. low MDD, or report its correlation with human judgment of geometry quality.
+
+4. Include a note in the text-to-3D section with the inference time for the feed-forward variant (the parser artifact should be corrected).
+
+5. For a camera-ready version, consider adding an ablation that compares (a) A0: original GRM, no ControlNet; (b) A0 + finetuned GRM, no ControlNet; (c) A0 + finetuned GRM + ControlNet with λ_aug=0 (current C0); (d) B0: full feedback. This would fully separate the finetuned GRM effect from the ControlNet presence effect from the feedback effect.
 
 ## Score and Decision
 
-This paper presents a well-motivated, novel architecture with consistent improvements across four diverse 3D generation tasks. The weaknesses — primarily the conflated ablation and the absence of geometry metrics in SOTA comparisons — are real but addressable and do not undermine the core contribution. The architecture is sound, the experiments are extensive, and the results are convincing. With the suggested revisions, the paper would be a strong addition to the field.
+Based on my assessment, the paper makes a genuine architectural contribution (feedback augmentation over I/O sync), demonstrates it convincingly across 4 tasks with SOTA results, and provides thorough ablations. The weaknesses are all addressable and none undermine the core claims. This is a strong paper.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>8.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

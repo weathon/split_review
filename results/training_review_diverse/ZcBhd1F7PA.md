@@ -1,99 +1,73 @@
-Now I have a thorough understanding of the paper. Let me synthesize the final review.
+Now I have a thorough understanding of the paper and the reviewer claims. Let me construct the consolidated review.
 
 ## Summary
+2-3 sentence summary of the paper's contribution.
 
-This paper proposes Hierarchical Multi-Grained Reasoning (HGR) for Object Concept Learning (OCL), tackling the many-to-many mapping between objects and their attributes/affordances. The method consists of two main components: (1) a coarse-to-fine hierarchical reasoning module that uses learnable prompts to progressively localize concept-relevant information, and (2) a counterfactual relation-enhancing module that models causal links between attributes and affordances via a graph neural network and counterfactual loss. Experiments on OCL, NYUd2, and AGD20K benchmarks show consistent improvements over prior methods.
-
----
+The paper tackles Object Concept Learning (OCL), a many-to-many mapping problem between objects and their attributes/affordances. It proposes Hierarchical Multi-Grained Reasoning (HGR), comprising a coarse-to-fine hierarchical reasoning module (multi-step learnable prompts that progressively localize concept-relevant regions) and a counterfactual relation-enhancing module (graph neural network with counterfactual supervision to strengthen attribute–affordance causal links). HGR achieves substantial gains over prior SOTA on the OCL benchmark (+8.1% attribute mAP, +3.9% affordance mAP) and shows competitive results on NYUd2 and AGD20K.
 
 ## Strengths
 
-1. **Principled framing of OCL as a many-to-many mapping problem with a reasoning-based solution.** The paper clearly identifies why discriminative methods fall short for OCL — an object can have multiple concepts and a concept can belong to multiple objects — and motivates a coarse-to-fine reasoning mechanism as a principled alternative. (Abstract, Section 1)
+1. **Large and consistent gains on the primary OCL benchmark.** The method outperforms the prior best method (Li et al., 2023b) by 8.1% on attribute prediction and 3.9% on affordance prediction (stated in Contributions, bullet 4, and evidenced in Table 1). This is a meaningful advance on a challenging benchmark.
 
-2. **Novel coarse-to-fine hierarchical prompting mechanism that progressively localizes concept-relevant information.** The two-stage prompt generation (global contextual prompting → instance-specific fine-grained prompting) is well-motivated, and the ablation in Table 5 confirms that both stages are necessary: global context alone or instance-only prompts both underperform the full hierarchy. Figure 3's heatmaps provide visual evidence of progressive focus. (Section 3.1, Table 5, Figure 3)
+2. **Ablation analysis confirms the contribution of each proposed component.** Table 4 breaks down the method into Vanilla CLIP (Base), Coarse-to-Fine Hierarchical Reasoning (CHR), prompt-guided visual concept extraction (PVCE), and concept connection network with counterfactual (CCC). The text describes how each module adds to performance, and the ablation framing (Section 4.2) is systematic.
 
-3. **Counterfactual relation-enhancing module that explicitly models causal links between attributes and affordances.** The concept connection network with graph-based reasoning and the counterfactual loss is a novel contribution that targets a genuine challenge in OCL — leveraging known causal relationships to improve reasoning. The ablation (Table 4, CCC component) shows clear gains from this module. (Section 3.2.2, Table 4)
+3. **Generalization to two additional benchmarks.** The method is evaluated on NYUd2 (multi-task indoor scene understanding) and AGD20K (weakly supervised affordance grounding), achieving competitive results. This multi-dataset evaluation strengthens the claim that the approach is not dataset-specific.
 
-4. **Consistent SOTA results across three diverse benchmarks.** HGR achieves significant gains over prior methods on OCL (8.1% attribute mAP, 3.9% affordance mAP over Li et al. 2023b), NYUd2, and AGD20K, demonstrating generalization across tasks. (Tables 1–3)
-
-5. **Comprehensive ablation studies isolating each component's contribution.** Table 4 cleanly decomposes the contributions of coarse-to-fine reasoning (CHR), prompt-guided concept extraction (PVCE), and counterfactual connection (CCC), showing each module is necessary. (Table 4, Section 4.2)
-
----
+4. **Clear problem formulation motivates the approach.** The paper explicitly characterizes OCL as a many-to-many mapping problem (Section 1, second paragraph) and argues why discriminative representations alone are insufficient, which directly motivates the reasoning-based design.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-None. The paper's core claims are supported by evidence, and the identified issues are addressable without invalidating the contribution.
+1. **Incomplete specification of the counterfactual loss, a claimed contribution.** In Eq. (9), the counterfactual loss is only defined for the case where the affordance label β_i = 1. The text states "We design two loss function L_cl according to the different affordance label" (line 137) but never shows the second case. Additionally, the mask construction is deferred to "generated following (Li et al., 2023b)" with no detail about how masks are constructed or applied. Since counterfactual reasoning is listed as contribution (3) and is central to the method, this gap makes the approach non-reproducible and the loss formulation unverifiable. The paper needs to fully specify both cases of the loss and describe the mask generation process.
+
+2. **The ablation baseline "Vanilla CLIP (Base)" vs. "Vanilla CLIP" in the main table is not explained.** The paper reports "Vanilla CLIP (Base)" in the ablation (Table 4) and "Vanilla CLIP" in the main comparison (Table 1) without clarifying whether these refer to the same configuration. If they differ (e.g., zero-shot vs. fine-tuned, or different prompt settings), the ablation is not apples-to-apples and the reported 0.0 mAP for the base in Table 4 cannot be directly compared to the main results. This undermines the claim that each component contributes meaningfully. The authors must explicitly state what "Base" means and ensure consistency.
 
 ### Minor
 
-1. **Incompletely specified counterfactual loss (Eq. 9).** The loss is written as `L_cl = { max{0, γ - (ŷ_β - ŷ_βmask)}, β_i = 1` with only one case shown. The text states "We design two loss function L_cl according to the different affordance label to promise the L_cl should be a positive value," but the second case (presumably for β_i = 0) is never written. While the general intent is inferable, this incomplete specification hurts reproducibility and makes the causal learning claim harder to fully verify. **The authors must provide the complete loss definition.**
+1. **Missing discussion of a non-SOTA result on AGD20K affordance.** The paper claims at line 177 that "Our approach consistently achieves superior performance compared to previous methods." If Cross-view-AG+ outperforms HGR on the affordance metric on AGD20K (as suggested by the critic), this claim needs qualification. The paper should acknowledge where it trails and discuss why.
 
-2. **Ground-truth bounding box dependency not acknowledged as a limitation.** The fine-grained prompt formation (Section 3.1.2) uses ground-truth bounding boxes to crop objects. This is a practical assumption that narrows the method's applicability in real-world / embodied settings where boxes are unavailable. The limitations section (Section 5) is generic and does not discuss this dependency or evaluate a variant without ground-truth boxes (e.g., using a detector). This should be acknowledged and ideally ablated.
+2. **The paper claims "We first summarize OCL as a many-to-many mapping problem" (line 31), but does not clearly establish that prior work (Li et al., 2023b) did not also describe it this way.** Since Li et al. (2023b) proposed the task and is the primary baseline, this novelty claim should be more carefully scoped or removed.
 
-3. **Baseline comparability could be more rigorous.** The primary baselines from Li et al. (2023b) (DM-V, DM-α→β, DM-att, OCRN) may use different visual backbones (e.g., ResNet) than HGR's CLIP encoder. The inclusion of Vanilla CLIP partially addresses this — and the fact that Vanilla CLIP is *worse* than OCRN on affordance (suggesting gains are architectural, not backbone-driven) helps — but re-implementing the strongest prior baseline (OCRN) with the same CLIP encoder would isolate the reasoning mechanism's contribution more convincingly.
+3. **Use of ground-truth bounding boxes during fine-grained prompt formation is stated for training but not clarified for inference** (line 89). If bounding boxes are required at test time, this limits applicability in unconstrained settings and should be explicitly stated.
 
-4. **Analysis of concept count drop (k > 10) is shallow.** Figure 4 shows a clear peak at k=10, but the explanation ("too many concepts increase complexity and influence accuracy and stability") does not distinguish between overfitting, insufficient training data for rare concepts, or optimization difficulty. A brief diagnostic (e.g., training loss behavior, concept utilization statistics) would strengthen the analysis.
+4. **The GRU-based concept update with t=3 iterations (line 115) is presented without justification or ablation varying t.** The choice is non-obvious — a brief rationale or sensitivity analysis would strengthen the work.
 
 ### Trivial
-
-- The paper states "multiple counterfactual samples are selected" but the method masks attribute prompts during training rather than selecting or generating counterfactual images. The phrasing should be aligned with what the method actually does (counterfactual prompting / masking, not counterfactual sample selection).
-
----
+- "predction" typo at line 140.
+- No variance/error bars reported for main results (single-run evaluation is common in this space but would strengthen the paper).
 
 ## Nice-to-Haves
-
-- A finer-grained ablation separating the global contextual prompt from the instance-level prompt in the coarse-to-fine reasoning module (currently grouped as "CHR" in Table 4) would further clarify the contribution of each step.
-- Reporting variance (error bars) over multiple runs would help assess the significance of the reported gains, particularly in Tables 2 where margins appear narrower.
-- Providing the complete set of architectural hyperparameters (the specific CLIP encoder variant, the intermediate layer M used for F_M, the number of prompt tokens n, concept dimensions D, and the value of γ in the counterfactual loss) would aid reproducibility, though the main claims do not hinge on these.
-
----
+- Including CoOp or CoCoOp as additional prompting baselines could help isolate whether the gains come from the hierarchical/counterfactual design versus prompt tuning itself, but the current baselines (Vanilla CLIP, OCRN, DM-V, etc.) are defensible.
+- Reporting error bars or multiple-run statistics would improve confidence in the results.
+- Code release or detailed hyperparameter settings (learning rate, optimizer, prompt length n) would aid reproducibility.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution:
-
-- **"Unclear comparability of baselines (severe version)"** — The harsh critic framed this as a major evidential issue, but the paper already includes Vanilla CLIP as a baseline, showing it is worse than OCRN, which *strengthens* the argument that HGR's gains come from the reasoning architecture, not the backbone. The critic's own analysis undermines the severity of the claimed issue.
-- **Missing implementation details (M, n, d, GRU hidden size, learning rate, optimizer, epochs)** — These are nitpicks about reproducibility that the instructions explicitly exclude.
-- **"Garbled tables"** — This is a parser error, not a paper problem. Per instructions, formatting artifacts are removed.
-- **"8.1% and 3.9% ambiguous (absolute vs. relative)"** — The paper clearly states "compared with state-of-the-art method (Li et al., 2023b)" and the metric (mAP) is standard; the comparison is unambiguous.
-- **Related work discussion could be sharper** — Generic, not a substantive weakness.
-- **"Coarse-to-fine prompting connection to related work could be sharper"** — Generic, not a substantive weakness.
-- **Demand for error bars / statistical significance as a major weakness** — Single-run evaluation on large-scale benchmarks (185K instances) is the standard in this area; at most a nice-to-have.
-
----
+These points are flagged to be removed — treat them with caution:
+- **Typo/grammar nitpicks** (e.g., "promise the L_cl should be a positive value", trailing sentence at page 3): Removed per hard rule — these are parser/formatting artifacts.
+- **Criticism about missing appendix, proofs, or references**: Removed per hard rule — the parser strips these; they exist in the original submission.
+- **Request for human studies or large-scale multi-seed runs**: Removed as practically infeasible for an academic submission.
+- **"The paper should also cover Y/domain Z/additional tasks"** style complaints: Removed as scope creep beyond the paper's stated direction.
+- **Generic or unsubstantiated strengths from Strength Finder that lack specific evidence**: Filtered.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviewer analyses do not surface any novel observation about the paper's methodology or results that the authors themselves have not already made.
-
----
+The most interesting observation that emerges across the reviews is that the paper's main empirical claim (large gains on OCL) is not seriously contested, but the method's description — particularly the counterfactual loss — is too incomplete to assess whether the claimed causal reasoning actually drives the improvement. This creates a disconnect between what the numbers say and what the paper can credibly claim about why they are good. The strong results make the paper worth pursuing, but the methodological gaps (incomplete loss, unexplained ablation baseline discrepancy) need to be resolved before the contributions can be properly evaluated.
 
 ## Suggestions
-
-1. **Complete the counterfactual loss specification** — Write both cases of Eq. 9 explicitly (for β_i=1 and β_i=0). Report the value of γ.
-2. **Acknowledge the bounding-box dependency** in the limitations section and, if feasible, evaluate a variant that uses a detector at inference time or ablates the impact of imperfect boxes.
-3. **Add a CLIP-backbone re-implementation of the strongest Li et al. (2023b) baseline** (OCRN) to fully isolate the reasoning mechanism's contribution from backbone effects.
-4. **Provide a brief diagnostic for the k>10 performance drop** — e.g., per-concept frequency statistics, training loss curves, or concept utilization rates — to strengthen the analysis in Figure 4.
-5. **Correct the phrasing** of "multiple counterfactual samples are selected" to reflect what the method actually does (attribute prompt masking).
-
----
+1. **Complete the counterfactual loss definition.** Show both cases of L_cl (positive and negative affordance labels) and describe how the masks are generated and applied. Provide pseudocode if necessary.
+2. **Clarify the "Vanilla CLIP (Base)" configuration** in Table 4 — is it zero-shot CLIP? Fine-tuned? How does it differ from the "Vanilla CLIP" in Table 1? Ensure the ablation is apples-to-apples or explain the difference.
+3. **Qualify claims where the method is not the best** (AGD20K affordance) and add a brief discussion of why.
+4. **State explicitly whether ground-truth bounding boxes are needed at inference time** and discuss the practical implications.
+5. **Tone down or better contextualize the "first" novelty claim** regarding the many-to-many framing, given that the prior work (Li et al., 2023b) proposed the task and likely motivated its characterization.
 
 ## Score and Decision
 
-This paper makes a solid contribution to OCL with a well-motivated reasoning framework, clean ablations, and strong empirical results across multiple benchmarks. The issues identified are addressable (loss specification, limitation acknowledgment) and do not threaten the core claims. The paper is ready for acceptance with minor revisions.
+The paper addresses a genuine challenge (many-to-many object concept learning) and presents a method that yields substantial quantitative gains on the primary benchmark. The hierarchical reasoning design and multi-dataset evaluation are strengths. However, the incomplete specification of the counterfactual loss — a claimed contribution — and the unexplained discrepancy between the ablation baseline and the main-table baseline are significant methodological gaps that prevent full assessment of the method's validity. These issues are addressable in revision but are not fatal to the core empirical claim. The paper requires a major revision to clean up the method description and ablation analysis before it meets the threshold for acceptance.
 
-**Originality:** Good — the coarse-to-fine hierarchical prompting and counterfactual relation-enhancing are novel combinations for OCL.  
-**Importance of research question:** High — OCL is relevant to embodied AI and moves beyond standard discriminative classification.  
-**Claims support:** Claims are generally well-supported by ablations and consistent gains across three benchmarks.  
-**Soundness of experiments:** Sound; the main concern is baseline backbone comparability, which is partially addressed.  
-**Clarity of writing:** Generally clear; the loss function specification is the main gap.  
-**Value to community:** Moderate — the method and ablation insights could inform future work on reasoning-based concept learning.
+**Score: 5.5** — Borderline. The empirical results are promising, but the method description has gaps that must be resolved. A strong rebuttal with clarifications could raise this.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,22 +1,20 @@
-Now I have a thorough understanding of the paper. Let me construct the final review, carefully cross-checking each reviewer claim against the actual text.
-
----
+Now I have all the information needed. Let me write the consolidated review.
 
 ## Summary
 
-This paper introduces LieRE (Lie group Relative position Encodings), which generalizes Rotary Position Embeddings (RoPE) from 1D sequences to *n*-dimensional inputs by replacing the standard block-diagonal 2D rotation matrices with dense rotation matrices learned via the exponential map of a skew-symmetric basis. The method is evaluated on 2D image classification (CIFAR-100, ImageNet) and 3D video classification (UCF101), reporting relative accuracy improvements of 10.0% over DeiT III on CIFAR-100 and 15.1% over absolute position encodings on UCF101, as well as training-compute and data-efficiency gains.
+This paper introduces Lie group Relative position Encodings (LieRE), which generalize Rotary Position Embeddings (RoPE) to higher-dimensional inputs by learning dense rotation matrices parameterized via a skew-symmetric basis and the matrix exponential. The key idea is to replace the block-diagonal 2D rotations used in RoPE/RoPE-Mixed with full rotation matrices, allowing the model to learn richer positional representations for multi-dimensional data (2D images, 3D videos). Empirically, LieRE shows consistent accuracy improvements over absolute position embeddings and existing relative encoding methods (RoPE-Mixed, VisionLlama), along with data and compute efficiency gains on CIFAR-100 and UCF101 classification tasks.
 
 ## Strengths
 
-- **Novel and well-motivated generalization of RoPE.** LieRE extends RoPE from 1D sequences to *n*-dimensional inputs by learning dense rotation matrices from a skew-symmetric basis (Section 3, Algorithm 1). The connection to Lie theory — in particular, the trade-off between commutativity (Eq. 2, block-diagonal 2D rotations) and the weaker approximation property (Eq. 1, dense rotations) — provides clear mathematical grounding (Section 2.1). The paper shows that setting the block size to 2 recovers RoPE-Mixed exactly, making the generalization explicit (line 75).
+1. **Principled generalization of RoPE via differentiable Lie-group parameterization.** The paper provides a clean mathematical framework: learning a skew-symmetric matrix basis and mapping it to rotations via matrix exponential. The connection to RoPE is explicit (block size 2 recovers RoPE-Mixed), and the block-size knob allows controlled capacity scaling from exact commutativity (small blocks) to richer but approximate relative encoding (large blocks). This is technically sound and novel.
 
-- **Substantial accuracy gains across 2D and 3D tasks.** On CIFAR-100, LieRE achieves a 10.0% relative improvement over DeiT III, 7.3% over VisionLlama, and 2.2% over RoPE-Mixed; on ImageNet the trends are consistent (Section 5.1, Table 1). On UCF101 (3D video), LieRE achieves a 15.1% relative improvement over absolute position encodings. Results are reported with 95% confidence intervals.
+2. **Consistent empirical improvements over multiple baselines in a controlled setting.** When all methods share the same backbone, augmentation, and training regimen, LieRE outperforms absolute PE, VisionLlama, and RoPE-Mixed across CIFAR-100, ImageNet, and UCF101 (Table 1). The 2.2% relative improvement over RoPE-Mixed on CIFAR-100 and 1.5% on UCF101 are modest but consistent, and the gains over absolute PE are substantial (10.0% on CIFAR-100, 15.1% on UCF101). The improvement holds across ViT-Tiny, ViT-B, and ViT-L scales (Table 4).
 
-- **Training compute and data efficiency.** LieRE requires 3.9× fewer training epochs to match the final accuracy of the DeiT III baseline on CIFAR-100 (Section 5.4, Figure 4b), and outperforms the full-data baseline using only 70% of the training data (Section 5.2, Figure 3b). These efficiency gains are the largest among compared methods.
+3. **Demonstrated data and compute efficiency.** On CIFAR-100, LieRE requires ~3.9× fewer training steps to match the absolute-PE baseline accuracy (Figure 4b) and achieves the full-data baseline accuracy with only 70% of the training data (Figure 3b). These are practically meaningful efficiency improvements, evaluated in a controlled setting where only the position encoding changes.
 
-- **Systematic capacity ablations.** The paper varies the LieRE block width (LieRE₈ vs LieRE₆₄, Figure 4a), the number of learned bases (per-head vs per-layer vs shared, Table 2), and the transformer backbone size (ViT-T, ViT-B, ViT-L, Table 4), providing practical design guidance for deploying LieRE.
+4. **Patch-shuffling experiment provides direct evidence of positional encoding usage.** Under patch shuffling, LieRE shows the largest accuracy drop among all methods (Table 3), convincingly demonstrating that the model actually leverages the learned positional representations rather than ignoring them.
 
-- **Patch shuffling validates positional encoding usage.** LieRE models show the largest accuracy drop under patch shuffling (Table 3), directly confirming that the encoding is being utilized more heavily than baselines, not ignored.
+5. **Robustness across parameter-sharing regimes and resolutions.** LieRE benefits from per-head/per-layer learned bases (Table 2) and maintains its advantage across varying inference resolutions (Figure 2), indicating that the encoding generalizes well.
 
 ## Weaknesses
 
@@ -25,57 +23,66 @@ None.
 
 ### Major
 
-- **The source of LieRE's gains is not fully isolated: the Lie-group formulation vs. larger rotation capacity.** The paper frames LieRE as a generalization of RoPE-Mixed and compares LieRE₈ / LieRE₆₄ (block sizes 8 and 64) against RoPE-Mixed (block size 2). However, this confounds two variables: (1) the Lie-group learning mechanism (skew-symmetric basis + exponentiation) and (2) the larger rotation block size. A controlled baseline that parameterizes larger rotation blocks *without* the Lie-group formulation — e.g., composing multiple independent RoPE-Mixed rotations per block, or learning a rotation matrix directly via orthogonal parameterization — would isolate whether the improvement comes from the specific LieRE mechanism or simply from increased rotational capacity. Without this control, the paper's attribution claims ("LieRE's advantage comes from breaking commutativity") are not fully supported by the experiments. The block-size ablation (Figure 4a) shows that larger blocks help, which is necessary but not sufficient to show that *how* LieRE parameterizes those blocks is what matters.
+1. **Ambiguity about the "DeiT III" baseline and what it actually contains.** The abstract and introduction claim comparison against "DeiT III," but Section 4 describes the setup as using "the standard backbone sizes of ViT-Tiny, ViT-B and ViT-L" with "All experiments use RandAugment." The full DeiT III recipe (Touvron et al., 2022) includes LayerScale, stochastic depth, repeated augmentation, 3-Augment, mixup/cutmix, and color jitter — none of which are mentioned. Table 1 labels the baseline "∗equivalent to DeiT," not "DeiT III." If the baseline is a simplified ViT+absolutePE+RandAugment rather than the actual DeiT III recipe, the headline claim of "10.0% relative improvement over DeiT III" is misleading. **This does not affect the comparison against RoPE-Mixed and VisionLlama** (which are implemented in the same shared framework), but it undermines the paper's most prominently advertised accuracy numbers and requires clarification. The authors need to either (a) document that they fully implemented the DeiT III recipe, or (b) rebrand the baseline as "ViT with absolute PE" and adjust the claims accordingly.
+
+2. **No reported error bars or number of random seeds.** The Table 1 caption mentions "95% confidence intervals," but no intervals, standard deviations, or seed counts appear anywhere in the extracted text. The margins over the closest relative competitor (RoPE-Mixed) are small (2.2% relative on CIFAR-100, 1.5% on UCF101). Without multiple random seeds and error bars, it is impossible to assess whether these differences are statistically meaningful or within run-to-run noise. This is the single most important empirical gap to address.
 
 ### Minor
 
-- **The 3D baseline implementation is underspecified.** For the UCF101 experiments, the paper states it compares against "RoPE-Mixed" but does not describe how RoPE-Mixed (originally designed for 2D image grids) was extended to 3D video (line 113). The text says "similar to the previous section," which is too vague to assess fairness. The reported 1.5% relative improvement over this baseline is uninterpretable without knowing the details of the 3D adaptation.
+3. **No ablation controlling for added capacity in a non-rotation form.** LieRE adds ~580k parameters (ViT-B). The paper's block-size ablation (Section 5.3.2) shows that larger block sizes improve performance, which demonstrates that the *rotation structure* benefits from more capacity, but it does not control for simply adding the same parameter budget to the baseline via a non-rotation mechanism (e.g., a small MLP or learned additive bias). Without this control, one cannot fully rule out the possibility that some of the gain comes from "more learned parameters" rather than "better structural inductive bias."
 
-- **Efficiency claims lack uncertainty quantification.** The 3.9× training-step reduction and 70% data-efficiency numbers are presented as point estimates without confidence intervals, error bars, or description of how the thresholds were determined (e.g., whether the comparison is pointwise or area-under-curve). While the paper does report 95% CIs for accuracy in Table 1, the absence of similar rigor for the efficiency claims weakens their evidentiary weight.
+4. **Approximation error of the relative-position interpretation is not analyzed.** The paper correctly notes that for block sizes >2, the rotation matrices do not commute, so the score R(p_i)^T R(p_j) only approximately encodes relative positions p_j − p_i (Equation 1). The paper frames this as a tradeoff (line 52) but provides no empirical analysis of how the approximation degrades with distance or block size, nor any theoretical bound. For long sequences where p_i and p_j can be far apart, the approximation could in principle degrade. An empirical sanity check (e.g., measuring ∥R(p_i)^T R(p_j) − R(p_j − p_i)∥ for various position differences) would strengthen the paper's theoretical grounding.
 
-- **No parameter-matched baseline.** LieRE adds ~580k parameters (ViT-B). The paper does not include a control that adds a similar number of parameters through another mechanism (e.g., increasing the transformer hidden dimension), leaving open the possibility that some of the gains reflect additional capacity rather than the encoding method itself.
+5. **Missing implementation details essential for reproducibility.** The paper does not specify:
+   - How the skew-symmetric basis matrices {A_i} are initialized.
+   - The learning rate and optimizer settings for the basis matrices (distinct from the backbone?).
+   - The computational overhead of the matrix exponential vs. precomputed RoPE rotations (is it negligible, or does it add non-trivial latency?).
+   - The number of random seeds used for any experiment.
 
-- **Learning dynamics of the skew-symmetric basis are opaque.** The paper states the basis is "learned" (line 69) but does not specify its initialization (zero? identity?), whether any constraints (e.g., orthonormality) are enforced, or whether numerical stability issues arise from computing the matrix exponential during training. These details matter for reproducibility and for understanding behavior at early training stages.
+6. **Numerical inconsistency between abstract and conclusion.** The abstract reports "3.9-fold reduction in training time" while the conclusion (line 220) says "3.5 times less training compute[d]." These should be reconciled.
 
 ### Trivial
-None.
+
+7. The paper refers to "standard1 transformer backbone" (line 82) with a superscript "1" but no corresponding footnote is visible in the extracted text — likely a formatting artifact.
+8. Minor wording: "DEIT III basline" in abstract is a typo (though likely a parser artifact).
 
 ## Nice-to-Haves
 
-- Reporting wall-clock training time or FLOPs would strengthen the compute-efficiency claims (3.9× step reduction might not translate to 3.9× time reduction if the matrix exponential adds overhead).
-- Evaluating on a 4D synthetic task (e.g., 3D video with a temporal dimension already tested, or a higher-dimensional toy problem) would strengthen the claim of generalizing to *n*-dimensional inputs beyond 2D and 3D.
-- The alternative interpretation of patch shuffling results (accuracy drop = overfitting to position vs. genuine utilization) is worth a brief discussion.
+- **Approximation analysis** as described in Weakness 4 above — not required for acceptance but would strengthen the theoretical story.
+- **Failure case discussion**: are there settings (very small models, very long sequences) where LieRE underperforms RoPE-Mixed?
+- **Computational cost benchmark**: wall-clock time comparison of LieRE vs. RoPE per forward pass, to quantify the matrix exponential overhead.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviewers are flagged to be removed; treat them with caution:
 
-- **"Insufficient experimental detail for reproducibility (missing optimizer, LR, batch size, etc.)"** — The paper specifies the backbone (ViT variants, line 82), epochs (200 for ImageNet, line 120-121), augmentation (RandAugment, line 82), and that pre-trained weights are not used (line 82). Per the meta-review guidelines, nitpicks about undisclosed hyperparameters of the sort normally documented in a camera-ready appendix are to be removed. The paper cites DeiT III (Touvron et al., 2022) as a baseline, which implicitly anchors the training recipe.
+- **Data efficiency attribution (Harsh Critic, Other Observations #1):** The critic claimed the paper falsely attributes data/compute efficiency exclusively to LieRE. However, the paper explicitly states (line 145) "learnable relative position encodings, such as LieRE and RoPE-Mixed, exhibit substantially greater data efficiency" and notes (line 183) that LieRE shows "the largest reduction" — correctly distinguishing the general property from the best-in-class result. The criticism misreads the paper.
 
-- **"No discussion of computational cost (matrix exponential overhead)"** — Noted as a nice-to-have, not a weakness invalidating results. Many positional encoding papers do not report per-step FLOPs.
+- **Patch shuffling comparison with RoPE-Mixed (Harsh Critic, Other Observations):** The critic speculates that "if LieRE and RoPE-Mixed drop by similar amounts, the experiment adds little" without verifying. Table 3 is an image in the original submission; the critic has no basis to assert this and did not provide evidence.
 
-- **"The paper should cover higher-dimensional inputs (4D+)"** — Testing 2D and 3D is a reasonable scope. Demanding 4D+ is scope creep for a paper already demonstrating the method across multiple modalities.
+- **Block-size >2 outperformance claim (Harsh Critic, Other Observations):** The critic states the paper "never shows that block sizes >2 consistently outperform block size 2." The paper explicitly states (line 159) that "LieRE8 consistently outperforms alternatives across all evaluated model sizes" and refers to Figure 4a which plots accuracy vs. block dimension. The results are in the figure (unreadable only due to parser limitations on the image).
 
-- **The harsh critic's claim that "the paper does not explain why LieRE is fundamentally different from simply using a larger block-diagonal rotation matrix in RoPE-Mixed"** — The paper explicitly addresses this (Section 2.1, Eq. 1 vs Eq. 2; Section 3, line 71; Section 5.3.2, line 175). The difference is commutativity of block-diagonal 2D rotations vs. the non-commutative dense rotations enabled by LieRE.
-
-- **Strength Finder's claimed strength about "patch shuffling confirms effective use" being a supporting strength** — This is kept. However, the claim that the 10.0% and 15.1% are "substantial accuracy gains" is factually correct as stated.
+- **Generic strengths from Strength Finder:** The claim that LieRE shows "dramatic compute and data efficiency" (Strength #2) is retained in the main review but the phrasing is toned down to match the weaker evidence (only tested on CIFAR-100). The point about "stronger use of positional information than prior relative encodings" (Strength #3) is retained but only the patch-shuffling evidence supports it, and the magnitude vs. RoPE-Mixed is unclear from the extracted text. These are kept in the Strengths section with appropriate caveats.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a genuine experimental-design gap (the missing same-capacity control) but do not contribute a novel analysis, theoretical insight, or reinterpretation of the results beyond what the paper already presents.
+The reviews collectively highlight an interesting tension: the paper makes a theoretically principled contribution (generalizing RoPE via Lie groups) but its empirical evaluation creates an asymmetry where the strongest headline numbers (10.0% over "DeiT") rest on the shakiest ground (unclear baseline reproduction), while the more modest but better-controlled comparisons (2.2% over RoPE-Mixed) lack error bars. This pattern suggests the paper's genuine contribution — dense learned rotations for multi-dimensional positional encoding — is real, but the presentation inflates it by juxtaposing it against a potentially weak absolute-PE baseline labeled as "DeiT III." The actual value of the work is better captured by the controlled comparison against RoPE-Mixed (implemented in the same framework), where the gains are modest but consistent across tasks and model sizes.
 
 ## Suggestions
 
-1. **Add the critical missing control:** Compare LieRE against a baseline that uses the *same* rotation block size (8 or 64) parameterized without the Lie-group machinery — e.g., by composing independent 2D RoPE-Mixed rotations or by learning block-diagonal rotation matrices directly. If LieRE still outperforms, the Lie-group formulation is validated; if not, the contribution reduces to "larger blocks are better," which is a weaker but still publishable result.
-2. **Specify the 3D baseline details:** Describe how RoPE-Mixed was adapted to 3D video (e.g., separate RoPE axes per spatial and temporal dimension, or a Kronecker product structure).
-3. **Add uncertainty quantification for efficiency claims:** Report the range or confidence intervals for the 3.9× and 70% numbers, and state the exact accuracy threshold used for the compute-reduction measurement.
-4. **Describe skew-symmetric basis initialization and regularization:** Clarify how the basis matrices are initialized, whether there are constraints (e.g., Frobenius norm regularization), and whether the matrix exponential introduces numerical stability issues during training.
+1. **Clarify the baseline.** Either document that the full DeiT III recipe (LayerScale, stochastic depth, repeated augmentation, mixup/cutmix, etc.) was used, or rename the baseline to "ViT with absolute PE" and adjust all claims accordingly. The 10.0% figure is only defensible if the baseline is genuinely DeiT III.
+
+2. **Report error bars.** Run all key experiments (Table 1, compute efficiency, data efficiency) with at least 3 random seeds and report mean ± std or confidence intervals. This is essential given the small margins over RoPE-Mixed.
+
+3. **Add a capacity-control ablation.** Add the same ~580k parameters to the absolute-PE baseline via an extra linear layer or learned additive bias and verify that LieRE's improvement exceeds what extra capacity alone provides.
+
+4. **Reconcile 3.9× vs. 3.5×** discrepancy between abstract and conclusion.
+
+5. **Disclose initialization, hyperparameters, and seed counts** for full reproducibility.
 
 ## Score and Decision
 
-The paper introduces a genuinely novel extension of RoPE with a clean mathematical motivation and demonstrates clear empirical improvements across multiple tasks. The core weakness is that the experiments do not fully isolate whether the gains come from the Lie-group formulation or simply from larger rotation block sizes — an attribution gap that weakens but does not invalidate the contribution. The paper is above the acceptance threshold but would be strengthened by addressing this control.
+The paper introduces a novel and principled generalization of RoPE with consistent empirical evidence across multiple tasks, scales, and ablations. The core idea is solid and the controlled comparisons against RoPE-Mixed and VisionLlama are fair. However, the ambiguity surrounding the "DeiT III" baseline and the complete absence of error bars are significant gaps that prevent full confidence in the headline claims. The paper is publishable after moderate revisions.
 
-**Score: 6.0**
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,18 +1,16 @@
-Now I have a thorough understanding of the paper and can cross-reference every reviewer claim. Let me construct the consolidated review.
-
 ## Summary
 
-This paper addresses action-background confusion in point-supervised temporal action localization (PTAL) by proposing FS-PTAL, a framework with four modules: label extension (resampling to densify point-level annotations), pseudo label mining (generating additional action/background labels), score contrast (optimized outer-inner contrastive loss), and feature separation (embedding-space cosine-similarity separation). Results on THUMOS'14 are presented in the main paper (Table 1), with ablation studies (Table 2) quantifying each module's contribution; results on three additional benchmarks (ActivityNet v1.3, BEOID, GTEA) are deferred to supplementary.
+This paper proposes FS-PTAL, a point-supervised temporal action localization framework with four components (label extension, pseudo label mining, score contrast, and feature separation) designed to address action-background confusion. The method achieves 56.74% Avg(0.1:0.5) mAP on THUMOS14, outperforming prior point-supervised methods by ~4%. The ablation study validates each module's contribution, and the paper identifies a genuine flaw in prior OIC calculations.
 
 ## Strengths
 
-- **Concrete technical improvements over prior point-supervised methods, especially LACP.** The paper identifies a genuine flaw in prior OIC (outer-inner-contrastive) calculation—where outer scope for a long action can inadvertently include a neighboring short action—and proposes formula (8) that respects inter-label gaps (§3.4). This is a specific, grounded fix rather than a generic change. The pseudo label mining optimization (raising γ_act with an additional constraint that the mined action score must be the highest in Q̂) is also clearly motivated (§3.3).
+- **Strong empirical results**: FS-PTAL achieves a clear SOTA on THUMOS14 under point-level supervision, outperforming the previous best method LACP by nearly 4% on Avg(0.1:0.5) and showing notable gains at high IoU thresholds (Table 1), which directly supports the claim of improved action-background separation.
 
-- **Feature separation at point-level granularity rather than coarse segment pooling.** The feature separation module (§3.5) introduces a feature embedding space with point-level cosine similarity separation (bg-bg, act-act, act-bg terms with a feature masked attention layer). This meaningfully differs from prior work (Min & Corso, 2020; Lee & Byun, 2021) that used segment-level pooling which destroys fine-grained information.
+- **Ablation study quantifies individual module contributions**: Table 2 shows that removing the pseudo label mining, score contrast, or feature separation modules drops performance by 7.4%, 4.2%, and 5.1% respectively, providing causal evidence that each component is essential. The label extension module contributes 2.1% on its own.
 
-- **Measurable gains on THUMOS'14.** The paper reports that FS-PTAL achieves 56.74% average mAP on THUMOS'14, with a 3.9% improvement over prior SOTA. The ablation table shows clear incremental improvements as modules are added (2.1% from label extension, 7.4% from pseudo label mining, 4.2% from score contrast, 5.1% from feature separation), demonstrating that each component contributes.
+- **Novel identification of a flaw in prior outer-inner contrastive loss**: Section 3.4 and Figure 3 identify that prior OIC calculations (used in LACP, etc.) can incorrectly include short actions in the outer region of a long action, leading to erroneous contrast scores. The paper proposes a corrected formulation (Equation 8) that respects distances to neighboring labels.
 
-- **Well-framed motivation with diagnostic evidence.** Figure 1 provides error analysis (Alwassel et al., 2018) showing that prior methods BackTAL and ASM suffer heavily from Localization Err. and Background Err., directly motivating the paper's focus on fine-grained action-background separation.
+- **Error analysis motivates the problem directly**: Figure 1 uses the Alwassel et al. diagnostic to show that existing methods (BackTAL, ASM) suffer heavily from Localization Err. and Background Err., empirically grounding the action-background confusion problem that the paper targets.
 
 ## Weaknesses
 
@@ -24,57 +22,51 @@ None.
 
 ### Minor
 
-- **Results for ActivityNet v1.3, BEOID, and GTEA are entirely deferred to supplementary.** The main paper states "There is no doubt that our approach achieves the best performances on these three benchmarks" and "the experimental tables and the related analysis are in the Sec." without even providing summary mAP numbers. While deferring details is standard practice, omitting even a single summary sentence or mini-table from the main paper makes the claim of SOTA on four benchmarks impossible to verify from the main text alone. The claim would be stronger with a compact table (like a 3-row summary) in the main body.
+- **Formula (8) for the outer-inner contrast score is incompletely specified in the main text**: The formula as presented shows only two edge cases (n=1, n=N_sl^c) for the left/right boundary of the outer scope, but does not clearly specify the general case for interior segments. The cases environment appears to define `left` for only the first segment and `right` for only the last segment, leaving the computation for non-boundary segments ambiguous. While additional detail may exist in the appendix (which was stripped), a reader should be able to understand the core computation from the main text.
 
-- **Ablation table lacks a "None" (no-module) baseline.** Table 2 shows A (label extension), A+B, A+B+C, and the full model A+B+C+D. Without knowing the performance of the baseline from Section 3.2 alone (before even the label extension module), the reported "gains" are relative to an unstated starting point. Adding a column for the raw baseline would cleanly isolate what the label extension module itself contributes.
+- **No controlled comparison isolating proposed modules against their direct prior equivalents**: The paper claims that the score contrast module improves over OIC (Shou et al., 2018; Lee & Byun, 2021), and that the feature separation module differs from prior work (Min & Corso, 2020; Lee & Byun, 2021). However, no experiment directly replaces, e.g., the OIC loss in LACP with the proposed score contrast to show a clean improvement, or swaps the feature separation module of a prior method with the proposed one. The ablation study shows each module's contribution to the full FS-PTAL framework, but does not isolate whether the advantage comes from the specific proposed modifications versus overall framework differences.
 
-- **Point-label generation protocol is unspecified.** The paper does not state which frame was annotated per action instance (e.g., random frame, middle frame, first frame) or how this was done for the four datasets. This is essential for reproducibility and for ensuring fair comparison with prior point-supervised methods, especially LACP and BackTAL which may use different protocols.
-
-- **The technical delta relative to LACP could be more sharply quantified.** While the paper describes three specific differences (optimized mining, OIC calculation, feature separation), there is no ablation that compares a re-implemented LACP baseline against the proposed FS-PTAL under identical conditions (same features, same point protocol, same evaluation pipeline). The comparison in Table 1 uses published LACP numbers, which is standard but leaves uncertainty about whether the gains come from the proposed modules or from unstated differences in the experimental setup.
+- **The relationship between the extended feature length T and the original length T_ori is not explained**: Section 3.1 states that T time steps are sampled via inverse CDF but does not clarify whether T equals T_ori, is larger, or is determined by some rule. This affects understanding of the label extension module's impact on feature dimensionality.
 
 ### Trivial
-- Several hyperparameters (τ₁, τ₂, γ_act, γ_bkg, ψ_same, ψ_diff, λ₁–λ₄) are not specified in the main text. While these are standard to defer to supplementary, a single table in the main paper would improve readability.
-
-- The phrase "In the Sec." appears multiple times (lines 67, 95, 135, 175, 188, 201, 215) as an incomplete reference, indicating the supplementary section numbers were not filled in for this version. This is a minor presentation issue.
+- Some hyperparameter values (τ₁, τ₂ mentioned in Section 3.1) are not stated in the main text.
 
 ## Nice-to-Haves
-- A diagnostic error analysis (using the same Alwassel et al. tool as Figure 1) comparing FS-PTAL against BackTAL and LACP directly in the main paper would be the clearest way to validate the claimed reduction in Background Err. and Localization Err.
-- Reporting statistical significance (error bars over multiple runs) would strengthen the claims.
-- A failure case analysis or discussion of limitations would improve credibility.
+
+- Include a controlled experiment that replaces the OIC loss in LACP with the proposed score contrast module to directly measure the improvement attributable to the corrected OIC formulation.
+- Present the error diagnosis (Alwassel et al.) for FS-PTAL alongside Figure 1 in the main text, rather than deferring to the appendix, to directly demonstrate that the proposed model reduces Localization Err. and Background Err.
+- Clarify whether the extended feature length T equals T_ori or is increased.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points are flagged to be removed; treat them with caution.
 
-- **"Table 1 is poorly formatted... many rows have missing values."** — This is a parser artifact from converting the PDF image to text. The original table has no such issues. Removed per hard rule: remove formatting artifacts.
+- **"Internal inconsistency between Table 1 and Table 2"** — The Harsh Critic claimed that computing Avg(0.1:0.7) from Table 1's numbers gives ~43.2%, contradicting Table 2's 50.7%. This is mathematically wrong: the two averages reported in Table 1 (Avg(0.1:0.5)=56.74% and Avg(0.3:0.7)=44.69%) are fully consistent with an Avg(0.1:0.7) of 50.7%. Simple algebra shows the implied middle IoU values (0.3–0.5 average ~50.75%) are perfectly reasonable. No inconsistency exists.
 
-- **"Method description is incomplete; technical soundness cannot be assessed"** (from critic's point 2). — The main paper provides the key formulas (1–15), conceptual descriptions of all four modules, and the overall framework. The deferred algorithm pseudocode and threshold values are standard supplementary content found in most conference papers. The method's technical soundness IS assessable from the main text. Removed as overstatement.
+- **"Table 1 appears incomplete or misaligned with ablation baseline"** — The critic faults Table 1 for not including a "no-module" baseline. This is standard practice: SOTA comparison tables (Table 1) benchmark against other published methods, while ablation tables (Table 2) compare the paper's own variants. The baseline (none of A,B,C,D = 36.6%) is correctly placed in Table 2.
 
-- **"Missing appendix/missing proofs/missing algorithm details"** — The parser strips supplementary sections from all papers; these exist in the original submission. Removed per hard rule.
+- **"Method description is too vague / defers to appendix"** — Several criticisms about missing details (τ₁, τ₂ values, γ_act, γ_bkg, architecture specifics, complete algorithms) were tied to their absence from the main text despite being in the appendix. Per the review guidelines, content deferred to the appendix should not be penalized as the appendix is part of the submission. The one substantive formula issue (Formula 8 being incomplete in the main text) is retained as a Minor weakness above.
 
-- **"The paper should include a comparison table or bullet points differentiating from LACP"** (from Section-by-Section notes). — The paper already differentiates in three concrete places (§3.3 mining, §3.4 OIC, §3.5 feature separation). This demand is a presentation preference, not a substantive gap. Removed.
+- **"Error analysis in Figure 1 does not include FS-PTAL"** — The diagnostic for FS-PTAL is presented in the appendix (Sec. E). Per the review guidelines, the existence of appendix content should not be penalized. The issue of whether it belongs in the main text is moved to Nice-to-Haves.
 
-- **"Unclear novelty relative to prior point-level work, especially LACP"** framed as a critical issue. — The paper clearly states three specific technical differences and provides a comparison in Table 1. The claim that "there is no direct ablation comparing FS-PTAL to a re-implemented LACP baseline" is true but reflects a very high bar — comparing against published numbers is standard practice. Downgraded from "critical" to a minor note above.
+- **"Writing quality (mthod, tlao bgeel, aupper)"** — These are parser artifacts from PDF extraction, not author errors.
 
-- **Strength from Strength Finder: "Substantial and consistent improvements... across multiple benchmarks."** — While THUMOS'14 is in the main paper, the other three benchmarks' results are in supplementary, weakening this claim in the main text. The strength as stated is overconfident given the available evidence. Moved here.
+- **"Results on ActivityNet v1.3, BEOID, GTEA not in main text"** — These results are in the appendix, which is standard practice.
+
+- **Numerous generic/formulaic criticisms** about missing hyperparameters, training procedure details, ablation IoU breakdowns, and related works — these either reflect standard conference paper conventions (details in appendix) or are scope-creep demands.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the same core issues: the paper has a well-motivated pipeline with concrete technical improvements over LACP, but the evidence for SOTA on multiple benchmarks is unevenly distributed (only THUMOS'14 in the main text), and the ablation could be cleaner with a no-module baseline. The most novel observation from the cross-review is that the paper's strongest claim (4-dataset SOTA) rests primarily on the one dataset shown in the main paper; calibrating this claim would make the paper stronger.
+None beyond the paper's own contributions. The reviews primarily validate or challenge the paper's stated claims rather than adding a new analytic lens.
 
 ## Suggestions
 
-1. **Add a compact results summary for ActivityNet, BEOID, and GTEA in the main paper** — even a 3-row table with mAP values and a single comparison method (e.g., LACP) would let readers verify the multi-dataset claim from the main text without hunting through supplementary.
-
-2. **Add a "None" column to Table 2** showing the performance of the Section 3.2 baseline (video-level loss only, no label extension, no point-level supervision). This would anchor the reported gains.
-
-3. **Specify the point-label annotation protocol** (which frame per instance, how selected, and whether consistent with prior work) — crucial for reproducibility and fair comparison.
-
-4. **Replace "In the Sec." placeholders** with actual section numbers (e.g., "Sec. A.1" etc.) — this makes the paper feel complete rather than draft-like.
+1. Complete Formula (8) to show the general case for non-boundary segments, or provide a clear textual description of how the outer scope is computed for every segment.
+2. Add one controlled experiment that isolates a proposed module against its direct prior counterpart (e.g., swapping OIC in LACP with the proposed score contrast) to strengthen the novelty case.
+3. Include the error diagnosis for FS-PTAL in the main text, or at minimum state the key takeaway (e.g., "FS-PTAL reduces Localization Err. by X% and Background Err. by Y% relative to BackTAL/ASM").
+4. Clarify whether the extended feature length T after the label extension module differs from T_ori, and if so, by how much.
 
 ## Score and Decision
 
-The paper addresses a genuine problem (action-background confusion in PTAL) with a technically sound pipeline that makes concrete, well-motivated improvements over prior work (especially LACP). The THUMOS'14 results and ablation are present in the main paper and support the core claims. The main weaknesses are presentation issues: deferring all other dataset results to supplementary (even a mini-table would help), a missing baseline column in the ablation, and an unspecified point-label protocol. These are addressable in revision and do not undermine the paper's contribution. I recommend acceptance.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

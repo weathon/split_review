@@ -1,18 +1,18 @@
-Now I have a clear picture. Let me write the consolidated review.
+Now I have thoroughly verified the reviewer claims against the paper. Let me synthesize the final review.
 
 ## Summary
 
-CLIP-DETR integrates pretrained CLIP knowledge into DETR-based object detectors through two training-only modules: AlignNet (which refines encoder feature maps via category- and scale-aware contrastive alignment using GT boxes) and DynQL (which injects noise-varied prompted queries into the decoder to improve query-object correspondence learning). The method is evaluated on COCO, LVIS, and open-vocabulary COCO, showing consistent improvements over DETR baselines.
+This paper proposes CLIP-DETR, a framework that integrates pretrained CLIP knowledge into DETR-based object detection through two training-only modules: **AlignNet**, which applies contrastive learning between ROI-pooled encoder features and CLIP-derived category+scale embeddings, and **DynQL**, which trains the decoder with multiple query sets at varying noise levels. On COCO, the method achieves 57.3 mAP with a CLIP-RN50x64 backbone and shows consistent gains on LVIS and open-vocabulary benchmarks.
 
 ## Strengths
 
-- **Consistent improvements across multiple DETR baselines and datasets.** On COCO (Table 1), CLIP-DETR with ResNet-50 achieves a +3.9% mAP gain over Deformable-DETR, and +5.1% with a CLIP image encoder backbone. On LVIS (Table 2) it outperforms Co-DETR across configurations. On open-vocabulary COCO (Table 3), it adds +1.4% and +1.7% AP50 on novel categories for OV-DETR and CORA respectively. These results directly support the paper's central claim.
+- **Category- and scale-aware feature alignment is well-validated.** AlignNet's incorporation of object scale [w,h] alongside CLIP text embeddings yields a clear +0.8 AP improvement over category-only alignment (Table 5: 49.1 vs 48.3), and the ablation study showing that full bbox coordinates [cx,cy,w,h] underperform scale-only [w,h] (48.7 vs 49.1) provides an actionable and non-obvious design insight. This goes beyond typical region-text contrastive methods that only align with labels.
 
-- **Strong ablation evidence for both components.** Table 4 shows that AlignNet and DynQL each independently improve the baseline, and their combination yields the largest gain — confirming complementarity. Tables 5–7 provide thoughtful ablations on scale-aware alignment, noise diversity, and the number of DynQuery sets.
+- **Diverse noise levels in DynQL are shown to improve decoder robustness.** The ablation in Table 6 demonstrates that a uniform distribution of noise levels (β from 0.1 to 0.9) across five DynQuery sets outperforms fixed-noise variants (49.7 vs 49.0 for β=0.5), supporting the paper's claim that exposing the decoder to a spectrum of query-object distances is beneficial. The systematic sweep over number of query sets (Table 7) further strengthens this finding, showing 5 sets as optimal.
 
-- **Insightful finding about translation invariance in feature alignment.** Table 5 reveals that aligning with [w,h] (scale only) outperforms full [cx,cy,w,h] alignment. The authors correctly attribute this to translation invariance — a non-obvious practical design insight.
+- **Training-only design preserves inference efficiency.** Both AlignNet and DynQL are removed at inference (stated in Section 3.3 and Figure 1), meaning CLIP-DETR incurs zero additional computational cost at test time versus the baseline DETR architecture — a practical advantage over methods that permanently modify the architecture.
 
-- **Inference-time efficiency preserved.** Both modules are training-only (Figure 1), so CLIP-DETR incurs no additional computational cost at inference compared to the baseline DETR — a practical strength for deployment.
+- **Thorough ablation studies across multiple design dimensions.** The paper independently ablates each component (Table 4), the content of attribute features (Table 5), noise level distribution (Table 6), and number of query sets (Table 7), all using a consistent 12-epoch Deformable-DETR baseline. This allows readers to isolate each design choice's contribution.
 
 ## Weaknesses
 
@@ -20,52 +20,50 @@ CLIP-DETR integrates pretrained CLIP knowledge into DETR-based object detectors 
 None.
 
 ### Major
-None.
+
+- **The headline COCO result (57.3 mAP, +5.1%) is uninterpretable due to a missing backbone-controlled baseline.** The paper claims "When using the CLIP image encoder as the backbone, our method provided an even larger improvement of 5.1% mAP over the baseline" (line 175). However, the baseline reported in Table 1 — Deformable-DETR — uses a ResNet-50 backbone (46.5 mAP), *not* a CLIP-RN50x64 backbone. The appropriate baseline — Deformable-DETR with the same CLIP-RN50x64 backbone, without AlignNet and DynQL — is never reported. This means the 5.1% figure conflates the gain from switching to a stronger backbone with the gain from the proposed method. The paper does show a controlled 3.9% improvement with ResNet-50 backbone, but the stronger headline number cannot be attributed to the method alone. Reporting Deformable-DETR with the CLIP backbone is necessary to make the result meaningful.
 
 ### Minor
 
-- **Unspecified training schedule for the headline 3.9% gain (line 175).** The paper reports "an mAP gain of 3.9% over the baseline" but does not say whether this refers to the 12-epoch or 36-epoch schedule (both are described in the Setup, line 169). The ablation studies (line 187) explicitly use a 12-epoch setup, but the main result text simply says "over the baseline" without qualification. The table images cannot be read in this parsed format to cross-check; this ambiguity makes the central quantitative claim needlessly hard to verify. The authors should state which schedule this refers to.
+- **Direct comparison with DINO's denoising training is missing.** DynQL's core idea — training the decoder with extra queries at varying distances from GT — is closely related to the denoising training in DN-DETR and DINO. While the paper acknowledges this connection (line 21, lines 35–36), it never compares DynQL against DINO's denoising scheme under identical conditions (same backbone, same training setup). The ablation in Table 6 effectively tests noise distributions, but without a DINO-denoising baseline, the reader cannot tell whether DynQL's improvement comes from using CLIP-derived features as the base, from the multi-level noise discretization, or simply from the extra decoder queries generically. A controlled comparison would isolate the novelty.
 
-- **Open-vocabulary evaluation scope.** The OV experiments compare against only two baselines (OVDETR and CORA), both DETR-based. The paper claims "state-of-the-art" open-vocabulary performance, which is not defensible without comparison to a broader set of contemporary OV methods. This does not invalidate the contribution — the paper's scope is a DETR training scheme, and the DETR-focused comparison is reasonable — but the "state-of-the-art" language should be tempered. Reporting only AP50 (standard for this benchmark, as the paper notes) is acceptable within the OV-COCO convention.
+- **The self-attention masking for DynQL is underspecified.** The paper states (line 134): "each DynQuery set can only interact with its own set and the conventional query set, while the conventional queries remain isolated from the DynQuery sets." This describes an asymmetric attention mask (DynQL→Conventional: attend; Conventional→DynQL: no attend), which is technically feasible. However, the exact masking pattern — which attention heads, how the mask is applied across decoder layers — is never specified, and the design choice is not justified. This makes reproduction unnecessarily difficult and also makes it hard to assess how DynQL differs from DINO, where denoising queries use full bidirectional attention with regular queries.
 
-- **Missing limitations discussion and training cost analysis.** The paper does not discuss when CLIP-DETR might underperform (e.g., if CLIP text embeddings are poorly aligned with the detection domain) and provides no analysis of the added training cost from DynQL's extra queries (up to 5× the number of instances per batch). While not a fatal omission, both would help readers assess the method's practical trade-offs.
+- **No direct evidence that AlignNet improves the encoder feature map beyond the pooled GT locations.** The contrastive loss in AlignNet is computed only on ROI-pooled features from ground-truth bounding boxes — a small number of spatial locations per image, all corresponding to foreground objects. The paper claims this "enhances the encoded feature map" (line 65) and makes it "more sensitive to objects" (Figure 1), but provides no feature-space analysis (e.g., feature similarity maps, attention map comparisons before/after AlignNet, or probe experiments) to show that the improvement generalizes across the full H×W spatial domain. The downstream mAP gains provide indirect evidence, but the claimed mechanism — that AlignNet produces a globally more discriminative source memory — remains unsubstantiated.
 
-- **Limited motivational specificity.** The introduction frames the problem as "limited refinement for object features" leading to "inferior inherent understanding of objects" (line 4), which is vague. The motivation would be sharper if it connected a specific observed failure mode of DETR (e.g., small objects, rare categories) to the design of AlignNet and DynQL.
+- **No variance estimates in ablation studies.** Tables 4–7 report single-run mAP values. Given that differences of 0.2–0.4 AP are common within random seed variation, several results (e.g., 52.1 vs 51.9 in Table 5) may not be statistically significant. Multi-seed runs with mean and std would substantially strengthen confidence in the reported design decisions.
 
 ### Trivial
-
-- **Notation in Eq. 1:** The summation index runs `i` over `L` levels, but `i` already denotes the instance ID. It should be `l` (the level index). Likely a parser artifact, but worth checking the original.
+- The paper refers to AlignNet as a "module" (Figure 1) when it is primarily a contrastive loss with a linear projection layer. This is a minor terminological overstatement.
+- The paper does not explicitly state whether the CLIP text encoder is retained at inference for open-vocabulary classification. It is implicitly used (class embeddings are needed for the classification head), but this should be stated.
 
 ## Nice-to-Haves
-- A sensitivity analysis on the number of DynQuery sets and noise range across multiple datasets (currently only COCO).
-- A direct head-to-head comparison with DN-DETR/DINO under identical noise levels to isolate the benefit of using CLIP-derived prompts versus random noise.
-- A failure case analysis showing which object categories or scales benefit most from each module.
+- A discussion of limitations: AlignNet's reliance on GT boxes during training, the computational overhead of DynQL during training, and the scope of open-vocabulary gains.
+- Training-time compute/memory overhead of DynQL (multiple query sets) relative to the baseline Deformable-DETR.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-
-- **Harsh Critic Claim 1 (numerical inconsistency between text and table):** The reviewer speculates that the table shows 43.9 while the text implies 46.0. The tables are embedded as images in the original PDF and cannot be read in this parsed format; the numbers 42.1, 43.9, and 46.0 do not appear anywhere in the paper's text. This criticism is based on unverifiable guesswork from garbled parser output, not an actual discrepancy in the submission. The genuine sub-issue (unspecified schedule) is retained under Minor.
-
-- **Harsh Critic Claim 2 (unclear baseline construction and fairness):** The paper explicitly states (line 159–160): "we chose Deformable-DETR as the foundational detector and built all models upon it to ensure a fair comparison." The reviewer's concern about unreported re-implementation differences is addressed directly by this statement. Removed as a misreading.
-
-- **Criticism about only AP50 for OV detection (Section 4.2):** The paper notes (line 182) that "standard practice for OV-COCO" is reporting AP50. This is correct — it is the established convention in the open-vocabulary detection literature. Removed.
-
-- **Criticism about missing comparison to ViLD, RegionCLIP, Detic, BARON:** These are non-DETR methods. The paper's scope is a training scheme for DETR-based detectors; comparing against non-DETR baselines is outside the paper's stated scope. Moved from Weaknesses to Removed Points.
+These points are flagged to be removed by the instructions; treat them with caution.
+- **Missing comparisons with Grounding DINO and YOLO-World**: The paper's choice of baselines (OV-DETR, CORA, Deformable-DETR, DINO, Co-DETR) is defensible for a DETR training-scheme paper. A demand for a different set of baselines is a matter of taste, not a structural weakness.
+- **"AlignNet is not a network module" — stylistic nitpick**: Calling a contrastive-loss-plus-linear-projection a "module" is standard terminology in the field; this does not affect the technical contribution.
+- **Criticism about self-attention masking being "contradictory"**: The paper's description is asymmetric but internally consistent (DynQL→Conventional attends, Conventional→DynQL does not). The critic's stronger claim that this is "functionally identical" to DINO's denoising is incorrect — DINO uses full bidirectional attention. The underlying concern (underspecification) is kept in Minor.
+- **Criticism about the 5.1% gain being "unsubstantiated" without clarification**: Kept in Major as the missing CLIP backbone baseline concern; the stronger framing as fully unsubstantiated is removed since the ResNet-50 controlled result (3.9%) does provide partial evidence.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews raise no observation about the method or results that the paper itself does not already state or imply.
+None beyond the paper's own contributions.
 
 ## Suggestions
-
-1. Specify in the Results section (line 175) which training schedule (12-epoch or 36-epoch) the 3.9% gain refers to, and add a direct cross-reference to the specific table row.
-2. Tone down the "state-of-the-art" claim for open-vocabulary detection given the limited DETR-only baseline set, or add non-DETR OV baselines to the comparison.
-3. Add a brief limitations paragraph and a note on training-time overhead (GPU-hours or time per epoch).
-4. Sharpen the introduction's motivation by connecting to a concrete failure mode of DETR (e.g., small object recall or rare-category performance) that AlignNet/DynQL specifically address.
+1. **Report Deformable-DETR with CLIP-RN50x64 backbone** (without AlignNet/DynQL) as a proper baseline in Table 1. This is essential to decompose the 57.3 mAP result into backbone gain vs. method gain.
+2. **Add a controlled comparison between DynQL and DINO's denoising scheme** under identical conditions (same backbone, same training schedule, same number of extra queries). This would isolate whether the benefit comes from multi-level noise, CLIP-derived features, or the asymmetric attention masking.
+3. **Specify the exact attention masking pattern** for DynQL: provide a matrix diagram or a precise description of which rows/columns are zeroed. Justify why asymmetric masking is preferred over full bidirectional attention.
+4. **Provide feature-space evidence for AlignNet's effect on the encoder**: compare feature similarity maps, Grad-CAM activations, or recall using encoder-only ROI heads with and without AlignNet training.
+5. **Report means and stds over 3+ seeds** for the ablation tables, particularly for the small-gap comparisons in Tables 5, 6, and 7.
+6. **Add a limitations section** covering AlignNet's GT-box requirement, DynQL's training overhead, and the scope/caveats of open-vocabulary generalization.
 
 ## Score and Decision
 
-The paper presents a clean, well-ablated method with two novel components (AlignNet and DynQL) that consistently improve DETR-based detection. The main weaknesses are presentational — an ambiguous specification of which training schedule the headline number refers to, and overclaimed "state-of-the-art" language relative to the OV baseline set — neither of which undermines the core contribution. The ablations are thorough and the design insights (e.g., scale-only alignment outperforming full bbox alignment) are genuinely informative. The paper makes a solid contribution to DETR-based object detection.
+The paper proposes a plausible and well-motivated direction — using CLIP to supervise both encoder feature alignment and decoder query diversity in DETR — and provides systematic ablation studies that validate several design choices. The controlled ResNet-50 results (3.9% gain) and open-vocabulary improvements do support the method's effectiveness.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+However, the missing CLIP-backbone baseline undermines the headline 57.3 mAP / +5.1% result, making it impossible to attribute the gain to the proposed modules versus the stronger backbone. Combined with the underspecified attention masking and the absence of a direct comparison against the most closely related prior work (DINO denoising), the paper's claimed improvements cannot be fully verified. These are addressable issues, but they are substantive enough that the paper in its current form does not meet the bar for acceptance.
+
+**MY FINAL SCORE: <pineapple>5.0</pineapple>**
+**MY FINAL DECISION: <orange>Reject</orange>**

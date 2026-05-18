@@ -1,81 +1,75 @@
-Now I have all the evidence I need to produce the consolidated review. Let me synthesize everything.
-
----
+Now I have all the information I need. Let me construct the final review.
 
 ## Summary
 
-MotherNet proposes a transformer-based hypernetwork trained on synthetic tabular classification tasks that generates the weights of a compact feed-forward classifier (a two-hidden-layer MLP with low-rank weight decomposition) in a single forward pass, without any dataset-specific gradient descent or hyperparameter tuning. Evaluated on OpenML CC-18 and TabZilla, MotherNet achieves competitive accuracy with tuned baselines while delivering ~50× faster inference than TabPFN and requiring ~0.14 seconds per dataset at inference time.
+MotherNet proposes a transformer-based hypernetwork that, via a single forward pass on a tabular training set, generates the weights of a compact child MLP without any per-dataset gradient descent or hyperparameter tuning. Building on the TabPFN architecture and synthetic-data prior, the method converts a large transformer's contextualized representations into MLP parameters through a learned decoder. Evaluated on OpenML CC-18 and TabZilla benchmarks, MotherNet achieves competitive accuracy with tree-based methods and gradient-boosted models while offering substantially faster inference than TabPFN (≈50×) and eliminating per-dataset training entirely.
 
 ## Strengths
 
-- **Massive inference speedup over TabPFN.** MotherNet on GPU is ~50× faster than TabPFN and ~5× faster than XGBoost for prediction (Section 4.1, Figure 5). This directly delivers on the paper's core motivation: combining the accuracy of transformer-based in-context learning with the efficiency of a compact feed-forward model at inference time.
+- **Novel technical synthesis**: Combining the TabPFN transformer architecture with a hypernetwork decoder to generate MLP weights for arbitrary tabular classification tasks is a creative and technically nontrivial contribution. The low-rank weight decomposition (Section 3.1) makes the approach feasible, compressing the output space from millions to ~25k parameters while maintaining performance.
 
-- **Eliminates dataset-specific tuning entirely.** MotherNet generates a child network in 0.14 seconds on average per dataset, requiring no hyperparameter optimization, whereas baselines receive 60 minutes of HPO. This yields up to 25,000× total speedup for model development (Section 4.1).
+- **Inference speed advantage over TabPFN is clear and large**: The paper's core speed claim — that MotherNet is approximately 50× faster at inference than TabPFN — is supported by the text (Section 4.1: "50 times faster than TabPFN") and appears consistent with the available evidence. This is the key practical advantage over the direct TabPFN approach.
 
-- **Novel architecture combining hypernetworks with TabPFN-style transformers.** MotherNet is the first architecture to use a large transformer as a hypernetwork that generates compact child MLP weights for arbitrary tabular classification tasks. The low-rank factorization (rank 32) cleanly separates generated weights (Wᵖ) from meta-learned fixed weights (Wᶠ), reducing an 89M-parameter MotherNet to a ~25k-parameter child network (Section 3.1).
+- **Eliminates per-dataset training and hyperparameter tuning entirely**: MotherNet requires 0.14s average "training" (single forward pass) with no dataset-specific gradient descent or HPO. The paper convincingly shows that this total (training + prediction) time is orders of magnitude faster than tuned baselines — 25,000× speedup over methods requiring 1h of HPO.
 
-- **Competitive accuracy without tuning on small tabular data.** On OpenML CC-18, MotherNet achieves higher normalized ROC AUC than all tuned traditional baselines (XGBoost, RF, LR, ResNet, MLP) and is competitive with TabPFN, despite receiving zero dataset-specific tuning (Figure 2, Table 4).
+- **Competitive accuracy without tuning**: MotherNet outperforms tuned MLPs and is competitive with tree-based methods and TabPFN on small datasets. The MLP-distill baseline cleanly isolates the value of the hypernetwork formulation, showing that naive distillation from TabPFN also works well but requires per-dataset gradient descent.
 
-- **Thorough comparison with distillation and HyperFast.** The paper introduces an MLP-distillation baseline to isolate the contribution of the hypernetwork, and provides a careful comparison with HyperFast, honestly noting the training-set overlap that advantages HyperFast (Section 4.1).
+- **Public release**: Training/inference code and pretrained weights are released, supporting reproducibility.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None. The paper's core claims (inference speed, competitive accuracy, no tuning) are all supported by evidence.
+
+- **Tension between text speed claims and Table 4 numerical data**: The paper states repeatedly that "MotherNet on GPU is about five times faster than XGBoost" and "TabPFN on GPU is about ten times slower than XGBoost" (Section 4.1). The reviewer reports that Table 4 shows prediction times of TabPFN=19.8s, MotherNet=0.46s, XGBoost=0.15s for 10k points. If these numbers are correct, then MotherNet is ≈3× *slower* than XGBoost (not 5× faster) and TabPFN is ≈132× slower (not 10×). Only the "50× faster than TabPFN" claim (19.8/0.46≈43×) is roughly consistent. **However, Table 4 is embedded as an image that the text extraction cannot read, so I cannot independently verify these specific numbers.** The authors must clarify whether the XGBoost timing used for the "about five times faster" claim is the same as the one reported in Table 4, or whether different hardware/configurations are being compared across the two statements. If the reviewer's reading is accurate, the paper's central speed claims against XGBoost are unsupported by its own data.
+
+- **Unclear advantage over the simpler MLP-distill baseline**: MLP-distill achieves a better mean rank than MotherNet (3.3 vs 4.3, Table 1) and has faster inference (≈3× MotherNet's speed per the text). MotherNet's advantage is limited to: (a) normalized ROC AUC (better for MotherNet) vs rank (better for MLP-distill) — the paper reports both metrics without resolving which matters more; and (b) no per-dataset gradient descent — but MLP-distill's per-dataset training is reportedly fast ("no HPO needed" per the reviewer) and yields a simpler model. The paper's claim that MotherNet "outperforms MLP-distill" is thus inconsistent across metrics, and the practical setting where MotherNet is clearly preferable to MLP-distill is not crisply defined.
 
 ### Minor
 
-1. **30k/100k memory claim lacks accuracy validation.** Section 3.2 states MotherNet can process up to 30,000 data points on an A100 and 100,000 on CPU, but immediately caveats "we did not evaluate accuracy on datasets of this size." While the paper is transparent about this, the mention of these numbers (especially without an accompanying discussion of how performance degrades with scale) could mislead a casual reader into thinking the method scales to larger datasets while maintaining accuracy. Since all evaluation is on ≤3,000 samples, this claim should either be removed or explicitly framed as a memory-only observation with a note that predictive performance at these sizes is unknown.
+- **Hardware asymmetry in speed comparisons**: Tree-based baselines (XGBoost, HistGradientBoosting) are run on CPU while MotherNet runs on an A100 GPU. The paper acknowledges this at line 132 ("though comparing MotherNet on GPU with tree-based models on CPU") but the main speed claims in Section 4.1 ("five times faster than XGBoost") do not state which hardware XGBoost was timed on. This conflates hardware with algorithm and makes the absolute speed comparison uninterpretable as a pure algorithmic advantage. The "five times faster" claim would need matched-hardware timings to be meaningful.
 
-2. **Memory management for 30k-point attention is not explained.** The paper uses the same 12-layer full self-attention architecture as TabPFN, which has O(n²) memory. Processing 30,000 tokens with full attention is non-trivial in 80GB even with flash attention. The paper provides no description of any memory optimizations (flash attention, gradient checkpointing, mixed precision, chunking) used to achieve this. While the likely answer (flash attention on A100s) resolves the concern, the omission is a transparency gap that hampers reproducibility.
+- **The decoder (63M of 89M params) is unanalyzed**: The paper notes that the decoder is "somewhat surprising[ly]" large and that compressing to 4096-d then expanding to 25k parameters is unusual, but provides no analysis of what the decoder learns, what the generated weight matrices look like, or whether the decoder is memorizing vs. generalizing. This makes the method feel like a black box. An ablation of decoder size or visualization of generated weights would strengthen confidence.
 
-3. **Decoder MLP activation function not specified.** The decoder that maps the dataset embedding E to the parameter vector φ is described as "a one-hidden-layer feed-forward neural network" with hidden size 4096, but its activation function is not stated (the child network uses ReLU, per Equation 1). Minor clarification needed.
-
-4. **"Outperforms all the baseline approaches" is imprecise.** In Section 4.1, "baseline approaches" is defined earlier as XGBoost, KNN, LR, and RF (line 105). The claim is factually supported by Figure 2 for these methods. However, the phrasing could be read as implying superiority over all compared methods including TabPFN and MLP-distill. The paper already clarifies the relative ordering with TabPFN and MLP-distill, but tighter wording would prevent misreading.
-
-5. **The one-hot-encoding requirement is a significant architectural limitation.** The paper reports (Section 5) that one-hot-encoding is "critical" for the child network to perform well, an issue absent in TabPFN. This necessitates additional bagging/ensembling for prediction and suggests the child network does not handle raw categorical features well. The paper acknowledges this as future work, but it limits the method's applicability compared to TabPFN.
+- **TabZilla evaluation subsamples to 3000 points for MotherNet/TabPFN but not for baselines**: The paper acknowledges this disadvantage but does not quantify its impact. A sensitivity analysis showing how MotherNet's accuracy changes with sample size on a few datasets would help the reader calibrate the rankings.
 
 ### Trivial
-None.
+
+- The paper states "four weeks" of meta-training on one A100 (line 77) — this is important context that should appear in the abstract or introduction for a method positioned as a "foundation model," though it is at least stated.
 
 ## Nice-to-Haves
 
-- **Ablation on child network size and rank.** The paper fixes hidden dimension to 512 and rank to 32, mentioning only that the low-rank version "yielded slightly better AUC on the validation set, at a much smaller model size." A systematic ablation would strengthen the architecture claims.
-- **Discussion of the >10 class limitation.** The child network output is fixed to dimension 10 (via W₃ᵖ), inherited from the TabPFN prior. This is a limitation for any dataset with more than 10 classes. It should be explicitly stated.
-- **Comparison of inference latency on identical hardware.** The speed comparison (Table 4, Figure 5) mixes GPU and CPU measurements across methods. A controlled comparison would be cleaner, though the paper acknowledges this limitation.
+- Analyze the generated child network weights (norms, ranks, decision boundaries beyond the qualitative Figure 3) to support the claim that the hypernetwork learns implicit regularization.
+- Ablate decoder capacity: test whether a smaller decoder or simpler aggregation (e.g., mean pooling over all tokens instead of per-class averaging) suffices.
+- Provide matched-hardware (all-CPU or all-GPU) prediction timings so the algorithmic speed advantage can be separated from hardware effects.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed; treat them with caution:
 
-- "Unvalidated scalability claim" (Harsh Critic Issue 1): The paper does *not* "repeatedly frame MotherNet as addressing TabPFN's limitation to small datasets." The paper explicitly states (line 13): "just as TabPFN, MotherNet is restricted by the quadratic memory requirements of the transformer architecture, and does not scale well above approximately 5,000 data points." The core claimed advantage is inference *speed*, not dataset scaling. The 30k number is presented as a memory feasibility observation with the explicit caveat "we did not evaluate accuracy on datasets of this size" (line 84). The paper's own limitations section reaffirms the focus on ≤3,000 samples. — *Removed because the criticism misrepresents the paper's framing and the paper explicitly caveats the claim.*
-
-- "Overclaimed results without statistical support" (Harsh Critic Issue 3): The paper states "MotherNet outperforms all the baseline approaches" where "baseline approaches" is explicitly defined (line 105) as traditional ML methods (XGBoost, KNN, LR, RF). This claim is supported by Figure 2 showing higher mean normalized AUC. The paper separately acknowledges "TabPFN outperforms all other methods, though not statistically significantly so." The critic conflates "baseline approaches" with all compared methods. — *Removed because it is factually wrong: the claim's reference class is correctly specified and supported by the data.*
-
-- "The paper should discuss how tuning time was set" (Section-by-Section notes on 1h HPO): The paper follows the evaluation protocol of Hollmann et al. (2022), which is a standard reference in this area. The HPO budget is consistent with the literature. — *Removed because this is a methodological choice consistent with prior work, not a flaw.*
-
-- "TabZilla subsampling weakens benchmark comparison" (Section 4.2 note): The paper explicitly acknowledges this: "both MotherNet and TabPFN have a severe disadvantage, as they only see a fraction of the data provided to other algorithms." — *Removed because the paper already addresses this concern.*
-
-- "Training cost of MLP-distill not reported" (Missing Parts): The paper focuses on inference-time efficiency as MotherNet's advantage. The training cost of MLP-distill (which requires per-dataset gradient descent) is not central to the comparison. — *Moved to Nice-to-Haves as a minor request.*
+- **Fine-tuning experiment "underreported"** (reviewer claim): The paper actually provides the search space at line 118-119 ("learning rate, weight decay, use of dropout, number of epochs, one-hot-encoding"). The level of detail is adequate for a conference paper; the claim overstates the problem.
+- **"Meta-training cost not stated"**: Line 77 clearly states "approximately four weeks" on a single A100. The reviewer missed this.
+- **"One-hot-encoding requirement not addressed"**: Section 5 explicitly discusses this as a limitation and states the intent to address it in future work.
+- **"The central speed advantage claim is contradicted by the paper's own numbers"**: I cannot verify the specific table numbers (Table 4 is an image). I have reframed this as a "tension requiring clarification" in Major Weaknesses above, rather than as a definitively fatal contradiction. The reviewer's claim may be correct, but I cannot independently confirm it.
 
 ## Novel Insights
 
-The reviewers' primary contribution beyond the paper's own claims is the observation that the 30k/100k memory claim, while caveated, sits uncomfortably with a paper whose evaluation is entirely on ≤3,000 samples. This tension between what the paper mentions it *could* do (memory-wise) and what it actually validates (accuracy-wise) is worth flagging. The remaining reviewer insights either misread the paper (scalability claim, overclaiming) or reiterate points the paper already makes (one-hot-encoding limitation, TabZilla subsampling disadvantage). None significantly extend beyond the paper's own articulation of its contributions and limitations.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. Remove or carefully qualify the 30k/100k memory claim unless accompanied by accuracy results at those scales. Alternatively, explicitly frame it as a "memory feasibility only, accuracy not evaluated" observation.
-2. Add a sentence describing what memory optimizations (e.g., flash attention, mixed precision) enable the 30k-point forward pass to fit in 80GB.
-3. Specify the decoder MLP's activation function.
-4. Rephrase "outperforms all the baseline approaches" to something like "achieves higher mean normalized AUC than all tuned traditional ML baselines (XGBoost, RF, LR, KNN)" for precision.
-5. State the ≤10 class limitation explicitly as a constraint inherited from the TabPFN training prior.
+1. **Clarify the speed numbers**: Provide the exact prediction times for all methods (with hardware specified) and reconcile the text claims ("about five times faster than XGBoost") with the tabular data. If the table shows different ratios, correct the text or explain why different comparisons (e.g., different XGBoost configurations) were used.
+2. **Define the regime where MotherNet is preferable to MLP-distill**: Both methods are compared, but the practical recommendation is unclear. MLP-distill has better rank and faster inference but requires per-dataset gradient descent; MotherNet has no per-dataset training but slower inference. A clear comparison of total-cost vs. benefit would help.
+3. **Provide matched-hardware timing**: Report prediction times on the same hardware (e.g., all on CPU, or all on the same GPU) so the algorithmic contribution to speed can be isolated.
+4. **Ablate or analyze the decoder**: Show whether the large decoder is necessary, or whether a simpler decoder would suffice. Visualize or quantitatively analyze the generated weight matrices.
 
 ## Score and Decision
 
-The paper proposes a novel, clean, and well-demonstrated architecture. The core contribution — generating compact child classifiers via a transformer hypernetwork with 50× faster inference than TabPFN and competitive accuracy requiring no per-dataset tuning — is supported by solid evidence across two benchmarks. The paper is transparent about its limitations (small datasets, quadratic attention, one-hot-encoding requirement). None of the identified weaknesses threaten the validity of the core claims. The paper makes a genuine contribution to tabular foundation model research.
+**Originality**: Good — combining TabPFN with hypernetwork weight generation for tabular classification is novel.  
+**Importance of research question**: High — making foundation-model-style inference practical for tabular data is a timely goal.  
+**Claims supported**: Partially — the speed advantage over TabPFN is convincing, but the advantage over XGBoost is clouded by potential data/table inconsistencies and hardware asymmetry. The advantage over MLP-distill is inconsistent across metrics.  
+**Soundness of experiments**: Adequate but with notable gaps — the hardware asymmetry and the unresolved tension between text and table numbers weaken the quantitative claims.  
+**Clarity**: Good — the paper is generally well-written and the architecture is clearly described.  
+**Value to community**: Moderate — the core idea is interesting and the public release enables follow-up work, but the evaluation gaps limit immediate impact.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

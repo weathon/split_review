@@ -1,82 +1,74 @@
-Here is my final consolidated review:
+Now I have all the information needed. Let me compose the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes MAGC (Modularity-Aided Graph Coarsening), an unsupervised framework that adds modularity maximization and several graph regularization terms (Dirichlet energy, log-det connectivity, balance penalty) to the Feature Graph Coarsening (FGC) objective, transforming FGC from a coarsening tool into a clustering method. The MAGC loss can be used standalone (solved via block majorization-minimization) or integrated as a regularizer into GNN architectures (Q-GCN, Q-VGAE, Q-GMM-VGAE). Experiments on attributed and non-attributed benchmarks show competitive or state-of-the-art NMI alongside substantial speedups.
+This paper proposes MAGC, an optimization-based attributed graph clustering framework that integrates modularity maximization with graph coarsening, Dirichlet energy, reconstruction error, log-determinant connectivity regularization, and a balanced mapping regularizer. The loss can be plugged into deep architectures (Q-GCN, Q-VGAE, Q-GMM-VGAE). The method is solved via block majorization-minimization and claims strong performance on Cora, CiteSeer, PubMed, and non-attributed graph benchmarks, as well as a 75% training speedup over GMM-VGAE on PubMed.
 
 ## Strengths
 
-- **Novel, well-motivated integration of modularity with graph coarsening for clustering.** The paper correctly identifies that FGC alone fails at clustering because the required coarsening ratio (~0.001) is orders of magnitude smaller than what FGC was designed for (Section 4.1). Adding spectral modularity, along with carefully chosen regularizers (Dirichlet energy for smoothness transfer, log-det for connectivity, ℓ₁,₂² for balanced assignment), transforms the objective into a clustering objective. This is a principled adaptation that prior work did not pursue.
+1. **Novel integration of modularity with graph coarsening regularization.** The paper combines modularity maximization with coarsening-based terms (Dirichlet energy, reconstruction error, log-det connectivity) into a single loss function. This differs from pure-modularity approaches like DMoN and from pure-coarsening approaches like FGC, and the ablation study (Sec. 5.5) confirms that each term contributes positively to performance.
 
-- **Consistent empirical gains when MAGC is added to existing architectures.** Across Table 1's attributed datasets (Cora, CiteSeer, PubMed), adding the MAGC loss improves NMI, ARI, and Accuracy over base counterparts (Q-VGAE > VGAE, Q-GMM-VGAE > GMM-VGAE). On PubMed, Q-GMM-VGAE achieves the highest NMI with a reported 75% reduction in runtime over GMM-VGAE (Figure 2b). This demonstrates practical versatility.
+2. **Large and documented training speedup.** On PubMed, Q-GMM-VGAE runs in under 15 minutes versus ~60 minutes for the unmodified GMM-VGAE — a 75% reduction — while maintaining or improving NMI (Fig 2b, Sec. 5.5). This practical advantage is clearly demonstrated.
 
-- **Substantial speed advantage reported.** The paper claims Q-GMM-VGAE runs in under 15 minutes on PubMed versus ~60 minutes for GMM-VGAE, while also performing better. If verified, this efficiency gain is a strong practical selling point.
+3. **Competitive performance across both attributed and non-attributed graphs.** Results are reported on multiple benchmark types, including using only degree features for non-attributed graphs (Table 2a, Airports datasets), showing the method does not depend on rich input features.
 
-- **Honest limitation discussion with empirical counter-example.** Section 6 acknowledges the method may be slower when ground-truth labels yield low modularity, yet still achieves competitive results on the Airports dataset where this condition holds — lending credibility.
+4. **Ablation isolating the contribution of each loss term.** Section 5.5 and Supplementary Material systematically remove each term and measure performance impact, confirming all components are necessary.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Incorrect convexity claim in Lemma 2 undermines theoretical justification.** The paper claims the C-subproblem (Eq. 6 w.r.t. C, keeping X̃ constant) is convex, stating "all the terms ... are convex functions." This is demonstrably false. The term **-β/(2e) tr(CᵀBC)** involves the modularity matrix B = A - ddᵀ/(2e), which is indefinite (trace zero, both positive and negative eigenvalues). An indefinite quadratic is neither convex nor concave, so its negation remains non-convex. The term **-γ log det(CᵀΘC + J)** composes a convex function (-log det) with a quadratic map — this composition is not guaranteed convex and is generally not convex. The proof offered in the main text ("More details are in supplementary material") is a vacuous one-liner. This error does not necessarily invalidate the algorithm (the MM update in Eq. 10 is gradient descent with projection, which works on non-convex objectives), but the paper's claim of "provably convergent" (Section 6) and Lemma 2's convexity assertion are overstated. The authors should either (a) correct the theoretical framing, dropping the convexity claim and appealing to standard non-convex MM convergence to a stationary point, or (b) provide a correct proof. As written, the theory section is unreliable.
+1. **Incorrect convexity claim in Lemma 2.** The paper asserts that the subproblem with respect to $C$ (keeping $\tilde{X}$ constant) is convex (Lemma 2, line 114–116). This is false. The modularity term $-\frac{\beta}{2e}\operatorname{tr}(C^{\mathsf{T}} B C)$ involves $B = A - \mathbf{d}\mathbf{d}^{\mathsf{T}}/(2e)$, which is an indefinite matrix (its spectrum contains both positive and negative eigenvalues). The function $C \mapsto -\operatorname{tr}(C^{\mathsf{T}} B C)$ is therefore not convex. Additionally, the log-determinant term $-\gamma\log\det(C^{\mathsf{T}}\Theta C + J)$ composes the convex function $-\log\det(\cdot)$ with a quadratic map $C \mapsto C^{\mathsf{T}}\Theta C$, which does not automatically preserve convexity. This error undermines the theoretical foundation claimed in the paper. **However**, the paper's actual algorithm — block majorization-minimization with a quadratic majorizer (the projected gradient step in Eqn. 10) — does not require the subproblem to be convex; it works for any Lipschitz-smooth objective. Thus the error is in the theoretical claim, not in the algorithm. The authors must correct this claim and provide either (a) a non-convex convergence argument (e.g., sufficient decrease, Lipschitz gradient) or (b) explicitly state the update is a heuristic projected gradient step supported by empirical evidence.
+
+2. **Absence of statistical rigor in experimental results.** Tables 1 and 2a report only point estimates (NMI, ARI, ACC) with no standard deviations, confidence intervals, or number of random restarts/initializations. Graph clustering with neural networks is sensitive to initialization and randomness; an improvement of, e.g., NMI 0.782 vs. 0.748 on Cora could fall within the noise range of a single run. Without variance estimates, the claimed state-of-the-art performance is not properly substantiated. The paper should report means and standard deviations over multiple runs.
+
+3. **Missing comparisons to methods discussed in Related Work.** The paper discusses SDCN, DCRN, GDCL, and SCGC as relevant deep clustering methods (Section 2) but the experimental section text never explicitly names them as baselines in the comparison tables. The tables are embedded images that cannot be verified from the text extraction, so whether these methods appear in the experimental evaluation is unclear from the paper text alone. If they are absent, the claim of surpassing "all existing methods" is unsubstantiated with respect to these directly relevant baselines. The authors should either include these methods or explicitly justify their exclusion.
 
 ### Minor
 
-- **No variance or statistical significance reported for main results.** Table 1 reports only point estimates for NMI, ARI, and Accuracy. The paper does not state how many random seeds were used, whether standard deviations were computed, or how hyperparameters were selected for baselines. Given that VGAE-based methods are stochastic and multiple baselines (GMM-VGAE, DMoN) are initialization-sensitive, the reader cannot assess whether the claimed improvements are statistically significant. This does not invalidate the results, but it weakens the evidential support for the stated state-of-the-art claims.
+4. **Constraint set mismatch between coarsening definition and optimization problem.** Equation (4) defines $\mathcal{S}_c$ with orthogonality constraints ($\langle C_i, C_j\rangle = 0$ for $i\neq j$) and sparsity conditions tied to graph coarsening. Equation (6) replaces this with $\{C \in \mathbb{R}^{p\times k} \mid C \geq 0,\ \|C_i^{\mathsf{T}}\|_2^2 \leq 1\}$ without explaining the relaxation. The paper never clarifies how the coarsening properties $X = C\tilde{X}$ and $\Theta_C = C^{\mathsf{T}}\Theta C$ relate to the new constraint set. This gap undermines the conceptual continuity between the coarsening motivation and the actual optimization. The reconstruction term $\|C\tilde{X} - X\|_F^2$ softens $X = C\tilde{X}$, but the column-orthogonality relaxation is unaddressed.
 
-- **X̃ computation differs between standalone Q-FGC and deep architectures, without explanation.** In the standalone block-MM algorithm (Section 4.1), X̃ is updated via Eq. 11: X̃ = (2/α CᵀΘC + CᵀC)⁻¹CᵀX. In the deep architectures (Fig 1a, line 146), X̃ is computed as C†X (the Moore-Penrose pseudoinverse). These are different expressions, and the paper never explains the relationship, why a different formula is used, or whether this affects the theoretical guarantees. This creates confusion about the actual training procedure.
-
-- **Hyperparameter values (α, β, γ, λ) and tuning details absent from the main text.** The loss in Eq. 6 has four weighting parameters whose values critically affect the trade-off between modularity, reconstruction, connectivity, and balance. Their ranges and selection method are deferred entirely to supplementary material.
-
-- **Constraint set inconsistency between Eq. 2 and Eq. 6.** The valid coarsening set S_c (Eq. 2) requires orthogonal columns with specific norms (⟨C_l, C_l⟩ = d_l). The optimization constraint in Eq. 6 uses C ≥ 0, ‖C_iᵀ‖₂² ≤ 1 — a different, looser set. The paper never explains or justifies this relaxation.
-
-- **Lipschitz constant L in Eq. 8 is never specified or derived.** The majorization step (Eq. 8) depends on L as the Lipschitz constant of ∇f(C), but the paper gives no formula, bound, or line-search strategy for determining it.
-
-- **Claim about directed/overlapping modularity left dangling.** The Introduction asserts modularity "can be extended to directed graphs with overlapping clusters" as a key advantage, but the paper never addresses directed or overlapping cluster settings in experiments or theory. This raises a mismatched expectation.
+5. **Unusual log-determinant regularization with $J = \frac{1}{k}\mathbf{1}_{k\times k}$.** The log-det term $-\gamma\log\det(C^{\mathsf{T}}\Theta C + J)$ uses a rank-1 matrix $J$ (all-ones scaled by $1/k$) instead of the more standard $\epsilon I$. Adding a rank-1 matrix affects eigenvalues in a qualitatively different way from adding a multiple of the identity. The paper provides no justification for this choice, nor does it discuss the effect on the spectrum. This should be explained or justified.
 
 ### Trivial
 
-- The "1/C" term in the update rule (Eq. 10, line: "1/C ∇f(C^t)") is dimensionally nonsensical (C is a matrix, and the Lipschitz constant L from Eq. 8 is clearly intended). This appears to be a formatting/parser corruption.
-- Figure descriptions reference images that cannot be rendered in the text version, making several experimental claims unverifiable from text alone.
+6. **The Lipschitz constant $L$ for the majorization (Eqn. 7–8) is not given or bounded.** For the block MM algorithm, the majorization requires $L$ to bound the gradient Lipshitz constant of $f(C)$. Computing this for the indefinite modularity term is non-trivial. The paper should either provide a bound or describe a backtracking line-search procedure.
+
+7. **The paper states the method is "provably convergent" (Section 6) but the proof is deferred to supplementary material.** Given the error in Lemma 2, this claim cannot be evaluated from the main text alone. The claim should be qualified or the relevant analysis should appear in the main paper.
 
 ## Nice-to-Haves
 
-- **Report means and standard deviations** over at least 5 random seeds for all main-table results, with hyperparameter selection criteria.
-- **Include comparisons to simple baselines** such as GCN/GAT embeddings + k-means, and to DCRN/SCGC since these are cited as relevant work.
-- **Clarify the relationship** between Eq. 11 (block MM update for X̃) and X̃ = C†X (used in deep architectures) — are they equivalent under certain conditions, or is the deep architecture using an approximation?
-- **Justify the choice J = (1/k)𝟙** in the log-det term analytically, comparing with the more standard ϵI regularization.
-- **Provide the Lipschitz constant** L or a line-search procedure for determining it in the block-MM algorithm.
+- Including a discussion of how the number of clusters $k$ is chosen, especially for datasets without ground-truth labels.
+- Providing empirical evidence of convergence (loss curves) in the main paper.
+- Reporting the sensitivity of results to the hyperparameters $\alpha, \beta, \gamma, \lambda$ more systematically.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **Gradient derivation error in Eq. 10 (Harsh Critic #2):** The reviewer claims the gradient of the log-det term is wrong, reading the expression as containing an extra (C^t)ᵀ factor. Cross-checking against the correct gradient (-2γΘC(CᵀΘC+J)⁻¹), the paper's expression is correct once accounting for a missing opening parenthesis (parser artifact: the intended expression is -2γΘC^t((C^t)ᵀΘC^t+J)⁻¹). The reviewer's criticism stems from a PDF-extraction formatting issue, not an author error. Per hard rules: remove formatting-artifact-based criticisms.
-
-- **"Weak baseline for non-attributed features" (degree one-hot):** The paper explicitly acknowledges this limitation ("This is a primitive way of making features... This was done for the sake of fair comparison, as the other methods also use this as node features"), so the criticism is already addressed.
-
-- **Missing comparisons to specific baselines (GCN/GAT+k-means, DCRN, SCGC):** Per instructions, I should not manufacture demands for missing baselines I cannot independently verify. Additionally, the paper already includes a broad set of 15+ baselines across multiple categories.
-
-- **Strength from Strength Finder about "theoretical convergence guarantees":** This conflicts with the verified weakness about the incorrect convexity claim in Lemma 2. Per rules, when a strength and weakness disagree, the weakness wins. The convergence claim is not reliable as stated.
+- **"Formulation style / presentation nitpicks"**: Pure formatting criticisms (e.g., misplaced parentheses in Eqn 10) are parser artifacts, not author errors.
+- **"Missing appendix content"**: Complaints about content being only in supplementary material are removed because the parser strips appendix sections from all papers.
+- **"Related work completeness"**: Criticisms about missing related works cannot be verified without external sources.
+- **"Reproducibility nitpicks about undisclosed hyperparameters"**: Minor implementation details that are impractical to include in a submission are not valid weaknesses.
+- **The Strength Finder's claim that Lemma 1 and 2 provide "theoretical convergence guarantees"** conflicts with the verified weakness about Lemma 2 being incorrect. Since weaknesses override strengths, this strength is moved here.
 
 ## Novel Insights
 
-The single most interesting observation from the reviewer interactions is the relationship between modularity and the coarsening objective: the paper shows that modularity maximization alone can misalign with ground-truth labels (Table 4a: DMoN has higher modularity but lower NMI), and that the additional regularization terms (Dirichlet energy, log-det connectivity) serve a corrective role — "optimizing modularity can get close but slightly off-course, and the other terms correct this trajectory." This insight about modularity needing companion regularizers for clustering is worth emphasizing but is already present in the paper's own discussion.
+None beyond the paper's own contributions. The reviews surface the convexity error and missing experimental rigor but do not identify novel implications not already in the paper.
 
 ## Suggestions
 
-1. **Fix Lemma 2.** Either drop the convexity claim and state the C-subproblem is non-convex (the gradient-based MM update still works), or provide a correct analysis showing which terms are/were convex and which are handled differently. This is a red flag for any theory-savvy reader and needs correction before the paper can be taken seriously on the theoretical side.
-2. **Report variances.** Provide mean ± std over multiple seeds for all main results (Table 1). This is the single highest-impact fix for the experimental section.
-3. **Clarify the X̃ computation.** Explain why Eq. 11 and C†X differ, whether they are approximately equivalent, and which is used in each setting (standalone Q-FGC vs. deep architectures).
-4. **State hyperparameter values and tuning ranges** (α, β, γ, λ) in the main text or at least in a brief table.
-5. **Specify or bound L**, or describe a line-search/backtracking procedure for the majorization step.
+1. **Fix Lemma 2.** Either provide a correct non-convex convergence analysis (e.g., sufficient decrease property of the MM update for Lipschitz-smooth objectives) or explicitly state that the C-update is a projected gradient descent step on a non-convex subproblem and present empirical evidence of convergence.
+2. **Report statistics.** Re-run experiments over multiple seeds (≥10) and report mean ± std for NMI, ARI, and ACC.
+3. **Include or justify exclusion of SDCN, DCRN, GDCL, SCGC.** If computational constraints prevent their inclusion, state this explicitly and limit the claim accordingly.
+4. **Explain the constraint relaxation** from Eqn (4) to Eqn (6), and clarify whether the coarsening properties still hold approximately under the relaxed set.
+5. **Justify the choice of $J = \frac{1}{k}\mathbf{1}_{k\times k}$** in the log-det term, or replace it with a more standard regularizer.
 
 ## Score and Decision
 
-The paper has a genuinely useful core idea — adding modularity and regularization to graph coarsening for clustering — and the empirical results suggest it works well. However, the paper's theoretical claims contain a material error (Lemma 2's convexity assertion is false), the experimental evaluation lacks statistical rigor, and key details about the training procedure are inconsistent across sections. The contribution is promising but not yet reliably established. A major revision correcting the theoretical framing and strengthening the empirical rigor could make this a strong paper.
+The paper presents an interesting and potentially useful framework that combines modularity maximization with graph coarsening regularization and achieves competitive empirical performance with significant speedups. However, a mathematically incorrect convexity claim (Lemma 2) undermines the paper's theoretical foundation, and the experimental evaluation lacks the statistical rigor (no variance estimates across runs) and baseline breadth needed to substantiate the claimed state-of-the-art performance. These are fixable issues — the core algorithm does not depend on Lemma 2 being true, and adding variance estimates is standard practice — but they must be addressed before the paper can be accepted. The contributions are promising but not yet sufficiently validated.
 
-**MY FINAL SCORE: <pineapple>6.0</pineapple>**
-**MY FINAL DECISION: <orange>Reject</orange>**
+**Score**: 5.0 — Borderline reject; major revisions required.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

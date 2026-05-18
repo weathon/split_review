@@ -1,80 +1,73 @@
-Now I have all the information needed. Let me construct the final review.
-
----
+Now I have all the information needed. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper proposes FourierMamba, a framework that integrates state-space models (Mamba) with Fourier-domain processing for image deraining. The key idea is to use Mamba's selective scanning to correlate different frequencies in Fourier space, addressing the underutilization of frequency dependencies in prior Fourier-based deraining methods. The authors design custom scanning strategies — bilateral zigzag and progressive zigzag — for the spatial Fourier dimension, and a channel-dimension Fourier scan. Experiments on four standard benchmarks show competitive PSNR/SSIM numbers against recent methods.
+This paper proposes FourierMamba, a novel architecture for image deraining that integrates Mamba (state space models) into the Fourier domain. The key technical contribution is designing scanning strategies for Mamba that respect the frequency ordering in Fourier space: zigzag-based scans for the spatial dimension (where frequencies are arranged concentrically) and a channel-dimension Fourier transform followed by Mamba scanning for the channel dimension (where frequencies are axis-aligned). The method achieves state-of-the-art PSNR/SSIM on Rain100H, Rain100L, Test2800, and Test1200 benchmarks, with particularly large gains on Test1200 (34.76 vs. 33.36 for the next best).
 
 ## Strengths
 
-- **Novel and well-motivated architecture.** The paper identifies a genuine limitation of prior Fourier-based deraining methods (inability to correlate frequencies across the spectrum) and proposes a credible solution by introducing Mamba into Fourier space. The motivation that 1×1 convolutions cannot model frequency correlations (Figure 1) is clearly demonstrated.
+1. **Novel integration of Mamba into Fourier space for frequency correlation**: Prior Fourier-based methods (e.g., Fourmer) and Mamba-based methods (e.g., MambaIR, FreqMamba) do not effectively model dependencies *across different frequencies*. FourierMamba introduces Mamba's selective scanning in the Fourier domain to model these cross-frequency relationships. This is well-supported by ablation studies (Table 2): removing the Fourier spatial interaction SSM (w/o FSI-SSM) drops PSNR from 39.73 to 39.05, and removing the Fourier channel SSM (w/o FCE-SSM) drops to 39.08.
 
-- **Custom scanning strategies that improve over vanilla Mamba in Fourier space.** The ablation in Table 3 shows that both bilateral zigzag (39.31 PSNR) and progressive zigzag (39.28) outperform the classic 2D VMamba scanning pattern (38.82) when applied in Fourier space, and their combination yields 39.73. This directly validates the design contribution.
+2. **Strong empirical results across multiple benchmarks**: The method achieves the highest PSNR and SSIM on all four standard benchmarks (Table 1), with a notable 1.4 dB gain on Test1200 over the next-best method. The visual quality comparisons (Figure 4 and real-world data figures) confirm that the quantitative gains translate to visible improvement in rain removal and detail restoration.
 
-- **Ablation studies confirm each component's contribution.** Table 2 shows removing FSI-SSM or FCE-SSM (replacing with 1×1 conv) drops performance by ~0.65 dB, and removing the Fourier priors entirely (w/o SDF, w/o CDF) causes much larger drops of 1.48 dB and 1.01 dB respectively. These controlled experiments build a credible case that both the Mamba-based scanning and the Fourier-domain processing matter.
+3. **Carefully designed zigzag scanning strategies for Fourier-space ordering**: The paper identifies that the concentric-circular arrangement of frequencies in 2D Fourier space means that off-the-shelf scanning (VMamba's cross-scan) destroys frequency ordering, and designs two zigzag-based methods (bilateral and progressive) that respect this structure. The ablation study (Table 3) shows that the proposed scans (39.31 and 39.28 PSNR individually, 39.73 combined) substantially outperform VMamba's classic scan (38.82).
 
-- **Competitive quantitative results across multiple benchmarks.** On Rain100H, Rain100L, and Test1200, FourierMamba achieves the highest reported PSNR/SSIM among the compared methods, and it is second-best on Test2800. The method also has competitive efficiency (22.56 GFLOPs, 17.62M params).
+4. **Thorough ablation studies**: The paper systematically ablates both the Fourier prior and the Mamba scanning components in spatial and channel dimensions (Table 2), clearly separating the contribution of each design choice.
+
+5. **Competitive efficiency**: The model achieves SOTA results with 17.62M parameters and 22.56 GFlops, substantially more efficient than Restormer (24.53M/174.7 GFlops) and MambaIR (31.51M/80.64 GFlops).
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
 
-- **Baseline comparisons are not controlled, undermining the SOTA claim.** The paper reports numbers from prior publications without stating that those methods were retrained using the same training setup (Rain13k, patch sizes, progressive schedule). Because training configurations differ across methods, the reported margins (e.g., +0.05 dB on Rain100H, +0.55 dB on Rain100L) may reflect training-condition artifacts rather than architectural superiority. The central claim "outperforms state-of-the-art" cannot be reliably verified from the table as presented. The authors should either retrain all baselines under their own pipeline or clearly identify which numbers come from published papers and acknowledge the comparison limitation.
-
-- **The frequency-ordering hypothesis is not directly tested.** The paper's core motivation is that ordering frequencies low→high is beneficial. However, the ablation in Table 3 only compares the proposed zigzag patterns against the "Classic" (VMamba's spatial scan applied on Fourier features). It does **not** compare against other frequency-sorted sequences — e.g., a simple 1D scan ordered by Euclidean distance from DC, a reversed high→low scan, or a shuffled ordering. Without these controls, the observed improvement could partly come from the structural regularity of the zigzag pattern rather than the low-to-high ordering itself. The paper even mentions the Euclidean-distance approach on line 124 but dismisses it for computational cost without using it as an experimental control, which would be trivial to implement once.
+None.
 
 ### Minor
 
-- **Gains are small and sometimes non-uniform.** On Test2800, FourierMamba (34.23) is actually *worse* than FreqMamba (34.25), the method it is most directly compared against. On Rain100H, the PSNR gain over FreqMamba is only 0.05 dB. No confidence intervals, standard deviations, or multi-run results are reported, so it is unclear whether these differences are statistically meaningful.
+1. **The claim that zigzag scanning "orderly correlates frequencies" is overclaimed relative to the evidence.** The paper frames this as a core motivation, but the ablation does not isolate "ordering by frequency" as the causal mechanism. Specifically: (a) the bilateral zigzag goes high→low→high while the progressive zigzag goes low→high, yet they achieve nearly identical performance (39.31 vs. 39.28 PSNR) — if the benefit were specifically about low-to-high ordering, bilateral should be worse; (b) no comparison is made against other plausible frequency-respecting scan patterns (e.g., raster, spiral-from-center, Hilbert curve), so the claim that this specific ordering drives improvement remains speculative; (c) the term "orderly correlation" is vague — any scan creates some sequence, and the paper does not operationalize what makes one ordering more "orderly" than another. This does not invalidate the empirical contribution — the scans clearly work well — but the interpretive framing goes beyond what the evidence supports.
 
-- **Frequency-domain loss term is not ablated.** The total loss includes a Fourier L1 term weighted by λ=0.02. Since the method relies heavily on Fourier processing, the effect of this auxiliary loss should be reported (e.g., removing it entirely). This is a standard ablation the paper omits.
+2. **The channel-dimension Fourier transform (CDF) is empirically effective but mechanistically under-explained.** The ablation shows a meaningful drop when the CDF is removed (39.73 → 38.72 for w/o CDF). Notably, w/o CDF *removes only the Fourier transform while keeping Mamba scanning on the raw channel vector* (the paper explicitly states "directly perform mamba scanning" without the Fourier transform), so the gain is genuinely attributable to the Fourier representation. However, the rationale — "the amplitude and phase encapsulate global statistics related to channel information" — is thin. Why should a Fourier transform along the channel axis be a better inductive bias than, say, a learnable linear transform or directly applying Mamba on the pooled channel vector (which the w/o CDF ablation already tests)? The paper does not articulate a mechanistic reason, and the current framing overstates how well-understood this component is.
 
-- **No quantitative evaluation on real-world data.** Although qualitative results on real-world rainy images are shown (Figs. 11–14), no no-reference metrics (e.g., NIQE, BRISQUE) are reported. This would strengthen the practical relevance of the method.
-
-- **Inference time not reported.** The paper reports FLOPs and parameter counts but not actual GPU runtime. Given that efficiency is a stated advantage of Mamba over Transformers, wall-clock time against Restormer and FreqMamba would be informative.
+3. **The scanning algorithm description in the main text is imprecise for full reproducibility.** The description says "starting from the vertex of the highest frequency on one side of the spectrum, progressing in a zigzag pattern toward the center's low frequencies; similarly, it then zigzags to the opposite side's highest frequency." For an arbitrary-size 2D Fourier spectrum, the exact path geometry (how the zigzag handles rectangular spectra, what "deducing the other half" means in terms of scan indices) is not fully specified. The supplementary material likely contains these details (the paper references it), but a self-contained specification in the main text would improve reproducibility, especially since these scans are the paper's most distinctive technical contribution.
 
 ### Trivial
 
-- **Equation (7) contains a variable-name error.** The RHS of the GAP equation (line 174) sums `F_g(h,w)` when it should sum `F_r(h,w)`, since the input feature is `F_r`. This is clearly a typo but should be corrected.
+- The paper states that "1×1 convolutions cannot correlate different frequencies" in the Fourier domain. This is factually correct within a single layer (each Fourier-domain spatial position is a frequency, and 1×1 convs operate per-position independently), but a footnote clarifying that the point is about the *direct* operation (not what a deep stack can approximate) would prevent misunderstanding.
 
 ## Nice-to-Haves
 
-- An ablation testing the frequency loss term (λ set to 0).
-- An ablation comparing against self-attention applied along frequency axes in Fourier space to further isolate whether Mamba's advantage is specific.
-- Reporting results from 2–3 random seeds with mean ± std to establish significance of the small margins.
+- A controlled comparison against at least one simple alternative ordering (e.g., raster scan, spiral from center outward) would significantly strengthen the claim that the specific zigzag path geometry (not just having a better path) drives improvement.
+- A per-module breakdown of the computational budget (FLOPs contribution of each FRSSB component) would help readers understand where efficiency gains come from.
+- Brief discussion or ablation of the progressive training schedule's impact on results (the paper mentions it but does not analyze it separately).
 
 ## Removed Points
 
 These points are flagged to be removed; treat them with caution.
 
-- **"Ablation studies (Table 4) do not isolate Fourier-Mamba vs spatial-Mamba."** The paper already addresses this through the w/o SDF and w/o CDF ablations (Table 2), which remove the Fourier transform while keeping Mamba scanning — showing large drops of 1.48 dB and 1.01 dB respectively. The critic overlooked these experiments.
-
-- **"Section 3.2 (Scanning) is ambiguous about progressive zigzag."** The text clearly describes the difference: bilateral zigzag starts from a high-frequency corner and zigzags through the center to the opposite corner, while progressive zigzag builds on the zigzag-ordered 1D sequence and scans it from low to high. The description is adequate.
-
-- **"Figure captions (Figs. 9–14) appear to be leftover revision notes."** These are legitimate supplementary figures with descriptive captions (e.g., "Correction of the second picture in Figure 5" refers to an updated visualization). They are not revision artifacts.
-
-- **"Figure 1 motivation is never shown quantitatively."** While the paper does not directly compare Mamba vs. self-attention in Fourier space (a valid nice-to-have), the ablation studies do show that the Mamba-based frequency correlation outperforms 1×1 convolution in the Fourier branch, which indirectly supports the motivation. The critic's expectation for a specific cross-attention comparison is not a standard requirement given the paper's scope.
+- **Harsh Critic's claim about the CDF ablation being a "combined ablation" that removes both Fourier transform and scanning.** This is factually incorrect — the paper's description of w/o CDF explicitly says "directly perform mamba scanning" without the Fourier transform, so the ablation does separate the Fourier representation from the scanning mechanism. The broader concern about thin motivation (above) is retained; the specific claim about this being an uninformative combined ablation is removed.
+- **Harsh Critic's criticism that the paper "understates the capabilities of prior Fourier-based methods" regarding 1×1 convolutions.** The paper's claim that 1×1 convolutions "cannot correlate different frequencies" is made in the specific context of the Fourier domain, where each spatial position corresponds to a distinct frequency and a 1×1 conv operates per-position independently. This is factually correct for the direct operation. The reviewer's counterargument about deep networks approximating mixing is a different point and does not invalidate the paper's claim about the inductive bias of the direct operation.
 
 ## Novel Insights
 
-The reviews surface a few insights worth noting. First, the harsh critic correctly identifies that the paper's strongest evidence is its ablation studies (Tables 2–3), which provide controlled validation of each design choice — yet the paper presents these secondarily to the uncontrolled SOTA comparison in Table 1. Reordering the presentation to lead with controlled ablations would make the paper's case more robust. Second, the central claim about low-to-high frequency ordering remains incompletely tested; the fact that the paper mentions the Euclidean-distance approach (line 124) but does not use it as an experimental control is a missed opportunity to strengthen the core thesis. None of these rise to insights beyond what the paper's own content suggests.
+None beyond the paper's own contributions. The comparative analysis between the reviewers primarily confirms that the paper's empirical strength is widely recognized, while its interpretive and motivational frame would benefit from moderation.
 
 ## Suggestions
 
-1. **Retrain at least the most relevant baselines** (FreqMamba, MambaIR, VMambaIR) under the same Rain13k training pipeline to establish a fair comparison. If this is impractical, explicitly state which numbers are from published papers and acknowledge the limitation.
+1. **Reframe the interpretive claims about scanning.** Replace "orderly correlates frequencies" with a more measured statement: "We hypothesize that frequency-progressive scanning may improve frequency correlation, and we find empirically that zigzag-based scans outperform prior scanning strategies. The specific mechanism warrants further study." This preserves the contribution without overclaiming understanding.
 
-2. **Add ablation experiments that directly test the frequency-ordering hypothesis:** compare low→high, high→low, and shuffled orderings of Fourier features. This would either confirm or refute the paper's central motivation.
+2. **Add a diagnostic ablation for the channel Fourier component.** Comparing Fourier+Mamba vs. Mamba-only (w/o CDF) vs. a learnable linear projection+Mamba would clarify whether the benefit comes from the specific structure of the Fourier transform or just from having any transform before scanning.
 
-3. **Report results from multiple random seeds** (3 runs) with mean and standard deviation for the main benchmarks, especially on datasets where margins are tiny.
+3. **Include a scanning-index figure or pseudocode in the main text.** Since the proposed zigzag scans are the paper's most distinctive contribution, a self-contained specification (even if brief) would significantly improve reproducibility.
 
-4. **Ablate the frequency-domain L1 loss** (λ=0) to show its contribution.
-
-5. **Add no-reference metrics** (NIQE, BRISQUE) on the real-world qualitative results to quantify practical performance.
+4. **Consider adding one simple scan-ordering baseline** (e.g., spiral from center outward or raster) to the scanning ablation to strengthen the evidence that the specific path geometry matters beyond mere frequency-awareness.
 
 ## Score and Decision
 
-The paper introduces a novel and sensible idea — correlating frequencies in Fourier space via Mamba with custom scanning — and provides reasonable ablative evidence that the components work. The architecture is well-designed and the results are competitive. However, the uncontrolled baseline comparison and the untested frequency-ordering hypothesis are nontrivial gaps that prevent full confidence in the claims. With revisions (especially controlled retraining and better ablations of the core hypothesis) the paper could be strong, but in its current form the evidence falls just short of what would be needed for a definitive acceptance.
+The paper presents a well-engineered method with clear empirical contributions: SOTA results across all four standard deraining benchmarks, thorough ablations, and a novel architectural design that genuinely advances the state of the art. The weaknesses are about framing and motivation, not about the validity of the results or the soundness of the method. The interpretive claims about the scanning strategy exceed what the evidence supports, and the channel Fourier component is effective but mechanistically opaque — but these do not undermine the core contribution. The method stands on its empirical results.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

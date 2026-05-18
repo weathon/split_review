@@ -1,79 +1,82 @@
-Now I have all the evidence I need. Let me carefully synthesize the review.
+Now I have all the information I need. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes a method for robust keypoint detection and description under large rotations by fusing rotation-equivariant features (from G-CNNs) with global positional encodings (from a Transformer encoder). It also introduces a directional uncertainty weighted descriptor loss to handle discrete-group alignment errors. The method is evaluated on rotated versions of HPatches, MegaDepth, and YFCC100M datasets, achieving top pose-estimation AUC scores.
+This paper proposes a keypoint detection and description framework that fuses rotation-equivariant multi-scale features (via G-CNNs) with global positional information (via a Transformer encoder) and introduces a directional uncertainty weighted descriptor loss. The method is evaluated on rotated variants of HPatches, MegaDepth, and YFCC100M, and achieves state-of-the-art results among learning-based methods on the 3D pose estimation benchmarks (MegaDepth, YFCC100M) under rotated conditions.
 
 ## Strengths
 
-1. **State-of-the-art results on rotated pose estimation benchmarks.** On MegaDepth-Rot-Rand, the method achieves AUC@5°/10°/20° of 50.1/67.8/80.3, outperforming all compared methods including AWDesc (46.2/64.5/77.6), ReF, RELF, and traditional algorithms. These gains hold across all three rotation modes (original, Rot90, Rot-Rand) on both MegaDepth and YFCC100M (Tables 2, 3).
+- **State-of-the-art rotation-robust descriptor matching on 3D benchmarks**: On rotated-MegaDepth (random rotations), the method achieves AUC@5/10/20 of 0.398/0.601/0.741, outperforming prior learning-based methods including AWDesc (0.347/0.552/0.704), ReF (0.314/0.516/0.680), and RELF. These results are the paper's strongest empirical contribution and provide genuine evidence that the overall system advances the state of the art.
 
-2. **Directional uncertainty weighted descriptor loss is a well-motivated contribution.** Section 3.3 introduces a loss (L_DUWD) that explicitly models principal-direction confidence β and uses cross-entropy on circular shifts conditioned on ground-truth relative rotation. This addresses a real problem—discrete-group quantization error during alignment—that prior rotation-equivariant descriptor methods (ReF, RELF) do not handle.
+- **Novel directional uncertainty weighted descriptor loss with ablation support**: The proposed L_DUWD explicitly accounts for discrete group sampling bias when aligning rotation-equivariant descriptors. Ablation results (Table 4) show the full fusion strategy outperforms alternative fusion strategies (Ablation1, Ablation2) across MegaDepth variants, e.g., on MegaDepth-Rot90 AUC@5=0.467 vs. 0.447/0.411.
 
-3. **Multi-scale rotation-equivariant feature fusion is principled and ablated.** The fusion module (Section 3.1.2, Figure 3) isolates rotation-group dimensions before concatenating multi-level feature maps, preserving equivariant structure. The ablation study (Table 4) compares three fusion variants and confirms the chosen design yields the best AUC across rotation settings.
-
-4. **Ablation validates architectural choices.** Table 4 shows that the proposed fusion pipeline outperforms two alternatives (ablation1, ablation2) on MegaDepth-Rot90 and MegaDepth-Rot-Rand, providing empirical justification for the specific design.
-
-5. **Runtime analysis included.** Section 4.5 reports inference times (0.4785s vs. 0.3106s for AWDesc), allowing readers to evaluate the accuracy-efficiency trade-off.
+- **Comprehensive evaluation across diverse rotation conditions**: The method is tested on three datasets (HPatches, MegaDepth, YFCC100M) with three rotation variants each (no rotation, 90° multiples, arbitrary angles). It achieves the best or near-best results among learning-based methods in every rotated setting on the 3D datasets, providing broad empirical support.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None that are fatal. The paper's core claims are supported by the evidence presented.
+
+- **Missing ablation baseline: the contribution of positional information is not isolated.** The ablation study (Table 4, Section 4.4) compares three variants of the fusion architecture, but every variant includes the Transformer/positional encoding branch. There is no comparison against a pure rotation-equivariant backbone (rotation-equivariant FPN + directional loss + standard descriptor loss) without any positional encoding component. The paper's central narrative is that fusing positional information with rotation-equivariant features is beneficial, but this cannot be verified without isolating whether the improvement comes from the fusion or simply from the rotation-equivariant backbone and losses. Adding this baseline would directly test the paper's core claim about the fusion.
+
+- **The Dilated Feature Extraction (DFE) module is underspecified.** This module is a critical part of the pipeline: it processes the fused features and its output directly forms the final descriptor map (Figures 2/4, ablation formulas in Section 4.4). However, the paper provides no architectural details — number of layers, dilation rates, kernel sizes, whether it uses group-equivariant or standard convolutions, or how the two addition operations in the fusion formula are implemented. Without this information, the method cannot be reproduced. (Note: the paper's Table 4 formulas reference "DFE" but only as a black-box symbol with no architectural specification.)
 
 ### Minor
 
-1. **Limited learning-based baseline set.** On rotated benchmarks, the paper compares against only three learning-based methods (ReF, RELF, AWDesc). Widely used learning-based descriptors such as SuperPoint, D2-Net, R2D2, and DISK are absent. While the comparison against rotation-equivariant methods (ReF, RELF) is directly relevant, the absence of standard non-equivariant learning baselines makes it harder to isolate whether gains come from the novel fusion components or simply from the rotation-equivariant backbone itself. This weakens the claim of "substantial advantage over other learning-based approaches."
+- **The cross-entropy term in L_DUWD is underspecified.** Equation (3) includes `CE(Shift(D_A, O_gt, D_B))`. The paper states that O_gt is the ground-truth relative rotation and Shift circularly shifts descriptors along the rotation-group channels. But it does not specify the target distribution for the cross-entropy loss — is the model classifying the shift index (K=8 classes?)? Is O_gt encoded as a one-hot vector? The loss function as written cannot be implemented from the paper alone.
 
-2. **No direct measurement of equivariance retention.** The paper acknowledges (Section 4.3) that adding positional information breaks perfect rotational equivariance, but never directly measures how much equivariance is preserved. Standard metrics—repeatability after rotation, descriptor distance between rotated patches, or equivariance error (e.g., L₂ difference between f(Rx) and R'f(x))—are absent. The ablation study (Table 4) evaluates only pose-estimation AUC, not equivariance directly. While the rotated benchmarks provide indirect validation, direct measurement would strengthen the paper's central narrative about trading off equivariance for positional context.
+- **The rotated-HPatches results are weaker than claimed.** On the dataset explicitly designed for planar rotation evaluation, traditional handcrafted keypoints (ORB, BRISK, AKAZE, KAZE) outperform the proposed method (Table 1). The paper acknowledges this and attributes it to planar scenes limiting learning-based advantages, but this is the exact regime where rotation-handling tricks should be most effective (no 3D structure to confound local equivariance). The fact that the method does not beat traditional algorithms on this benchmark, while strongly outperforming them on 3D benchmarks, raises the question of whether the method's advantage on 3D data comes more from the Transformer's global context on non-planar scenes than from improved rotation handling per se. A controlled experiment isolating rotation effects on 3D scenes would clarify this.
 
-3. **Fusion mechanism description could be clearer.** Section 3.1.2 describes the fusion as "add the multi-scale fused rotation-equivariant feature maps to it and feed them into a dilated feature extraction module." The paper would benefit from making explicit: (a) that "it" refers to the Transformer output weighted by a convolutional pathway, (b) that the addition is element-wise (which is the natural reading but is not stated), and (c) a forward-pass equation for the descriptor map computation.
+- **Detection component is barely described.** The paper claims an "end-to-end framework to simultaneously detect and describe robust keypoints," but the detection head architecture, the resolution of the score map, and how detection interacts with the rotation-equivariant backbone are not specified. The only information given (Section 4.1) is that the loss is weighted binary cross-entropy with ground truth from SuperPoint.
 
-4. **Notation issues in the loss function.** The β formula (line 111) uses `D(c, argmax_k ...)` where the index order is inconsistent with the earlier typing of D(k,c). The L_DC formula (line 117) has `∑_{k=0}^{k} D(k,c)` where the upper bound is clearly a typo (should be K-1). The mathematical intent is discernible, but these issues would hamper exact reimplementation.
-
-5. **Incomplete reproducibility details.** Missing: (a) Transformer Encoder configuration (number of layers, attention heads, hidden dimension), (b) dilated feature extraction architecture (number of layers, dilation rates, kernel sizes), (c) rotation augmentation details (seed, number of rotations, interpolation method), (d) whether rotated datasets rotate only the query or both images. The paper describes the group size as 8 but does not clarify whether this is for SO(2) or a discrete group (p4/p4m).
-
-6. **Detection ground-truth bias not discussed.** Training uses SuperPoint-pseudo ground truth for detection. The paper does not discuss how this choice may bias the detector toward SuperPoint's keypoint locations or whether this suboptimally serves rotation robustness.
-
-7. **Claim about handcrafted methods vs. learning-based methods on rotated-HPatches is slightly oversold.** The paper notes handcrafted methods perform "slightly better" on rotated-HPatches but still titles the advantage as "substantial" — this is accurate only when restricted to learning-based comparisons. The paper does reconcile this (attributing it to HPatches being planar), but the phrasing could mislead a casual reader.
+- **Training details are sparse.** The paper reports learning rate (0.001), weight decay (0.05), batch size (12), and epoch count (28), but omits the optimizer type (e.g., Adam vs. SGD), learning rate scheduler, data augmentation strategy, and how negative pairs are sampled for the triplet loss. These details are needed for reproducibility.
 
 ### Trivial
-- The abstract claims the method "effectively enhances performance" without specifying quantitative magnitude.
-- The Equivariance and Invariance subsection (3.1.1) covers standard textbook material that could be shortened to a reference.
-- The conclusion is generic and does not summarize key quantitative findings or limitations.
-- Standard deviations / confidence intervals are not reported; single-run results are reported without variance estimates.
+
+- **Runtime comparison is limited.** The runtime analysis (Section 4.5) only compares against AWDesc. Comparisons to ReF and RELF — the most relevant rotation-equivariant baselines — would have been more informative.
+- **Origin of attention maps (w_A, w_B) in the CVtri loss is not explicitly stated.** The paper adopts this loss from AWDesc but does not clarify whether these attention maps come from the Transformer encoder in this paper's architecture or are computed separately.
 
 ## Nice-to-Haves
-- Adding an ablation that removes the Transformer entirely (rotation-equivariant features + dilated module + standard triplet loss only) would isolate the gain from positional encoding.
-- Including SuperPoint + SuperGlue and D2-Net on the rotated MegaDepth benchmark would strengthen the comparative evaluation.
-- Reporting standard deviations over multiple runs would improve statistical confidence.
-- A limitations section discussing the equivariance–position trade-off and computational cost would improve the paper's completeness.
+
+- A controlled experiment on rotated-MegaDepth at multiple discrete rotation angles (e.g., 30°, 60°, 90°, 120°, 150°, 180°) would clarify whether the method's advantage is continuous across rotations or only benefits from the discrete group structure at angles aligning with the group sampling (K=8 → 45° increments). This is not a weakness in its absence but would strengthen the rotation robustness analysis.
+- Additional runtime comparisons against ReF and RELF would help contextualize the 54% slowdown relative to AWDesc.
 
 ## Removed Points
-These points are flagged as removed—treat them with caution:
-- "The loss function contains broken/parser-corrupted notation" → The notation has inconsistencies and a typo (kept as Minor, point 4), but the reviewer's characterization that it "cannot be implemented" overstates the problem. The intent is clear enough.
-- "cannot be independently verified or built upon" → Overly strong characterization given the method is described at a level comparable to many accepted papers.
-- "The introduction spends too many sentences on well-known background" → Style preference, not a weakness.
-- "Related work doesn't discuss ReF vs RELF differences" → This is a valid request but is scope-creep (the paper isn't a survey); moved to subjective preference.
-- "The claim of substantial advantage is contradicted by handcrafted methods performing better" → The paper explicitly separates "learning-based" from "handcrafted" and only claims advantage over the former. This is a misreading, not a contradiction.
-- "Paper should discuss prior positional encoding work in more detail" → AWDesc, SuperGlue, LoFTR are all cited and discussed at appropriate depth for a method paper.
+
+These points are flagged to be removed — treat them with caution:
+
+- **Section numbering jump (3.1.2 to 3.3, missing 3.2):** This is likely a parser artifact or minor editing error. The rule for meta-reviewing is to remove formatting/parser artifacts. The original submission likely contains this section.
+- **Missing related works (non-rotation-equivariant learning-based keypoint methods):** As per meta-review guidelines, I cannot verify the presence or absence of specific related works without external sources. This criticism is excluded.
+- **"Uncertainty weighting" name critique:** The critic argues that L_DUWD does not truly model uncertainty despite its name. This is a stylistic/pedantic point about naming conventions rather than a substantive weakness. The loss still performs as described.
+- **Criticism that O_gt cannot be obtained during evaluation:** Not raised by this particular reviewer but the general class of "missing test-time supervision" criticisms was filtered. The paper uses O_gt only during training (for the loss), which is standard.
 
 ## Novel Insights
-None beyond the paper's own contributions. The key insight—fusing rotation-equivariant features with global positional encoding and handling the resulting discrete-group alignment error via directional uncertainty weighting—is the paper's contribution and is properly presented.
+
+None beyond the paper's own contributions. The reviews are largely convergent: the paper has genuine SOTA results that make a contribution, but the experimental analysis is incomplete in a way that prevents full attribution of those gains, and several architectural components are underspecified to the point of hampering reproducibility.
 
 ## Suggestions
-1. Add a direct equivariance retention experiment (e.g., descriptor similarity before/after known rotation on synthetic data) to validate that the positional encoding does not destroy the equivariance benefits.
-2. Provide the full network architecture in an appendix or supplement (Transformer layers, dilation rates, exact fusion equations).
-3. Expand the learning-based baseline set to include at least SuperPoint and D2-Net on the rotated MegaDepth benchmark.
-4. Fix the notation issues in Equations for β and L_DC (index ordering and sum bound).
-5. Add a brief limitations section discussing when the equivariance–position trade-off is or is not beneficial.
+
+1. **Add the missing ablation baseline**: Evaluate the method with the positional branch removed entirely (no Transformer encoder, no positional encoding — use only the rotation-equivariant FPN and the directional loss on fused features). This directly tests whether the fusion is beneficial.
+2. **Specify the DFE module completely**: Provide architecture details (layers, dilation rates, kernel sizes, equivariance properties, implementation of the addition operations in the fusion formula).
+3. **Clarify the cross-entropy loss term**: Specify the target distribution, number of classes (K=8?), and whether O_gt is a one-hot encoding of the discrete rotation index.
+4. **Provide detection architecture details**: Describe the detection head, score map resolution, and its interaction with the rotation-equivariant backbone.
+5. **Add training details**: Specify the optimizer type, learning rate scheduler, data augmentation, and negative pair sampling strategy.
+6. **Discuss the rotated-HPatches result more thoroughly**: Acknowledge the gap with traditional methods and provide analysis or a controlled experiment that separates rotation effects from global context effects.
 
 ## Score and Decision
 
-The paper addresses an important problem (rotation-robust keypoint descriptors), proposes a well-motivated architecture, and demonstrates strong empirical results on multiple rotated benchmarks. The main weaknesses are (a) a limited learning-based baseline set, (b) absence of direct equivariance retention measurement, and (c) incomplete reproducibility details. None of these invalidate the core contribution, but they reduce the strength of the empirical evidence. The paper would benefit from revisions but has real, verifiable contributions.
+**Originality:** The fusion of rotation-equivariant features with positional encoding for local descriptors is a reasonable direction, though individual components (G-CNNs, Transformers for positional info) are established. The directional uncertainty weighted loss is a novel contribution. — *Score: 3/5*
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+**Importance of research question:** Rotation robustness for local features is practically important for robotics, UAVs, and extreme-motion scenarios. The question is timely and well-motivated. — *Score: 4/5*
+
+**Claims support:** The main claim (SOTA rotation-robust performance) is supported by results on 3D benchmarks. However, the attribution claim about the fusion benefit is not fully supported due to the missing ablation. — *Score: 2.5/5*
+
+**Soundness of experiments:** The evaluation is comprehensive across datasets and rotation conditions. The ablation compares fusion strategies but misses the fundamental baseline. Missing optimizer/details slightly weaken the soundness. — *Score: 3/5*
+
+**Clarity of writing:** The paper is generally understandable but has significant gaps in architectural specification (DFE module, detection head) and loss definition (CE target) that affect reproducibility. The writing quality is adequate but needs revision. — *Score: 2.5/5*
+
+**Value to community:** If the reproducibility gaps are addressed, the SOTA results and the loss formulation would be valuable to researchers working on rotation-robust local features. — *Score: 3.5/5*
+
+**Overall assessment:** The paper demonstrates genuine SOTA results on rotation-robust keypoint matching on 3D benchmarks and proposes a novel loss. However, the ablation analysis has a critical gap (no baseline removing positional information entirely), and the method description has significant reproducibility issues (DFE module architecture unspecified, cross-entropy target undefined, detection details missing). These issues are addressable with additional experiments and clarifications, but in its current form the contribution analysis is incomplete and the method cannot be fully reproduced.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

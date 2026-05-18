@@ -1,25 +1,16 @@
-Now I have a thorough understanding of the paper and all the reviewer claims. Let me write the consolidated review.
+Now I have all I need. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes FedGWC, a federated learning clustering algorithm that groups clients by transforming empirical losses into Gaussian rewards, constructing an interaction matrix, and applying recursive spectral clustering. The method uses only scalar losses communicated from clients (avoiding gradient sharing for clustering), includes theoretical convergence guarantees for the Gaussian weights, and introduces a class-adjusted clustering metric. Experiments on CIFAR-10, CIFAR-100, and FEMNIST show accuracy improvements when FedGWC is combined with various FL aggregation algorithms.
+FedGWC proposes a clustered federated learning method that groups clients by computing Gaussian rewards from their empirical loss values, then builds an interaction matrix and uses spectral clustering recursively to form homogeneous client clusters. The method can be integrated with any FL aggregation algorithm (FedAvg, FedProx, pFedMe, etc.) and automatically determines the number of clusters via a convergence check and Davies-Bouldin threshold. The paper also introduces a "Wasserstein Adjusted Metric" for evaluating cluster cohesion under class imbalance.
 
 ## Strengths
 
-1. **Novel clustering mechanism using only empirical losses avoids communication of model updates.**  
-   By transforming scalar losses into Gaussian rewards (Eq. 1) and building an interaction matrix, FedGWC avoids the overhead of sharing model updates for clustering (as in CFL) or having clients evaluate multiple cluster models (as in IFCA). The paper explicitly states this advantage: "we do not rely on model updates to cluster clients" (Section 2).
+- **Loss-based clustering without model updates.** FedGWC groups clients using only empirical losses transformed via Gaussian rewards, avoiding the hyperparameter sensitivity of gradient-norm based methods like CFL. This is well-motivated and explicitly contrasted with prior work (Section 3.2, Section 4.1).
 
-2. **Theoretical convergence and unbiasedness of the Gaussian weights provide formal grounding.**  
-   Theorem 3.1 proves almost-sure convergence of the weights to the expected reward under Robbins-Monro conditions; Theorem 3.2 extends unbiasedness to constant α; Proposition 3.1 shows variance reduction. These results go beyond the heuristic loss-ranking in prior work (Cho et al., 2022).
+- **Orthogonal integration with any FL aggregation method.** The paper demonstrates that FedGWC improves balanced accuracy when layered on top of FedAvg, FedAvgM, FedProx, pFedMe, and Per-FedAvg (citing >10% improvement on Cifar100). This orthogonal design — clustering as a drop-in layer — is a clean architectural choice that the paper validates across six different algorithms.
 
-3. **Consistent and substantial accuracy improvements on heterogeneous benchmarks, especially CIFAR-100.**  
-   Table 2 shows that integrating FedGWC with FedAvg, FedAvgM, and FedProx raises balanced accuracy on CIFAR-100 by more than 10% on average (e.g., FedAvg + FedGWC: 41.3% vs. FedAvg alone: 28.2%). Table 1 shows FedGWC outperforms CFL, FeSEM, and IFCA on clustering quality metrics. Figure 2 visualizes accuracy jumps at the rounds where clustering occurs.
-
-4. **Automatic cluster discovery with an over-splitting guard, avoiding pre-specified cluster counts.**  
-   FedGWC uses an MSE convergence threshold on the interaction matrix and a Davies-Bouldin criterion (DB ≤ 1) to decide when and how many clusters to form. The paper highlights that competing methods either require the number of clusters in advance (FeSEM, IFCA) or are highly sensitive to threshold parameters (CFL).
-
-5. **Demonstrated ability to separate clients by both class distribution (Dirichlet α) and visual domain (noise/blur).**  
-   Section 4.2 shows FedGWC achieves high adjusted Silhouette scores when clients have different Dirichlet parameters (Table 4) and near-1 Rand-Index scores when clients belong to distinct image domains (Table 5), suggesting practical applicability for anomaly detection.
+- **Automatic determination of cluster number.** FedGWC uses an MSE convergence threshold on the interaction matrix combined with a Davies-Bouldin score to decide when to split clusters recursively, avoiding the need to pre-specify the number of clusters (unlike FeSEM, IFCA, and Multi-Center FL). The paper explicitly compares with CFL's hyperparameter sensitivity and shows FedGWC produces reasonable cluster counts.
 
 ## Weaknesses
 
@@ -28,78 +19,52 @@ None.
 
 ### Major
 
-1. **The core assumption — that empirical losses reliably reflect data distribution similarity — is asserted but not empirically validated.**  
-   The entire method depends on the claim that clients with similar data distributions exhibit similar loss trajectories under the same model. While plausible and linked to prior work (Cho et al., 2022), the paper provides no controlled experiment that directly validates this mapping — e.g., showing that the Gaussian weights γₖ are monotonic with respect to known distribution similarity, or that loss-based clustering recovers ground-truth groups. The theoretical results (Theorems 3.1, 3.2) show that the weights converge to an expected reward μₖ, but do not establish that μₖ is a meaningful or separable measure of distribution similarity. The paper would be significantly stronger with a dedicated validation experiment (e.g., synthetic data where client distributions are known, measuring how well γₖ correlates with distribution distance).
-
-2. **Missing a natural baseline: clustering on class proportions directly.**  
-   A straightforward comparison is to compute per-client class frequencies (which the server could obtain with minimal privacy overhead via secure histogram sharing) and cluster using k-means on frequency vectors. This baseline would directly test whether the loss-based approach adds value over using explicit distributional information. The paper does not include such a comparison, making it difficult to assess the incremental benefit of FedGWC's indirect loss-based method.
-
-3. **No variance or statistical significance reporting.**  
-   All tables present single numbers without confidence intervals, standard deviations, or any indication of variability across runs. Given the stochasticity in client sampling, local training, and clustering decisions, single-run results are insufficient to assess whether the reported improvements are reliable. This is a significant gap in experimental rigor.
-
-4. **Incomplete hyperparameter disclosure limits reproducibility.**  
-   The paper does not specify concrete values or tuning procedures for key parameters: the MSE convergence threshold ε, the RBF kernel parameter β, the update coefficient sequence {αₜ}, the learning rate, batch size, local epochs S, and n_max. While code is promised in supplementary material, the paper itself lacks these essential details. Additionally, the claim that FedGWC requires "only one hyperparameter" (Section 4.1) is inconsistent with the method's actual hyperparameters (ε, β, {αₜ}, n_max).
+1. **Unjustified stationarity assumption undermines the convergence theory.** The paper claims (Section 3.2, Eq. 1) that the rewards \(R_k^{t,s}\) are "stationary by construction" so that "their moments do not depend on the iteration" and "\(\mu_k\) does not depend on \(t\)." This is asserted without proof or justification. The loss \(L_k^{t,s} = \mathcal{L}_k(\theta_k^{t,s})\) depends on model parameters \(\theta_k^{t,s}\), which are updated each round as training progresses; the sample mean \(\hat{\mu}^{t,s}\) and variance \(\hat{\sigma}^{t,s}\) also evolve. There is no argument given for why the Gaussian transformation would render these quantities stationary. The Robbins-Monro update in Eq. 2 requires unbiased observations of a *fixed* target; if the target \(\mu_k\) is time-varying, the claimed convergence \(\Gamma_k^t \to \mu_k\) in Theorems 3.1 and 3.2 (and the extension to \(P_{kj}^t\)) is not supported. **Why this matters**: The paper presents these theorems as part of a "comprehensive mathematical framework" and "rigorous analytical examination" (Section 1), but the central assumption of the convergence analysis is unsubstantiated. This does not invalidate the empirical method *per se*, but it means the theoretical guarantees claimed do not hold as stated, and the framing as a rigorous theoretical contribution is misleading.
 
 ### Minor
 
-1. **The stationarity claim for the reward process is unjustified.**  
-   Section 3.2 states that the rewards are "stationary by construction, i.e., their moments do not depend on the iteration." However, the reward Rₖ^{t,s} depends on the loss Lₖ^{t,s}, which depends on model parameters θₖ^{t,s} that evolve over training rounds. The paper provides no argument for why the moments should be constant. This does not invalidate the method (the Robbins-Monro framework handles non-stationary targets), but the claim as stated is unsupported.
+2. **Affinity matrix construction is intuitive but not rigorously justified.** The interaction matrix \(P_{kj}\) is updated using only \(\omega_k^t\) (the reward of client \(k\)), not a symmetric quantity between \(k\) and \(j\) (Eq. 5). The paper then builds UPVs by deleting diagonal and reciprocal entries, and applies an RBF kernel to form a symmetric affinity matrix \(W\). The rationale connecting this pipeline to distributional similarity is described conceptually (lines 93–97) but not formally derived — no theorem or argument explains why Euclidean distance between these partial row vectors encodes similarity of data distributions. The Davies-Bouldin \(>1\) split threshold is also arbitrary.
 
-2. **Interaction matrix construction conflates pairwise similarity with client-to-group similarity.**  
-   P_{kj} is updated using only ωₖ (client k's average reward), making the row constant for all j in the same sampled set. This means P does not directly capture pairwise similarity between clients k and j — rather it captures how k relates to the group average at rounds where they co-occur. The subsequent construction of the affinity matrix W via unbiased perception vectors and an RBF kernel is a complex workaround. The paper would benefit from clarifying this interpretation and discussing why simpler alternatives (e.g., directly using γₖ vectors as features) would not suffice.
+3. **Overstated novelty of the "Wasserstein Adjusted Metric."** The proposed metric (Section 3.5) sorts class frequency vectors and computes Euclidean distance between them, then uses this as the distance in existing clustering metrics (Davies-Bouldin, Silhouette). Sorting histograms before computing distances is standard practice. The paper states the metric "derived the Wasserstein distance" (line 132) but provides no derivation or proof of this connection — only an equivalence claim. This is a reasonable adaptation for FL settings but does not constitute a novel contribution.
 
-3. **The "personalization bound" claim in Table 3 is imprecisely phrased.**  
-   The paper states that FedGWC "surpasses the pure personalization performance bound," yet this refers to outperforming standard PFL methods (pFedMe, Per-FedAvg) when FedGWC is combined with them. These are comparison methods, not bounds. The actual result (FedGWC + PFL > PFL alone) is reasonable and the experiments support it, but the phrasing overstates the finding.
+4. **No ablation study.** The method has multiple components (Gaussian kernel, averaging over S iterations, interaction matrix update, UPV construction, RBF affinity, spectral clustering, DB threshold). There is no analysis isolating which components are essential. Given the pipeline complexity, an ablation would significantly strengthen confidence in the design.
 
-4. **Computational cost of spectral clustering is not discussed.**  
-   The algorithm performs spectral clustering (O(K³) worst-case) at each recursive split. For large K or frequent splits, this could be prohibitive. The paper should acknowledge this and discuss scaling considerations.
+5. **No communication overhead analysis.** The method requires clients to send their loss vector of length \(S\) (e.g., \(S=8\) or more values) every round in addition to model parameters. The paper states there is no "significant communication overhead" (Section 2, Section 5) but provides no comparison of total bits communicated versus baselines. This is relevant for the claimed cross-device applicability.
 
-5. **The class-adjusted clustering metric's connection to the experiments could be clearer.**  
-   While the paper uses "adjusted Silhouette (AS)" and "adjusted Davies-Bouldin (ADB)" in Tables 1 and 4 (which appear to be the class-adjusted versions from Section 3.5), it never explicitly states that these are computed using the ranked class-frequency distance proposed in Section 3.5, nor compares them to the non-adjusted versions to demonstrate the adjustment's value.
+6. **"Out-of-distribution" not concretely defined.** The paper uses this term repeatedly (Sections 3.2, 5) but never defines what constitutes an out-of-distribution client in terms of the reward or loss process. The Gaussian reward measures deviation from the *average loss*, not from a true data distribution. The mapping from loss proximity to distribution similarity is asserted but not established.
 
 ### Trivial
-
 None.
 
 ## Nice-to-Haves
 
-- An ablation study showing sensitivity to the key hyperparameters (ε, β).
-- A limitations section discussing when the loss-based premise might fail (e.g., very small local datasets, poorly trained models).
-- Comparison with additional aggregation methods (SCAFFOLD, FedNova) to strengthen the "orthogonal to any FL aggregation algorithm" claim.
-- A discussion of communication cost: each selected client sends S loss values plus model updates per round.
+- An ablation study isolating the contribution of each component (Gaussian kernel, UPVs, spectral clustering, DB threshold).
+- A communication cost comparison (total bits per round) versus baselines.
+- Experiments with a larger number of clients (thousands) to support the cross-device FL claims.
+- Convergence plots of the interaction matrix \(P^t\) over rounds to visualize the claimed convergence behavior.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"The new clustering metric is unused and unmotivated in the evaluation."** — This is factually incorrect. The paper uses "adjusted Silhouette (AS)" and "adjusted Davies-Bouldin (ADB)" throughout Tables 1 and 4, which are the class-adjusted versions of these metrics introduced in Section 3.5. The metric is used; the connection could be clearer, but it is not "unused."
-- **"Most human-written reviews are overly positive."** — This is a generic calibration observation from the human finder, not a paper-specific weakness.
-- **"The definition of stationarity is confusing."** — While the stationarity claim is indeed unsupported, I have kept this as a substantively correct Minor weakness rather than a confusion. The re-framing above preserves the valid critique while dropping the dismissive language.
+- **"Experimental results are unverifiable due to image references"** — Removed. The `![](images/...)` references are parser artifacts; images exist in the original submission. Per hard rules, formatting artifacts from PDF extraction are not author errors.
+- **"Algorithm pseudocode is missing"** — Removed. The algorithms are described in text (Sections 3.3–3.4) and may be presented as formatted boxes or figures in the original submission, which are lost during text extraction.
+- **"Typos, grammar, and formatting issues"** — Removed per hard rules (parser artifacts, not author errors).
+- **"Convergence plots for interaction matrix mentioned but not shown"** — Removed as a weakness; this is a parser artifact (Figure 2 exists in the original submission).
 
 ## Novel Insights
 
-The reviews surface a useful tension that goes beyond the paper's own framing: FedGWC's reliance on loss-behavior as a proxy for distribution similarity is both its most innovative feature and its most fragile assumption. The harsh critic correctly identifies that the theoretical results, while sound, do not bridge the gap between "weights converge" and "weights separate distributions." The strength finder correctly notes that the empirical results on CIFAR-100 (10%+ accuracy gains) and the domain separation experiments provide indirect evidence that the assumption holds in practice. The resulting picture is of a paper with a genuinely novel approach and promising empirical results, but whose reasoning chain has an unvalidated link that prevents full confidence. The most impactful follow-up would be a controlled experiment with ground-truth distribution labels to directly validate the loss→similarity mapping.
+None beyond the paper's own contributions. The reviews surface the tension between the paper's claimed "rigorous theoretical framework" and the actual unsupported stationarity assumption, but this is the standard observation that an asserted assumption without justification does not constitute rigor.
 
 ## Suggestions
 
-1. **Add a direct validation of the core assumption** with a controlled experiment where clients are grouped by known class distributions (e.g., varying Dirichlet α) and measure whether the Gaussian weights γₖ are monotonic with respect to distribution similarity, or whether clustering on γₖ recovers ground-truth groups with high accuracy.
+1. **Revisit the theoretical framing.** Either provide a rigorous justification for the stationarity claim (under what conditions on the loss process does the Gaussian transformation yield stationary rewards?), or drop the stationarity claim and reframe the weights as online estimates with finite-time bounds without asymptotic convergence guarantees. The empirical method can stand on its own without overstated theory.
 
-2. **Add a "class-frequency clustering" baseline** that clusters on empirical class proportions using k-means. This directly tests whether the loss-based method adds value over explicit distributional information.
+2. **Add an ablation study.** Show the effect of removing the UPV construction, using raw Gaussian weights as features, or using a simpler clustering method (e.g., k-means on weights) to identify which components drive performance.
 
-3. **Report all main results with mean ± std over multiple runs** (at least 3–5 independent seeds) to establish statistical reliability.
-
-4. **Disclose all hyperparameter values** (ε, β, {αₜ}, learning rate, batch size, S, n_max) in the main paper or a clear appendix table.
-
-5. **Clarify the stationarity claim** or remove it, and **correct the "one hyperparameter" claim** to avoid misleading readers.
-
-6. **Explicitly state in the experiments which metrics use the class-adjusted distance** from Section 3.5, and ideally include a comparison of adjusted vs. non-adjusted metrics to demonstrate the adjustment's value.
+3. **Define "out-of-distribution" concretely** in terms of the reward process. What threshold on \(\gamma_k^t\) or \(\mu_k\) separates in-distribution from out-of-distribution clients?
 
 ## Score and Decision
 
-The paper presents a novel and well-motivated approach to client clustering in federated learning, with theoretical grounding and promising empirical results. However, the evaluation has significant gaps: the core assumption is not validated directly, a natural baseline is missing, there is no statistical significance reporting, and hyperparameter disclosure is incomplete. These issues are substantial but addressable; they do not invalidate the core contribution.
+This paper has a genuine strength in its core design — loss-value-only clustering that is orthogonal to aggregation methods — and the empirical claims (as described qualitatively) suggest the method works. However, the theoretical analysis is built on an unsubstantiated stationarity assumption that is presented as "rigorous" but is not justified. Combined with the overclaimed novelty of the clustering metric, the missing ablation study, and the absence of communication cost analysis, the paper falls short of the standard for acceptance. The core idea is salvageable, but the paper in its current form does not deliver the theoretical rigor it promises.
 
-**Score:** 5.5  
-**Decision:** Accept (conditional on major revisions)
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

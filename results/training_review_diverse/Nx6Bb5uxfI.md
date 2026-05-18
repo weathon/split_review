@@ -1,97 +1,86 @@
-Now I have a thorough understanding of the paper and all reviewer claims. Here is my consolidated review:
-
----
+Now I have a complete picture of the paper. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes E3D, a two-stage training strategy for sparsely-supervised 3D object detection. In the first stage, Large Multimodal Models (FastSAM + SemanticSAM) generate semantic masks on 2D images, which are transferred to 3D point clouds via a Confident Points Semantic Transfer (CPST) module with boundary-constrained mask shrink. A Dynamic Cluster Pseudo-label Generation (DCPG) module produces pseudo-label proposals using adaptive-radius clustering, and a Distribution Shape (DS) score (combining a Gaussian interior-point-to-boundary prior with category-level meta-shape templates) filters proposals via NMS without ground truth. The detector is first trained on these pseudo-labels, then fine-tuned on sparse ground-truth annotations. Experiments on KITTI show non-trivial improvements over CoIn and CoIn++ at 0.1%–2% annotation rates.
+This paper proposes E3D, a two-stage strategy for sparsely-supervised 3D object detection that leverages 2D Large Multimodal Models (specifically FastSAM + SemanticSAM) to generate pseudo-labels that warm-start a 3D detector. E3D consists of three modules: (1) Confident Points Semantic Transfer (CPST) for obtaining clean 3D seed points from 2D semantic masks via boundary-constrained mask shrinking, (2) Dynamic Cluster Pseudo-label Generation (DCPG) for fitting bounding boxes from seed points using a dynamically updated clustering radius, and (3) a Distribution Shape (DS) score for unsupervised quality assessment of generated proposals. Experiments on KITTI show improvements over the CoIn baseline at 0.1% and 2% annotation rates.
 
 ## Strengths
 
-1. **Novel pipeline integrating LMMs into sparsely-supervised 3D detection.** The idea of using off-the-shelf LMMs (FastSAM + SemanticSAM, no fine-tuning needed) to bootstrap pseudo-labels for a 3D detector under extreme annotation sparsity is well-motivated and practically appealing. The paper explicitly identifies and addresses the 2D–3D semantic projection noise problem (Figure 4) with a principled mask shrink operation (Section 3.2, Eq. 3).
+- **Large improvements at extremely low annotation rates**: E3D improves CoIn's average AP by 36.92% at 0.1% and 14.89% at 2% annotation rates on KITTI (contributions list, Table 2 discussion), demonstrating that LMM-derived pseudo-labels provide useful feature initialization where prior sparsely-supervised methods collapse. The gains are particularly striking for single-stage detectors like CenterPoint, where the gap from CoIn is largest.
 
-2. **Dynamic clustering radius in DCPG is a clear improvement over fixed-radius baselines.** Section 3.3 (Eq. 4) introduces a linear update rule that varies the DBSCAN radius per seed point based on its position within the instance's seed set. This is a sensible solution to the foreground incompleteness / background noise trade-off that plagues fixed-radius approaches (Zhang et al., 2023), and the downstream detection gains support its effectiveness.
+- **CPST module addresses a concrete 2D-to-3D transfer problem**: The paper identifies the real issue of noisy edge semantics during projection (Section 3.2, Figure 4) and proposes a principled boundary-constrained mask shrink (Eq. 3) that retains only the central portion of foreground masks before transfer. This design choice is well-motivated by the known depth ambiguity and calibration errors in 2D-3D projection.
 
-3. **DS score provides a practical unsupervised NMS surrogate.** The combined distribution constraint (modeling point-to-boundary distances as Gaussian) and meta-shape constraint (category-specific normalized dimensions) gives a quality metric for pseudo-labels when no ground-truth IoU is available (Section 3.4, Eq. 5–7). This is a non-trivial engineering contribution that makes the two-stage pipeline feasible.
+- **DCPG's dynamic radius is motivated by a known failure of fixed-radius clustering**: Unlike prior unsupervised approaches (Zhang et al., 2023) that use a fixed constant radius, DCPG updates the clustering radius dynamically (Eq. 4) to adapt to multi-scale geometry. The paper explicitly identifies the failure mode of fixed-radius clustering (incomplete foreground or excess background noise) and designs around it.
 
-4. **Large and consistent empirical gains.** Table 1 shows E3D improves CoIn++ average car AP by 14.31% at 2% annotation rate and CoIn by 36.92% at 0.1% annotation rate. These gains are substantial and validate the core thesis that LMM-derived pseudo-labels can boost feature discrimination under extreme sparsity.
-
-5. **Practicality and reproducibility.** The method uses off-the-shelf LMMs without any additional fine-tuning and adopts standard detector backbones (VoxelRCNN, CenterPoint, CasA) within OpenPCDet, lowering the barrier for adoption.
+- **Evaluation across multiple detector architectures**: E3D is validated with CenterPoint, VoxelRCNN, and CasA (Table 2), showing consistent improvements over CoIn across detector families, which supports the claim of generalizability.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **No ablation studies or component analysis anywhere in the main paper (or in the visible content).** The pipeline has three distinct modules (CPST, DCPG, DS score), multiple hyperparameters (γ, r_initial, δ, λ1, λ2), and design choices (mask shrink vs. no shrink, dynamic vs. fixed radius, DS score components). Without isolating the contribution of each component — e.g., removing CPST, using a fixed clustering radius, ablating one of the two DS score terms — the paper cannot demonstrate that each module justifies its complexity. The reported gains could plausibly come largely from the DS score or the mask shrink alone. This is the most significant weakness because it undermines attribution of the reported improvements.
+- **Zero-shot results are claimed but not presented**: The abstract states "we have verified our E3D in the zero-shot setting, and the results demonstrate its performance exceeding that of the state-of-the-art methods." The contributions list similarly claims "without fine-tuning on labeled data, our E3D has shown superior performance compared to zero-shot methods." However, **no zero-shot experiments, tables, or figures appear anywhere in the visible paper**. This is not a missing appendix detail — it is a central claim made twice in the paper's headline presentation with zero supporting evidence. For a paper whose core thesis is using LMMs to generate pseudo-labels, the zero-shot setting (where these pseudo-labels are used directly without any fine-tuning on labeled data) is the most direct test of whether the pseudo-labels are actually useful. Its absence is a major omission that makes the claimed advantages unverifiable.
 
-2. **The distribution prior in the DS score (N(μ=0.8, σ=0.2)) and the meta-shape priors are cited from prior work but never validated on KITTI.** Section 3.4 states these are "inspired by (Luo et al., 2024)" and "followed this shape prior (Wu et al., 2024)," but the paper provides no evidence — not even a simple histogram or a table — that the actual point-to-boundary distance distribution in KITTI ground-truth boxes resembles N(0.8, 0.2), or that the adopted meta-shape templates match the KITTI statistics for cars, pedestrians, and cyclists. Since the DS score directly determines which pseudo-labels survive NMS and thus controls first-stage supervision quality, an inaccurate prior could systematically bias the training. A sensitivity analysis varying μ, σ, and the meta-shape dimensions would substantially strengthen the claims.
+- **No ablation study isolating the three proposed modules**: The paper claims three contributions (CPST, DCPG, DS score) but provides no experiment that removes or replaces any single component to measure its individual contribution. This means the reader cannot tell: (a) whether all three modules are necessary, (b) whether the gains come primarily from the CPST mask shrinking alone (which is the simplest component), or (c) whether a simpler alternative to any module would work equally well. For a method paper, this is a critical gap — the claim that E3D is a "strategy" comprising three specific designs cannot be evaluated without component-level ablation.
 
-3. **No hyperparameter sensitivity analysis.** The paper sets γ=0.3, r_initial=1, δ=0.1, λ1=λ2=0.5 (Section 4, Implementation Details) without any analysis of how performance varies with these choices. While some hyperparameters are standard empirical choices, the DS score weights (λ1, λ2) and the shrink factor γ directly affect the quality and quantity of pseudo-labels and should be ablated.
+- **Missing comparison against MixSup and other image-assisted sparse-label methods**: The related work (Section 2.3) discusses MixSup (Yang et al., 2024), which also transfers 2D image information to 3D point clouds for pseudo-label generation under sparse annotation. MixSup is a direct competitor with a similar motivation, yet it appears nowhere in Tables 1–2. Without this comparison, it is impossible to judge whether E3D's improvements come from the LMM-based pipeline or from other design choices, and the claim of "state-of-the-art" performance is unsubstantiated within the image-assisted sparse-label niche.
 
 ### Minor
 
-4. **The "zero-shot" framing is overstated.** The abstract claims the method is "verified ... in the zero-shot setting" where "without fine-tuning on labeled data, our E3D has shown superior performance compared to zero-shot methods." However, in this setting the detector is still trained on the target dataset (KITTI) using pseudo-labels generated from the same scenes — this is unsupervised/self-training adaptation, not zero-shot in the conventional sense (which implies no training on the target domain). The comparison is against methods that are truly zero-shot, making the framing asymmetrical and potentially misleading. The paper should either drop "zero-shot" or clearly define the setting as "pseudo-label pre-training without ground-truth labels."
+- **Unclear distinction between CoIn and CoIn++**: The abstract and Section 4.1 refer to "CoIn++" (citing Xia et al., 2023b — the same reference as CoIn), while other parts of the paper refer to "CoIn." The paper never explains whether CoIn++ is an improved variant of CoIn, a different method, or just a naming convention. Table 1 compares against sparsely-supervised methods (using CoIn++), while Table 2 compares against fully-supervised methods trained with sparse labels (using CoIn). These are different comparison regimes, which is valid, but the naming ambiguity makes it difficult for readers to understand the baseline hierarchy. The paper should clearly define CoIn vs. CoIn++ and reconcile which one is used where.
 
-5. **The relationship between CoIn and CoIn++ is never defined.** The abstract reports an 11.63% improvement over CoIn++, while the contributions section reports 14.89% improvement over CoIn at the same 2% rate. The paper never explains what CoIn++ adds over the original CoIn or why these baselines yield different improvement numbers. This creates unnecessary confusion even if the numbers are technically consistent (different baselines = different gains).
+- **DS score priors are adopted from prior work without validation in the target domain**: The Gaussian prior (μ=0.8, σ=0.2) is cited from Luo et al. (2024), and the meta-shape templates are cited from Wu et al. (2024). While citing established priors is standard practice, the paper does not verify that these priors transfer well to KITTI point cloud data. A simple histogram of interior-point-to-boundary distances on ground-truth boxes from KITTI would have sufficed to validate the Gaussian parameters. Without this, the DS score's reliability in the target domain remains unconfirmed.
 
-6. **Evaluation on only KITTI.** The method depends on 2D image availability and LMM quality. Testing on nuScenes or Waymo (which also provide images and have established sparsely-supervised baselines) would substantially strengthen generalization claims. As is, the method's broader applicability is unconfirmed.
+- **No hyperparameter sensitivity analysis**: Several key parameters (shrink factor γ=0.3, initial radius r_initial=1, adjustment δ=0.1, DS weights λ1=λ2=0.5) are set without any sensitivity study. While these values are reported in the implementation details, the reader has no sense of how performance varies with these choices or whether the method is brittle. Given that these parameters directly control pseudo-label quality (and thus downstream detection performance), their robustness matters.
 
-7. **Quality analysis of seed points is missing.** The paper should report precision/recall of the LMM-generated seed points (after CPST mask shrink) against ground-truth object centers to show the CPST module actually provides accurate semantic transfer. Showing qualitative examples of successful and failed pseudo-labels would also be informative.
+- **Experiments are limited to KITTI**: The method is evaluated only on KITTI. While KITTI is a standard benchmark, modern 3D detection evaluation commonly includes Waymo or nuScenes to demonstrate generalizability. The paper should at minimum discuss this limitation and what would be needed to extend to other datasets.
 
 ### Trivial
 
-8. The paper mentions "CoIn++" in Section 4.1 without a formal definition or citation distinguishing it from CoIn — a single sentence of clarification would resolve this.
+None of note.
 
 ## Nice-to-Haves
 
-- A component-level ablation study (remove CPST individually vs. DCPG vs. DS score) is needed for the paper to convincingly claim that all three modules contribute positively.
-- A sensitivity analysis varying γ, λ1/λ2, and the DS score distribution parameters (μ, σ) would show the method is robust rather than brittle.
-- Reporting variance across multiple random scene-selection seeds would address potential concerns about the limited split being unrepresentative.
-- An analysis of the actual distribution of point-to-boundary distances on KITTI ground-truth boxes (even a small held-out set) to validate the N(0.8, 0.2) prior.
+- A sensitivity study over the shrink factor γ would strengthen confidence in the CPST module.
+- A comparison against MixSup, even if limited to the same VoxelRCNN backbone and 2% annotation setting, would significantly strengthen the positioning.
+- Visualizing failure cases (e.g., the slight drop in Easy Car AP noted in Table 1) would give insight into the method's boundaries.
 
 ## Removed Points
 
-These points are flagged as removed from the main review; treat them with caution.
+These points are flagged to be removed — treat them with caution.
 
-- **"The DS score relies on arbitrary, unvalidated priors" (partially removed):** The priors are cited from published work (Luo et al., 2024; Wu et al., 2024), not "arbitrary." The criticism that they are unvalidated on KITTI is kept in Major Weakness #2, but the framing of "arbitrary" is removed as too strong given the citations.
+1. **"Inconsistent baseline reporting / factor-of-5 difference between Table 1 and Table 2"** — Removed because the two tables compare fundamentally different settings: Table 1 compares **sparsely-supervised methods** (CoIn++), while Table 2 compares **fully-supervised detectors trained with only 2% labels** (where "Sparse Label" is the baseline of training a standard detector with sparse data). The paper's text makes this distinction clear ("Comparison with SoTA sparsely-supervised methods" vs. "Comparison with fully-supervised methods"). The critic's "factor-of-5" complaint compares apples to oranges. The naming confusion between CoIn and CoIn++ is retained in Minor above, but the inconsistency claim is not valid.
 
-- **"Inconsistency in baseline naming" (removed):** The numbers for CoIn (14.89% at 2%) and CoIn++ (11.63% at 2%) are for different baselines, which is expected. The paper should clarify the relationship, but there is no factual inconsistency. Moved to Minor Weakness #5 with corrected framing.
+2. **"Algorithm 1 is referenced but missing"** — Removed per instructions: the parser strips algorithmic blocks from many papers; this reflects a parsing artifact, not an author omission. The DCPG procedure is described in prose and Eq. 4.
 
-- **"Disconnect between motivation and mechanism" (Section 1 critique, removed):** The reviewer claims the LMMs only provide seed points while the real work is done by geometric clustering, but the paper's stated contribution is precisely that LMMs provide semantic prior knowledge for bootstrapping — not that LMMs perform clustering. The paper's motivation and mechanism are consistent.
+3. **"LMM framing overstates multimodality (FastSAM + SemanticSAM)"** — Removed. FastSAM performs class-agnostic segmentation, and SemanticSAM uses CLIP-based semantic labeling. This is a legitimate use of vision-language models to extract semantic masks, which constitutes multimodal processing. The critic's objection is a taste disagreement, not a substantive weakness.
 
-- **"Comparison tables not visible" (removed):** This is a parser artifact (images not extracted from PDF), not an author error. The paper likely includes the tables in the original submission.
+4. **"The paper should be evaluated on multiple datasets"** — Downgraded from the critic's framing. KITTI-only evaluation is standard for method papers in this sub-area, and the paper discusses its split protocol. Kept as a minor limitation rather than a major weakness.
 
-- **"Missing appendix" (removed per hard rules):** The parser strips these sections; they exist in the original submission.
-
-- **Strength Finder strengths about "explicit semantic mask transfer avoids cross-modal feature confusion" and "uses off-the-shelf LMMs without fine-tuning":** Retained as Supporting Strengths #4 and #5. These are valid supporting points, not strong enough to be primary strengths but worth mentioning.
-
-- **Strength Finder's "novel contribution to sparsely-supervised 3D detection" (about DS score replacing IoU for NMS):** This is kept as Strength #3.
+5. **Strength Finder's generic strengths** — Some strengths from the Strength Finder (e.g., "comprehensive evaluation across multiple detector architectures") are retained as valid; generic phrasing has been condensed.
 
 ## Novel Insights
 
-The reviewers collectively surface an important tension: the paper's core innovation is using LMMs to provide semantic priors, yet the pseudo-label quality depends critically on geometric priors (Gaussian distribution of point-to-boundary distances, meta-shape templates) that are adopted from prior clustering/unsupervised detection work rather than from the LMMs themselves. This creates two distinct types of prior knowledge in the pipeline — semantic (from LMMs) and geometric (from hand-chosen distributions and template shapes) — and the paper never disentangles which contributes what. A deeper insight is that the method's success may depend more on the geometric priors (which have known applicability to KITTI's LiDAR point distribution) than on the LMMs, which primarily serve as a convenient source of 2D foreground segmentation. The paper would be stronger if it acknowledged and tested this separation explicitly.
+None beyond the paper's own contributions. The reviews surface the predictable tensions (method is promising but experimentally incomplete) without offering a new lens on the work.
 
 ## Suggestions
 
-1. **Add component ablation.** This is the single most impactful improvement. Show E3D with: full pipeline, w/o CPST (use raw LMM masks), w/o DCPG (fixed-radius clustering), w/o DS score (no NMS filtering), and with each DS score term individually. This would transform the paper from "interesting but unvalidated pipeline" to "demonstrably well-designed framework."
+1. **Add the missing zero-shot results.** This is the single most important fix — the paper makes this claim prominently and must back it up with a table showing performance of E3D-generated pseudo-labels used directly (no fine-tuning) vs. existing zero-shot methods on KITTI.
 
-2. **Validate or learn the DS score priors.** Either (a) compute the actual point-to-boundary distance distribution on a set of KITTI ground-truth boxes and show it approximates N(0.8, 0.2), or (b) treat μ, σ as learnable parameters or estimate them per-frame from the data, and show this improves or maintains performance.
+2. **Add a component ablation study.** At minimum: (a) full E3D, (b) w/o CPST (no mask shrinking), (c) w/o DCPG (fixed-radius clustering instead of dynamic), (d) w/o DS score (no quality-based NMS). This would validate that each module contributes.
 
-3. **Clarify the "zero-shot" framing.** Replace "zero-shot setting" with "pseudo-label pre-training without ground-truth labels" or "unsupervised first-stage training." This is a simple fix that avoids potential criticism from the broader community.
+3. **Reconcile the CoIn vs. CoIn++ naming.** Clearly state whether CoIn++ is a variant of CoIn, and if so, how it differs. Ensure tables and text use consistent names.
 
-4. **Clarify what CoIn++ is relative to CoIn** in one sentence, and use consistent notation throughout.
+4. **Add MixSup as a baseline.** Even if exact reproduction is difficult, include the best available numbers from their paper under comparable settings (VoxelRCNN, 2% annotations) to contextualize E3D's gains.
+
+5. **Provide a brief validation of the DS score priors on KITTI.** A small figure showing the empirical distribution of interior-point-to-boundary distances on ground-truth boxes would suffice to show the Gaussian prior is reasonable.
 
 ## Score and Decision
 
-**Originality:** 6/10 — The idea of using LMMs to bootstrap pseudo-labels for sparsely-supervised 3D detection is novel, though each individual component (mask shrink, DBSCAN clustering, distribution-based filtering) draws from prior work.  
-**Importance of question:** 7/10 — Reducing annotation cost for 3D detection is practically important and actively researched.  
-**Claims well-supported:** 4/10 — The core claim that E3D improves sparsely-supervised detectors is supported by the KITTI results, but the lack of ablation and hyperparameter analysis means the attribution of these gains to specific proposed modules is unsubstantiated. The zero-shot framing is somewhat overstated.  
-**Soundness of experiments:** 5/10 — Results are positive but incomplete: single dataset, no ablation, no sensitivity analysis, no variance reporting.  
-**Clarity of writing:** 6/10 — The method descriptions are generally clear (modules are well-separated, equations are specified), but the CoIn/CoIn++ ambiguity and zero-shot framing create unnecessary confusion.  
-**Value to community:** 6/10 — If validated with proper ablation, the pipeline could be practically useful; in its current form, the lack of validation limits confidence.
+The paper proposes a sensible idea (use 2D LMMs to generate pseudo-labels for sparsely-supervised 3D detection) and the reported improvements over CoIn are noteworthy. However, the paper is experimentally incomplete in ways that directly affect the believability of its claims: zero-shot results are promised but entirely absent, there is no ablation isolating the three claimed components, and a directly related competitor (MixSup) is discussed but never compared against. These gaps prevent acceptance in the current form. The core direction is reasonable and could become a strong paper with the missing experiments, but as submitted the empirical support is insufficient.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

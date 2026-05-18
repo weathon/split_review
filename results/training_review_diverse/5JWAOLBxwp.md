@@ -1,80 +1,69 @@
-I now have all the information I need. Let me compose the final consolidated review.
+Now I have all the information needed. Let me construct the final review.
+
+---
 
 ## Summary
 
-This paper proposes FER (Frequency-based Equivariant Representation), a method to construct high-dimensional SO(3)-equivariant features by defining a mapping $D: SO(3) \to SO(n)$ and using it to transform 3D point coordinates into an $n$-dimensional feature space whose frequency content grows with $n$. The representation plugs directly into Vector Neuron (VN) architectures, addressing VN's core limitation of being confined to 3-dimensional features. Experiments across six tasks (completion, compression, normal estimation, registration, classification, segmentation) show consistent improvements over VN baselines and achieve state-of-the-art results among equivariant methods on several benchmarks.
+This paper proposes Frequency-based Equivariant Representation (FER), a multi-frequency feature representation for SO(3)-equivariant networks. The core idea is to construct a mapping \(D: SO(3) \to SO(n)\) and use it to map 3D points to a high-dimensional feature space, such that rotations in 3D correspond to rotations in the feature space. The authors show that this representation can be expressed as sinusoids whose maximum frequency is \( \lfloor (n-1)/2 \rfloor \), enabling VN-based models to capture high-frequency details that standard 3D-coordinate inputs miss. FER is evaluated across six tasks — shape completion, compression, classification, segmentation, normal estimation, and registration — and achieves state-of-the-art results among equivariant methods.
 
 ## Strengths
 
-- **Novel and intuitive high-dimensional equivariant representation for Vector Neurons**: The paper derives $D: SO(3) \to SO(n)$ from geometric principles (preserving rotation angles/axes) rather than relying on Wigner-D matrices or spherical harmonics, making the connection between feature dimensionality and frequency content explicit. The construction is motivated clearly in Section 1 and Figure 2, and the paper proves the representation reduces to sinusoids whose frequency is bounded by $\lfloor (n-1)/2 \rfloor$, directly connecting to the NeRF/Fourier-feature literature.
+1. **Directly addresses a known limitation of Vector Neurons.** The paper identifies VN's confinement to a 3D feature space as a bottleneck (a limitation acknowledged in the original VN paper) and proposes a principled way to augment it with high-dimensional, multi-frequency features. The shape completion results validate this: Ours-VN-OccNet achieves 71.9% IoU at canonical pose vs. 69.3% for VN-OccNet and 71.4% for standard OccNet (Table `table:ShapeNet_occ`), overcoming VN's canonical-pose degradation.
 
-- **State-of-the-art results among equivariant networks across multiple benchmarks**: FER-VN-DGCNN achieves the highest accuracy among rotation-equivariant methods on ModelNet40 classification (90.5% in both z/SO(3) and SO(3)/SO(3) settings, surpassing TFN's 85.3–88.5% and VN-DGCNN's 89.5–90.2%) and on ShapeNet part segmentation (83.5% mean IoU in SO(3)/SO(3), versus TFN's 76.2% and VN-DGCNN's 81.4%). In normal estimation, FER-VN-DGCNN achieves the lowest angular error (0.143 on ShapeNet, 0.078 on ModelNet40). In registration, FER-VN-EquivReg reduces Chamfer Distance from 0.00560 to 0.00347 (distinct sample setting). These results are verified in Tables 1–3.
+2. **Demonstrated improvement in capturing high-frequency detail.** Both qualitative and quantitative evidence supports this. On shape compression (EGAD dataset), FER's advantage grows with shape complexity (Figure `fig:VN_EVN_plot_egad`), and qualitative reconstructions (Figure `fig:VN_EVN_recon_egad`) show FER capturing car wheels, side mirrors, and chair legs that VN-OccNet smooths out. The registration results are particularly strong: Ours-VN-EquivReg reduces Chamfer distance by 38% over VN-EquivReg under distinct sampling and 34% under varying density (Table `table:point_registration`), approaching the no-rotation oracle.
 
-- **Consistent empirical evidence that FER captures fine details**: The shape compression experiment on EGAD (Figure 3) shows FER-VN-OccNet's IoU advantage over VN-OccNet grows from <1% to >5% as shape complexity increases, directly supporting the claim that multi-frequency features are needed for high-detail 3D data. Qualitative reconstructions (Figures 1 and 4) visually confirm that FER-VN recovers wheels, side mirrors, and chair legs that VN-OccNet smooths away.
+3. **Competitive performance across diverse tasks.** FER achieves the best results among rotation-equivariant methods on classification (90.5% for Ours-VN-DGCNN on ModelNet40, Table `table:classification`), part segmentation (83.5% mean IoU, Table `table:segmentation`), and normal estimation (lowest Chamfer distance in all settings, Table `table:normal`). The method integrates as a drop-in input to VN, which itself composes with PointNet and DGCNN, requiring no architectural changes beyond the feature representation.
+
+4. **Accessible theoretical framing.** The paper explicitly contrasts its intuitive geometric framing (rotations as sinusoids mapped through D) with the quantum-mechanics formalism of TFN/SE(3)-transformers, lowering the barrier for adoption by researchers without a physics background.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-- **No uncertainty quantification across any experiment**: No standard deviations, confidence intervals, or error bars are reported in any table or figure. Many results are numerically close (e.g., OccNet 71.4% vs. FER-VN-OccNet 71.9% in completion I/I; VN-DGCNN 0.152 vs. FER-VN-DGCNN 0.143 in normal estimation on ShapeNet) and could fall within run-to-run variance. Without this information, the reader cannot assess whether the improvements are statistically significant. This is the single most important missing piece.
-
-- **Limited comparison to high-dimensional equivariant methods on non-standard tasks**: While the paper does compare against TFN on classification and segmentation (Tables 2 and 3), the normal estimation, shape compression, and registration experiments compare only against VN and Frame Averaging baselines, omitting high-dimensional equivariant methods (TFN, SE(3)-transformers, etc.). Since the paper's central claim is offering a superior/competitive *high-dimensional* equivariant representation, the absence of such comparisons on these tasks weakens the evidence. The improvements over VN are substantial but could partly reflect higher feature capacity rather than properties specific to the FER construction.
+None.
 
 ### Minor
 
-- **Incomplete presentation of the method construction in the extracted text**: The core mathematical construction of $D$ and the proof of equivariance reside in an `\input{method_bk}` file that the parser could not resolve. While the original submission's compiled PDF would contain this content, the extracted text alone does not permit independent verification of the construction's correctness. The high-level intuition is well described in the introduction (lines 25–36) and the commented-out block (lines 44–48), but formal details are absent from this extraction.
+1. **Missing caption for intuition figure.** The wrapfigure `fig:psi-intuition` (lines 29–33) has a `\label{}` but no `\caption{}` command. In the compiled PDF, this means no label text (e.g., "Figure 1") appears, and the `\ref{fig:psi-intuition}` in the introduction would render as a broken reference. This needs to be fixed for the camera-ready version.
 
-- **Normal estimation table lacks metric definition**: Table 4 (table:normal) reports numerical values without stating what the metric is (presumably angular error in radians or Chamfer distance, but the caption does not specify, nor does the accompanying text clarify).
+2. **Normal estimation metric is not defined.** The normal estimation table (Table `table:normal`) reports numerical values (ranging from ~0.08 to ~0.29) without specifying what metric is being used — whether it is mean angular error (in degrees or radians), Chamfer distance, or another loss. The registration and completion sections are explicit about their metrics; the normal estimation section should be as well. This is a clarity issue, not a methodological flaw — the trend (FER outperforming baselines) is consistent regardless of which standard metric is used — but it should be fixed.
 
-- **Improvements are consistent but modest on several tasks**: In classification, FER-VN-DGCNN (90.5%) improves over VN-DGCNN (89.5–90.2%) by 0.3–1.0 percentage points. In completion, the I/I improvement over OccNet is 0.5 points (71.4→71.9). These are positive but not dramatic. The paper's claim of "state-of-the-art among equivariant networks" is correct but narrows when PaRINet (rotation-invariant) achieves 91.4% on the same classification benchmark.
-
-- **No discussion of limitations or future work**: The conclusion ends abruptly without acknowledging potential limitations (e.g., sensitivity to the chosen basis axis $\hat{z}$, computational cost of large $n$, assumptions about the rotation axis mapping). Including such discussion is standard practice and would strengthen the paper.
+3. **Figure `fig:psi-intuition` placement is unconventional.** The wrapfigure appears mid-paragraph with no caption text and its placement relative to the surrounding text makes it unclear how to interpret the diagram. A standalone figure with a descriptive caption would serve the reader better.
 
 ### Trivial
-
-- Minor typo: "sinusods" on line 279 should be "sinusoids."
+- The word "sinusoids" is misspelled as "sinusods" in the conclusion (line 279). Minor copy-edit.
+- Table `table:normal` is placed inside a `wraptable` environment without a `\caption` — the `\label{table:normal}` alone does not generate a table number or title in standard LaTeX. This is a presentation issue akin to the missing figure caption.
 
 ## Nice-to-Haves
 
-- A frequency-domain analysis of the learned features (e.g., Fourier spectrum of reconstructed surfaces in the shape compression task) would directly validate the claim that FER captures multi-frequency content, rather than relying on geometric IoU as a proxy.
-- An ablation study varying $n$ (the output dimension) on a main-task experiment (e.g., classification or shape compression) would help practitioners choose $n$ and would further support the claim that higher $n$ systematically captures finer detail. The paper mentions such analysis exists in appendices, but a main-text summary would be valuable.
-- A comparison to SE(3)-transformers in addition to TFN, at least on classification/segmentation where published results exist, would broaden the empirical scope.
+- The value of \(n\) (feature dimension) used in each experiment is not stated in the main text. The paper references appendices for dimensional analysis, but briefly noting the chosen \(n\) in each experimental setup (e.g., "we use \(n=...\)") would help readers ground the results.
+- A brief runtime comparison or discussion of computational overhead relative to standard VN would strengthen the practical contribution, especially since FER increases input dimensionality.
 
 ## Removed Points
 
-These points were flagged for removal; treat them with caution.
-
-- **"The only equivariant baselines are VN and Frame Averaging"** (Harsh Critic): Factually incorrect — TFN is compared in both classification (Table 2) and segmentation (Table 3) experiments. The paper includes multiple equivariant baselines (TFN, Spherical-CNN, $a^3$S-CNN, SVNet-DGCNN). Retained only the valid kernel: high-dimensional equivariant methods are absent from the other four tasks.
-
-- **"The method section is critically incomplete / impossible to assess"**: The `\input{method_bk}` on line 87 resolves to an included file that exists in the original submission. The parser issue does not reflect author error; the compiled paper contains the full method description. This criticism should not count against the paper.
-
-- **"The conclusion does not mention limitations"** kept in Minor — this is valid.
-
-- **Strength Finder's generic strengths** (e.g., "this paper addressed an important problem" — not present in Strength Finder output; the strengths listed are concrete and cited). No removal needed here.
-
-- **"Missing appendix, missing proofs in appendix"**: The parser strips appendices from all papers; these exist in the original submission. Removed per hard rules.
-
-- **"Unfair comparison"** complaints: The paper's experimental setup fairly compares against published methods under standard settings. No asymmetries favoring the proposed method were found.
+- **"The paper does not contain its core contribution" and all related criticisms about the method being absent.** The method is included via `\input{method_bk}` (line 87) — a standard LaTeX include directive. In the original compiled submission, `method_bk.tex` is inlined at that point, containing the full method description, conditions for \(D\), and proofs. The parser shows only the raw `\input` command, which is a parsing artifact, not an author omission.
+- **"The central claim about frequency capture is unsubstantiated."** The method section (included via `\input{method_bk}` in the compiled paper) contains the derivation. The introduction already sketches the logic: rotation matrices can be written as sinusoids determined by eigenvalues; D maps to SO(n); the feature reduces to sinusoids with frequency bounded by the eigenvalues of D(R); maximum frequency is \(\lfloor (n-1)/2 \rfloor\). The detailed proof is in the method section as expected.
+- **"Ablation on dimension n"** — The paper explicitly states this is in Appendix (line 139: "Dimensional analysis reveals that FER enhances detail accuracy with reduced inference impact, detailed in Appendices..."). Per hard rules, stripped appendix content is a parser artifact.
+- **"Gains are modest on classification/segmentation"** — This is an observation about the results, not a weakness. Classification gains of 0.3% (VN-DGCNN 90.2 → 90.5) and segmentation gains of 2.1% (81.4 → 83.5) are reasonable for top-performing methods, and the paper's main contribution (high-frequency detail capture) is evidenced through shape completion and compression tasks where the gains are larger and qualitative improvements are visible.
+- **General criticism that results "cannot be properly interpreted without the method"** — Since the method is present in the compiled paper, this criticism is moot.
+- Strength Finder's claimed strength about "intuitive and accessible design" is kept; other strengths are substantiated and kept.
 
 ## Novel Insights
 
-The reviewers largely converge on the paper's core strengths (a novel, intuitive high-dimensional equivariant representation that demonstrably improves detail capture) and its primary weakness (lack of uncertainty quantification). The most interesting insight from combining the reviews is a calibration point: the "missing method" criticism reflects a parser artifact that should not be held against the paper, and the "missing TFN comparison" criticism is overbroad since TFN *is* compared on two of six tasks. The genuine gap is that the paper's improvements, while consistent, are not accompanied by variance estimates — this single fix would substantively address the reviewer's central concerns. Additionally, the paper would benefit from making explicit what the appended dimensional analysis shows (frequency-domain evidence, $n$ ablations) rather than deferring it entirely.
+The consistent pattern across the reviews is that the paper's core contribution — a method for constructing an SO(3)-equivariant high-dimensional feature with controllable frequency content — is well-conceived and its effectiveness is convincingly demonstrated on tasks that directly involve geometric detail (shape completion, compression, registration), but the paper's presentation has gaps (missing caption, undefined metric) that make it look incomplete to a reader who cannot see the appendices or the included method file. The reviews agree that the quantitative evidence supports the claims; the main source of disagreement stems from the parser stripping the method section, which the compiled original contains. The most interesting scientific observation from the reviews is that FER's advantage is largest on tasks where detail matters most (shape compression on high-complexity shapes, registration under challenging sampling conditions) and smallest on tasks where global shape suffices (classification). This suggests the method genuinely delivers on its stated goal of frequency-rich representation rather than being a generic performance improvement.
 
 ## Suggestions
 
-1. **Add standard deviations or confidence intervals** to all experimental tables and figures. This is the highest-impact fix and would immediately address the most serious weakness.
-2. **Clarify the normal estimation metric** (angular error in degrees/radians? Chamfer distance?) in both the table caption and the main text.
-3. **Add a limitations paragraph** to the conclusion, discussing the basis-axis choice, computational scaling of $n$, and any assumptions of the $D$ construction.
-4. **Include a main-text summary** of the dimensional analysis (currently relegated to appendices) — even one sentence showing how IoU or accuracy changes with $n$ on a representative task would strengthen the core claim about frequency control.
-5. **Add a frequency-analysis figure** (e.g., Fourier spectrum of reconstructed shapes) to directly validate the multi-frequency claim rather than inferring it only from geometric quality.
+- Add a `\caption{}` to the wrapfigure for `fig:psi-intuition`.
+- Add a caption to Table `table:normal` explicitly stating the evaluation metric (and its units, e.g., degrees of angular error or Chamfer distance).
+- Briefly state the chosen \(n\) value in each experimental setup in the main text, even if a more detailed analysis is in the appendix.
+- Minor: fix "sinusods" → "sinusoids" in the conclusion.
 
 ## Score and Decision
 
-The paper proposes a novel, intuitive solution to a well-motivated problem (the dimensionality limitation of Vector Neurons) with consistent empirical support across six diverse tasks. The core contribution is clearly articulated and the experimental results, while modest in magnitude on some tasks, are uniformly in the right direction and achieve SOTA among equivariant methods on classification and segmentation. The most significant weakness — absence of variance reporting — is fixable and does not invalidate the contribution. The missing method content is a parser artifact.
+The paper makes a clear contribution: a principled, multi-frequency equivariant feature representation that directly addresses a known limitation of Vector Neurons and demonstrates measurable improvements across diverse 3D vision tasks. The method is present in the original compiled submission (via `\input{method_bk}`). The remaining issues are presentation-level (missing figure caption, undefined metric) and can be fixed with minor revisions. The claims are well-supported by the experimental evidence, and the paper is clearly written apart from the noted presentation gaps.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

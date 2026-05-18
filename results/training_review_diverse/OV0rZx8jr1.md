@@ -1,79 +1,71 @@
-Now I have a thorough understanding of the paper and all review inputs. Let me construct the final consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes PFP (Preference Feature Preservation), a framework that debiases online preference learning by explicitly maintaining the distribution of human preference features throughout iterative training. PFP extracts preference features from offline data using GPT-4o, trains a DeBERTa-v3-large classifier with a Sinkhorn-Knopp-based relabeling step to preserve the feature distribution, then conditions LLM response generation through preference-derived system prompts. The method is evaluated on Mistral-7B with UltraFeedback, showing improved AlpacaEval 2.0 LC win rate (15.24% vs. 13.13% for Iterative DPO) and MT-Bench (6.88 vs. 6.53), while nearly eliminating length bias growth over iterations.
+The paper proposes PFP (Preference Feature Preservation), a framework to mitigate bias accumulation in online preference learning for LLMs. PFP extracts multi-dimensional preference features from binary pairwise human preference data, trains a classifier with distribution-preserving relabeling (via Sinkhorn-Knopp), and injects the mapped features into system prompts during both response generation and preference judgment. Experiments on Mistral-7B using UltraFeedback/UltraChat show that PFP achieves the best AlpacaEval 2.0 LC win rate (15.24%) and MT-Bench score (6.88) among compared methods, while nearly eliminating length growth (49-token increase vs. hundreds for baselines) and maintaining a stable feature distribution across iterations.
 
 ## Strengths
 
-1. **Novel and well-motivated approach to debiasing.** The idea of preserving the distribution of human preference features (not just conditioning on features) during online learning is novel and addresses a real problem — bias accumulation in iterative preference learning. Figure 4 directly demonstrates that PFP keeps feature-distribution KL divergence near zero across all iterations while baselines diverge substantially.
+1. **Effective length bias mitigation without heuristics**: PFP increases average response length by only 49 tokens (1138→1187) across four online iterations, while Iterative DPO (+291 tokens) and SELFEE (+560 tokens) show large increases (Figure 5a). This is achieved through feature-based conditioning rather than explicit length penalties, and Table 4 shows PFP substantially outperforms heuristic approaches (length penalty, R-DPO) in both alignment quality and length control.
 
-2. **Strong empirical results on standard benchmarks.** Table 1 shows PFP achieves the highest AlpacaEval 2.0 LC win rate (15.24%) and MT-Bench score (6.88) among compared methods, outperforming Iterative DPO (13.13%, 6.53), SELFEE (14.23%, 6.56), and DPO (9.93%, 6.34). These gains are on independent benchmarks not tied to the paper's KL-divergence diagnostic.
+2. **Demonstrated preservation of preference feature distribution**: The KL divergence between the feature distribution of online-model responses and initial-model responses stays near zero for PFP across four iterations, while diverging steadily for Iterative DPO and SELFEE (Figure 4). This directly supports the paper's core claim that the method prevents feature-level bias accumulation.
 
-3. **Near-elimination of length bias without explicit length heuristics.** Figure 5(a) shows PFP's response length grows only from 1,138 to 1,187 tokens over 4 iterations, while Iterative DPO grows 1,418→1,709 and SELFEE 1,852→2,412. Table 4 further shows PFP controls length more effectively than explicit length penalty and R-DPO methods while also achieving higher win rates.
+3. **Superior alignment benchmark performance**: PFP achieves the highest AlpacaEval 2.0 LC win rate (15.24%) and MT-Bench score (6.88) among all compared methods (Table 1), outperforming Iterative DPO (13.13%, 6.53) and SELFEE (14.23%, 6.56). Notably, this performance gain co-occurs with bias reduction rather than trading off against it.
 
-4. **Careful ablations validate each component's contribution.** Table 2 isolates the effect of the feature classifier (12.38→14.80) and the distribution-preserving relabeling (14.80→15.24) within the same system-prompt framework. Table 3 demonstrates that double sampling (12.73→13.78) and scheduling (13.78→15.24) each add clear gains. Critically, the "SP only" condition (random features + system prompts) achieves only 12.38, which is *below* SELFEE (14.23) — this rules out the alternative explanation that improvements come merely from adding system prompts rather than from feature preservation.
+4. **Well-structured ablation studies**: Tables 2 and 3 isolate the contributions of each component (classifier labels, distribution-preserving relabeling, double system prompt sampling, scheduling) from a common initialized model, showing that each component provides measurable improvements to both performance and bias metrics.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-1. **All results are from a single run without variance estimates.** No standard deviations, confidence intervals, or multiple seeds are reported for any experiment (Tables 1–4, Figs. 2–5). Online preference learning involves stochasticity from response sampling, LLM-based system prompt synthesis (with non-zero temperature), and classifier training. Without multiple trials, it is impossible to assess whether the reported advantages (e.g., AlpacaEval 15.24 vs. 14.23 for SELFEE) reflect reliable improvements or noise. This is the paper's most significant evidential gap.
+1. **Underspecified and potentially problematic preference judgment logic**. The paper (Section 4.3) states: "we judge the preference between y1 and y2 with randomly chosen s between s1 and s2." Here, y1~π_{t-1}(s1,x), y2~π_{t-1}(s2,x), and the judgment uses Eq. 5's implicit reward, which computes log-probability ratios under a *single* randomly chosen s. This means one response's log-probability is evaluated under a conditioning distribution different from the one that generated it. The paper acknowledges (Section 3) that s is always included in the notation but omitted for convenience, but this does not resolve the core concern: evaluating π(y1|s2,x) vs π(y2|s2,x) could systematically favor the response whose conditioning matches the judgment prompt. While s1 and s2 encode the same preference features (just different phrasings), the paper provides no analysis of how much this matters, nor does it justify the "randomly chosen s" design choice. This ambiguity affects the validity of the entire online training signal and must be clarified.
+
+2. **Confounded baseline comparison due to different initial models**. PFP's initial DPO is trained on seed data with system prompts encoding preference features (LC win rate 9.93), while the SELFEE and Iterative DPO initial models are trained on the same seed data without system prompts (9.27). The gap at the starting point (0.66 points on AlpacaEval, 0.27 on MT-Bench) propagates through iterations: PFP's final advantage over SELFEE (15.24 vs 14.23 = 1.01 points) largely consists of this inherited gap. While PFP's gain from iteration (+5.31) is slightly larger than SELFEE's (+4.96), the comparison does not isolate the iterative preservation mechanism from the benefit of initial system-prompt conditioning. The ablation in Table 2 partially addresses this by comparing PFP variants from the same system-prompt-conditioned initial model, but it does not answer whether the *full PFP pipeline* outperforms a version of SELFEE that also starts from a system-prompt-conditioned initial model (without iterative preservation). A controlled apples-to-apples comparison is needed to attribute the gains to the iterative component.
 
 ### Minor
 
-2. **KL divergence debiasing metric uses the same model family (GPT-4o) used for feature extraction during training.** The KL divergence diagnostic (Eq. 8, Figs. 4, 5(b,c)) uses GPT-4o to infer preference features from model responses — the same model used to extract features from the seed data to train the classifier. If GPT-4o has systematic biases in how it classifies features, both the training targets and the evaluation metric share those biases. This does not affect the paper's main benchmark results (AlpacaEval and MT-Bench are independent), but it weakens the supporting evidence for the core debiasing claim. An independent evaluation (e.g., using a different classifier or human annotation on a sample) would strengthen confidence.
+3. **Heuristic double system prompt sampling and scheduling is critical yet unprincipled**. This component (Section 4.3) produces the largest single jump in performance (from 12.73 to 15.24 in Table 3) and significantly reduces length bias. However, the mechanism is entirely heuristic: sample two different phrasings of the same features to increase response diversity, then reduce the sampling temperature over iterations to increase difficulty. No theoretical grounding, sensitivity analysis, or validation against alternative scheduling strategies is provided. The paper's own motivation — that single conditioning reduces response diversity — raises the question of whether the features themselves are sufficiently discriminative. That a heuristic component drives the majority of the method's gain weakens confidence in the overall framework.
 
-3. **No human validation of GPT-4o's feature extraction.** The paper relies entirely on zero-shot CoT prompting of GPT-4o to infer which preference features drove human annotators' binary choices (Sec. 4.1). There is no inter-annotator agreement study or spot-check against human judgments. The quality of the entire pipeline depends on this step; a small error analysis would help.
+4. **Feature distribution measurement is indirect**. The KL divergence reported in Figures 4 and 5 (Eq. 8) compares the feature distribution of the online model's responses against the *initial model's* response distribution, not directly against the human preference feature distribution from the seed data. While this is a reasonable measure of distributional stability across iterations (and the initial model's outputs should reflect the seed data distribution), the paper's framing of "preserving human preference features" would be better supported by a direct comparison to the seed data's extracted feature distribution. Additionally, the GPT-4o-based feature extraction used for this evaluation is not validated (no agreement rates or human checks reported).
 
-4. **Generalizability is limited to one base model / dataset configuration.** All experiments use Mistral-7B + UltraFeedback + GPT-4o. It is unclear whether the approach transfers to other base models (e.g., Llama-3 8B), other preference datasets, or other LLM-based feature extractors. The classifier's ability to generalize to out-of-distribution instructions is not analyzed.
+5. **Reliance on GPT-4o for both feature extraction and system prompt synthesis** makes the pipeline costly and not self-contained. The paper does not discuss the computational overhead or explore alternatives (e.g., smaller models, human annotation for a subset).
 
 ### Trivial
 
-None.
+- The length claim "almost resolves" (abstract, conclusion) is slightly overstated: PFP's response length still grows from 1138 to 1187 (≈4%). While negligible compared to baselines, it is not zero.
+- The Sinkhorn-Knopp regularization parameter and its default value are not reported.
 
 ## Nice-to-Haves
 
-- An evaluation of the feature classifier's accuracy on held-out instructions (comparing its predictions to GPT-4o-extracted or human-annotated features), to assess whether the Sinkhorn-Knopp relabeling is correcting genuine distribution shift or compensating for classifier errors.
-- A comparison against a control that uses a generic fixed system prompt (rather than preference-derived ones) within the same double-sampling framework, to further isolate the effect of feature-specific conditioning. (The paper's "SP only" random-feature condition partially addresses this, but a fixed generic prompt would be even clearer.)
+- A controlled comparison where SELFEE and Iterative DPO also start from a system-prompt-conditioned initial model (or PFP starts without) would cleanly isolate the iterative preservation effect.
+- Sensitivity analysis for the temperature scheduling strategy (e.g., fixed temperature, increasing temperature) would strengthen the ablation.
+- Validation of the GPT-4o feature extraction via human agreement rates on a small subset.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **Critical Issue 3's "circular" argument** (harsh critic). The reviewer claims the KL divergence measure is circular because it compares model outputs to model outputs. This misreads the paper: the comparison is between the *current iteration's* model and the *initial* (pre-iteration) model — a fixed reference point that was trained on human-annotated seed data. Measuring whether the distribution shifts away from this fixed baseline is a standard and appropriate way to test "preservation." The measure is not circular. The underlying concern (indirectness to human data) is retained as Minor weakness 4 above.
 
-- **Critic point #1 (confound between feature conditioning and system-prompt augmentation):** The critic claimed the paper lacks a control for whether improvements come from system prompts rather than feature preservation. However, Table 2's "SP only" condition (random features + system prompts) achieves only 12.38 AlpacaEval, which is **lower** than both SELFEE (14.23) and Iterative DPO (13.13). If system prompts alone explained the gains, this condition would not be the worst performer. The ablation already provides the requested control and shows that the distribution-preserving relabeling (not system prompts) drives improvement. Removed as factually incorrect / the paper already addresses it.
+- **Criticism about missing initial model training details** (harsh critic's "Missing Parts"). The paper clearly states (lines 120–121): "the seed data would be taken feature extraction and system prompt synthesis processes, and the resulting data with added system prompts are used for initial DPO training." This is sufficient.
 
-- **Critic point about length bias being largely due to system prompt conditioning (Fig. 3).** The critic claimed the paper does not control for system prompts when claiming PFP's iterative process eliminates length bias. However, Fig. 3 and its surrounding text explicitly analyze a one-step DPO (not the iterative process) to show that even at the initial step, feature-conditioned system prompts reduce bias. This is presented as supporting motivation, not as evidence for the iterative claim. The iterative length-bias evidence in Fig. 5(a) compares PFP against Iterative DPO and SELFEE, which also don't use system prompts. Removed as the paper separates these analyses clearly.
+- **Criticism about SELFEE without self-refine**. The paper explicitly states this modification was made "to reduce the number of tunable hyper-parameters" (line 130). This is a reasonable experimental choice, not an omission.
 
-- **Critic's suggestion to add a control with random features within the same framework:** Already present as the "SP only" condition in Table 2 (12.38 AlpacaEval). The paper has this control. Removed as already present.
-
-- **Critic's note about Sinkhorn-Knopp enforcing seed distribution which may not generalize:** This is a reasonable theoretical concern but is speculative — no evidence is presented that the seed distribution is inappropriate or that this causes harm. The empirical results show strong performance, so this concern is not substantiated by evidence. Demoted to Nice-to-Have at most.
-
-- **Critic's note about scheduling heuristic lacking theoretical motivation:** While true that the decreasing-temperature schedule is heuristic, the ablation (Table 3) shows it works empirically. Many effective techniques in LLM alignment are heuristic. This is a generic concern that does not invalidate results. Removed.
-
-- **Critic's demand for human evaluation of feature extraction on 50–100 examples:** This is reasonable but goes beyond what is standard for a conference paper using LLM-as-annotator. Many papers in this area use LLM annotation without human validation. Demoted to Nice-to-Have.
+- **Criticism about feature taxonomy justification**. The taxonomy is adopted from a published prior work (Lee et al., 2024) with citation. This is standard practice.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface no perspective the paper does not already articulate about its method, though they do highlight methodological rigor gaps (single-run evaluation, circularity in the debiasing diagnostic) that the authors should address.
+The reviews reveal a tension in the paper's evaluation design. The most impressive result — near-elimination of length bias — is achieved primarily by the initial system-prompt conditioning (Figure 3 shows this offline benefit) combined with the heuristic double-sampling mechanism, rather than by the iterative distribution-preservation mechanism (which provides a smaller marginal improvement of ~0.44 points on AlpacaEval per Table 2). This suggests that the paper's framing ("preserving feature distribution during online learning") may over-attribute what is actually driven by two distinct design choices: (a) injecting features at initialization (which sets a good starting point), and (b) the double-sampling heuristic (which prevents collapse during training). The distribution-preserving relabeling contributes incremental but non-trivial gains. Recognizing that different components address different parts of the bias problem could sharpen future work.
 
 ## Suggestions
 
-1. **Report results over at least 3 random seeds** for the main experiments (Table 1 and key ablations) with means and standard deviations. This single change would substantially increase confidence in the reported gains.
+1. **Clarify the preference judgment**: Specify whether the implicit reward (Eq. 5) computes log-probabilities under the randomly chosen s for both responses, or under the original generation-conditioning s_i for each response. Provide a justification or ablation showing the chosen approach does not introduce systematic bias.
 
-2. **For the KL divergence debiasing metric, use an independent feature extractor** (e.g., a different LLM or a pre-trained classifier) that was not involved in the training pipeline, to break the potential circularity.
+2. **Run a controlled comparison**: Compare PFP against a baseline that starts from the same system-prompt-conditioned initial model but performs vanilla iterative DPO/SELFEE without distribution-preserving relabeling. Table 2 partially does this (Init+SP baseline), but this baseline should be directly compared to SELFEE/Iterative DPO under the same conditions.
 
-3. **Include a small human validation study** (50–100 examples) of the GPT-4o feature extraction step to establish annotation quality.
+3. **Validate the feature extraction**: Report the accuracy of the trained DeBERTa classifiers on a held-out subset of the seed data. Include a small human evaluation of the GPT-4o-extracted feature labels to establish reliability.
 
-4. **Test on at least one additional base model** (e.g., Llama-3 8B) to demonstrate generalizability beyond Mistral-7B.
+4. **Analyze the scheduling heuristic**: Compare fixed temperature, increasing temperature, and decreasing temperature to rule out the possibility that any time-varying schedule is beneficial, rather than the specific reduction in system-prompt diversity.
 
 ## Score and Decision
 
-The paper proposes a novel and well-motivated framework for debiasing online preference learning, supported by strong empirical results on standard benchmarks and careful ablations that isolate each component's contribution. The primary weakness is the lack of statistical significance reporting (single-run results) and the use of GPT-4o for both training feature extraction and evaluation diagnostics. Neither weakness is fatal — the core performance claims rest on independent benchmarks, not the circular diagnostic — but they prevent full confidence in the reported margins. The paper represents a solid contribution to an important problem and should be accepted with the expectation that the authors address the robustness concerns.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

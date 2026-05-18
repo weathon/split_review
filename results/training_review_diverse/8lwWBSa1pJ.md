@@ -1,26 +1,20 @@
-Now I have all the information needed. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and all the reviewer claims. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes a Time-aware World Model that conditions a latent world model (built on TD-MPC2) on the continuous time-step size Δt and trains on a mixture of Δt values sampled log-uniformly per episode. The goal is to learn task dynamics that generalize across varying observation rates without requiring additional data. Experiments on 9 Meta-World tasks show that the proposed model consistently outperforms non-time-aware baselines trained on fixed Δt values, at both the default and altered observation rates.
-
----
+This paper proposes a Time-Aware World Model that conditions state transition, reward, value, and policy predictions on the time step size Δt, and trains on a log-uniform mixture of Δt values. Built on top of TD-MPC2, the model uses Euler/RK4 integration with a τ(Δt) scaling function to enforce that z_{t+1}|_{Δt=0} = z_t. The paper evaluates on 9 Meta-World tasks and shows that the time-aware model outperforms fixed-Δt baselines across varying observation rates while using fewer training steps (1.5M vs. 2M).
 
 ## Strengths
 
-1. **Explicit conditioning on continuous-valued Δt enables generalization to unseen observation rates.**  
-   The paper modifies the TD-MPC2 world model so that the latent dynamics, reward, terminal value, and policy all take Δt as an input (Section 4.1.2). Figure 3 demonstrates that the time-aware model consistently outperforms the baseline (trained on fixed Δt=2.5 ms) on most evaluation Δt values across all nine Meta-World tasks, including the adjusted-evaluation baseline (purple curves) that accounts for the step-count mismatch.
+1. **Principled incorporation of Δt into the world model.** The Euler integration formulation (z_{t+1} = z_t + d(z_t, a_t, Δt)·τ(Δt)) naturally enforces the identity constraint z_{t+1}|_{Δt=0} = z_t, which is a fundamental property of dynamical systems that standard world models lack. Conditioning reward, value, and policy models on Δt is conceptually clean and architecture-agnostic.
 
-2. **Mixture-of-time-step training achieves superior performance without increasing sample complexity.**  
-   The training pipeline (Algorithm 1) log-uniformly samples Δt per episode rather than fixing it. Figure 5 shows that the time-aware model converges at least as fast as the baseline on the default Δt (2.5 ms) despite training for **fewer steps** (1.5 M vs. 2 M), and on larger Δt (10 ms, 50 ms) the baseline fails to converge while the time-aware model succeeds by large margins.
+2. **Consistent empirical outperformance across varying observation rates.** Figure 3 shows the time-aware model (1.5M steps) achieves higher success rates than the TD-MPC2 baseline (2M steps) on most tasks and evaluation Δt values. The purple curves (repeated application of the baseline to match evaluation Δt) further confirm the advantage is not simply an artifact of step-count mismatch.
 
-3. **Robust multi-task validation across diverse control problems.**  
-   Experiments cover 9 Meta-World tasks (Assembly, Basketball, Box Close, etc.) with varying motion characteristics. Figure 4 shows that models trained only on low observation rates (Δt ≥ 10 ms) fail on all tasks, whereas the time-aware model excels — isolating the difficulty and showing the benefit of the mixture approach.
+3. **Ablation isolating the benefit of mixture-of-Δt training.** Figure 4 demonstrates that baselines trained on fixed low observation rates (Δt ≥ 10ms) fail entirely across all tasks, while the time-aware model (trained on a mixture) succeeds. This ablation validates that training on diverse temporal resolutions is necessary — models restricted to a single low rate cannot learn the task.
 
-4. **Principled architectural design enforces a hard dynamical invariant.**  
-   The Euler / RK4 formulation (Section 4.1.2) naturally enforces that when Δt=0, the predicted next latent state equals the current state for any action — a physically meaningful constraint that reduces model ambiguity. The log transformation τ(Δt) mitigates numerical instability across Δt values spanning orders of magnitude.
+4. **Sample efficiency is maintained despite the more complex input space.** Figure 5 shows the time-aware model converges at least as fast as the baseline at the default Δt = 2.5ms, and significantly outperforms at larger Δt values where the baseline fails to converge. This directly supports the claim that mixture-of-Δt training does not increase sample complexity.
 
----
+5. **Log-uniform sampling strategy is well-motivated.** The paper biases toward smaller Δt early in training to stabilize learning, and provides evidence (Figure 4) that dominant large-Δt training causes failure. This practical design choice addresses a real training instability issue.
 
 ## Weaknesses
 
@@ -29,87 +23,59 @@ None.
 
 ### Major
 
-- **The core ablation separating Δt conditioning from mixture training is missing.**  
-  The proposed method differs from the baseline in two ways simultaneously: (a) explicit Δt conditioning in the architecture, and (b) training on a mixture of Δt values. The experiments never isolate these factors. Specifically, we need:
-  - A **time-aware model trained on a single fixed Δt** (e.g. 2.5 ms) and evaluated at other Δt values — this would test whether conditioning alone provides generalization.
-  - A **non-time-aware model trained on the same mixture of Δt** (by skipping frames) — this would test whether simply seeing more diverse transition data explains the result.
-  
-  Without these ablations, the paper cannot establish that the architectural innovation (Δt conditioning) is responsible for the gains rather than the data diversity from mixture training. The paper's central claim — that *both* components matter — remains unsubstantiated at the level needed for a new-method paper. This does not invalidate the combined method (which clearly works), but it does weaken the support for the claimed novelty.
+1. **Missing ablation: does conditioning on Δt drive improvement, or just data diversity?**  
+   The paper's central claim is that explicitly feeding Δt into the model (time-awareness) is responsible for the performance gains. Every experiment compares the time-aware model against baselines trained on a single fixed Δt. What is missing is a comparison against a *non-time-aware* model trained on the *same mixture of Δt values* — i.e., a standard TD-MPC2 that experiences diverse temporal gaps during training without receiving Δt as input. Such a baseline would isolate whether the benefit comes from conditioning on Δt (the paper's claimed contribution) or simply from exposure to a wider variety of state transitions (data augmentation). The paper attributes the improvement to time-awareness, but the current evidence cannot distinguish between these two hypotheses. This is the most significant gap and must be addressed for the contribution to be credible.
 
 ### Minor
 
-- **The "adjusted evaluation" for baselines (purple curves) is underspecified.**  
-  The paper states: "repeatedly applying the baselines Δt\_eval/Δt\_train times every time step." It does not specify whether the same action is repeated across substeps, how the reward is accumulated, or how terminal conditions are checked during substeps. This makes the purple-curve comparison difficult to interpret or reproduce precisely.
+1. **The τ(Δt) function may be degenerate at the default evaluation Δt.**  
+   The paper defines τ(Δt) = max(0, log(Δt) + 5). The paper reports Δt values in seconds (default = 0.0025s). Using natural log: τ(0.0025) = max(0, ln(0.0025)+5) ≈ max(0, -0.99) = 0. This means that at the default evaluation Δt = 2.5ms, the dynamic model predicts z_{t+1} = z_t (no state change), which appears degenerate. The paper shows successful results at this Δt (Figure 3), creating a tension. The ambiguity is whether the authors use log₁₀ (which would give τ > 0), pass Δt in milliseconds, or rely on the RK4 formulation to avoid this issue. The paper must specify the log base and the units of Δt used in the τ function, or explain how the model produces meaningful latent transitions when τ = 0.
 
-- **High variance and limited statistical testing.**  
-  Several tasks (Assembly, Basketball) show wide 95% confidence intervals with substantial overlap between methods at certain evaluation Δt values. The paper does not report significance tests or discuss which comparisons are statistically reliable. While 3 seeds × 10 episodes is a common RL evaluation, the presentation would benefit from formal assessment of which claimed improvements are significant.
+2. **RK4 implementation is not described and its interaction with τ(Δt) is unclear.**  
+   Section 4.1.2 states that RK4 replaces Euler integration in experiments, but never explains how RK4 is applied. RK4 requires evaluating the derivative at multiple intermediate points, yet the derivative function d takes Δt as an explicit argument — is Δt the total step or the sub-step? How does τ(Δt) interact with RK4 substeps? Is τ applied per substep or once for the whole step? Since the dynamic model is central to the approach, this omission hurts reproducibility and makes it impossible to assess whether the method behaves as claimed.
 
-- **The τ(Δt) = max(0, log(Δt)+5) transformation is given without justification for the constant "5" or sensitivity analysis.**  
-  The paper explains the need for a log transform (numerical stability), but the specific offset "5" appears arbitrary. For Δt < 0.0067, τ clips to 0 and the model predicts no state change — this behavior and its implications are not discussed. An ablation or sensitivity analysis on this design choice would strengthen the paper.
-
-- **The lower bound Δt=0.0001s (0.1 ms) raises a simulation-level question.**  
-  The Meta-World simulator runs at a fixed default Δt=2.5 ms (400 Hz). The paper does not explain how observations at 0.1 ms intervals are realized — whether through environment substeps, frame skipping/interpolation, or environment modification. This affects the realism and reproducibility of the training protocol.
-
-- **"Adaptively adjusted" is a mischaracterization for what is random per episode.**  
-  Section 5 states "We adaptively adjusted the observation rate," but Algorithm 1 samples Δt uniformly at random per episode with no adaptive feedback. This wording is misleading.
-
-- **Nyquist-Shannon motivation is employed heuristically.**  
-  The paper invokes sampling theory as motivation but never estimates the frequency content of any task's dynamics, nor does it use the theorem to derive the Δt bounds. The authors acknowledge this limitation (Section 6), but the theoretical framing in Sections 1 and 3 is presented as more precise than the experiments support.
+3. **Nyquist-Shannon motivation is overclaimed as theoretical justification.**  
+   The paper invokes the Nyquist-Shannon sampling theorem as a motivating principle. Nyquist-Shannon governs *signal reconstruction from samples*, not the sample efficiency of learning a parametric neural dynamics model. The paper does not derive any formal connection, and the theorem does not directly justify why training on a mixture of Δt values improves learning. The core intuition — that multi-scale sub-systems are best observed at multiple rates — is reasonable but stands on its own without the theorem. The paper would be stronger if it acknowledged this as an analogy rather than a theoretical foundation.
 
 ### Trivial
-
-- **RK4 is claimed but only the Euler equation is written.**  
-  The paper says "we adopt the 4th-order Runge-Kutta (RK4) integration method" but only shows the Euler update: ẑ_{t+1} = z_t + d(z_t, a_t, Δ̃t)·τ(Δt). While RK4 is standard knowledge, specifying the exact intermediate steps used in the latent space would aid reproducibility.
-
----
+None that survive filtering. (The 1.5M vs. 2M step comparison is discussed under Removed Points.)
 
 ## Nice-to-Haves
 
-- An ablation separating Δt conditioning from mixture-of-Δt training (see Major weakness) — this is the single most impactful addition.
-- A brief discussion of how the method handles intra-episode Δt variation (currently Δt is fixed per episode, but real sensors can have irregular rates).
-- Wall-clock time and parameter-count comparison between the proposed model and the baseline (the increased cost of RK4 and Δt conditioning is not quantified).
-- A more precise specification of the adjusted-evaluation procedure for baselines.
-
----
+- An explicit demonstration that the time-aware model conditioned on Δt outperforms a non-time-aware model trained on the *identical* mixture of Δt values (this is the Major weakness above, listed here as a suggestion for addressing it).
+- Analysis of how τ(Δt) behaves across the training range, showing which Δt values produce zero vs. positive effective step sizes and how the model avoids degeneracy.
+- Evaluation on at least one environment outside Meta-World to increase confidence in generalizability.
+- Error accumulation analysis for the repeated-step baseline (purple curves in Figure 3) — is the time-aware model's advantage due to better single-step predictions or reduced compounding?
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were raised by reviewers but are not included in the main review for the reasons stated below:
 
-1. **Concern about unequal training budgets (1.5M vs 2M steps) being unfair.**  
-   *Reason:* The asymmetry favors the baseline (more training steps), not the proposed method. The proposed method outperforms despite **fewer** steps, which is a strength, not a weakness. The rule explicitly states to remove criticisms where asymmetry favors the baseline. Additionally, Figure 5 shows convergence curves, so the comparison at equal step counts is directly visible.
+- **Training step discrepancy (1.5M vs. 2M)**: The harsh critic argued this is an unfair comparison. However, the asymmetry favors the **author's method** (fewer steps, better results) — this is a stronger claim, not a weaker one. The convergence curves in Figure 5 show the time-aware model's trajectory, and the baseline continues improving monotonically to 2M, making it unlikely that equalizing at 1.5M would change the conclusion. This criticism does not weaken the paper's evidence.
 
-2. **Suggestions to discuss Neural ODEs and continuous-depth models.**  
-   *Reason:* The rule states "DO NOT mention missing related works" as the reviewer cannot confirm their existence or relevance from external knowledge.
+- **"The paper claims 'same number of training samples' but uses 1.5M vs. 2M"**: This is a minor wording imprecision in the abstract, but the actual finding (fewer steps, better results) is strictly stronger than the claim of "same." It is not a weakness of the method.
 
-3. **Criticism that the baseline may not reproduce published TD-MPC2 results for Box Close.**  
-   *Reason:* This claim cannot be verified without external access to the TD-MPC2 paper's exact evaluation protocol, seeds, and hyperparameters. Different random seeds, evaluation procedures, and environment versions can produce different absolute numbers without indicating a flawed implementation.
+- **Purple curves / error accumulation**: The reviewer observes that the paper does not discuss compounding errors in the repeated-step baseline. This is a valid observation but is a fairly minor analysis point that does not affect the validity of the core comparison.
 
-4. **Criticism that the introduction's claim about "overlooking Δt" is overstated given MTS3.**  
-   *Reason:* The paper explicitly acknowledges MTS3 and Lutter et al. (lines 19–20) and explains why they differ (fixed Δt vs. continuous Δt). This is a reasoned distinction, not an oversight.
-
----
+- **Strength Finder's claim #4 (Nyquist-Shannon as "rigorous justification")**: The Strength Finder overstates the role of Nyquist-Shannon. The paper itself uses hedging language ("inspired by," "motivated by"), and the theorem is better characterized as an analogy. This strength conflicts with verified weakness #3 and is therefore removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews primarily surface a missing ablation that the authors should address, but the core observation — that the time-aware model with mixture training works robustly across observation rates — is already presented in the paper.
-
----
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Run the two critical ablations** (time-aware model trained on single fixed Δt; non-time-aware model trained on Δt mixture) to isolate whether the architectural conditioning or the data diversity drives the gains. This is the single most important addition.
-2. **Specify the adjusted evaluation procedure** precisely: are actions repeated? How are rewards accumulated and terminal flags handled during substeps?
-3. **Explain how Δt=0.0001s observations are realized** given the simulator's default 2.5ms step.
-4. **Add a sensitivity analysis or justification for τ(Δt)=max(0,log(Δt)+5)**, including discussion of the clipping regime where the model predicts no dynamics.
-5. **Replace "adaptively adjusted" with "randomly sampled"** to accurately describe the training procedure.
-6. **Write the RK4 equations** used in the latent dynamics, or at minimum state that the standard RK4 scheme is applied to d(z_t, a_t, Δ̃t).
+1. **Run the crucial ablation**: Train a non-time-aware TD-MPC2 on the same mixture of Δt values (without conditioning on Δt) and compare to the time-aware model. If the non-conditional mixture model performs comparably, the contribution reduces to data augmentation; if the time-aware model clearly outperforms, the central claim is strongly validated.
 
----
+2. **Clarify the τ(Δt) function**: Specify the log base (natural vs. base-10) and the units of Δt (seconds vs. milliseconds) used in τ(x) = max(0, log(x) + 5). Provide a figure showing τ(Δt) across the training range [0.0001, 0.05] so readers can see which Δt values produce zero effective step size.
+
+3. **Describe the RK4 implementation**: Explain how RK4 substeps interact with d(z_t, a_t, Δt) and τ(Δt). Provide the update equations or pseudocode. If RK4 avoids the τ = 0 degeneracy at small Δt, state this explicitly.
+
+4. **Temper the Nyquist-Shannon framing**: Acknowledge that the theorem provides an intuitive analogy rather than a formal theoretical guarantee, and let the empirical results carry the argument.
 
 ## Score and Decision
 
-The paper addresses a practical and well-motivated problem (world models that fail when observation rates change), proposes a clean solution, and provides generally positive results across 9 tasks. The combined method clearly works and outperforms baselines. However, the experimental design has a significant gap: the contribution of the two key components (Δt conditioning vs. mixture training) is not isolated, leaving the paper's central claim about the necessity of the architectural innovation unsubstantiated. This is fixable but makes the current evidence weaker than it should be for a new-method paper. This is a borderline-to-weak-accept submission that would substantially benefit from the missing ablation.
+**Overall assessment**: The paper proposes a genuinely interesting and plausible idea, and the empirical results are promising. However, the central claim — that conditioning on Δt (rather than data diversity from diverse Δt values) drives the improvement — is not properly isolated. The missing ablation is the kind of gap that could either validate or invalidate the core contribution. Additionally, the τ(Δt) degeneracy at the default evaluation Δt raises a significant question about how the method actually functions, and the RK4 details are too under-specified for reproducibility. These issues are fixable, but in their current form they prevent the paper from convincingly demonstrating its stated contribution.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

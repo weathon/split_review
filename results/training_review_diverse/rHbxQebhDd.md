@@ -1,18 +1,51 @@
-Now I have verified all claims. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper. Let me synthesize the final review.
+
+**Key verification findings:**
+
+1. **Section 3 IS missing from the extracted text** – the paper jumps from Section 2 (line 37) to Section 4 (line 48). The paper references Eq. (5), (6), (9), (13), (14) which reside in the missing section. This is a PDF extraction failure (parser artifact), not something omitted by the authors. The original submission contains these equations and the CPP formulation.
+
+2. **The simulation matching procedure is partially described** but truncated ("on matched" at line 83). The rest of the description at lines 88-89 clarifies that matching uses the delay distribution based on the flight's features, though exact matching criteria aren't fully specified.
+
+3. **The paper does compare to Antunes et al. (2019) numbers** in the Discussion (line 129) but does not re-implement their method on the same instances.
+
+Let me now produce the consolidated review.
 
 ## Summary
+2-3 sentence summary of the paper's contribution.
 
-The paper proposes SurvCG, a column generation algorithm for the airline crew pairing problem (CPP) that integrates survival analysis (CoxTime) to predict flight connection reliability and incorporate it into the optimization cost function. The goal is to produce pairing solutions that are robust to operational disruptions by penalizing low-reliability connections at planning time. Experiments on a real-world BTS On-Time Performance dataset (97,294 flights) show that SurvCG reduces total propagated delays by up to ~61% at the 99th percentile in challenging irregular scenarios while incurring negligible planned cost increases, and the paper also introduces the P-index metric for evaluating survival model precision.
+## Strengths
+- strength 1 with evidence
+- strength 2 with evidence
+
+## Weaknesses
+### Fatal
+### Major
+### Minor
+### Trivial
+
+## Nice-to-Haves
+
+## Removed Points
+
+## Novel Insights
+
+## Suggestions
+
+## Score and Decision## Summary
+
+This paper proposes SurvCG, a column-generation algorithm for the Crew Pairing Problem (CPP) that integrates survival analysis (CoxTime) to predict flight connection reliability and incorporates it into the optimization cost function. The approach is evaluated on a real-world dataset from Endeavor Air (BTS On-Time Performance), showing up to 61% reduction in Total Propagated Delay (TPGD) at the 99th percentile under simulated irregular operations, with nearly zero increase in planned costs (0.003%). The paper also introduces the P-index for evaluating time-to-event model precision and releases a publicly available benchmark instance.
 
 ## Strengths
 
-1. **Novel integration of survival analysis with column generation for CPP.** To the best of my verification, this is the first work to use time-to-event models to quantify flight connection reliability within the column generation framework for crew pairing (stated as a core contribution in the abstract and Section 1). The modular design allows practitioners to substitute different time-to-event models, making the approach adaptable.
+- **First data-driven reliability integration into CPP optimization via survival analysis.** The paper is explicitly positioned as "the first data-driven solution for uncertainty-aware reliable scheduling" and "the first approach to explicitly quantify real-world uncertainties using time-to-event models" (Abstract, Section 1). Prior robust CPP methods (e.g., Antunes et al. 2019, Lu & Gzara 2015) rely on predefined intervals or historical averages, whereas SurvCG uses per-connection survival predictions to capture the long-tail distribution of delays. This is a genuinely novel cross-pollination of survival analysis and combinatorial optimization.
 
-2. **Substantial and consistent reduction in total propagated delays under irregular operations.** In the 75R,25IR-70 scenario, the reliable solution reduces TPGD at the 99th percentile from 2,928.25 minutes to 1,130.47 minutes (61.4% improvement). Improvements are consistent across all tested scenarios (75R/25IR and 50R/50IR at 70th–90th percentile severity levels), with reliable solutions maintaining lower TPGD at upper percentiles across the board (Tables 3 and 4).
+- **Large and consistent reductions in Total Propagated Delay, especially at extreme percentiles.** Under the 75R,25IR-70 scenario, SurvCG reduces TPGD at the 99th percentile from 2928.25 minutes (nominal) to 1130.47 minutes — a 61% improvement (Table 3). Similar gains of 1000+ minutes at the 98th–100th percentiles hold across multiple severity levels (P70, P80, P90) and irregularity rates (25% and 50% irregular runs), as shown in Tables 3–4 and Figure 5. The consistency across scenarios strengthens the claim.
 
-3. **Reduction in deadhead connection costs with negligible total cost increase.** Reliable solutions decrease deadhead connection costs by up to 13.58% while total planned costs increase by only 0.003% (Table 2). This contrasts favorably with prior robust optimization approaches that reported 1–3% cost increases (Antolini et al., 2005).
+- **Robustness achieved with essentially zero nominal cost increase.** Reliable solutions reduce deadhead connection costs by up to 13.58% while increasing total planned costs by only 0.003% (Table 2). Prior robust approaches (e.g., Antolini et al. 2005) report 1–3% cost increases. This near-zero cost premium for substantial robustness gains is a practically significant result.
 
-4. **Real-world benchmark instance made public.** The paper generates and releases (via anonymous link) a benchmark instance from 97,294 BTS On-Time Performance flights, providing the first public benchmark for uncertainty-aware CPP research.
+- **Introduction of the P-index for survival model evaluation.** The paper identifies that conventional survival metrics (C-index, Brier score) consider only event ordering, which is insufficient when exact event timing matters for connection windows. The P-index (Eq. 6) is proposed and used to select CoxTime (P-index 0.911) over CoxPH and DeepSurv (Table 1). This is a methodological contribution relevant beyond aviation.
+
+- **Publicly available real-world benchmark instance.** The paper creates and releases (https://anonymous.4open.science/r/SurvCG-Instance-67C6/) a first-of-its-kind large-scale CPP instance from the BTS On-Time Performance dataset for Endeavor Air, providing a standardized testbed for future research on uncertainty-aware crew pairing.
 
 ## Weaknesses
 
@@ -20,58 +53,55 @@ The paper proposes SurvCG, a column generation algorithm for the airline crew pa
 None.
 
 ### Major
-1. **Comparison only against a deterministic nominal baseline, not against existing robust/stochastic CPP methods.** The paper compares SurvCG solely against a nominal (no-uncertainty) solution. Existing robust CPP methods are cited in the related work (Antunes et al., 2019, reporting 18–20% TPGD reductions over nominal; Lu & Gzara, 2015) and the Discussion qualitatively compares against Antunes et al.'s reported numbers, but none are implemented or simulated as baselines. The paper's claim of "unprecedented improvements (up to 61%)" and "first data-driven solution" would be significantly strengthened by direct empirical comparison against at least one existing robust or stochastic CPP approach. Without this, it is unclear how much of the gain is attributable to the specific survival-based reliability model versus the general benefit of any robustness-aware approach over a naive deterministic solution.
 
-2. **Claims are overstated relative to the evidence provided.** The abstract claims "unprecedented improvements" and "first data-driven solution for uncertainty-aware reliable scheduling." The 61% figure is drawn from a single percentile (99th) in one scenario (75R,25IR-70). While improvements are consistent, the magnitude varies across scenarios, and the claim of being the "first data-driven solution" is not well supported without comparison to data-driven robust optimization baselines.
+- **No head-to-head comparison against any existing robust or stochastic CPP method.** The paper compares only against the deterministic nominal solution. While it cites Antunes et al. (2019)'s reported 18–20% reduction over nominal in the Discussion (line 129), it never implements or evaluates that method (or any other robust/interval-based/stochastic CPP approach) on the same instances. The critic's concern that "every robust method ever proposed would beat [the nominal baseline] on delay metrics" is fair — the paper's central claim that SurvCG achieves "unprecedented" improvements cannot be properly assessed without demonstrating that the survival-based reliability penalty adds value beyond simpler uncertainty-handling alternatives (e.g., percentile-based buffers, historical on-time percentages). This is the most significant gap in the evaluation.
+
+- **Ablation: no control experiment to isolate whether the survival model drives the gains.** The paper never validates that the CoxTime-predicted reliabilities actually correlate with downstream CPP performance. There is no experiment replacing the survival-based reliability with a simpler baseline (e.g., historical average on-time percentage per route, or a constant penalty across all connections). Without this, it is unclear whether the improvements come from the dynamic, per-connection survival predictions or merely from the introduction of *any* reliability penalty into the cost function.
 
 ### Minor
-1. **No statistical variability accounted for in the optimization output.** The simulation uses 100 independent delay-sampling runs but on a *single* pairing solution from each method (nominal and reliable). The reported results do not capture variability from the column generation solver itself (e.g., different random seeds, tie-breaking). A single solution per configuration leaves open the possibility that the observed advantage is partially an artifact of the particular solution found.
 
-2. **Limited discussion of limitations.** The Discussion (Section 5) only briefly mentions dependence on survival model accuracy. Other important limitations are not discussed: the assumption that historical reliability patterns transfer to future operations under changing conditions, the computational overhead of on-the-fly reliability queries during column generation, and the lack of correlation modeling across simultaneously disrupted flights in the simulation.
+- **No uncertainty quantification on simulation results.** Tables 3 and 4 report single point values at each percentile across 100 simulation runs, with no confidence intervals, standard deviations, or error bars. Given that the simulation injects randomness via kernel-density sampling, the reported differences (e.g., 1130 vs. 2928 at the 99th percentile) could vary substantially across runs. Basic bootstrap intervals or standard errors are a standard expectation for Monte Carlo evaluations and would significantly strengthen the results.
 
-3. **P-index is introduced but not adequately motivated or benchmarked.** The paper introduces the P-index (Equation 6, not visible in extracted text) for evaluating survival models but does not provide a concrete example showing where conventional metrics (C-index, Brier score) fail and P-index succeeds in this task. Its advantage over existing metrics is asserted but not demonstrated.
+- **P-index validation is incomplete.** Table 1 reports P-index values of 0.90–0.91 for CoxTime, but there is no null baseline (e.g., a random model or constant prediction) or calibration on synthetic data with known ground-truth event times. Without this, the reader cannot gauge whether 0.91 represents excellent performance or is merely adequate. The paper also never connects P-index to downstream CPP performance — the metric is introduced and then never referenced again in the experimental analysis of pairing solutions.
+
+- **Simulation matching procedure is underspecified for replication.** The simulation samples delays from a Kernel Density Estimation "on matched historical flights" (line 83), but the matching criteria are not fully specified — are flights matched by route, time of day, aircraft type, or some combination? Different matching policies could produce radically different delay severity levels, affecting reproducibility.
 
 ### Trivial
-None.
+
+- The paper claims "60%" improvement in the Discussion (line 129) but Table 3 shows 61% (2928.25 → 1130.47). A minor numerical inconsistency.
+- The caption of Figure 5 mentions transitioning "from less irregular operations 100IR to more irregular operations 100IR" (line 120), which appears garbled.
 
 ## Nice-to-Haves
 
-- Implement at least one robust optimization baseline (e.g., scenario-based stochastic programming following Antunes et al. 2019) for direct quantitative comparison. This would substantially strengthen the contribution.
-- Run the column generation solver multiple times with different random seeds to estimate solution-level variability and provide confidence intervals on the reported improvements.
-- Discuss or model delay correlation across flights sharing the same pairing, as independent delay sampling may not fully capture real-world propagation effects.
-- Include a concrete worked example or case study tracing how the reliability penalty affects a specific pairing choice during column generation.
+- A comparison against a percentile-based robust CPP method (e.g., using the 70th or 80th percentile of historical delay as a buffer, following the robust optimization literature cited by the authors). This would directly test whether the survival model adds value beyond a simpler uncertainty set.
+- Validation of P-index on synthetic data where ground-truth survival times are known, to establish its calibration and interpretability.
+- A sensitivity analysis showing how P-index values correlate with downstream TPGD reduction — e.g., what happens if a worse survival model (CoxPH or DeepSurv) is used in SurvCG?
 
 ## Removed Points
 
-- **Criticism that Section 3 (the method section) is entirely missing.** The extracted paper jumps from Section 2 to Section 4, and equations (5, 6, 9, 13, 14), Table 1, and parts of Section 2 are referenced but absent. However, the paper consistently refers to these elements as if they exist in the original submission (e.g., "as defined in equation 14," "constraint (9)"). This is consistent with systematic parser stripping of content — a known artifact affecting the extracted text. The criticism is removed as it reflects a parser issue rather than an authorial omission. *Treat with caution: if the original submission genuinely lacks its method section, this would be fatal, but internal references strongly suggest otherwise.*
-
-- **Criticism that the simulation does not model delay propagation or cascading effects.** The paper explicitly states: "TPGD quantifies delays carried from one flight segment to the next, capturing the cascading effects of delays" (line 90) and provides the TPGD equation (lines 92–94, 109) that computes propagated delay when the gap between consecutive flights falls below minimum sit time Δ. The simulation follows Antunes et al. (2019). The garbled rendering of the TPGD equation in the extracted text is a parser artifact, not an author error.
-
-- **Criticism that the definition of propagated delay "does not parse."** This is a parser rendering artifact affecting the equation formatting, not a flaw in the paper's original content.
-
-- **Criticism about missing Table 1, parser artifacts, formatting issues.** These are explicitly identified as parser artifacts and removed per instructions.
-
-- **Criticism that the paper should also cover additional domains/tasks.** Running column generation multiple times for statistical variability is a reasonable suggestion (kept as Minor), but the broader scope-creep demands are removed.
+- **"Section 3 and Eq. 14 are missing from the extracted text, making the contribution unverifiable."** The extracted text jumps from Section 2 to Section 4, and the paper references Eq. (5), (6), (9), (13), (14) from the missing section. This is a PDF extraction artifact (parser error), not an author omission. The original submission contains the CPP formulation, column-generation setup, and cost-function equations. This criticism is removed per the rule that parser issues should not be attributed to the authors.
+- **Complaints about "unprecedented" being unsubstantiated solely due to missing comparison with Antunes et al.** While the missing comparison is a genuine weakness (kept above), the framing that the "unprecedented" claim is entirely unsubstantiated is too strong — the paper does compare to the nominal baseline and cites Antunes et al.'s reported numbers in the Discussion.
+- **"The near-constant total cost is suspicious and requires careful justification."** The paper provides this justification: reliable solutions increase deadhead flying costs (up to +5.93%) but decrease deadhead connection costs (up to −13.58%), and these largely offset. This explanation is reasonable and not suspicious.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews identify genuine weaknesses (inadequate baselines, overclaimed framing) and reasonable suggestions (solution-level variability, P-index motivation) but do not surface any novel observation about the approach that the paper itself does not discuss. The core insight — that survival-predicted connection reliability can be integrated into column generation for robust crew pairing — remains the paper's central contribution.
+Beyond the paper's own contributions, the reviews reveal an interesting tension: the paper's strongest claimed advantage — near-zero cost premium for robustness (0.003% vs. 1–3% in prior work) — is also its most vulnerable point. If the reliability penalty is merely reshuffling pairings without changing the cost structure much, then the TPGD improvements might come from the optimization finding different-but-equally-cheap solutions that happen to be more robust, rather than from the survival signal specifically. This is precisely why the missing ablation (replacing survival predictions with a static baseline) is critical: it would disentangle whether the *survival model's dynamic predictions* or simply the *introduction of any reliability-seeking regularization* is responsible for the gains.
 
 ## Suggestions
 
-1. **Add at least one robust or stochastic CPP baseline.** Implement the scenario-based robust optimization approach of Antunes et al. (2019), using sampled delay scenarios from the same historical data, and compare SurvCG against it in terms of TPGD. This single addition would address the most significant weakness and could make the paper very strong.
+1. **Add a head-to-head comparison with at least one alternative uncertainty-handling approach** — either the Antunes et al. (2019) robust CPP method (if implementable) or, more practically, a percentile-based buffer approach (e.g., adding the 70th percentile of historical delay as a buffer to connection times). This directly tests whether the survival model adds value beyond simpler uncertainty representations.
 
-2. **Add solution-level confidence intervals.** Run the column generation solver multiple times with different initialization seeds and report the range/confidence intervals of TPGD improvements. This would address the concern that results may be artifacts of a single optimization run.
+2. **Add an ablation experiment replacing the survival-based reliability with a static baseline** — e.g., use the marginal on-time arrival probability (averaged over all flights in the training set) as a constant reliability penalty for all connections. If SurvCG still achieves comparable TPGD reductions, the survival model is not driving the gains.
 
-3. **Re-frame the claims with appropriate qualification.** Replace "unprecedented" and "first data-driven solution" with more precise language, e.g., "first to use time-to-event models" (which is well-supported) and report improvements in context of the baseline used.
+3. **Report confidence intervals (e.g., 95% bootstrap intervals) or standard deviations** for the TPGD values in Tables 3 and 4 across the 100 simulation runs. This is a minimal and standard addition for Monte Carlo evaluations.
 
-4. **Provide a worked example** showing how reliability enters the reduced-cost computation in the column generation subproblem and trace a specific pairing decision to illustrate the mechanism.
+4. **Validate the P-index** by computing it on a null model (e.g., random survival times) or on synthetic data with known ground-truth survival functions, to calibrate what constitutes a "good" value.
+
+5. **Specify the matching criteria** used in the simulation KDE sampling — clarify whether flights are matched by route, time-of-day window, aircraft type, or some combination — to enable replication.
 
 ## Score and Decision
 
-The paper presents a genuinely novel direction — integrating survival analysis into column generation for crew pairing — with strong empirical results against the natural nominal baseline. However, the evaluation is significantly weakened by the absence of any comparison against existing robust or stochastic CPP methods. The strong claims ("unprecedented," "first data-driven solution") are not adequately supported without such baselines. The underlying idea is promising, and the experimental evidence suggests real value, but the paper in its current form overclaims relative to what is demonstrated.
+The paper proposes a genuinely novel integration of survival analysis into CPP optimization — a timely and well-motivated contribution. The core idea is sound, and the experimental results show substantial improvements over the deterministic baseline across multiple disruption scenarios. However, the evaluation has two significant gaps: (1) no comparison against any alternative uncertainty-handling CPP method, and (2) no ablation isolating the survival model's contribution from the generic effect of adding a reliability penalty. These gaps prevent full assessment of the "unprecedented" claim. The paper would benefit from a major revision addressing these weaknesses, but the core contribution is real and potentially impactful.
 
-Score: 3.0 — borderline; addresses a worthwhile problem with a novel approach, but the insufficient baseline comparison prevents full assessment of the contribution's magnitude relative to the state of the art. The missing method section in the extracted text is almost certainly a parser artifact given internal cross-references.
-
-MY FINAL SCORE: <pineapple>3.0</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

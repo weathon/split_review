@@ -1,20 +1,20 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
-
----
+Now I have a thorough understanding of the paper. Let me write the consolidated review.
 
 ## Summary
 
-SHIFT is a diffusion-based adversarial state perturbation attack for RL that removes the traditional $l_p$-norm constraint. It uses a history-conditioned diffusion model with classifier-free guidance (for history alignment), policy gradient guidance (to alter semantics toward a target action), and autoencoder-based realism guidance (to suppress artifacts). Evaluated across four Atari games against six defenses (SA-DQN, WocaR-DQN, CAR-DQN, Diffusion History, DP-DQN, vanilla DQN), it reduces episode rewards by more than 50% and is the only attack shown to compromise the strongest diffusion-based defenses.
+This paper proposes SHIFT, a diffusion-based adversarial state perturbation attack for RL that moves beyond traditional $l_p$-norm constraints. The method combines a history-conditioned diffusion model (classifier-free guidance) with policy gradient guidance (classifier guidance) and autoencoder-based realism enhancement to generate semantically meaningful perturbed states. Evaluated on four Atari games against five defenses (SA-DQN, WocaR-DQN, CAR-DQN, Diffusion History, DP-DQN), SHIFT demonstrates substantial reward reduction.
 
 ## Strengths
 
-1. **Removes the $l_p$-norm constraint to enable semantic perturbations.** The paper clearly identifies that existing $l_p$-norm-constrained attacks (PGD, MinBest, PA-AD) cannot alter semantic content even at large budgets (Section 1, Figure 1c). SHIFT replaces this constraint with realism and history-alignment objectives, directly enabling semantic changes that fool defenses which easily denoise $l_p$-bounded perturbations.
+1. **Novel and well-motivated method.** SHIFT is the first work to apply conditional diffusion models to adversarial state perturbations in RL, combining classifier-free guidance (history conditioning), classifier guidance (policy gradient), and autoencoder-based realism correction into a single generation pipeline. The idea of going beyond $l_p$-norm constraints by generating semantics-changing but realistic perturbations is timely and practically motivated (Figure 1 visually illustrates the difference from PGD).
 
-2. **Breaks state-of-the-art defenses that resist all prior attacks.** Table 1 shows SHIFT reduces episode reward substantially across 4 Atari games against 6 defenses. Figure 3a demonstrates that PGD, MinBest, PA-AD, PGD-TC, Blurred, and Shifting attacks all fail against DP-DQN on Freeway, while SHIFT succeeds — and simultaneously achieves lower reconstruction error and Wasserstein distance than those attacks.
+2. **Strong absolute attack performance across diverse defenses.** Table 1 shows that SHIFT substantially reduces episode rewards against vanilla DQN and four SOTA defenses (SA-DQN, WocaR-DQN, CAR-DQN, Diffusion History, DP-DQN) across four Atari games, while maintaining high manipulation and deviation rates. Results are reported with mean and std over 10 runs.
 
-3. **Principled combination of classifier-free guidance (history conditioning), classifier guidance (policy gradient), and autoencoder-based realism enhancement.** Theorem 1 shows that in the RL setting the two guidance mechanisms are additively computable without cross-terms, because the policy gradient depends only on the target action and the classifier-free gradient depends only on the history. The autoencoder guidance (Section 3.2.3) demonstrably removes artifacts such as the "two balls" anomaly (Figure 1d vs. 1e).
+3. **Demonstrated advantage over existing attacks (in the evaluated setting).** Figure 3a shows that in Freeway against DP-DQN, PGD, MinBest, PA-AD, temporally coupled PGD, and high-sensitivity direction attacks all fail to meaningfully reduce reward, while SHIFT succeeds — directly supporting the claim that SHIFT overcomes defenses that resist $l_p$-constrained attacks.
 
-4. **Formal characterization of stealthiness.** Definitions 1–5 provide a vocabulary for valid, realistic, semantics-changing, and history-aligned states. This framework is accompanied by quantitative metrics (reconstruction error for static stealthiness, Wasserstein distance for dynamic stealthiness), and Figure 3a shows SHIFT outperforms all compared attacks on both metrics.
+4. **Real-time feasibility via EDM architecture.** Table 2 demonstrates that using EDM reduces per-perturbation generation time to ~0.2 seconds (vs. ~3.08s for DDPM) while maintaining attack quality, addressing the practical concern of deploying diffusion-based attacks in real time.
+
+5. **Useful formal conceptual framing.** Definitions 1–5 (Valid, Realistic, Semantics-Changing, History-Aligned, Approximately History-Aligned States) provide a clear vocabulary for characterizing attack objectives beyond $l_p$ norms, even if not directly enforced in implementation.
 
 ## Weaknesses
 
@@ -22,64 +22,48 @@ SHIFT is a diffusion-based adversarial state perturbation attack for RL that rem
 None.
 
 ### Major
-
-1. **Comparative evaluation against prior attacks is shown for only one environment.** The paper's central claim is that SHIFT "uniquely" breaks defenses that prior attacks cannot. However, the head-to-head comparison with PGD, MinBest, PA-AD, PGD-TC, Blurred, and Shifting attacks is presented only for Freeway (Figure 3a). Table 1 reports SHIFT's own performance across four environments (Pong, Freeway, Seaquest, Boxing), but does not show whether prior attacks also fail against the same defenses on those environments. Given that SHIFT is computationally heavier than PGD or MinBest (0.2s vs. 0.02s per perturbation), it is important to verify that cheaper attacks cannot achieve comparable results on multiple games. The paper's strongest claim rests on evidence from a single environment.
+1. **Comparative evaluation is too narrow to fully support the paper's central claim.** The paper claims that existing attacks "cannot compromise these more advanced defenses" while SHIFT can, but the head-to-head comparison against other attacks (PGD, MinBest, PA-AD, temporally coupled PGD, high-sensitivity direction attacks) is conducted **only in Freeway against DP-DQN** (Figure 3a). There is no comparison table showing how other attacks perform against the full set of defenses (SA-DQN, WocaR-DQN, CAR-DQN, Diffusion History) across multiple environments. The paper's central comparative claim rests heavily on a single figure with one environment and one defense. Adding comparisons across a broader set of conditions would significantly strengthen the paper.
 
 ### Minor
+2. **Abstract's "more than 50%" claim appears overstated for some conditions.** The abstract states that SHIFT "significantly lowers the agent's cumulative reward in various Atari games by more than 50%." According to the reviewer's reading of Table 1 (which I cannot directly verify from the text but appears to be the data the reviewer is citing), Pong against DP-DQN and Diffusion History show drops of approximately 43% and 45% — both below 50%. While the attack is clearly effective overall, this specific quantitative claim in the abstract does not hold uniformly across all evaluated conditions. The paper itself notes (lines 204–206) that "these defenses perform better in the Pong environment," which is consistent with smaller drops there.
 
-2. **Theory-practice gap in the formal definitions (Section 3.1).** Definitions 1–5 define valid states ($S^*$), realistic states, and semantics-changing states via projection onto the set of states reachable by any policy in the MDP — a set that is intractable to compute for high-dimensional Atari environments. The paper acknowledges this (Section 3.1: "ensuring strict validity is intractable with limited amount of data") but then uses the true state $s_t$ as a proxy for $\mathrm{Proj}_{S^*}(\tilde{s})$ in experiments (Figure 2). The $l_2$ distance to $s_t$ is a valid upper bound on the realism measure (since $s_t \in S^*$ by construction), and the practical approximation is reasonable. However, the elegant formal framework is not directly operationalized — semantic change is inferred from action manipulation rates rather than verified against the formal definitions. The paper would benefit from either (a) developing a computable proxy for projection onto $S^*$ (e.g., via a trained classifier) and measuring against it, or (b) explicitly framing the definitions as motivation and using pragmatic measures (reconstruction error, Wasserstein distance) as primary evidence.
+3. **Gap between formal definitions and heuristic implementation is acknowledged but not characterized.** Definitions 1–5 are presented as a principled framework, but the implementation uses heuristic proxies: autoencoder reconstruction error for realism (rather than computing $\text{Proj}_{S^*}$), and true-history conditioning for history alignment (rather than projecting through $S^*$ as Definition 5 requires). The paper acknowledges this (line 142: "our attack uses the true history $\tau_{t-1}$ to approximate the victim's belief $H_{t-1}$"), but does not empirically measure how well the generated states satisfy the formal definitions. A reader cannot tell whether the attack's success derives from the formal framework or from the specific engineering of diffusion-based generation.
 
-3. **Missing no-attack baselines in Table 1.** Table 1 reports SHIFT's attack performance across various defenses, but does not show the reward each defense achieves under clean (no-attack) conditions. Without this, it is harder to assess the absolute impact — e.g., if SA-DQN already achieves low reward even without attack, SHIFT's impact is less impressive. The paper should report clean reward for each defense to contextualize the attack results.
+4. **No ablation study isolating component contributions.** SHIFT combines three techniques: (a) history-conditioned diffusion, (b) policy gradient guidance, and (c) autoencoder realism correction. The paper does not ablate these components to measure each one's contribution to attack success, stealthiness, or realism. This makes it difficult to understand which design choices are critical.
 
-4. **Missing ablation studies.** The method has three interacting components: (a) history conditioning (classifier-free guidance), (b) policy gradient (classifier guidance), and (c) autoencoder realism guidance. No ablation isolates the contribution of each component. The most critical missing ablation is removing autoencoder guidance to measure the hit to realism vs. attack success. Similarly, removing policy guidance would test whether the conditioned diffusion model alone can induce semantic change. These ablations are standard practice for a method paper and would strengthen the attribution of SHIFT's success.
+5. **Theorem 1 is overclaimed.** The "theorem" states that classifier-free and classifier guidance combine without interference in this setting. The justification (line 163) correctly observes that the two conditioning signals ($\bar{a}_t$ and $\tau_{t-1}$) are independent, so the gradient modification commutes with the conditional diffusion step. This is a valid design observation but calling it a "Theorem" inflates its rigor — it is a straightforward consequence of the conditioning structure rather than a nontrivial result requiring proof.
 
-5. **Real-time feasibility claim is not fully justified.** The paper reports ~0.2s per perturbed state with EDM (Section 4.1) and claims this is "feasible for real-time applications." Standard Atari RL settings use frame skipping (typically 4 frames), giving ~67ms between agent actions. At 0.2s per perturbation, SHIFT is ~3× slower than the action interval, which is not real-time in the strict sense. The paper should either provide a more nuanced discussion of the computational trade-off (e.g., attacking at a lower frequency, or parallelized generation) or moderate the real-time claim.
+6. **Boxing result with DP-DQN is unexplained.** The reviewer notes that in Boxing, DP-DQN yields *lower* reward under SHIFT than vanilla DQN, suggesting the defense may interact pathologically with the attack. If true, this is an interesting phenomenon that warrants explanation — it could indicate the defense amplifies the attack rather than mitigating it.
+
+7. **White-box threat model assumptions are strong and not contextualized.** The attacker requires access to: the clean environment, the victim's policy, all deployed defense mechanisms, true states in real-time, and sufficient compute for a trained diffusion model. While worst-case analysis is legitimate, the paper does not discuss how realistic these assumptions are for safety-critical RL deployments, nor does it explore attack transfer under relaxed assumptions (e.g., black-box policy access).
 
 ### Trivial
-
-6. **The paper uses true history (rather than perturbed history) for conditioning** during generation, which is acknowledged as an approximation (Section 3.2.1). The effect of divergence between true and perturbed history over the course of an episode is not studied.
-
-7. **Target action selection uses a myopic Random Non-Optimal method**, which the paper notes as a limitation (Section 5), but alternative selection strategies are not explored.
+None.
 
 ## Nice-to-Haves
-
-- **Human evaluation or detector study** to confirm that perturbed states are visually plausible to human observers or can evade an independent anomaly detector (beyond the autoencoder used by the attack itself).
-- **Extension of comparative evaluation** to at least 2 additional environments (e.g., Pong and Seaquest) against DP-DQN, comparing SHIFT to PGD (at multiple budgets) and one additional prior attack.
-- **Sensitivity analysis** on history length $k$ and autoencoder gradient steps.
+- **Ablation study** isolating history conditioning, policy guidance, and autoencoder guidance to clarify each component's contribution.
+- **Broader comparative evaluation** showing how PGD, MinBest, PA-AD, and high-sensitivity attacks perform against all five defenses across multiple environments (not just DP-DQN in Freeway).
+- **Empirical verification** of how often generated perturbed states satisfy Definitions 2–5 under learned proxy metrics, to bridge the theory-method gap.
+- **Discussion** of the surprising Boxing result (DP-DQN under SHIFT yielding worse reward than vanilla DQN under SHIFT).
 
 ## Removed Points
-
-These points from the reviewer inputs are flagged to be removed; treat them with caution.
-
-1. **Criticism that the $l_2$ distance does not give a valid upper bound on the realism measure (Critical Issue 1).** The reviewer claimed that "this is only true if the true state is the closest point in $S^*$ to the perturbed state." This is incorrect. Since the true state $s_t$ is itself an element of $S^*$ (it is a state actually reached by the MDP), the distance from $\tilde{s}$ to $s_t$ is always an upper bound on the distance to the nearest point in $S^*$ — i.e., $\|\mathrm{Proj}_{S^*}(\tilde{s}) - \tilde{s}\|_2 \leq \|s_t - \tilde{s}\|_2$. The paper's claim is mathematically correct.
-
-2. **Criticism that Theorem 1's "no interference" claim is invalidated by the autoencoder guidance (Critical Issue 2).** The reviewer argued that the autoencoder guidance "implicitly admits interference." This misunderstands the theorem. The "no interference" claim is about the two gradient terms (classifier-free and classifier guidance) being additively computable without cross-terms because they depend on different conditioning variables. The autoencoder guidance is a separate, additional mechanism addressing realism degradation from strong policy guidance — not evidence of interference between the two guidance methods. The theorem is technically sound.
-
-3. **Criticism about Figure 3a axes not being clearly labeled.** This is a parser artifact and/or presentation nitpick; the paper text explains the axes.
-
-4. **Criticism that the paper does not cite prior unrestricted attack work in RL.** The paper cites Song et al. (2018) for the connection to unrestricted adversarial examples in supervised learning. Asking for extensive related work on unrestricted attacks in RL is scope creep; no such well-known prior work is established in the RL attack literature.
-
-5. **Various formatting/style nitpicks** (typos, figure clarity, etc.) — these are parser artifacts, not author errors.
+These points are flagged to be removed; treat them with caution.
+- **"Variance/distribution not reported"** — The paper explicitly states "All results are reported with mean and std over 10 runs" (line 202). Std over runs is the standard reporting practice for this setting.
+- **"Missing hyperparameters in main text"** — Hyperparameters such as guidance scale, temperatures ζ₁/ζ₂, and thresholds are expected to appear in the appendix. The rules caution that the parser strips appendix content; this should not be held against the paper.
+- **"EDM/DDPM disconnect confuses theory"** — The paper explicitly addresses this in Section 3.2.4 (line 179): "Although our theoretical analysis in Section 3.2.2 is based on the DDPM method to simplify the discussion, we implement our attack method using the EDM formulation." The choice is explained and the EDM-vs-DDPM ablation (Table 2) validates it.
+- **"Probing defense analysis is underdeveloped"** — The paper appropriately scopes this as a "preliminary defense strategy" (line 20) and "a promising future direction" (line 217). The results are presented as an exploratory analysis, not as a complete defense.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews surface the expected tension between the paper's formal theoretical apparatus (which is elegant but not fully operationalized) and its empirical evidence (which is strong but concentrated in a single comparative environment). The most useful takeaway is that the paper's central claim — that SHIFT uniquely breaks defenses other attacks cannot — would benefit from broader comparative evidence across more environments, and the method's contributions would be better understood with component ablations.
+The most interesting observation not fully developed by the paper is the interaction between SHIFT and DP-DQN in Boxing, where the defense appears to amplify rather than mitigate the attack's damage. If confirmed, this suggests that some defense mechanisms (particularly those involving denoising or belief estimation) can create a *worse* outcome for the victim than no defense at all when facing semantics-changing attacks — a failure mode not discussed in the existing defense literature. This merits deeper investigation beyond the paper's current scope.
 
 ## Suggestions
-
-1. **Extend the comparative evaluation:** Run PGD (at multiple $\epsilon$ budgets), MinBest, and one additional prior attack against DP-DQN on at least two more environments (e.g., Pong and Seaquest) and report results alongside SHIFT. This is the single most important addition to support the paper's core claim.
-
-2. **Add no-attack baselines to Table 1** showing the clean reward of each defense method.
-
-3. **Run a 3-way ablation** comparing (i) full SHIFT, (ii) SHIFT without autoencoder guidance, and (iii) SHIFT without policy guidance, reporting reward, manipulation rate, reconstruction error, and Wasserstein distance.
-
-4. **Clarify or moderate the "real-time" claim.** Either provide evidence that 0.2s per state is sufficient for the specific deployment scenario (e.g., attacking at lower frequency), or acknowledge that the attack currently operates at a sub-real-time rate.
-
-5. **Reconsider whether the formal definitions (Definitions 1–5) need to be retained as a full theoretical framework** or can be presented as motivational scaffolding with practical measurements serving as the primary evidence.
+1. Add a comparison table (analogous to Table 1) showing how PGD, MinBest, PA-AD, and high-sensitivity attacks perform against SA-DQN, WocaR-DQN, CAR-DQN, and Diffusion History, even if only in Freeway and one additional environment. This would directly support the paper's central comparative claim.
+2. Conduct and report an ablation study isolating the contributions of (a) history conditioning, (b) policy guidance, and (c) autoencoder realism guidance on attack success rate and reconstruction error.
+3. Add a brief analysis of the Boxing anomaly (DP-DQN vs. vanilla DQN under SHIFT) to demonstrate understanding of the defense-attack interaction.
+4. Calibrate the abstract's "more than 50%" claim — either qualify it to reflect per-environment variation, or report the average across all tested conditions.
+5. Rename "Theorem 1" to "Proposition 1" or "Remark 1" to better reflect its status as a design observation rather than a formal proof.
 
 ## Score and Decision
 
-The paper presents a novel, well-motivated attack method that goes beyond existing $l_p$-norm-constrained approaches and demonstrates strong empirical results against state-of-the-art defenses. The core weakness is that the comparative evidence for the central claim (SHIFT uniquely breaks defenses) is concentrated on a single environment. The missing ablations and no-attack baselines are addressable. The formal theory-practice gap is acknowledged and the paper's practical approximations are reasonable. Overall, the contribution is significant and the method is sound, but the empirical scope of the comparative evaluation needs broadening. The paper merits acceptance after moderate revisions.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

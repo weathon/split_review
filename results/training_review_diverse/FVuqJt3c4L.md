@@ -1,22 +1,18 @@
-Now I have a thorough understanding of the paper and can verify the reviewer's claims against the actual text. Let me synthesize the final review.
-
----
+Here is my final consolidated review:
 
 ## Summary
 
-This paper introduces the Population Transformer (PopT), a self-supervised framework for learning joint representations of arbitrary ensembles of neural recording channels. PopT is modular: it stacks a transformer-based spatial aggregator on top of frozen per-channel temporal embeddings (e.g., BrainBERT). During pretraining, it optimizes two discriminative objectives (ensemble-wise and channel-wise). The method is evaluated on iEEG and EEG decoding tasks, showing that the pretrained PopT consistently outperforms simple aggregation baselines (linear, deep NN, non-pretrained PopT) across four temporal encoders and two data modalities, with substantial gains in sample and compute efficiency, and generalizability to held-out subjects. The paper additionally demonstrates qualitative interpretability analyses (connectivity from pretrained weights, attention-based functional region identification).
+The paper introduces Population Transformer (PopT), a self-supervised framework that learns to aggregate arbitrary channel configurations of neural recordings by stacking a transformer module on top of frozen temporal embeddings. PopT is pretrained with two discriminative objectives (ensemble-wise and channel-wise) and then fine-tuned for downstream decoding tasks. Across four iEEG auditory-linguistic tasks and one EEG seizure detection task, pretrained PopT consistently outperforms linear and deep neural network aggregation baselines by 0.10–0.18 ROC-AUC, achieves competitive performance with end-to-end models like Brant, BIOT, and LaBraM, and demonstrates substantial sample and compute efficiency gains.
 
 ## Strengths
 
-- **Consistent and substantial decoding improvements across tasks, modalities, and temporal encoders**: Pretrained PopT outperforms all baseline aggregation methods on four iEEG auditory-linguistic tasks (Table 1, e.g., Speech/Non-speech ROC-AUC 0.89 vs. best baseline 0.72) and on EEG seizure detection (Table 2, ROC-AUC 0.8821 vs. best baseline 0.8678 with Chronos). This holds across BrainBERT, TOTEM, Chronos, and TS2Vec temporal encoders, convincingly demonstrating that the spatial aggregation learned by PopT is beneficial regardless of the temporal backbone.
+1. **Clear and well-supported core contribution: a modular self-supervised spatial aggregator for variable electrode configurations.** The paper convincingly shows that pretrained PopT + BrainBERT outperforms all aggregation baselines on all four iEEG tasks (e.g., Speech/Non-speech: 0.89±0.07 vs. 0.71±0.11 for Linear Agg., Table 1), and similar improvements hold on EEG with different temporal encoders (Table 2). The improvements are consistent across tasks, modalities, and four different temporal encoders (BrainBERT, TOTEM, Chronos, TS2Vec), demonstrating genuine generality.
 
-- **Dramatic sample efficiency and compute efficiency**: With fewer than 500 training samples, pretrained PopT reaches the full decoding performance of baseline aggregation approaches that require the full dataset (5–10k samples) (Figure 3 — sample efficiency). It also converges in fewer than 750 training steps, while non-pretrained PopT requires 2k+ steps (Figure 4 — compute efficiency). These efficiency gains are practically important for neural data where labeled samples are scarce.
+2. **Dramatically improved sample and compute efficiency.** Figure 4 shows pretrained PopT reaches baseline full-dataset performance with fewer than 500 labeled samples, and Figure 5 shows it converges in under 750 steps vs. ~2000 for non-pretrained PopT. This quantifies a practically important advantage for neuroscience settings where labeled data is scarce.
 
-- **Generalization to held-out subjects with minimal degradation**: The hold-one-out analysis (Figure 6) shows that pretraining without the test subject yields decoding performance nearly identical to pretraining with all subjects, and far above a non-pretrained PopT. This demonstrates that the learned spatial aggregation transfers to unseen electrode configurations.
+3. **Generalization to held-out subjects.** Figure 6 shows minimal performance degradation when the target subject is completely excluded from pretraining, confirming that PopT learns subject-generic spatial representations rather than overfitting to individual electrode layouts.
 
-- **Ablation thoroughly validates design choices**: Ablation results (Table 3) confirm that removing position encoding, the ensemble-wise loss, or the channel-wise loss all reduce performance, with position encoding being the most critical (e.g., Pitch drops from 0.69 to 0.59). The comparison of discriminative vs. reconstructive losses supports the design rationale.
-
-- **Modular framework enables practical adoption**: By separating temporal and spatial learning, PopT can leverage existing (and future) temporal embeddings, works across data modalities (iEEG and EEG), and is computationally lightweight to train. The release of pretrained weights and code adds community value.
+4. **Ablation study validates design choices.** Table 3 shows that removing position encoding causes the largest performance drop (e.g., Speech/Non-speech: 0.89→0.79), while both loss components contribute. The finding that adding a reconstruction term hurts performance (vs. the discriminative objectives) is a non-obvious and useful result.
 
 ## Weaknesses
 
@@ -25,52 +21,49 @@ None.
 
 ### Major
 
-- **Comparison against end-to-end models is confounded by different temporal encoders**: Table 1 compares PopT+BrainBERT against Brant, but Brant learns its own temporal representations while PopT uses BrainBERT's frozen embeddings. The observed advantage of PopT over Brant could partially reflect BrainBERT being a better temporal encoder rather than PopT's spatial aggregation being superior. Similarly, Table 2's EEG comparison uses values from the original BIOT/LaBraM papers with potentially different data splits and preprocessing, despite the authors' attempt to match them. The claim that PopT is "competitive with end-to-end models" is supported at a system level, but the evidence does not isolate the contribution of the spatial aggregation component. A controlled comparison where the temporal encoder is held fixed and only the aggregation method varies would substantially strengthen this claim.
+1. **Interpretability analysis is presented as a core contribution but lacks quantitative validation.** Contribution 3 claims "a new method for brain region connectivity analysis and functional brain region identification." The connectivity analysis (Figure 7) compares PopT-based context sensitivity to cross-correlation for one subject, but reports no quantitative metric — no correlation between matrices, no overlap measure, no comparison to known anatomical connectivity. The attention-based functional region analysis (Figure 8) highlights that Pitch/Volume tasks activate primary auditory cortex and linguistic tasks activate Wernicke's area, which is expected and could be recovered by simpler methods. Without quantitative validation (e.g., correlation with an atlas, statistical comparison to a null model, cross-subject consistency metrics), this analysis does not meet the standard of a validated method. The decoding results (Contributions 1 and 2) stand on their own, but the paper would be stronger if the interpretability claims were either (a) quantitatively validated or (b) scaled back to preliminary observations.
 
 ### Minor
 
-- **Interpretability claims are qualitative without quantitative validation**: The connectivity analysis (Figure 7) proposes a novel metric (degradation in the channel-wise objective when masking a channel) and claims it "recapture[s] the strongest connectivity of the cross-correlation maps," but provides no quantitative correlation between this metric and traditional coherence. The attention-based functional region identification (Figure 8) identifies expected brain regions but does not compare against any ground-truth functional atlas (e.g., Dice coefficient or overlap with the Destrieux atlas). The paper acknowledges these are candidate/suggestive patterns, but contribution 3 claims "a new method for brain region connectivity analysis and functional brain region identification," which is over-claimed given the qualitative nature of the evidence. Strengthening these claims would require systematic quantitative evaluation.
+2. **Statistical rigor is insufficient for auxiliary claims.** The core decoding results (pretrained PopT vs. baselines) have large effect sizes with non-overlapping error bars, so those are fine. However, several auxiliary claims lack formal testing:
+   - "missing a subject from pretraining does not significantly affect the downstream results" (Figure 6) is stated without any statistical test (paired or otherwise).
+   - "all components are necessary" (Table 3 ablation) is asserted, but the gaps with and without the two loss components are small with overlapping standard errors (e.g., Pitch: 0.69±0.07 vs. 0.66±0.07 w/o group-wise loss; Volume: 0.84±0.06 vs. 0.83±0.06 w/o group-wise loss). The position encoding ablation shows a clear necessity; the loss components show smaller, less definitive effects.
+   - "consistent improvement" with more pretraining subjects (Figure 7) is not clearly visible for all tasks (e.g., Sentence Onset: performance with 1 subject is similar to all subjects within error).
 
-- **Channel selection protocol is under-documented**: The paper states that for the scaling experiment, channel subsets are selected "based on their individual linear decodability" (line 138). For the main 90-channel results in Table 1, the selection criterion is not explicitly stated. If the same linear-decodability selection was used, and if this selection used the test labels, it could introduce a minor bias that favors all methods equally but raises methodological hygiene concerns. The paper should clarify how the 90 channels were selected and whether the decodability-based selection was performed on training data only. (Note: this does **not** undermine the comparative results, as all methods — including the linear aggregation baseline — would be equally affected.)
+   These do not invalidate the main results but mean the auxiliary claims are presented more strongly than the evidence supports.
+
+3. **Ensemble-wise loss details are underspecified in the main text.** The paper does not state how "consecutive" times are defined, at what temporal granularity, whether positive and negative pairs are balanced, or how large the "further, randomly selected interval" is relative to the data length. These details affect whether the model could exploit trivial temporal structure (e.g., slow drift). If they are in the appendix, they should be summarized in the main text.
 
 ### Trivial
 
-- The paper references architectural and hyperparameter details in appendix sections (e.g., \Cref{architectures}, \Cref{sec:connectivity}) that are standard content for conference papers and are only missing from this extracted version, not from the original submission.
+4. **The held-out subject experiment could be clearer.** The paper says "conduct a hold-one-out analysis" and shows one bar, but it is ambiguous whether the result is averaged across all held-out subjects or reflects a single held-out subject. The text ("We pretrain a model using all subjects except for one") suggests iterative hold-out, but this should be explicitly stated.
 
 ## Nice-to-Haves
 
-- **Controlled temporal-encoder ablation**: Compare PopT + a frozen temporal encoder against an end-to-end model that uses the same temporal encoder architecture but learns spatial aggregation jointly. This would isolate the benefit of decoupled training.
-- **Quantitative interpretability validation**: Compute Spearman correlation between the proposed connectivity metric and traditional coherence across all channel pairs, and report overlap scores (e.g., Dice) between attention-based functional regions and anatomical atlases.
-- **Pretraining compute cost**: Report the parameter count, GPU hours, and hyperparameters for the pretraining stage itself to substantiate the "computationally lightweight" claim.
-- **Error bars for hold-one-out analysis**: Add significance tests comparing held-out vs. non-pretrained conditions in Figure 6.
+- **Report pretraining data scale for the end-to-end comparison.** The paper positions PopT as "competitive with end-to-end trained methods" and "computationally lightweight." Reporting the number of subjects, recording hours, or total samples used for PopT pretraining (and for the compared models, to the extent known) would make the "efficient" claim much more informative. If PopT achieves near-LaBraM performance with an order of magnitude less data, that is a major finding worth highlighting.
+
+- **Show learning curves for baseline aggregation methods in the sample efficiency figure (Figure 4).** The comparison would be more transparent if the reader could see how Linear/Deep NN baselines behave with fewer samples, not just their full-dataset performance as dashed lines.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+- **Concern about whether temporal encoders are frozen or fine-tuned.** The paper explicitly states "frozen temporal embedding model" (Figure 1 caption, line 60) and uses "frozen" throughout. The encoders are used off-the-shelf without adaptation to the neural domain. This is a misreading of the paper.
 
-- **"Channel selection leaks task information and biases the evaluation (Structural flaw)"** — This is a significant overstatement. The sentence about selecting channels by linear decodability (line 138) explicitly states "To test scaling with arbitrary ensemble sizes," referring to Figure 4's scaling experiment, not necessarily Table 1. Even if the same selection was used for Table 1, it applies to **all methods equally**, and if anything would favor the linear aggregation baseline (which directly uses linear decodability). The reviewer's framing as a "structural flaw" that "inflates performance for any method that can exploit these highly predictive channels" is unsupported, since PopT is compared against baselines on the same channels.
+- **Request for architecture details (layers, heads, dimensions) in main text.** The paper references \Cref{architectures} for these details. Architecture details were in the appendix, which is stripped by the parser. The original submission contained these.
 
-- **"Under-specification of method details hampers reproducibility"** — The paper explicitly references appendix sections (\Cref{architectures}, \Cref{sec:interpretability_details}) for architecture details and hyperparameters. The parser strips appendix content; these details exist in the original submission. The temporal granularity of the self-supervised objectives is adequately described in the main text (lines 100–113: consecutive vs. separated by a random interval for ensemble-wise; 10% of channels replaced with activity from a random time point for channel-wise).
-
-- **"Discriminative vs. reconstructive justification is post-hoc"** — The paper provides a clear rationale (low effective dimension of temporal embeddings makes reconstruction overfit to "filler" dimensions) and supports it with ablation results. This is a reasonable ex-ante design choice validated by experiments.
-
-- **Various format/style/typo nitpicks** from the reviewer — These are parser artifacts, not paper errors.
+- **Criticism that the paper does not discuss whether TOTEM/Chronos are used in pretrained form.** The paper says the temporal embedding model is frozen (line 60, Figure 1), which covers all four encoders uniformly.
 
 ## Novel Insights
 
-The reviewers collectively surface an important tension: the paper's interpretability and end-to-end competitiveness claims are the most novel but also the least rigorously validated parts of the contribution. The self-supervised spatial aggregation idea itself is well-supported by the controlled baselines (linear, deep NN, non-pretrained PopT), sample efficiency experiments, and generalizability results — but the most attention-grabbing claims (outperforming end-to-end models, providing a validated connectivity analysis tool) rest on weaker evidence. This creates a gap between the paper's strongest contributions (which are solid) and its most ambitious claims (which need further support). The paper would benefit from either strengthening the evidence for these ambitious claims or calibrating the claims more modestly to match the evidence.
+None beyond the paper's own contributions. The reviews surface the core strengths and limitations clearly without adding a novel perspective.
 
 ## Suggestions
 
-- **For the end-to-end comparison**: Either (a) run a controlled experiment where the same temporal encoder is used for both PopT and an end-to-end variant, or (b) reframe the claim from "competitive with end-to-end models" to "competitive with end-to-end models at the system level while being more modular and efficient," which more accurately reflects what is demonstrated.
-
-- **For interpretability**: Compute a systematic quantitative measure (e.g., Spearman correlation between the proposed connectivity metric and traditional coherence; Dice overlap between attention-weighted regions and the Destrieux atlas) for all subjects. If the results are positive, this substantially strengthens contribution 3. If not, scale back the claim to "suggestive qualitative patterns."
-
-- **Clarify channel selection**: Explicitly state in the main text how the 90 channels for Table 1 were selected (e.g., all available channels? top-k by decodability on training data? random?) and confirm that any label-based selection was done on training data only.
+1. Either add quantitative validation for the interpretability analysis (e.g., correlation between PopT connectivity and anatomical ground truth, statistical comparison of attention-based regions to known atlases) or reframe the claims as preliminary/qualitative observations rather than a validated method.
+2. Add simple statistical tests (paired t-test or effect-size reporting) for the auxiliary claims about generalizability, scaling with subjects, and ablation necessity.
+3. Clarify the ensemble-wise loss details (temporal granularity, positive/negative balance, interval size) in the main text.
+4. Explicitly state whether the hold-one-out results in Figure 6 are averaged across all held-out subjects.
 
 ## Score and Decision
 
-This paper makes a solid contribution: the modular self-supervised spatial aggregation framework is well-motivated, novel within this space, and convincingly supported by experiments showing improvements in accuracy, sample efficiency, compute efficiency, and generalizability over reasonable baselines. The core claims about decoding improvement and efficiency are well-supported. The main weaknesses are (1) the comparison against end-to-end models is not fully controlled, and (2) the interpretability claims are qualitatively suggestive rather than quantitatively validated. These are addressable in a revision and do not undermine the paper's central contribution. The paper presents a useful, practical framework with released code and pretrained weights.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

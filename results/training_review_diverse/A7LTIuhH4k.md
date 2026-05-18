@@ -1,18 +1,20 @@
-Now I have all the information I need. Let me write the consolidated review.
+Now I have a thorough understanding of the paper. Let me synthesize the final review.
+
+---
 
 ## Summary
 
-This paper proposes using the proximal point method (PPM) to generate a family of efficiency-robustness Pareto-efficient robust solutions in a single algorithmic pass, rather than solving separate robust optimization instances for each desired trade-off point. The paper proves an exact equivalence between the PPM trajectory and the Pareto-efficient set for robust linear programs with simplex domains and ellipsoidal uncertainty sets (Theorem 1), provides a probabilistic bound for random polyhedron domains (Corollary 1), and empirically validates the approach on robust portfolio optimization and adversarially robust deep learning. The core idea—warm-starting from the most robust solution and then running PPM towards the nominal problem—is conceptually interesting and practically motivated.
+This paper proposes using the Proximal Point Method (PPM) trajectory—initialized at the most-robust solution and iterating toward the nominal problem—as a cheap surrogate for the entire efficiency-robustness Pareto frontier. The core claim is that the sequence of PPM iterates approximates (and, in a special case, exactly matches) the set of Pareto-efficient robust solutions, reducing the cost from \(N \times T\) to roughly \(2 \times T\). The paper provides a theoretical result (Theorem 1) proving exact equivalence under simplex domain + ellipsoidal uncertainty sets, a probabilistic bound for random polyhedron domains (Corollary 1), and empirical validation on portfolio optimization and adversarially robust deep learning.
 
 ## Strengths
 
-- **Exact theoretical equivalence for a nontrivial problem class.** Theorem 1 proves that under a simplex domain and ellipsoidal uncertainty set (with Σ⁻¹e ∈ ℝⁿ₊), the proximal point method trajectory *exactly* recovers the set of Pareto-efficient robust solutions. The proof chains together existing results (central-path/PPM equivalence, mean-variance/central-path correspondence, Pareto-robust/central-path correspondence) in a non-obvious way, providing a rigorous foundation for the algorithmic claim. This is a clean theoretical contribution.
+1. **Novel and practically motivated framework**: The idea of generating a menu of efficiency-robustness trade-off solutions in two passes rather than \(N\) independent solves is genuinely useful. The paper correctly identifies an expensive workflow in robust optimization and adversarial ML and offers a simple, implementation-friendly alternative (Algorithm 1).
 
-- **Probabilistic performance bound extending beyond the exact setting.** Corollary 1 shows that for random polyhedron domains with i.i.d. constraint coefficients, the efficiency and robustness of Pareto-efficient solutions are bounded between those of two PPM trajectories with probability 1 − 1/m. This extends the applicability of the method to problems where the exact equivalence does not hold and provides a formal (if indirect) justification for using PPM trajectories as approximations.
+2. **Exact equivalence result under a nontrivial special case**: Theorem 1 proves that for robust LPs with a simplex domain and ellipsoidal uncertainty sets (with \(\Sigma^{-1}e \in \mathbb{R}^n_+\)), the PPM trajectory starting from the most-robust solution exactly coincides with the set of Pareto-efficient robust solutions. This provides rigorous footing for the heuristic in a class of problems with clear practical relevance (e.g., portfolio optimization).
 
-- **Empirical evidence that the approach works beyond its strict assumptions.** The portfolio optimization experiment (Figure 1) shows that even when the condition Σ⁻¹e ∈ ℝⁿ₊ is not satisfied—and for the Markowitz++ problem where the domain deviates from a simplex—the PPM trajectory closely matches the exact Pareto frontier in both in-sample and out-of-sample performance. This is valuable empirical corroboration that the idea has practical legs.
+3. **Empirical validation across two distinct domains**: The experiments on robust portfolio optimization (both vanilla and Markowitz++ variants) and adversarially robust deep learning on CIFAR-10 show that the PPM trajectory closely tracks the true Pareto frontier even when theoretical conditions are violated (e.g., \(\Sigma^{-1}e \notin \mathbb{R}^n_+\) in the portfolio data; non-convex deep learning with norm-ball perturbations). The deep learning experiment further demonstrates that better gradient approximations of PPM (ExtraFullGD > ExtraSGD > SGD) yield better frontier approximations.
 
-- **Clear, well-conceived experimental design for the deep learning case.** The adversarial deep learning experiment systematically compares four gradient-method approximations to PPM (SGD, ExtraSGD, FullGD, ExtraFullGD) and shows that better PPM approximations yield better Pareto frontiers (Figure 2). This confirms the conceptual link between PPM accuracy and solution quality, and provides practical guidance for implementation.
+4. **Transparency about limitations**: The paper honestly acknowledges when experimental conditions violate the theoretical assumptions (line 280: "although the assumption \(\Sigma^{-1}e \in \mathbb{R}^n_+\) is not satisfied"), and does not overclaim that the exact result applies broadly.
 
 ## Weaknesses
 
@@ -20,53 +22,65 @@ This paper proposes using the proximal point method (PPM) to generate a family o
 None.
 
 ### Major
-
-1. **The "2 × T" computational cost claim is overstated and not supported by the paper's own data.** The abstract and introduction repeatedly state that the method reduces cost from N × T to 2 × T. However, the paper's own Table 1 shows the actual cost as "15.12 + 0.25(N−1)" minutes. Plugging in N=100 gives 39.87 minutes, while 2T = 30.24 minutes. The cost grows linearly with N and is not 2T. The correct accounting is T + (N−1)·c, where c ≪ T is the per-step PPM cost. The key insight—and the real contribution—is that c is much smaller than T, so the total cost is far less than N·T. But presenting this as "2 × T" without qualification is numerically inaccurate even in the paper's own experiment. This is a significant overstatement that damages the paper's credibility and should be corrected. *Note: the underlying savings are real; the problem is the imprecise framing.*
-
-2. **Section 3.4 (multiple uncertain constraints) is disconnected from the paper's main contribution.** This section introduces a saddle-point reformulation for problems with uncertain constraints (Proposition 2) and provides Algorithm 2, which solves for a *single* Pareto solution for a given α. It does not connect to the PPM-based trajectory idea, does not generate multiple solutions in one pass, and does not reduce the computational cost in the way the core method does. Running Algorithm 2 for multiple values of α would incur the same N × T cost the paper aims to avoid. This material reads as a separate, partially developed idea that does not advance the paper's main thesis and should either be integrated (e.g., by showing how to apply PPM to the saddle-point formulation to generate a trajectory) or removed.
+None that threaten the core contributions, but see Minor for substantive concerns.
 
 ### Minor
 
-1. **The theory-to-practice gap for the deep learning experiment is not explicitly acknowledged.** The paper's theoretical guarantees (Theorem 1) require linear objectives, simplex domains, ellipsoidal uncertainty sets, and Σ⁻¹e ∈ ℝⁿ₊. The deep learning setting violates all of these: the objective is nonconvex, the parameter space is not a simplex, and the uncertainty is an ℓ∞ ball. The paper notes that extra-gradient methods approximate PPM (line 167) and conducts the experiment as an empirical case study, which is reasonable. However, it does not include a clear paragraph stating that "for nonconvex problems, the theoretical equivalence breaks down entirely, and the following experiments should be interpreted as heuristics, not as validated by Theorem 1." Adding such a statement would improve the paper's intellectual honesty without weakening its contribution.
+1. **Proposition 3 (PE\_as\_CP) is stated without justification in the main text, creating a gap in Theorem 1's exposition.**  
+   The proof chain for Theorem 1 is: PPM sequence = central path (Prop. 1) → central path w.r.t. \(x_R\) = Pareto-efficient robust solutions (Prop. 2 + Prop. 3). Proposition 2 (MV\_as\_CP) connects the central path w.r.t. \(x_{\mathrm{mv}}\) to mean-variance solutions; Proposition 3 asserts the same for central path w.r.t. \(x_R\). The missing reasoning is that under the stated conditions, \(x_R = x_{\mathrm{mv}}\) (the most-robust solution as the uncertainty radius → ∞ is the minimum-variance portfolio), which makes Proposition 3 a direct corollary of Proposition 2. The paper does not make this connection explicit, and the critic's confusion is understandable. The result itself is mathematically correct, but the paper would benefit from a brief justification in the main text rather than deferring entirely to the appendix.
 
-2. **Missing reproducibility details for the portfolio experiment.** The portfolio optimization section (line 278) does not specify the number of PPM steps taken, how the λₖ sequence was chosen, how the "exact Pareto frontier" was computed (solved as SOCP? using which solver?), or the computational cost comparison. Without these details, the experiment cannot be reproduced or fully assessed.
+2. **The "\(2 \times T\)" cost claim is imprecise.**  
+   The abstract and introduction state the cost is reduced from \(N \times T\) to \(2 \times T\). In the deep learning experiment, the actual cost is \(15.12 + 0.25(N-1)\) minutes, which for \(N=100\) is \(\approx 40\) minutes, while \(2 \times T = 30.24\) minutes (since \(T = 15.12\) min for adversarial training). Moreover, the standard training pass (25 min for 100 epochs) costs *more* than the single robust solve (15.12 min), so the second pass is not bounded by \(T\). The paper gives a more precise formula in Section 5, but the headline claim in the abstract overstates the precision of the bound. The key insight—reduction from \(N \times T\) to roughly \(T + (N-1) \times t\) with \(t \ll T\)—remains valid and practically significant.
+
+3. **Corollary 1's relationship to the PPM trajectory is unclear from the main text.**  
+   Corollary 1 bounds the robustness \(\mathrm{R}(\cdot)\) of Pareto-efficient solutions on a random polyhedron between those on two simplex domains. The connection to the PPM trajectory is only indirect (through Theorem 1's simplex result). The corollary is presented without intuition for how the bound connects to the algorithm's output, which may leave readers uncertain about what the result actually guarantees about the PPM approximation on general domains.
+
+4. **The multiple-uncertain-constraints extension (Section 4.4 / Proposition 4) does not benefit from the PPM-based cost reduction.**  
+   As the paper notes, Algorithm 2 must be run separately for each \(\alpha\) value, which means the "one pass" advantage of Algorithm 1 does not carry over. This is a genuine scope limitation that the paper acknowledges implicitly (line 233: "running the following algorithm for a set of \(\alpha\) values") but could state more prominently.
 
 ### Trivial
-None.
+
+- The paper uses the notation \(\Xi(\infty)\) somewhat informally. Clarifying that this means the limit as the ellipsoid radius → ∞ would improve precision.
+- Figure 2's four-panel layout is dense; the trajectories for different gradient variants overlap, making it hard to assess relative performance visually.
 
 ## Nice-to-Haves
 
-- A comparison to warm-starting or continuation methods (solving the robust problem for decreasing radii using the previous solution as initialization) would help quantify the specific advantage of the PPM approach over a natural baseline.
-- An ablation study on the number of PPM steps needed to obtain a good Pareto frontier approximation would strengthen the portfolio experiment and provide practical guidance.
-- The paper could discuss the rationale for the specific Bregman distance D_φ(x,y)=⟨x−y, Σ(x−y)⟩ versus alternatives (e.g., Euclidean).
+- A bound on the *approximation error* between the PPM trajectory and the true Pareto frontier for the general case (beyond the exact-simplex setting) would substantially strengthen the paper. The current theory is either exact (simplex) or gives performance bounds (random polyhedron), but not an approximation guarantee.
+- The deep learning experiment uses a fixed learning rate schedule. An adaptive schedule or learning rate decay could potentially extend the useful range of the trajectory (the paper notes clean/adversarial accuracy drops in later epochs).
 
 ## Removed Points
 
-- *Criticism about missing appendix, missing proofs in appendix, or absent references:* Removed per instructions — the parser strips these; they exist in the original submission.
-- *Strength Finder's supporting strength #2 ("Extension to multiple uncertain constraints... broadens the class of problems that can benefit"):* Dropped because it conflicts with verified Major Weakness #2 — the section is disconnected and does not actually extend the one-pass trajectory idea to those problems.
-- *Complaint about irreproducibility of cited baselines/existence of methods:* Not applicable; the reviewer made no such claim.
-- *Formatting/style nitpicks and typo complaints:* Not present in the reviewer's feedback; the reviewer's feedback is substantive.
-- *The reviewer's suggestion to "remove or substantially rework the multiple uncertain constraints section" is too strong; the section could potentially be integrated.* This was downgraded from a removal demand to "remove or integrate" framing.
+These points from the reviews were assessed and removed with justification:
+
+- **"Proposition 3 is unsubstantiated and likely false"** (harsh critic): The mathematical claim is correct under the stated conditions (\(x_R = x_{\mathrm{mv}}\) makes Proposition 3 follow from Proposition 2; this is standard portfolio theory). The proof is in the appendix (stripped by the parser). The critic's objection about the linear term \(-2\omega\langle x,\Sigma x_R\rangle\) is specifically what Proposition 2 addresses under the \(\Sigma^{-1}e \in \mathbb{R}^n_+\) condition. Removed per: Rule about appendix proofs being stripped; also the criticism is factually incorrect about the result being "likely false."
+
+- **"Corollary 1 is stated without derivation"** (harsh critic): The proof is in the appendix (stripped by parser). Removed per rule about missing appendix proofs.
+
+- **"Proofs for Propositions 2, 3, and 4 are not sketched in the main text"**: The parser strips appendix sections. Removed per rules.
+
+- **"Missing comparison with existing methods (e.g., homotopy/continuation)"**: Rule states not to mention missing related works as external sources cannot verify their existence.
+
+- **Formatting/style nitpicks, grammar, and typo complaints**: Removed per rules.
+
+- **Generic strengths from Strength Finder** (e.g., "Simplification of a previously expensive workflow" — this is a paraphrase of the contribution, not an independent strength): Removed.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface an important meta-point: the paper's theoretical machinery (central-path/PPM equivalence) is elegant but tightly coupled to linearity and the specific Bregman distance. The deep learning experiments suggest that even crude PPM approximations (SGD, ExtraSGD) produce reasonable Pareto frontiers, which hints that the PPM trajectory property might be more robust to approximation errors than the theory would suggest. This observation — that the empirical performance degrades gracefully as the PPM approximation worsens — is not explicitly discussed in the paper but is visible in Figure 2 and could motivate future theoretical work on robustness of the PPM trajectory property.
+The most interesting observation to emerge from the reviews is that the paper sits at an awkward junction between theory and practice. The exact result (Theorem 1) is mathematically correct but requires restrictive conditions (simplex domain, ellipsoidal uncertainty, \(\Sigma^{-1}e \in \mathbb{R}^n_+\), linear objective), while the empirical experiments intentionally violate these conditions. The paper's strongest evidence is therefore empirical, not theoretical—yet it presents the theory as the primary contribution. This tension is not a flaw per se, but it means the paper would benefit from a clearer positioning: the exact result validates the *intuition* behind the heuristic, but the practical value rests on the empirical demonstrations and the algorithmic insight (PPM trajectory ≈ efficient frontier), not on the theorem's generality. The gradient-method approximation insight from the deep learning experiment (ExtraFullGD > ExtraSGD > SGD) is an underexploited finding that could guide practitioners.
 
 ## Suggestions
 
-1. **Correct the computational cost statement.** Replace "2 × T" with an honest description: total cost = T (one robust solve) + (N−1)·c where c ≪ T is the per-PPM-step cost. Describe the regime where c is small relative to T (e.g., robust solve requires SOCP while PPM step is a linear projection or gradient step). This change removes a claim that invites skepticism and strengthens the paper.
+1. **Clarify the connection between \(x_R\) and \(x_{\mathrm{mv}}\) in the proof sketch of Theorem 1.** Add a sentence explaining that as the ellipsoidal uncertainty radius → ∞, the robust solution minimizes \(\sqrt{\langle x,\Sigma x\rangle}\), i.e., is the minimum-variance portfolio, making Proposition 3 a consequence of Proposition 2.
 
-2. **Either integrate Section 3.4 or remove it.** If kept, show how the saddle-point formulation can be solved via PPM to generate a trajectory; if not, drop it and focus the paper on the core contribution.
+2. **Replace the "\(2 \times T\)" slogan with a more precise characterization**, e.g., "reducing the cost from \(N \times T\) to \(T + (N-1) \times t\) where \(t\) is the per-iteration cost of the PPM (typically much smaller than \(T\))." This would avoid misleading readers whose setting may differ from the experimental one.
 
-3. **Add a limitations paragraph** at the end of the theory section or in a dedicated section, stating explicitly that the theoretical guarantees apply to the linear/simplex/ellipsoidal setting, and that extensions to nonconvex problems are heuristic.
+3. **State upfront that the multiple-uncertain-constraint extension (Section 4.4) does not inherit the one-pass cost reduction**, so readers know its scope is different from Algorithm 1's.
 
-4. **Provide reproducibility details** for the portfolio experiment: number of PPM steps, λₖ schedule, exact Pareto frontier computation method, and computational cost.
-
-5. **For the portfolio experiment, numerically verify** that the PPM trajectory distance to the exact Pareto frontier is small, to make the theoretical claim more concrete.
+4. **Add a brief forward reference** connecting Corollary 1 back to Algorithm 1, explaining how the simplex-domain bounds translate into guarantees on the PPM trajectory's quality.
 
 ## Score and Decision
 
-The paper has a genuinely interesting core idea and a clean theoretical result for a specific problem class. The empirical evidence supports the practical utility of the approach. However, the overstated computational savings claim ("2 × T") and the disconnected Section 3.4 are significant weaknesses that undermine the precision and coherence of the contribution. The paper is not ready for acceptance in its current form, but the core contribution is salvageable with revisions.
+The paper proposes a genuinely novel and practically motivated approach with a clean theoretical special case and compelling empirical support. The theoretical gaps identified by the harsh critic are largely due to deferred appendix proofs and missing exposition, not actual errors. The remaining weaknesses (imprecise cost characterization, unclear connection in Proposition 3, scope limits of the multiple-constraint extension) are minor and addressable. The paper makes a solid contribution.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

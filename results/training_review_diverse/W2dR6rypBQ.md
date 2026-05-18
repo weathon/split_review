@@ -1,18 +1,18 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have all the information I need. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes EOR (Explainable Operations Research), a framework that combines a three-agent LLM architecture (Commander/Writer/Safeguard) with bipartite graph edit distance (GED) quantification to generate explanations for OR model changes. The paper also contributes a new industrial benchmark of 30 OR problems with 10 queries each, and provides experimental results comparing EOR against a raw LLM baseline (Standard) and the prior work OptiGuide across four GPT-4 variants. The main empirical finding is that EOR substantially improves modeling accuracy (e.g., 88.33% vs. 63.00% for GPT-4-Turbo zero-shot) and yields modestly higher explanation quality scores.
+This paper introduces EOR (Explainable Operations Research), a framework that combines a multi-agent LLM architecture (Commander/Writer/Safeguard) with a bipartite-graph-based "Decision Information" quantification to generate explanations for OR model changes. The paper also introduces a new benchmark of 30 problems with 10 queries each for evaluating explainable OR. Empirically, EOR substantially outperforms both a Standard LLM baseline and OptiGuide in modeling accuracy (e.g., 95.33% vs. 75.00% with GPT-4-Turbo one-shot) and achieves higher explanation quality scores in both automated and expert evaluations.
 
 ## Strengths
 
-- **Formal problem definition for explainable OR with LLMs (Section 3.1).** The paper provides a clean mathematical formulation of the explainable OR task, specifying inputs (problem description + user query) and outputs (Attribution Explanation + Justification Explanation). This establishes a foundation that prior work lacked and enables systematic future research.
+- **Consistent and substantial performance gains.** EOR outperforms both baselines across all four tested LLMs in zero-shot and one-shot settings. With GPT-4-Turbo, EOR achieves 88.33%/95.33% accuracy versus 63.00%/67.00% (Standard) and 30.33%/75.00% (OptiGuide) (Table 2). The margins are large and consistent, supporting the practical value of the framework.
 
-- **Novel three-agent architecture with iterative code verification (Section 3.2.1).** The Commander/Writer/Safeguard pipeline with code-modify-and-verify loops is a well-engineered design. The failure case analysis (Table 4) shows a 60% reduction in errors from zero-shot to one-shot, demonstrating the practical value of this iterative approach.
+- **Formal problem formulation for explainable OR within LLMs.** Section 3.1 provides a precise input-output specification (problem description, user query, attribution explanation, justification explanation) that clarifies the scope and provides a foundation for future research in this emerging area.
 
-- **First industrial benchmark for explainable OR (Section 4.1).** The benchmark of 30 categorized problems with 10 expert-crafted queries each, developed from scratch and managed in-house to avoid LLM training data contamination, fills a genuine gap — existing OR datasets (NL4OPT, ComplexOR, IndustryOR) address only modeling, not explanation.
+- **Multi-faceted evaluation methodology.** The paper assesses both modeling accuracy (by comparing optimization outcomes rather than code similarity) and explanation quality (via automated LLM-based scoring and blind expert review). The dual evaluation approach is appropriate for the task.
 
-- **Consistent accuracy gains across multiple LLMs (Table 2).** EOR outperforms both baselines on all four GPT-4 variants in both zero-shot and one-shot settings. The accuracy improvements are large (e.g., 88.33% vs. 63.00% for GPT-4-Turbo zero-shot), providing convincing evidence that the overall framework improves modeling fidelity.
+- **Practical system design with safety iteration.** The three-agent architecture includes explicit safety checks and a debugging loop with timeout (Section 3.2.1). Failure case analysis (Table 4) shows a 60% reduction in total errors from zero-shot to one-shot, demonstrating the system's practical robustness.
 
 ## Weaknesses
 
@@ -20,52 +20,52 @@ This paper proposes EOR (Explainable Operations Research), a framework that comb
 None.
 
 ### Major
-- **The role of GED quantification in explanation generation is underspecified (Section 3.2.2).** The paper states that LLMs are used to "sense these processes and generate explanatory insights" (line 124) but never specifies the mechanism by which the GED value enters the explanation pipeline. Is the computed NGED fed as a number in the LLM's prompt? Is the LLM given the bipartite graph representations and asked to reason about structural changes? Or does the workflow compute GED as a separate analytical step that is never surfaced to the LLM? The distinction matters because the paper claims GED-based quantification as a core contribution, yet the case study (Section 4.6) illustrates quantitative analysis (the $15,000 cost increase) that comes from comparing solver solutions, not from the GED itself. Without specifying how GED is used, the reader cannot assess whether the GED contributes to explanation quality or is merely computed alongside the main pipeline. This is a reproducibility-relevant clarity gap.
+
+- **The GED/"Decision Information" quantification is claimed as a core contribution but is never shown to be operationalized in the evaluated system.** The paper presents the bipartite-graph GED computation in Section 3.2.2 as a central methodological novelty (it appears in Contribution 2, the abstract, and throughout the introduction). However, the workflow in Section 3.2.1 makes no mention of how GED is computed or fed to the LLM. The prompt engineering for incorporating GED into explanations is never described. No ablation compares EOR with and without the GED information. The case study ($15,000 cost increase) is derived from comparing LP objective values, not from GED. The paper says "Since LLMs cannot directly perform this quantification, we utilize them to sense these processes" (line 124), but this is too vague to establish that the GED plays any causal role in the reported explanation quality improvements. Consequently, the paper's central claimed contribution is unsubstantiated: we cannot tell whether the gains come from the GED quantification, the multi-agent design, better prompting, or other factors.
+
+- **The new benchmark is described too thinly to be independently assessed.** The paper claims "the first industrial benchmark for evaluating explanation quality in OR" (30 problems, 10 queries each), but the description lacks critical details: (1) The "ground truth labels" (line 135) are mentioned but never defined — what constitutes a correct or good explanation? (2) The template used for automated evaluation is referenced but not shown. (3) Expert evaluation involves "OR experts" (line 144) but no details are given about their number, backgrounds, or inter-rater agreement. (4) The paper does not discuss coverage, difficulty distribution, or how the 30 problems were selected. For a claimed "first industrial benchmark" that is meant to set a new standard, the description is insufficient for the community to assess or use it.
 
 ### Minor
-- **Explanation quality evaluation lacks statistical rigor (Section 4.5.2, Table 3).** The differences between EOR and Standard in explanation quality are small (e.g., zero-shot Overall: 8.42 vs. 8.15 on a 0–10 scale from Auto evaluation). No confidence intervals, standard deviations, or significance tests are reported. The text describes these as "consistently outperforming" without statistical support. Given that only correct-output cases are evaluated (further reducing sample size for less accurate methods), the observed differences could be within the noise margin of the evaluation.
 
-- **Expert evaluation protocol is under-described (Section 4.2).** The paper mentions a blind review process with OR experts but does not report: number of expert raters, inter-rater agreement (e.g., Cohen's kappa, Spearman correlation), whether a calibration phase was conducted, or the exact scoring rubric beyond "clarity, relevance, logical coherence." The claim that "Auto is nearly as effective as Expert" (Section 4.5.2) is asserted without agreement metrics between the two evaluation methods.
+- **Explanation quality comparison may suffer from selection bias.** The paper evaluates explanation quality only on correct modeling cases. When methods differ substantially in accuracy (EOR ~88–95%, Standard ~63–70%), the subsets of correct outputs likely come from different distributions of problem difficulty. If EOR correctly handles harder queries that Standard fails on, the remaining correct cases for Standard may be systematically easier to explain. The paper does not discuss this potential bias or justify the comparability of explanation scores under this filtering.
 
-- **Potential same-LLM-family bias in automated evaluation.** The automated evaluation uses GPT-4o to score explanations generated by GPT-4 variants. An LLM from the same family may exhibit systematic bias toward outputs that follow certain stylistic patterns, independently of actual correctness or informativeness. A held-out set of human-written reference explanations (even small) would help calibrate this.
+- **Safeguard agent effectiveness is not evaluated.** The Safeguard's role in catching errors and triggering the debugging loop is described but no data is provided on how often checks trigger, how many iterations the loop requires, or how the Safeguard affects final accuracy and latency. This makes it difficult to attribute accuracy gains to the multi-agent design versus simpler prompting strategies.
 
-- **No ablation to isolate the GED component's contribution.** The EOR framework combines multiple components: the three-agent architecture, the code-verify loop, and the GED-based quantification. Without comparing EOR against an "EOR-minus-GED" variant (the same agent workflow but without providing GED information to the LLM), it is impossible to attribute any portion of the improvement to the GED-based quantification specifically. This weakens the support for what the paper presents as its central technical novelty.
+- **"Real-time" claim is unsupported.** The paper uses the term "real-time" in the problem formulation (Section 3.1) and introduction (Section 1) but provides no runtime measurements. Given the iterative debugging loop and multiple LLM calls, the practical latency of the system is unknown.
 
-- **Limited baseline control for prompt engineering.** The Standard baseline is a raw LLM without structured explanation instructions. A more informative comparison would be Standard with a structured prompt that instructs the model to explain code changes and result differences in a prescribed format, to control for prompt engineering quality rather than just the presence of a workflow.
+- **No statistical significance or variance reported.** Accuracy results in Table 2 lack confidence intervals or standard deviations across problems. With only 30 problems, it is unclear whether the large margins are robust across the benchmark.
+
+- **Claim about handling "more complex" constraint changes is not separately evaluated.** The paper distinguishes EOR from OptiGuide by claiming it handles more complex what-if analysis (e.g., deleting or combining constraints), but the benchmark queries are described as involving "deleting, adding, or updating constraints and parameters" — and the advantage is measured only through overall accuracy, not through a targeted analysis of which query types drive the performance gap.
 
 ### Trivial
-- The benchmark's "ground truth labels" (Section 4.1) are mentioned without explicit specification. From the evaluation methodology (Section 4.2), it is clear these are correct optimal solutions for modeling accuracy evaluation, but the paper could state this directly.
-- The scalability of GED computation to large OR models (many constraints/variables) is not discussed. Bipartite GED on large graphs can be computationally expensive, and a brief note on limitations would be helpful.
+None.
 
 ## Nice-to-Haves
-- An ablation study comparing full EOR vs. EOR-without-GED (same agent workflow, GED computed but not surfaced to the LLM) would isolate the contribution of the GED-based quantification.
-- Confidence intervals and/or paired significance tests for explanation quality scores across multiple evaluation runs.
-- Inter-rater agreement metrics (e.g., Cohen's kappa) for the expert evaluation.
-- Failure case breakdown by query type (constraint deletion, addition, combined changes) to characterize where EOR struggles.
-- A brief discussion of GED computational cost and its practical limits for large-scale OR models.
+
+- Testing the framework on open-source or less capable LLMs would strengthen claims about generalization, though this is scope expansion rather than a flaw.
+- An inter-rater agreement statistic (e.g., Cohen's κ) for the expert evaluation would substantiate the reliability of the human evaluation.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
 
-- **Missing related works (harsh critic, Section 2).** The critic claims the paper omits a "substantial body of work on explainable optimization." Per policy, missing related works should not be raised as a weakness without external confirmation.
-- **"No variance reported for accuracy" (harsh critic, Section 4.5.1).** The paper sets hyperparameter temperature at 0 (Section 4.4), making outputs deterministic for a fixed model checkpoint. The critic's demand for standard deviations on accuracy under these conditions is not standard practice.
-- **"The benchmark has questionable validity" — ground truth labels are undefined (harsh critic, Section 4.1).** The paper clearly states it "include[s] the ground truth labels for each query for each problem to ensure accurate evaluation" and the evaluation methodology (Section 4.2) explains that accuracy is evaluated by comparing optimization outcomes. In context, these are correct optimal solutions.
-- **"Decision Information as defined is very broad" (harsh critic).** Definition 1 intentionally scopes to "parameters and constraints specified in a user's query." The novelty is in the quantitative operationalization via GED, not in the definitional scope.
-- **"No comparison to counterfactual explanations, interactive optimization tools, or rule-based generators" (harsh critic).** These belong to different methodological paradigms (non-LLM) and the paper is scoped to LLM-based methods. This amounts to criticizing the paper for not being a different paper.
-- **Formatting/style nitpicks and generic strength claims from the Strength Finder** (e.g., generic statements about importance of the problem without specific evidence).
+- **Strength from Strength Finder: "Introduces a novel quantitative measure for explainability in OR"** — Removed because it conflicts with the verified weakness that the GED quantification is not shown to be operationalized in the system. The paper describes the math but does not demonstrate its integration or causal role.
+- **Critic's sub-point about benchmark queries covering the same types as OptiGuide** — Removed because the paper's accuracy results empirically show OptiGuide performing poorly (30-75% vs EOR 88-95%), which supports the claim that OptiGuide cannot handle these changes effectively. The critic's speculation contradicts the presented evidence.
+- **Critic's broader suggestion to "drop that claim or reframe"** — The underlying concern (GED not operationalized) is kept as a Major weakness; the specific recommendation for how to fix it is a suggestion, not a weakness.
 
 ## Novel Insights
-The reviews converge on a central structural observation that is more insightful than the paper itself provides: the paper announces "Decision Information" quantification via GED as a core contribution, but the experimental design (end-to-end comparison of EOR vs. baselines) and the method description (vague phrasing about LLMs "sensing" the GED process) do not actually demonstrate that the GED component contributes independently to explanation quality. This is not merely a missing ablation — it reflects a deeper ambiguity about what "quantification of Decision Information" means for the LLM's actual behavior. The paper could have a genuine contribution even if the GED is used only as a post-hoc analytical signal that the LLM does not directly consume; but in that case, the contribution narrative would need to be reframed around the agent workflow and benchmark rather than around GED-based quantification. The reviews collectively reveal that the paper tries to claim two distinct contributions (agent-based code generation + GED-based quantification) under one experimental umbrella that cannot distinguish their effects.
+
+None beyond the paper's own contributions. The reviews surface relevant methodological concerns (selection bias in explanation evaluation, unvalidated GED integration) but do not contribute novel perspectives beyond standard peer review critique.
 
 ## Suggestions
-1. **Clarify the GED-LLM interface.** Provide the actual prompt template used in the "interpreter prompt" (step 6 in Section 3.2.1). State explicitly whether the NGED value, the graph structure, or both are included in the prompt, and how the LLM is instructed to use them.
-2. **Add an ablation study** comparing EOR (full) vs. EOR-without-GED (same pipeline but the LLM generates explanations without access to GED information). This is the single most important addition for substantiating the claimed contribution.
-3. **Strengthen explanation evaluation reporting.** Add confidence intervals or bootstrap-based significance tests for the scores in Table 3. Report inter-rater agreement for the expert evaluation. If multiple expert raters were used, include their individual scores or agreement statistics.
-4. **Add a structured Standard+ baseline.** Give the Standard LLM a prompt that explicitly instructs it to explain code changes and result differences, controlling for prompt engineering quality as a confound.
+
+1. **Demonstrate that the GED quantification is actually used.** Provide an ablation that compares EOR with and without GED information fed to the LLM (or with a simpler quantitative summary). If GED is not directly used in the system, reframe the contribution honestly — the bipartite graph framework can stand as a formal analysis tool without claiming it drives improvements.
+2. **Substantially expand the benchmark description.** Include the annotation protocol for ground-truth explanations, the expert evaluation rubric, inter-rater agreement statistics, and representative examples of queries and explanations. Without these, the benchmark contribution cannot be assessed by the community.
+3. **Address the selection bias in explanation evaluation.** Either justify why comparing explanation quality on filtered subsets is valid, or analyze a held-out set of queries where all methods produce correct outputs.
+4. **Report runtime measurements** to support or qualify the "real-time" claim. At minimum, report average latency and the number of Safeguard iterations.
+5. **Add confidence intervals or significance tests** for the accuracy results (Table 2) given the modest benchmark size.
 
 ## Score and Decision
 
-The paper addresses a timely and important problem, offers a well-engineered framework, and provides a useful new benchmark. The accuracy results are strong and convincing. However, the central methodological novelty — GED-based quantification of Decision Information — is not adequately isolated from the agent workflow, and the explanation quality evaluation lacks the statistical rigor needed to support the paper's claims about improvement in that dimension. The clarity gap about how GED integrates with LLM explanation generation is a real weakness but one that can be addressed in revision. The contributions (problem formulation, agent framework, benchmark) are independently valuable.
+The paper addresses an important gap and demonstrates an effective framework with strong empirical results. However, the claimed core contribution — GED-based quantification of Decision Information — is not shown to be operationalized in the system, and the new benchmark is described too thinly to stand as a contribution. These are structural issues that prevent acceptance in the current form. With major revisions that clarify the role of the GED quantification (or honestly scope it down) and substantially flesh out the benchmark description, the paper could become a strong contribution.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

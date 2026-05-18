@@ -1,95 +1,83 @@
-Now I have all the verification I need. Let me write the consolidated review.
+Now I have a clear picture. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes FedBNN, a federated learning framework for heterogeneous settings where clients have varying data resources, compute capacities, and model architectures. The key idea is to enable collaboration through functional-space priors: clients share outputs (logits) on a public alignment dataset (AD) rather than weight-space parameters, allowing clients with non-identical architectures to benefit from peer knowledge. The paper also describes a differentially private variant and provides a theoretical privacy analysis. Experiments on MNIST, CIFAR-10, and CIFAR-100 compare against FedAvg, FedProx, pFedME, pFedGP, pFedBayes, FOLA, and DP-FedAvg under multiple heterogeneity axes.
+The paper proposes a Bayesian personalized federated learning framework (FedBNN) that uses functional-space priors, leveraging an unlabeled public Alignment Dataset (AD) to enable collaboration across clients with heterogeneous model architectures. Clients share their model outputs on the AD (not weights), the server aggregates them, and clients tune their Bayesian priors to match a convex combination of global and local outputs. A differentially private variant adds Gaussian noise to client outputs. Experiments on MNIST, CIFAR-10, and CIFAR-100 under non-IID data and heterogeneous compute settings show accuracy improvements over baselines, especially for low-resource clients.
 
 ## Strengths
 
-- **Novel functional-space prior mechanism for heterogeneous FL.** The core idea — using an unlabeled alignment dataset at the server to transfer knowledge via output-space priors rather than weight-space aggregation — is genuinely novel. It directly addresses the system heterogeneity challenge (non-identical architectures across clients) that most personalized FL methods cannot handle. (Section 3.2.1–3.2.2)
+1. **Enables collaboration across heterogeneous client architectures**: Prior Bayesian FL methods (pFedGP, pFedBayes, FOLA) require identical model architectures across clients. This paper explicitly handles clients training models of different sizes (~50K vs. ~3M parameters) by communicating in function space rather than weight space — a novel capability demonstrated in heterogeneous compute settings (Section 3.2.1, Figure 1a-b).
 
-- **Non-DP experimental results show promise across multiple realistic heterogeneity axes.** The paper evaluates under compute heterogeneity, data-size heterogeneity, and statistical (non-IID) heterogeneity on three datasets. Reported results suggest that low-capacity clients gain ~10% accuracy through collaboration with higher-capacity clients — a benefit not achievable by homogeneous baselines. The method reportedly outperforms baselines by ~6% on average in small/medium data settings. (Section 5.2, Figure 1)
+2. **Significant empirical gains under data scarcity**: On CIFAR-10/100 with non-IID partitions and limited per-client data (50–100 samples/class), the method achieves ~6% average improvement over all baselines (Table 1). In the CIFAR-100 small setting, accuracy of 30.2±0.5 notably exceeds the next best baseline (pFedME, 26.5±0.3) despite the challenging 100-class task.
 
-- **Seven baselines compared across three datasets.** The paper includes a solid set of comparators spanning non-Bayesian FL (FedAvg, FedProx, pFedME), Bayesian FL (pFedGP, pFedBayes, FOLA), and DP (DP-FedAvg), evaluating on MNIST, CIFAR-10, and CIFAR-100 under non-IID settings. (Section 5.1)
+3. **Principled approach to knowledge transfer when weight-space alignment is impossible**: The idea of using functional-space priors — tuning prior parameters so the model's output on the AD matches a corrected global signal — provides a concrete mechanism for transferring peer knowledge when weight aggregation is infeasible due to heterogeneous architectures (Section 3.2.2, Equations 3–5).
+
+4. **Benefit for low-resource clients in heterogeneous ecosystems**: Figure 1 shows that lower-capacity clients gain ~10% performance improvement when higher-capacity clients participate, and the method degrades more gracefully than baselines as the fraction of low-resource clients increases.
 
 ## Weaknesses
 
-### Fatal
-None. The core non-DP method and its evaluation constitute a legitimate contribution; the flaws described below are severe but do not invalidate the paper entirely.
-
 ### Major
 
-- **Privacy analysis is technically unsound and the DP variant is never empirically tested.** This is the most serious weakness. Two specific problems: (1) The sensitivity bound Δ² ≤ 2 (line 126) is not justified. The paper claims this holds because clients output "normalized" logits, but the sensitivity of a neural network's output on a fixed public dataset with respect to a change in one training data point cannot be bounded by any constant without explicit mechanisms (gradient clipping, bounded Lipschitz constant, etc.) — none are described. (2) The composition formula in Theorem 4.2 (ρ = ε²/(4 E K log(1/δ))) does not follow from standard zCDP-to-DP conversion. Standard results give ε = EKρ + 2√(EKρ·log(1/δ)), which does not invert to the paper's formula. Furthermore, **the DP version of the proposed method is never evaluated.** The paper claims "under strict privacy constraints" in the abstract and states ε ≈ 9.98 with δ = 10⁻⁴ (line 128), but reports zero experiments with noise added to their own method. The only privacy baseline (DP-FedAvg) is included but with no matching comparison. The combination of an invalid formal analysis and absent empirical support means the entire privacy contribution is unsubstantiated.
+1. **Prior optimization step (Eq. 4) is underspecified, harming reproducibility**. The optimization minimizes \(d(\Phi_i^{\text{corrected}}, \Phi_i(\text{AD}; \mathcal{W}_i))\) with respect to prior parameters \(\psi\). However, the loss depends on the model output \(\Phi_i(\text{AD}; \mathcal{W}_i)\), which is computed from the BNN with weights \(\mathcal{W}_i\) drawn from the current posterior \(q(\mathcal{W}_i|\theta)\). The paper does not explain how changing \(\psi\) affects this loss, nor whether a single Monte Carlo sample, an expectation, or some other estimator is used. The description says "the optimization involves training the client's personal BNN \(\Phi_i\) to only learn the parameters of the prior distribution," but this conflates updating the BNN's behavior with updating prior parameters — these are different objects in the variational framework. Without this specification, a reader cannot implement the method from the description. (Lines 76–88, Eq. 4)
 
-- **Calibration is never measured despite being a core motivation.** The abstract, introduction, and discussion repeatedly emphasize "well-calibrated outputs," "calibrated predictions," and uncertainty quantification as key advantages of the Bayesian framework. However, the experiments report only classification accuracy. No calibration metric (expected calibration error, negative log-likelihood, coverage) is presented anywhere in Section 5. This is not a minor omission — it means a central claimed benefit of the method is asserted rather than demonstrated.
+2. **The differential privacy analysis contains significant gaps that prevent the claimed guarantee from being substantiated**. Multiple issues collectively undermine the DP contribution:
+   - **Ambiguous output representation for sensitivity**: The method description says clients aggregate "logits" (Section 3.2.1, line 59), which are unbounded in principle. The privacy analysis claims the "normalized output" gives \(\Delta^2 \leq 2\) (line 126). If outputs are raw logits, this bound does not hold. The paper never clarifies whether softmax/normalization is applied to outputs before reporting, and the "logit representation, i.e., the normalized output" (line 126) is internally contradictory.
+   - **The variable \(K\) in the privacy analysis is undefined**: Theorem 4.2 treats \(K\) as "the number of queries to the algorithm per round." In the method, each client sends exactly one aggregated output per round. If \(K=1\), composition is trivial. If \(K>1\) (e.g., Monte Carlo samples treated as separate queries), the paper does not explain how the local dataset or model changes between these queries, which is a prerequisite for composition to apply as stated.
+   - **The zCDP-to-\((\epsilon,\delta)\) conversion formula is non-standard and unjustified**: Theorem 4.2 gives \(\rho = \epsilon^2 / (4 E K \log(1/\delta))\). The standard conversion from \(\rho\)-zCDP to \((\epsilon,\delta)\)-DP gives \(\epsilon = \rho + 2\sqrt{\rho\log(1/\delta)}\), not the expression implied by the paper's formula. The paper provides no derivation for its alternative form. (Theorem 4.2, lines 118–128)
+   
+   These gaps mean the claimed DP guarantee (\(\epsilon \approx 9.98\)) is not established by the analysis presented.
 
-- **No ablation studies are performed.** The method has multiple design choices that directly affect performance: the mixing parameter γ (set to 0.7), the prior optimization procedure (100 steps), the AD size (2000), the number of Monte Carlo samples K (unspecified), and the core question of whether the functional-space prior provides improvement over simply training locally with Bayes-by-Backprop. Without ablations, it is impossible to attribute the reported performance to any specific component or to understand sensitivity to hyperparameters.
+3. **The DP-FedAvg comparison is uninformative because the privacy accounting is mismatched**. The paper reports DP-FedAvg with "per round \(\epsilon < 0.1\)" (line 155) while its own method is claimed to have a total \(\epsilon \approx 9.98\) after 200 rounds. Without putting both methods on the same accounting footing (e.g., total \(\epsilon\) after 200 rounds for DP-FedAvg under the same composition rules), the privacy-utility comparison in Table 1 is not interpretable. Since the paper's own DP guarantee is unsubstantiated, the comparison is doubly problematic.
+
+4. **No calibration metrics reported despite claiming calibrated predictions as a motivation**. The abstract and introduction emphasize uncertainty quantification and calibrated outputs, yet the experiments report only accuracy. Key metrics like Expected Calibration Error (ECE) or reliability diagrams are absent, making the claim of "providing characterizations of model uncertainties" (abstract) unsupported by evidence.
 
 ### Minor
 
-- **Prior/posterior separation is methodologically unclear.** The paper states that prior parameters ψ are optimized by training the BNN to minimize the distance between Φ_i^corrected and Φ_i(AD; W_i) (Equation 4, line 85). But the BNN's output Φ_i(AD; W_i) depends on the variational parameters θ (via sampled weights W_i ∼ q(W_i|θ)), not on ψ directly. The paper says "the optimization involves training the client's personal BNN Φ_i to only learn the parameters of the prior distribution denoted by ψ" (line 88), but does not explain how updating the BNN's weights can affect ψ without also affecting θ. If the same network parameters are being trained in both phases, the "prior optimization" may constitute double-counting local data (once in the prior-tuning step, once in the variational inference step). This ambiguity undermines the theoretical grounding of the Bayesian framework.
+1. **Computational overhead not discussed**. Each round involves ~100 steps of prior optimization (with Monte Carlo sampling over \(K\) weight samples) plus Bayes-by-Backprop training. For the motivating use case of low-resource clients, the added cost is relevant but left unaddressed (line 148).
 
-- **The number of Monte Carlo samples K is never specified.** K is introduced in the method (line 59) as the number of weight samples drawn from the posterior to approximate Φ_i(AD), but its value is absent from the experimental details (Section 5.1). This makes the results partially unreproducible.
+2. **No ablation on the personalization parameter \(\gamma\)**. The convex combination coefficient \(\gamma\) (Eq. 3) controls the trade-off between global and local knowledge and is set to 0.7 without any sensitivity analysis. Understanding how this parameter affects performance across heterogeneous settings would strengthen the paper's claims.
 
-- **Adaptive aggregation weights (w_j) are set to 1/N and never varied.** The method motivates w_j as representing client "strength" in terms of data or compute resources, but all experiments use uniform weighting. The claimed benefit of resource-aware aggregation is never tested.
+3. **Source of the Alignment Dataset is not specified**. The AD is described as "a general publicly accessible unlabelled dataset" (Section 3.2.1) of size 2000 (line 148). Its origin (from training data, test data, or a separate source) is unclear. If it derives from the test distribution, this could bias evaluation.
 
-- **AD size is fixed at 2000 with no sensitivity analysis.** The choice of 2000 is plausible but not justified, and no experiment varies the AD size to understand how the method's performance depends on this auxiliary dataset. Since the AD is a key assumption of the framework, this gap limits practical guidance.
-
-- **Asymmetric local training epochs unexplained.** Clients train for 50 epochs before collaboration but only 20 epochs per round afterward. This difference is not explained.
-
-- **Missing baseline: FedDF.** FedDF (Lin et al., 2020) is discussed in Related Work as a knowledge-distillation approach for heterogeneous FL, which is conceptually similar to the proposed functional matching. Its omission from the experimental comparison weakens the evaluation.
+4. **Circular dependence in the variational objective is not discussed**. The prior \(p(\mathcal{W}_i; \psi_i^*)\) is optimized using the model's own output \(\Phi_i(\text{AD}; \mathcal{W}_i)\) (which depends on the current posterior \(q(\mathcal{W}_i|\theta)\)), and is then used as the prior in the ELBO that updates the same posterior. This creates a data-dependent prior that deviates from standard Bayesian inference; the paper does not discuss the implications.
 
 ### Trivial
 
-- The claim of being "the first to jointly address" limited data, heterogeneous compute, privacy, and calibration (line 16) is overclaimed — Noble et al. (2022) already targets DP for heterogeneous FL, and pFedBayes already addresses limited data with uncertainty.
-- The auxiliary dataset requirement is described as "a very mild requirement," which downplays a practical constraint that many FL deployments may not satisfy.
-- No training curves or convergence analysis are provided for the 200-round runs.
+None.
 
 ## Nice-to-Haves
 
-- A brief experiment varying AD size (e.g., 500, 2000, 5000) would significantly strengthen the evaluation and provide practical guidance.
-- Reporting the computational overhead of the 100-step prior optimization and Monte Carlo sampling relative to standard FL training would help assess practicality.
-- Including training/test accuracy curves would allow readers to assess convergence behavior.
+- Calibration evaluation (ECE, reliability diagrams) to substantiate the uncertainty quantification claims.
+- Ablation on \(\gamma\) to show how the global/local trade-off affects the results.
+- Wall-clock time and memory comparison with baselines to contextualize computational cost.
+- Clarification of the AD source (e.g., held-out public data, separate from train/test).
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
-
-- **"Table 1 is unreadable / no numerical evidence the reader can inspect"** — Parser artifact. The table was an embedded image in the original submission; only the DP-FedAvg row survived text extraction. The original PDF contained a proper table. (Per hard rules: remove formatting/parser artifacts.)
-- **Strength: "Formal differential privacy guarantee that is general and algorithm-agnostic"** — Conflicts with verified weaknesses (the analysis is incorrect, and no DP experiments exist). (Per rules: when a strength and weakness disagree, the weakness wins.)
-- **Strength: "Privacy analysis provides actionable knobs for real deployment"** — Conflicts with verified weaknesses. Same reasoning as above.
-- **Strength: "Mild assumption of a small public dataset for alignment"** — Generic/superficial; the paper's own self-characterization, not an independent strength. (Per rules: drop strengths that are generic or lack specific content.)
-- **"Related work would benefit from distinguishing methods that require a public dataset from those that do not"** — This is a presentation suggestion, not a weakness of the paper's own contribution. (Scope creep.)
-- **"Proof is missing / appendix references absent"** — The parser strips appendix sections from all papers; these exist in the original submission. (Per hard rules.)
+1. **Strength Finder claim about "formal differential privacy guarantee"** — Removed because it conflicts with verified weaknesses in the DP analysis (weakness wins per rules). The paper's DP analysis has fundamental gaps that prevent this claimed strength from being upheld.
+2. **Harsh critic's specific claim that the sensitivity bound is "unsubstantiated" on the grounds that "normalized logits (or probabilities) do not imply a Lipschitz constant in the training data"** — This misunderstands how sensitivity can be bounded by output range diameter rather than requiring a Lipschitz constant in training data. The real problem is the output representation ambiguity (logits vs. probabilities), not a lack of any possible bound. The relevant concern is retained in Major weakness #2 above with the correct framing.
+3. **Harsh critic's claim that the DP analysis "does not establish a valid guarantee" because of "sensitivity bound is unjustified"** (in the sense of being entirely without basis) — Partially removed because a sensitivity bound via output space diameter is valid in principle for bounded outputs; the retained issue is the ambiguity about what outputs are used (logits vs. normalized).
+4. **Harsh critic's suggestion that "the prior should not depend on a sample from the approximate posterior" makes the VI "ill-defined"** — This overstates the issue. In variational EM and related frameworks, data-dependent priors are used; the paper's omission is not discussing the implications, not that the approach is fundamentally invalid.
 
 ## Novel Insights
 
-The reviews surface a tension that the paper itself does not fully address: the functional-space prior mechanism is the paper's genuinely novel contribution, but the authors weighed it down by overclaiming on privacy and calibration — two dimensions where the evidence is either absent or technically flawed. The most interesting observation from the critic is that the Bayesian framing ("prior optimization") may not be doing what the paper claims: if the "prior" parameters ψ are optimized by training the BNN to match a target output, but the BNN's output depends on the variational parameters θ, then the distinction between prior-tuning and posterior-inference collapses. This suggests that the method might work well for reasons other than its stated Bayesian interpretation — perhaps as a form of output-regularized training. The paper would be stronger if it acknowledged this ambiguity and presented the mechanism in more neutral terms.
+The most striking observation from the reviews is the disconnect between the paper's ambition (jointly handling architectural heterogeneity, data scarcity, privacy, and calibration in FL) and the uneven rigor with which these components are treated. The functional-space prior idea is genuinely interesting and the empirical results under data scarcity are compelling. But the DP analysis reads as an afterthought — using undefined quantities (what is a "query" here? what output representation?), a non-standard conversion formula, and a comparison against DP-FedAvg on mismatched accounting. The core methodological contribution would be stronger if presented alone without the underdeveloped DP claims, or if the DP analysis were brought up to the same standard as the rest of the paper. Additionally, the gap between promising calibration in the introduction and omitting calibration metrics entirely from the experiments is a missed opportunity to validate one of the paper's claimed advantages.
 
 ## Suggestions
 
-1. **Fix or remove the privacy analysis.** The sensitivity argument and composition formula need a complete rework. If a correct DP analysis cannot be provided, remove the DP claim and present the method as a non-private approach to heterogeneous FL — the core contribution does not depend on privacy.
-2. **Run the DP experiments or remove the privacy claims from the abstract/introduction.** Showing the proposed method's accuracy-privacy trade-off (or acknowledging it cannot be run) is non-negotiable if privacy remains a claimed contribution.
-3. **Measure calibration.** Report at minimum expected calibration error (ECE) on test sets. This directly addresses the uncertainty quantification motivation.
-4. **Provide ablations.** At minimum: performance without prior optimization (i.e., local-only Bayes-by-Backprop), sensitivity to γ, and sensitivity to AD size. This would clarify which components drive performance.
-5. **Clarify the prior/posterior separation.** Provide explicit pseudocode showing which parameters (ψ vs. θ) are updated in each phase, and explain how training the BNN's output affects ψ without double-counting data.
-6. **Specify K.** The number of Monte Carlo samples must be reported for reproducibility.
+1. **Clarify the prior optimization step**: Specify whether Eq. 4 uses a single sample \(\mathcal{W}_i \sim q(\mathcal{W}_i|\theta)\), a Monte Carlo average, or an expectation. Explain how optimizing \(\psi\) affects the loss that involves \(\Phi_i(\text{AD}; \mathcal{W}_i)\). Provide the full algorithmic pseudocode.
+
+2. **Fix the DP analysis or remove the DP claims**: Either (a) drop the DP section and refocus the paper on the non-private method (which is the primary contribution), or (b) provide a rigorous privacy analysis with clearly defined sensitivity, correct composition accounting, and matched comparisons against DP baselines. The current analysis is not ready for publication.
+
+3. **Add calibration experiments**: Report ECE or reliability diagrams to support the claimed advantage of Bayesian methods for uncertainty quantification.
+
+4. **Include an ablation on \(\gamma\)** and report computational overhead (wall-clock time) for clients of different capacities.
+
+5. **Specify the AD source clearly** and discuss any potential information leakage if the AD distribution overlaps with the evaluation distribution.
 
 ## Score and Decision
 
-The paper's core idea — functional-space priors via an alignment dataset for heterogeneous FL — is novel and addresses a genuine gap in the literature. The non-DP experimental results suggest practical promise. However, the paper attempts to claim contributions in privacy and uncertainty quantification that are not supported (invalid theoretical analysis, absent DP experiments, no calibration metrics). Combined with methodological ambiguity in the Bayesian framing and missing experimental rigor (no ablations, unspecified K, no sensitivity analysis), the paper is not ready for acceptance in its current form.
+The paper presents an interesting direction for heterogeneous Bayesian FL via functional-space priors, with solid empirical evidence for the non-private method. However, the underspecified prior optimization step (affecting reproducibility of the core method) and the fundamentally flawed DP analysis (affecting a claimed contribution highlighted in the abstract) are significant weaknesses. The paper would benefit from clarifying the core algorithm and either fixing or removing the DP component. In its current form, the method is promising but not yet ready for publication.
 
-**Originality:** 7/10 — The functional-space prior mechanism is genuinely new in the FL context.
-
-**Importance of research question:** 8/10 — Heterogeneous FL with varying architectures is a practically important problem.
-
-**Whether claims are well supported:** 3/10 — Core accuracy claims are plausible but unablated; privacy and calibration claims are unsupported.
-
-**Soundness of experiments:** 4/10 — Reasonable breadth of baselines and datasets, but missing ablations, calibration metrics, DP experiments, and key details (K).
-
-**Clarity of writing:** 5/10 — The method section is readable but the prior/posterior ambiguity creates confusion about what is actually being optimized.
-
-**Value to the research community:** 6/10 — The core idea could inspire follow-up work if clarified and properly evaluated.
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

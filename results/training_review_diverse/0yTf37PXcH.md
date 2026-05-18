@@ -1,36 +1,38 @@
-Now I'll synthesize the final consolidated review.
+Now I have all the information I need. Let me construct the final consolidated review.
 
 ## Summary
 
-Arcana proposes two architectural modifications for MLLMs to improve visual perception: (1) **MM-LoRA**, which assigns separate LoRA parameters to visual and language tokens within the LLM decoder to avoid modality interference, and (2) **QLadder**, a lightweight query-based adapter that extracts enhanced visual features from a frozen CLIP encoder using a small number of learnable query tokens. Experiments on six VQA and five LVLM benchmarks show competitive performance, and controlled ablation studies (using LLaVA-v1.5 data) demonstrate consistent but modest improvements.
+This paper proposes Arcana, a multimodal LLM with two components: (1) **MM-LoRA**, which allocates separate LoRA parameters to visual and language tokens within the LLM decoder to reduce modality interference, and (2) **QLadder**, a query-based adapter that adds a small number of learnable visual tokens to the frozen CLIP encoder to enhance visual representation. Arcana is evaluated on standard VQA and LVLM benchmarks with competitive results and thorough ablations validating each component's individual contribution.
 
 ## Strengths
 
-- **MM-LoRA consistently outperforms standard LoRA in controlled ablations.** When trained on the same LLaVA-v1.5 data (Section 5.3, Table 5), MM-LoRA with β=0.25, γ=0.75 improves over LoRA on all four benchmarks: TextVQA (+0.6), ScienceQA (+2.1), MMBench (+1.0), MME (+40). The β=1 extreme (visual-only LoRA) shows severe degradation (−6.9 on TextVQA), confirming that joint modality-specific learning is necessary.
+1. **MM-LoRA's decoupled modality learning consistently improves over standard LoRA.** The β/γ ablation (Table 5) shows that MM-LoRA with β=0.25, γ=0.75 outperforms standard LoRA on all four benchmarks (TextVQA: +0.6, ScienceQA: +2.1, MMBench: +1.0, MME: +40). The design is clean: it splits the LoRA rank between visual and language tokens while keeping total parameters constant via β+γ=1.
 
-- **QLadder is demonstrably efficient and effective.** Adding just 64 query tokens (Table 6) yields +2.1 on ScienceQA, +1.0 on MMBench, +40 on MME over baseline. Compared to MOF (which adds a full second encoder with 256–576 tokens), QLadder achieves better or comparable results on MMBench (+6.2 vs MOF's −4.2 decline) and TextVQA (+0.6 vs MOF's −1.7 decline) while using only 64 tokens (Table 9). The inference overhead is minimal (memory +0.58 GB, speed −0.11 tokens/s, Table 11).
+2. **QLadder enhances visual perception with minimal overhead, outperforming costly dual-encoder methods.** Table 9 shows QLadder (+64 tokens) surpasses MOF (+256 tokens, an additional DINOv2 encoder) on MMVP (27.6 vs 27.1), MMBench (66.3 vs 60.1), and TextVQA (58.8 vs 56.5). Table 8 reports only 0.582 GB extra memory and a 0.11 tokens/s speed drop — genuinely lightweight.
 
-- **State-of-the-art results with a small ViT-L (0.3B) encoder.** Arcana* achieves the highest MME score (1520.93) among all methods in Table 2, including those with larger encoders (e.g., Qwen-VL-Chat with 1.9B encoder). This demonstrates efficient use of vision resources.
-
-- **Language capabilities are preserved despite multimodal training.** Arcana matches or exceeds the base Vicuna-v1.5 on all four language benchmarks (Table 5: BBH +0.9, AGIEval +8.1, ARC-c +4.8, ARC-e +5.5), indicating no catastrophic forgetting of language ability.
-
-- **Ablation study is properly controlled.** The paper explicitly states (Section 5.3) that ablation experiments use only LLaVA-v1.5 data, providing a fair foundation for isolating the method's contribution.
+3. **Competitive overall performance with a small model and limited data (~2M samples).** Tables 1 and 2 show Arcana (Vicuna-7B, ViT-L) often matches or exceeds models with larger vision encoders or more training data (e.g., Qwen-VL-Chat, mPLUG-Owl2), achieving top scores on VQAv2 (79.5), MMBench (67.4), SEED-Bench (63.2), LLaVA^W (72.7), and POPE (87.1).
 
 ## Weaknesses
 
+### Fatal
+
+None. The paper's core claims — that MM-LoRA and QLadder improve multimodal performance — are supported by controlled ablations and are not invalidated by the issues below.
+
 ### Major
 
-- **Main results are confounded by different training data.** The primary comparisons (Tables 1 and 2) train Arcana on ~2.1M total samples (1.2M ShareGPT4V pre-training + 934K instruction data), while LLaVA-v1.5 uses ~1.26M samples (~595K CC + ~665K instruction). The paper does not clearly flag this discrepancy when presenting main results. The observed gains (e.g., +3.1 on MMBench, +9.3 on LLaVA^W) could be partially or largely driven by data quantity/quality rather than the architectural contributions. The ablation study (Section 5.3) does control for data and shows more modest gains (e.g., +1.0 on MMBench, +2.1 on ScienceQA), but the paper's narrative in Sections 4.2 and the introduction presents the larger-margin results as primary evidence. This is a **structural framing issue**: the paper's strongest claims rely on a confounded comparison, while the clean evidence shows smaller effects. The contributions are real but modest, and the paper should reframe around the ablation evidence.
+1. **Overclaimed novelty in the conclusion.** The paper states that QLadder "demonstrates for the first time that with limited multimodal training data, retaining the capabilities of a pre-trained model and adding a small number of visual encoders can still enhance the performance" (Conclusion, final paragraph). This is not accurate: BLIP-2's Q-Former (cited in the paper) and numerous subsequent query-based adapters already showed that lightweight learnable modules on frozen encoders improve performance with limited data. The "for the first time" framing inflates what is an incremental but well-engineered contribution. The narrative needs to be scaled back to match what is actually demonstrated.
+
+2. **The language understanding evaluation (Table 3) does not isolate MM-LoRA's effect.** The paper compares Arcana against LLaMA-2, LLaMA-2-Chat, WizardLM, and Vicuna-v1.5 on BBH, AGIEval, and ARC, concluding these results "further highlight the superiority of our approach" for language understanding. However, Arcana is trained on multimodal data plus text-only ShareGPT data, while the comparison models come from different training recipes. Without an ablation that removes MM-LoRA (or substitutes standard LoRA) while keeping training data identical, the results cannot be attributed to MM-LoRA — they may simply reflect the inclusion of text-only instruction data in Arcana's training mix. This claim is unsupported in its current form.
+
+3. **The MOF comparison (Table 9) lacks sufficient transparency about experimental control.** The paper compares LLaVA-v1.5 + QLadder against LLaVA-v1.5 + MOF (DINOv2 fusion). The paper states "we conducted detailed experiments to directly compare Q-Ladder with the MoF method," but the table simply cites the original MOF paper without clarifying whether these numbers were reproduced in-house with identical data, training pipeline, and hyperparameters. If taken from the original paper, differences in training data, schedules, and settings could confound the comparison. Since the claim that "QLadder maintains performance across benchmarks while MOF degrades" is central to motivating QLadder over dual-encoder alternatives, this opacity weakens the evidence.
 
 ### Minor
 
-- **The "modality interference" mechanism is asserted but not directly evidenced.** The paper claims MM-LoRA prevents "information confusion" between modalities, but no direct analysis is provided — no gradient conflict measurements, no KL divergence between visual/language representations, no comparison of language-only performance degradation after multimodal training with vs. without MM-LoRA. The ablation (Table 5) shows MM-LoRA works, but the improvement is equally consistent with a capacity-allocation story (different modalities benefit from different effective ranks) rather than "decoupling." The term "modality interference" is used as an explanation for what the method improves, but the paper does not independently measure interference to verify the causal mechanism. This does not invalidate the method's effectiveness but means the claimed mechanism is speculative.
+1. **Attention map visualization (Fig. 5) is qualitative evidence for a semi-quantitative claim.** The paper asserts that MM-LoRA causes "a significant increase in attention to visual tokens in the middle and subsequent layers" and QLadder leads to "increased attention to visual tokens across all layers." These claims are based on a single example's attention maps with no aggregation, no error bars, and no quantitative metric. While such visualizations are common for illustration, the claims are presented as empirical findings about model internals. This is a minor issue because the paper's core quantitative results do not depend on these visualizations.
 
-- **The NLU evaluation (Table 5) does not isolate the method's effect on language preservation.** Arcana's language scores are compared to the base Vicuna-v1.5 (which received no multimodal training). This does not answer the important question of whether multimodal training degrades language ability and whether MM-LoRA helps preserve it. A cleaner comparison would include: (a) Vicuna-v1.5 after standard multimodal LoRA tuning (without MM-LoRA) on the same language benchmarks, or (b) a direct ablation of Arcana with vs. without MM-LoRA on language-only tasks. Without this, the claim that "MM-LoRA preserves language capabilities" is unsubstantiated; Arcana may simply benefit from additional training data (ShareGPT text-only data is included in its 934K instruction mixture).
+2. **The "data engine" is mentioned as a contribution but never described or evaluated.** The conclusion (final paragraph) states "we designed a data engine that uses diverse visual annotation models and large language models to generate captions rich in visual information," but no description, ablation, or evaluation of this data engine appears anywhere in the method or experiments. The limitations section reads "we plan to leverage our data engine" as future work, suggesting it was not used in the reported experiments. Including an unevaluated design as a contribution in the conclusion is misleading.
 
-- **No error bars or statistical significance for small-margin improvements.** Several reported gains in the ablation are 0.6–2.1 percentage points (e.g., QLadder +1.0 on MMBench, MM-LoRA +0.6 on TextVQA). Given that MLLM benchmarks can exhibit 0.5–1.5 point variance across seeds, these improvements may not be statistically significant. No multiple seeds or significance tests are reported. This weakens confidence in the quantitative claims, though consistency across multiple benchmarks partly mitigates the concern.
-
-- **QLadder's performance drop at 128 queries (Table 6) is not explained.** The model peaks at 64 queries and degrades at 128. This pattern needs discussion — it may indicate that query tokens compete with patch tokens for representational capacity, or that the training data is insufficient to support more query tokens. The absence of analysis weakens the QLadder design justification.
+3. **Dismissal of Partial-LoRA without experimental evidence.** The related work (Section 2) states that "experiments with MM-LoRA have shown that directly increasing the learning space for visual tokens in the decoder does not improve the model's performance," referencing Partial-LoRA from InternLM-XComposer2 but providing no direct experimental comparison. While the β=1, γ=0 row in Table 5 (visual-only LoRA degrading performance) is consistent with this claim, a direct comparison with Partial-LoRA's specific formulation would strengthen the argument.
 
 ### Trivial
 
@@ -38,37 +40,32 @@ None.
 
 ## Nice-to-Haves
 
-- **Compare MM-LoRA against simply using separate LoRA ranks per layer** (rather than per modality) to better isolate whether the benefit is from modality-specific routing or from flexible rank allocation.
-- **Include failure-case analysis** for QLadder and MM-LoRA to clarify the boundaries of the improvements (e.g., on which image types or tasks do they fail to help).
-- **Provide a more detailed computational cost comparison** between QLadder and MOF (training time, GPU memory during training, not just inference).
-- **Compare QLadder against simpler alternatives** such as fine-tuning the last CLIP layer or adding a single cross-attention layer without the multi-layer ladder structure.
+- **Quantify attention patterns:** Aggregate attention weights across at least 100–200 examples, showing mean attention to visual vs. language tokens per layer with error bars, to turn Fig. 5 into a quantitative finding.
+- **Direct Partial-LoRA comparison:** Include InternLM-XComposer2's Partial-LoRA as a baseline in the MM-LoRA ablation table.
+- **Language ablation with controlled LoRA:** Compare Arcana vs. a version with standard LoRA (same rank, same training data) on BBH/AGIEval/ARC to isolate MM-LoRA's effect.
+- **Clarify "multimodal decoder" framing:** The term suggests an architectural departure from standard Transformers, but MM-LoRA operates within unchanged Transformer layers. A more precise term like "modality-decoupled LoRA" would better describe the contribution.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-1. **"Code/data not released"** — Hard rule: if the paper cites a URL, it exists. Cannot question availability/release status.
-2. **"Claim about increasing learning space has no reference"** — The paper's own ablation (β=1 case in Table 5, where performance drops severely) provides the evidence. The reviewer missed this. This claim is supported.
-3. **"The 'for the first time' claim is a generic property of finetuning"** — This is a minor overclaim in the conclusion but does not affect the actual contribution (QLadder itself is the contribution, not the discovery that finetuning preserves pre-trained knowledge). Not a weakness of the method.
-4. **"MOF results may not be under same setup"** — The paper explicitly states they "conducted detailed experiments to directly compare Q-Ladder with the MoF method under the LLaVA-v1.5 setting." The ambiguity is resolved.
-5. **Various generic strengths from the Strength Finder** — Strengths like "addressed an important problem" without specific support are dropped as generic.
-6. **Formatting/style nitpicks and missing appendix concerns** — Parser artifacts, not author errors.
+- **Strength Finder's claim #4 ("Natural language understanding is preserved"):** This conflicts with the verified weakness (Major #2) that the language evaluation does not isolate MM-LoRA's effect. The strength is based on the same uncontrolled comparison. Moved to this section per the rule that when a strength and verified weakness disagree, the weakness wins.
+- **Harsh critic's claim that MM-LoRA is "simply LoRA applied separately to visual and language tokens":** While this is an accurate description of the mechanism, the reviewer overstated this as a structural flaw. The paper does not claim a fundamentally new Transformer architecture — MM-LoRA is presented as a LoRA-based design that enables modality-specific learning spaces, which it demonstrably does. The paper's own framing is nuanced enough on this point. The core criticism is better captured by the "overclaimed novelty" item above (Major #1).
 
 ## Novel Insights
 
-The most interesting finding is the comparison between QLadder and MOF (Table 9): adding a second full encoder (DINOv2 via MOF) improves visual grounding (MMVP) but *hurts* comprehensive benchmarks (MMBench −4.2, TextVQA −1.7), while QLadder improves both. This suggests that the "more encoders is better" assumption in the MLLM literature has a real downside — auxiliary SSL-based features may interfere with the language-aligned CLIP representations on non-grounding tasks. QLadder's ladder structure, which uses cross-attention to refine features within the CLIP space rather than merging a separate feature space, appears to avoid this interference. This is a genuinely non-obvious architectural insight that goes beyond simply reporting higher numbers.
+None beyond the paper's own contributions. The key insight — that decoupling LoRA parameters by modality within the LLM (MM-LoRA) and adding lightweight query tokens to the frozen visual encoder (QLadder) both improve multimodal performance — is well-validated by ablations. However, neither individual component is conceptually novel: modality-separated adapters and query-based pooling on frozen encoders have both been explored. The paper's value lies in combining them in a resource-efficient package and providing clean ablations.
 
 ## Suggestions
 
-1. **Reframe the paper's narrative** around the controlled ablation results (using LLaVA-v1.5 data) as the primary evidence for the method's effectiveness, and present the larger-data results (Tables 1, 2) as an additional demonstration of scaling combined with the method. Explicitly state the data difference in the main results section.
-2. **Either provide direct evidence for modality interference** (gradient conflicts, representation similarity analysis) or **moderate the causal language** to describe MM-LoRA as "allocating separate capacity" rather than "decoupling modalities."
-3. **Add a controlled comparison for the NLU table:** include scores of Vicuna-v1.5 after standard LoRA multimodal tuning (without MM-LoRA) on the same language benchmarks to isolate the language-preservation effect.
-4. **Run at least 3 seeds for the ablation experiments** (Tables 5, 6, 8) and report mean ± std. If resources are constrained, acknowledge the lack of error bars as a limitation.
-5. **Discuss why 128 queries underperform 64 queries** in QLadder — this could reveal a meaningful design constraint.
+1. **Remove or substantiate the "for the first time" claim.** Replace it with honest framing: "QLadder shows that even with limited training data, adding a small number of learnable queries to a frozen encoder can improve performance, complementing prior approaches that use additional encoders or full fine-tuning."
+2. **Add a controlled language-understanding ablation** comparing Arcana (with MM-LoRA) against a version with standard LoRA (same rank, identical training recipe) on BBH, AGIEval, and ARC. If MM-LoRA genuinely preserves language ability, this ablation would demonstrate it directly.
+3. **Clarify the MOF comparison:** State explicitly whether MOF numbers were reproduced in the same pipeline or cited from the original paper. If reproduced, provide the experimental details. If cited, note any differences in data/pipeline and consider re-running to ensure a fair comparison.
+4. **Either remove the data engine from the conclusion or provide a description + ablation.** As written, it appears as an unevaluated contribution, which undermines trust.
+5. **Add quantitative attention analysis** or soften the claims about "significant increase" to reflect the qualitative nature of the evidence.
+6. **Consider adding a direct comparison with Partial-LoRA** to support the claim that visual-only LoRA underperforms.
 
 ## Score and Decision
 
-This paper makes two real but modest architectural contributions. The ablation studies provide clean evidence that MM-LoRA and QLadder each yield small but consistent improvements (1–2 points) when training data is controlled. The QLadder vs. MOF comparison is the strongest contribution, revealing an interesting asymmetry. However, the paper's primary narrative overclaims by presenting confounded main results as the headline evidence, and the mechanistic claims about modality interference are not directly supported. With moderate revisions to reframe the evidence and add a few controlled comparisons, the paper would be acceptable. As it stands, the framing inflates the contribution beyond what the clean evidence justifies.
+The paper presents two well-ablated components that yield modest but consistent improvements over strong baselines. The ablations are its strongest asset — each component's contribution is cleanly isolated and validated. However, the paper is undermined by three issues that, while fixable, cannot be overlooked in their current form: (1) the novelty is overclaimed with an inaccurate "for the first time" statement; (2) the language-understanding claim is not supported by controlled evidence; and (3) a key comparison (MOF) lacks transparency about experimental control. These issues prevent the paper from being accepted as-is. With tempered claims, a controlled language ablation, and clarified experimental methodology, this work would make a solid incremental contribution.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,77 +1,86 @@
-Now I have all the information I need. Let me construct the final consolidated review.
+Now I have all the information needed. Let me write the consolidated review.
+
+---
 
 ## Summary
 
-The paper proposes ReForm-Eval, a benchmark that re-formulates 61 existing task-oriented vision-language datasets into unified formats (multiple-choice or text-generation) compatible with LVLMs, spanning 8 capability dimensions. It provides both black-box (generation with in-context learning) and white-box (likelihood-based) evaluation strategies, along with an instability-aware evaluation framework. The paper evaluates 16 models and analyzes factors influencing LVLM performance, including model architecture, data quality, and instruction-following ability.
+ReForm-Eval proposes to re-formulate 61 existing task-oriented multi-modal benchmarks into unified multiple-choice and text-generation formats compatible with large vision-language models (LVLMs). The paper evaluates 16 open-source LVLMs across 8 capability dimensions and provides analysis of how model architecture, pre-training data quality, instruction-following ability, and prompt-instability affect performance. The core idea — reusing existing annotations at scale rather than constructing new benchmarks from scratch — is sensible and well-motivated.
 
 ## Strengths
 
-- **Large-scale benchmark construction without manual annotation**: ReForm-Eval re-formulates 61 existing benchmarks across 8 capability dimensions, providing "almost 100 times the size of MMBench" (line 38). This directly supports the claim of offering substantial evaluation data while fully utilizing publicly available resources—a clear practical advantage over MME and MMBench.
+- **Large-scale benchmark construction via re-formulation**: By systematically re-formulating 61 existing task-oriented benchmarks covering 8 capability dimensions (coarse/fine-grained perception, scene text, reasoning, spatial, cross-modal inference, description, dialog), ReForm-Eval provides substantially more evaluation data than manually annotated alternatives like MME and MMBench. This directly addresses the data-scarcity limitation of prior LVLM benchmarks.
 
-- **Two complementary evaluation strategies addressing LVLM instruction-following gaps**: The paper designs both a black-box generation method (with in-context learning to guide format) and a white-box likelihood method (direct probability computation). The finding that "likelihood evaluation yields better results than generation evaluation in most cases" (Section 4.4, Figure 5) quantitatively demonstrates that most LVLMs have limited instruction-following capability, providing diagnostic insight beyond simple accuracy scores.
+- **Unified evaluation strategy with dual methods for multiple-choice**: The paper designs both a black-box in-context learning method (guiding models to output format-constrained responses) and a white-box likelihood-based method (Equation 1, directly computing generation probability over options). Table 4 demonstrates that in-context samples raise format hit rates from as low as 62.86% to near 100% for most models, validating the practical effectiveness of the black-box strategy — a concrete improvement over dataset-specific post-processing required by prior work like LVLM-ehub.
 
-- **Instability-aware metric and systematic source analysis**: The paper introduces an entropy-based instability metric and empirically decomposes instability sources (instruction, option order, option mark) in Section 4.5, showing option-order shuffling causes the highest instability (0.5523). This provides a principled way to measure and understand prompt sensitivity—a known but previously unquantified issue for LVLMs.
+- **Instability-aware evaluation with an entropy-based metric**: The paper introduces a formal instability metric (entropy of the prediction distribution across multiple tests) and systematically quantifies sources of instability. Table 5 shows that option-order shuffling causes the largest instability (0.5523 in generation), providing novel quantitative evidence of LVLM sensitivity that goes beyond prior qualitative observations.
 
-- **Actionable analysis of factors affecting LVLM performance**: Through controlled experiments, the paper identifies that high-quality pre-training data (MSCOCO) benefits both in-domain and out-domain tasks (Figure 3a), scaling with synthetic captions outperforms scaling with filtered web data (Figure 3b), and increasing instruct-tuning dataset diversity improves performance (Figure 3c). These empirical insights inform model development decisions.
+- **Extensive model analysis yielding actionable findings**: The paper evaluates 16 models and provides evidence-backed conclusions about architecture choices — e.g., Vicuna-based models outperform LLaMA-based ones (Figure 2), ViT-G visual backbones outperform ViT-L and ImageBind, and the connection module choice matters for different backbones (Table 2). These findings offer practical guidance for LVLM development.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **No validation of re-formulated data quality**: The paper's core contribution is converting 61 benchmarks into multiple-choice or text-generation problems, but the quality of this conversion is never verified. For negative option generation, the paper states only that options are obtained via "task-specific strategies or LLMs like ChatGPT" (line 72), with no evaluation of whether distractors are meaningful, too easy, or inadvertently give away the answer. For a benchmark paper, the reliability of the data is foundational. Without evidence that the re-formulated questions test what they purport to test, the validity of all downstream evaluations is unknown. This is the paper's most significant gap—it requires a dedicated validation study, not just additional experiments.
+1. **Insufficient transparency of the multiple-choice re-formulation process (Section 3.1).** For a benchmark paper, the construction of the evaluation data is the central contribution. The description of how negative options (distractors) are generated is limited to a single paragraph: for close-vocabulary tasks, "we build relationships between categories based on which hard negative options are selected"; for open-ended tasks, "negative options can be obtained with the help of task-specific strategies or LLMs like ChatGPT." No concrete examples, no systematic rules per task type, no quality checks, and no human validation are reported. The paper does not state the number of options per question, whether all options are drawn from the dataset's own label space or externally generated, or whether any human verification was performed on a sampled subset. The credibility of every multiple-choice accuracy in Table 1 depends on whether the distractors are meaningful — poor distractors inflate scores, overly hard ones suppress them. This opacity is a significant shortcoming for a benchmark paper.
 
-- **Converting grounding and spatial tasks to multiple-choice changes what is being measured**: The paper states that object grounding "assesses the ability to localize fine-grained objects" (line 94) yet converts RefCOCO and MSCOCO into multiple-choice questions. Selecting an object name from a list tests object *recognition*, not *localization*—the latter requires spatial position output. Similarly, spatial understanding from MP3D is turned into text-based multiple-choice, likely testing commonsense about spatial prepositions rather than genuine 3D spatial reasoning from visual input. The paper never acknowledges that these re-formulations are proxies rather than faithful measurements of the original capabilities. This undermines the validity of specific evaluation dimensions.
+2. **Missing benchmark statistics.** The paper claims "almost 100 times the size of MMBench" (Section 1) but provides no exact numbers for total sample size, per-dataset sample counts, or whether full datasets or subsamples are used. MMBench has ~3k questions; 100× would be ~300k, but the 61 datasets include massive resources like ImageNet-1K (1.2M images) and MSCOCO (~120k images), making the actual total highly dependent on subsampling decisions. Without these basic statistics, the reader cannot assess whether the benchmark is genuinely "large" in a meaningful way or whether it is dominated by a few massive datasets. Per-dataset counts, distribution across dimensions, and average number of options per question are standard expectations for a benchmark release.
+
+3. **Unclear handling of tasks that do not naturally map to multiple-choice (Section 3.2).** Several tasks listed under "Visual Cognition" and "Visual Perception" are intrinsically structured problems. Object grounding (RefCOCO, MSCOCO) typically requires referring expression comprehension or bounding box output; the paper states it is "formulated as multiple-choice questions" without explaining how. Spatial reasoning benchmarks like CLEVR involve compositional reasoning about object attributes — again, no explanation of the conversion. Multi-turn dialog (VisDial) requires dialog-aware options. Without concrete examples of how these conversions were done, the validity of the corresponding evaluation results cannot be assessed.
 
 ### Minor
 
-- **No confidence intervals or stability ranges for main results**: The paper correctly identifies that LVLMs are sensitive to prompt perturbations and averages across templates/shuffled options. However, the main results in Table 1 report point estimates with no range, confidence interval, or variance across perturbations. Given the paper's own finding that option-order shuffling causes the highest instability (0.5523), it is unclear whether small differences between model rankings are meaningful. The instability metric (entropy) is introduced but never applied to the main results to filter or weight them.
+1. **The claim "without the need for manual annotation" is somewhat overstated.** The abstract and conclusion state that ReForm-Eval provides data "without the need for manual annotation" (conclusion) or "reduces the manual effort" (abstract). While the benchmark reuses existing annotations (a valid and valuable approach), constructing high-quality multiple-choice questions still requires human effort: designing negative option generation strategies, crafting prompts for LLM-based option generation (where used), and ensuring the reformulation preserves task intent. The paper should be precise about what is automated and what required human judgment.
 
-- **Instability analysis limited to one dataset**: The behind-the-instability analysis (Section 4.5) is conducted only on ScienceQA. It is unclear whether the relative importance of different instability sources (instruction, option order, option mark) generalizes to other datasets and task types.
+2. **Instability analysis limited to one dataset.** The investigation of instability sources (Table 5, Section 4.4) is conducted only on ScienceQA. While the results are illustrative, this is too narrow to support general conclusions about "current LVLMs." Replicating the analysis on at least 2-3 diverse datasets spanning different task types would substantiate the claims.
 
-- **No limitations or discussion of conversion fidelity**: The paper concludes without discussing the limitations of its approach—specifically, the inherent lossiness of converting grounding, spatial understanding, and multi-turn dialogue into multiple-choice formats, the risk of distractor quality issues, and the fact that instability-aware averaging may still hide systematic biases. This omission reduces the paper's scientific rigor.
+3. **Instruction templates not shown.** The paper mentions "multiple (more than five) instruction templates manually designed" for each task (Section 3.3.2) and provides one in-context example. The exact set of templates is not provided in the main text. While these may appear in supplementary materials, the evaluation's reproducibility depends on their availability and the templates being reasonable and diverse.
+
+4. **Interpretation of the generation vs. likelihood gap.** The paper attributes the performance gap between generation and likelihood evaluation primarily to "limited instruction-following capability" (Section 4.3). This interpretation is plausible but not rigorously isolated — other factors such as model calibration, different sensitivity to option marking formats, or decoding strategy could contribute. The paper should discuss these alternative explanations.
+
+5. **Limited positioning against other LVLM benchmarks.** The paper compares against MMBench (for scale) and LVLM-ehub (for evaluation methodology). While MME is cited in related work, there is no positioning table or comparison against other recent comprehensive LVLM benchmarks like SEED-Bench or MM-Vet, making it harder for readers to understand where ReForm-Eval fits in the ecosystem.
 
 ### Trivial
 
-- The description of negative option generation is too brief for reproducibility ("task-specific strategies or LLMs like ChatGPT" on line 72). The paper should provide concrete examples or procedures.
-
-- Table 1 is densely formatted, making it difficult to parse at a glance.
+None.
 
 ## Nice-to-Haves
 
-- **Correlation analysis with existing LVLM benchmarks**: The paper positions ReForm-Eval against MME and MMBench but does not show whether rankings on ReForm-Eval correlate with or differ from these benchmarks. A correlation analysis would help establish whether the benchmark captures complementary information.
-
-- **Human evaluation of a representative subset of re-formulated problems**: Having human annotators judge correctness of answers and plausibility of distractors for a sample of multiple-choice questions would significantly strengthen the benchmark's claimed validity.
+- A human validation study on a random subset of re-formulated questions to measure whether the correct answer is unambiguous and whether negatives are plausible would substantially strengthen confidence in the benchmark.
+- Extending the instability analysis (Section 4.4) to 3-4 diverse datasets spanning different capability dimensions.
+- A table positioning ReForm-Eval against existing LVLM benchmarks (MME, MMBench, SEED-Bench, MM-Vet, LVLM-ehub) along axes like: total samples, number of datasets, capability dimensions covered, evaluation formats, manual annotation required.
 
 ## Removed Points
 
-- *"No rationale is given for excluding certain popular benchmarks (e.g., why no NLVR2, no VCR)"* — Removed per scope-creep rule: the paper already covers 61 datasets across 8 dimensions, which is comprehensive. Demanding specific additional datasets is scope expansion, not a weakness. Additionally, the hard rule prohibits citing missing related works without external verification.
+These points were flagged by reviewers but are removed or downgraded per the filtering rules:
 
-- *"The contribution is incremental—the insights largely confirm what is already known"* — Removed as an over-generic dismissal. The paper provides specific, quantified insights (e.g., the gap between likelihood and generation evaluation, instability source decomposition, synthetic vs. filtered data scaling curves) that go beyond generic expectations.
-
-- *"The paper promises open-source release but lacks specifics on reconstructing data"* — Removed per hard rule on reproducibility nitpicks for a paper that explicitly commits to release. The re-formulation methodology is described; the data itself will be released.
-
-- *"Hit-rate results only tested on VQA v2"* — The paper's purpose for Table 5 is to demonstrate that the ICL strategy *works*, not to evaluate model performance. Testing on one dataset is sufficient for this diagnostic claim.
+- **Criticism about object grounding not being multiple-choice compatible**: Kept in Major but note that object grounding can be re-formulated as selecting the correct referring expression among options — the paper's failure is not explaining this, not that the task is impossible to convert.
+- **"No manual annotation" as a fatal overstatement**: Downgraded to Minor. The paper's core claim — reusing existing annotations rather than creating new ones — is valid and valuable.
+- **Criticism about missing appendix content (instruction templates, per-dataset details)**: The parser strips appendix sections from all papers. The main-text description is still too vague, which is the valid core of the criticism.
+- **Strength about "large-scale, comprehensive benchmark"**: Kept but qualified — the scale claim lacks precision (no exact numbers), which is captured as Weakness #2.
+- **Weakness about CLEVR being compositional reasoning**: Kept as part of Major point #3 — the paper doesn't explain how any of these tasks are converted, not just CLEVR.
 
 ## Novel Insights
 
-The reviews surface a tension that is worth articulating. The paper's central methodological move—re-formulating diverse task-oriented benchmarks into a unified multiple-choice format—is simultaneously its greatest strength (scalability, no manual annotation) and its greatest vulnerability (fidelity loss for tasks like grounding and spatial reasoning that are inherently non-discrete-choice problems). The harsh critic correctly identifies that this conversion is not a neutral transformation but a redefinition of capabilities being measured. The strength finder correctly identifies that the paper's real contributions lie less in the raw benchmark data and more in the evaluation framework (two complementary strategies, instability-aware metrics) and the diagnostic analysis of model factors. This suggests the paper's value proposition would be stronger if it explicitly scoped itself as an *evaluation framework* with a large accompanying data collection, rather than primarily as a *benchmark*—the former framing would make the validation demands more proportionate to what the paper actually delivers.
+The paper's most striking finding — that option-order shuffling causes substantially larger instability (0.5523) than instruction variation (0.1607) or option-mark changes (0.3295) — goes beyond the usual observation that LVLMs are "prompt-sensitive." It specifically points to a misunderstanding of option content rather than instruction ambiguity. The analysis of likelihood vs. generation evaluation (Figure 5) also provides an interesting diagnostic: models based on FlanT5 and LLaMA2-Chat show the smallest gap between the two methods, suggesting that backbone instruction-following strength is a bottleneck for fair evaluation. These insights are genuinely useful for the community.
 
 ## Suggestions
 
-1. **Add a validation study** of the re-formulated data: for a representative subset, have human annotators judge whether (a) the correct answer is actually correct, (b) distractors are plausible (hard, not trivial), and (c) the question can be answered from the image without options. Report inter-annotator agreement and fix or discard low-quality items.
+1. **Open the black box of re-formulation.** Provide a concrete taxonomy of re-formulation strategies across the 61 datasets. For each major task type (classification, VQA, grounding, spatial reasoning, dialog), show: (a) how negative options are generated, (b) how many options per question, (c) what quality checks were applied. Include at least one worked example per capability dimension showing the original annotation and the re-formulated input.
 
-2. **Acknowledge the proxy nature of converted tasks explicitly**: add a limitations paragraph clarifying that multiple-choice grounding tests recognition, not localization; that spatial multiple-choice tests prepositional commonsense more than 3D spatial reasoning; and that these dimensions are best interpreted as coarse diagnostics, not faithful measures of the original capabilities.
+2. **Report basic benchmark statistics.** Total number of multiple-choice questions, total number of text-generation samples, distribution across the 8 dimensions, per-dataset sample counts, and whether datasets are used in full or subsampled. State the average number of options per multiple-choice question.
 
-3. **Report instability metrics alongside main results**: include the range or standard deviation across perturbations for each model in Table 1, or at minimum report the average instability per model so users can judge the reliability of fine-grained comparisons.
+3. **Release instruction templates.** Make all instruction templates publicly available alongside the benchmark to ensure reproducibility of the instability-aware evaluation.
 
-4. **Provide concrete examples of negative option generation** for at least 2–3 task types (e.g., open-ended VQA and classification), showing both the "task-specific strategies" and the LLM-based approach, to improve reproducibility.
+4. **Add a small human validation study.** Sample ~100-200 re-formulated questions across task types and have human annotators judge whether the correct answer is unambiguous and whether the distractors are plausible but incorrect.
 
 ## Score and Decision
 
-The paper proposes a practically useful benchmark and a thoughtful evaluation framework with real diagnostic value. The two major weaknesses—lack of data validation and unacknowledged proxy measurement for grounding/spatial tasks—are significant but addressable with a validation study and explicit scoping. They do not invalidate the paper's overall contribution, which includes a large-scale re-formulated dataset, complementary evaluation strategies, instability-aware metrics, and actionable analysis of LVLM training factors. The paper is a solid contribution that should be accepted with the expectation that the authors address the validation gap and acknowledge conversion limitations.
+This paper tackles an important problem — enabling large-scale automated evaluation of LVLMs by reusing existing benchmarks — and provides extensive model analysis with several useful findings (architecture effects, data quality insights, instability characterization). The evaluation methodology (dual black-box/white-box, instability-aware metrics) is well-designed and represents real value.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+However, for a paper whose core contribution is a benchmark, the construction process is documented at far too high a level. The re-formulation of 61 datasets into multiple-choice questions is described in a single vague paragraph, basic statistics (total sample size, per-dataset counts) are absent, and the conversion of tasks that are not naturally multiple-choice (object grounding, CLEVR, VisDial) is not explained. These gaps undermine confidence in every numerical result derived from the benchmark. The issues are fixable with substantial supplementary documentation, but in its current form, the paper does not provide sufficient evidence that the benchmark is well-constructed and trustworthy.
+
+**MY FINAL SCORE: <pineapple>5.0</pineapple>**
+**MY FINAL DECISION: <orange>Reject</orange>**

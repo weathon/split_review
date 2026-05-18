@@ -1,0 +1,29 @@
+- Decision: Reject
+- Scores: 5, 5, 5, 5
+
+## Merged Review
+
+### Summary
+This paper introduces two methods to improve virtual try-on: a garment extraction model that generates (human, synthetic garment) pairs from clothed individuals to augment training data, and an Error-Aware Refinement-based Schrödinger Bridge (EARSB) that uses a weakly-supervised error classifier to localize and correct generation errors via a spatially adaptive noise schedule. Experiments on VITON-HD and DressCode-Upper show state-of-the-art quantitative results and a user preference of 59% over prior work. All four reviewers rated the paper 5 (borderline reject) with confidence levels of 4, 5, 4, 4. While the paper is well-written and presents extensive ablations, concerns were raised about limited novelty, marginal performance gains, missing comparisons with recent methods, insufficient explanation of core components, and lack of reproducibility details.
+
+### Strengths
+- **Clarity and presentation**: The paper is well-structured, easy to follow, and contains adequate details for reproducing the garment extraction and error detection networks (R1, R2, R4).
+- **Effective synthetic data augmentation**: The garment extraction model generates human-garment pairs from single clothed images, which can be used to augment training of other virtual try-on models. This is validated on Stable-VITON and CAT-DM, showing performance gains (R2, R3, R4).
+- **Comprehensive experiments and ablations**: The paper provides detailed ablations demonstrating the effect of synthetic data augmentation, manually annotated data for error detection, and the contribution of each component. The user study strengthens the claim of user preference (R1, R3).
+- **Advanced refinement via Schrödinger Bridge**: Using an error-aware noise schedule to refine localized generation errors is a technically interesting adaptation of I2SB, showing improvements over directly adding random noise to GAN-generated images (R1, R2, R3).
+- **High-quality results**: Qualitative examples show that high-frequency textures, logos, and lines are better preserved compared to several baselines (R1).
+
+### Weaknesses
+- **Limited novelty**: The paper primarily combines existing methods—a GAN-based base network with an I2SB-based refinement—and the error map module is a relatively straightforward application. The core refinement strategy is not fundamentally new; a more detailed discussion of specific modifications and adaptations for virtual try-on is needed (R1, R4).
+- **Marginal performance gains**: The improvements over baselines are not consistently significant. For example, Table 3 shows that Stable-VTON + H2G-UH sometimes outperforms the full proposed method, raising questions about the added complexity versus benefits (R3, R4).
+- **Missing comparisons with recent methods**: The paper omits comparisons with state-of-the-art methods such as IDM-VTON, OOTDiffusion, CATVTON, and DCI-VTON. Including these is essential to assess the relative performance and true advancement (R2, R3).
+- **Missing baseline results**: LaDI-VTON results on VITON-HD and Stable-VITON results on DressCode-Upper are missing in Table 1, hindering a complete comparison (R3).
+- **Insufficient explanation of EARSB**: The mechanism by which EARSB identifies and corrects local errors is not clearly described. How does the weakly supervised mask alone achieve local detail optimization? How is this different from simply inpainting the masked regions? The training process (data pair preparation, U-Net initialization, loss function) and the effect of the weakly supervised classifier on the Gaussian posterior assumption in I2SB are not explained (R2, R4).
+- **Lack of proof of generalizability**: The error-map-reweighted diffusion process seems universal, but no experiments apply it to other methods beyond the proposed pipeline. Additionally, the paper does not discuss how EARSB’s performance generalizes to scenarios beyond the dataset, given that it does not use large-scale pretraining like SD-based methods (R2, R3).
+- **No code or reproducibility details**: No code is provided, and the paper lacks sufficient details for reproducing the experimental setup, reducing reproducibility (R2, R4).
+- **Concerns about synthetic garment quality**: Only visual examples are given for the generated garment images. Quantitative metrics (e.g., FID, LPIPS) on the synthetic data are needed to validate its fidelity and realism (R3).
+- **Annotated data ratio not ablated**: The paper uses 5% of generated images for manual error annotation. Ablations showing performance with different ratios (e.g., 1%, 2.5%, 10%) are missing, as are details on the annotation criteria (e.g., what constitutes an “error region”) (R1, R3).
+- **Shape inconsistency**: The generated images often transfer textures into the shape of the source person rather than fully respecting the target garment shape (e.g., making a dress longer or shorter than the product). More examples and analysis of shape-mismatch cases (e.g., tight-to-loose, short-to-long) are needed (R1).
+- **Need for more visualizations of noise scheduling**: Figure 4 alone does not adequately convey how the error map determines which regions receive more or less noise. A side-by-side visualization of error map, noise map, and refined image would help (R2).
+- **Use of GAN base network**: Since the next best performing methods are SD-based, the motivation for using a GAN-based first stage (rather than a diffusion-based one) is not justified. The potential for EARSB to refine diffusion-generated images (not just GAN outputs) is not explored (R1, R3).
+- **Minor formatting issues**: Some equations lack proper punctuation, and there is inconsistency in the use of “error-map” vs. “error map” (R4).

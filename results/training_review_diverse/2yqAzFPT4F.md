@@ -1,82 +1,86 @@
-Here is my final consolidated review:
+Now I have a thorough understanding of the paper and all claims. Let me verify each criticism against the actual text.
+
+Key verification results:
+- The paper acknowledges logit requirement in Discussion (lines 354-356) but uses "black-box" unqualified in title/abstract/contributions
+- WB baseline is indeed the authors' own trivial construction (Section 3.2)
+- No full-image SPSA baseline exists anywhere in the paper
+- "55 iterations" is reported without defining what an iteration is or reporting total queries
+- λ and α are named but specific numeric values are not in the main text
+- The target phrase shifts from "Sure, here is" (GCG, lines 83/100) to "Sure, here it is" (their method, line 106) without explanation
+- Only one GPT-4o showcase example
 
 ---
 
 ## Summary
 
-The paper proposes Zer0-Jack, a method for directly jailbreaking black-box Multi-modal Large Language Models (MLLMs) by optimizing image inputs using zeroth-order optimization (SPSA) with a patch-coordinate descent strategy (SPSA-P). Unlike prior work that relies on transfer attacks from white-box models, Zer0-Jack estimates gradients using only output logits, enabling direct black-box optimization. Experiments across MiniGPT-4, LLaVA1.5, and INF-MLLM1 show ASR of 88–98%, surpassing transfer-based baselines and approaching white-box performance, while using substantially less GPU memory (e.g., 10G vs. 15G for MiniGPT-4 7B).
+This paper proposes Zer0-Jack, a zeroth-order optimization method for directly jailbreaking black-box Multi-modal Large Language Models (MLLMs). The key idea is to use Simultaneous Perturbation Stochastic Approximation (SPSA) with a patch coordinate descent variant (SPSA-P) to generate adversarial images without backpropagation, enabling attacks on models where only output logits (not parameters) are accessible. Experiments on MiniGPT-4, LLaVA1.5, and INF-MLLM1 show high attack success rates (e.g., 95% on MiniGPT-4, Harmful Behaviors dataset) that substantially exceed transfer-based baselines while requiring significantly less GPU memory than white-box alternatives.
 
 ## Strengths
 
-- **First direct black-box jailbreak for MLLMs via zeroth-order optimization**: The paper introduces a genuinely novel approach for attacking black-box MLLMs without model access or transfer attacks. This fills an underexplored gap where prior black-box methods were limited to transfer attacks or handcrafted prompts.
+1. **First direct (non-transfer) black-box jailbreak for MLLMs using zeroth-order optimization.** The paper provides the first demonstration that a gradient-estimation approach can directly optimize image inputs for jailbreaking MLLMs without white-box access. Evidence: Tables 2-3 show Zer0-Jack achieves 95% ASR on MiniGPT-4 (Harmful Behaviors) versus just 16% for the best transfer method (AutoDAN), a gap of ~80 points that clearly establishes the advantage of direct optimization.
 
-- **Clear and substantial memory reduction validated across model sizes**: Table 1 reports concrete GPU memory figures showing Zer0-Jack uses 10G vs. 15G (MiniGPT-4 7B), 22G vs. 39G (13B), and successfully runs the 70B variant on a single A100 (63G) where the white-box baseline OOMs. This directly supports the memory-efficiency claim.
+2. **Substantial and well-documented memory reduction.** Table 1 shows concrete numbers: Zer0-Jack uses 10GB vs. 15GB (MiniGPT-4 7B), 22GB vs. 39GB (MiniGPT-4 13B), and the method enables attacking a 70B model on a single A100 (63GB) where the white-box baseline OOMs. This is a practical contribution that enables scaling to larger models.
 
-- **High ASR comparable to white-box attacks and dramatically exceeding transfer methods**: On the Harmful Behaviors dataset (Table 2), Zer0-Jack achieves 95% (MiniGPT-4), 90% (LLaVA1.5), and 88% (INF-MLLM1) — matching or exceeding the white-box baseline (93%, 91%, 86%) while all transfer-based baselines score ≤22%. On MM-SafetyBench-T (Table 3), the pattern is similar (98.2%, 95.8%, 96.4% vs. white-box 96.4%, 95.2%, 97.6%).
+3. **High ASR across diverse models and datasets.** The method achieves 90-95% on Harmful Behaviors and 95-98% on MM-SafetyBench-T across three different 7B MLLMs and one 70B model, with consistent margins over transfer baselines. This breadth supports robustness of the approach.
 
-- **Patch-coordinate descent is a principled solution to high-dimensional gradient estimation error**: The method reduces the effective optimization dimension to ~0.02% of the full image (32×32 patches on 224×224 images), directly addressing the known weakness of zeroth-order methods in high dimensions.
-
-- **Demonstration of feasibility on GPT-4o**: Section 3.6 shows a clever use of the `logit_bias` API feature to obtain log-probabilities for target tokens, successfully jailbreaking GPT-4o in a single showcase at ~$0.70 cost.
+4. **Transferability demonstrated.** Table 4 shows that images optimized on MiniGPT-4 transfer to GPT-4o (51.8%), LLaVA1.5 (54.2%), and INF-MLLM1 (54.8%), substantially above the P-Image baselines. This shows cross-model utility beyond the source model.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None.
+
+1. **The core novelty (patch coordinate descent) is unvalidated against the obvious simpler alternative: full-image SPSA.** The paper motivates patch-wise optimization as a way to reduce gradient estimation error in high dimensions (Section 3.3, lines 141-149), and SPSA-P is the main algorithmic contribution. However, there is no experiment comparing SPSA-P against vanilla SPSA applied to the whole image. Without this ablation, we cannot tell whether the patch strategy helps, hurts, or is neutral. The memory advantage comes from zeroth-order optimization itself (no backprop), not from patching. The iteration efficiency comparison is against white-box methods and transfer baselines, not against full-image SPSA. This is the single largest methodological gap — it leaves the central design choice untested.
+
+2. **Query complexity is not reported, making it impossible to assess the practical cost of the attack.** The paper reports "55 iterations on average" (Section 4.4, line 328) but never defines what constitutes an "iteration." From Algorithm 1, each outer loop iterates over all patches, and each patch update performs two forward passes. If "55 iterations" means 55 outer loops, total forward passes ≈ 55 × 49 patches × 2 = 5,390. If it means 55 total patch updates, the cost is much lower but only part of the image is updated. Either way, total forward passes per successful attack — the primary efficiency metric for any black-box method — is never stated. Mean, variance, or max query counts are absent. This prevents comparison with other black-box methods on a common resource axis and undermines the claim of "reasonable queries" (line 30).
 
 ### Minor
 
-- **No direct black-box image-optimization baseline to isolate the patch mechanism's benefit**: The paper compares against transfer-based image baselines (A-Image) and text-based methods, but never includes a simple direct black-box image-optimization baseline such as SPSA on the full image, random search on patches, or coordinate-wise finite differences. Without this, the reader cannot tell whether the improvement attributed to SPSA-P comes from the patch coordinate descent specifically, or simply from applying zeroth-order optimization to the image at all. The paper's core contribution (SPSA-P) is not ablated against simpler alternatives.
+3. **"Black-box" framing is overstated; the method requires logit access, not just response access.** The paper consistently uses "black-box" in the title, abstract, and contributions without qualification. In practice, the method requires output logits or token probabilities (line 140), which many commercial MLLMs (including Claude, as acknowledged in Section 6) do not expose. The logit_bias trick for GPT-4o is clever but API-specific and possibly patchable. The paper acknowledges these limitations in the Discussion (lines 354-356) but should qualify "black-box" upfront (e.g., "logit-level black-box") so the scope is clear from the start. The contribution remains significant with this qualification, but the current framing is imprecise.
 
-- **No statistical variance reported for any ASR result**: All numbers in Tables 1–3 and Figure 2 are single values with no confidence intervals, standard deviations, or indication of runs/trials. Since SPSA-P involves random sampling of perturbation directions and patch order, the results are stochastic. Without variance estimates, it is impossible to assess whether the differences between methods (e.g., 95% vs. 93% on MiniGPT-4 HB) are meaningful.
+4. **Claim of being "comparable with existing white-box jailbreak techniques" is unsupported.** The only white-box comparison (WB baseline, Section 3.2) is the authors' own trivial construction: full-image gradient descent on the same loss function. This is not representative of state-of-the-art white-box methods such as those combining image and text perturbations (Qi et al. 2024, Shayegani et al. 2023, cited in the paper). The claim in the abstract and contributions (line 35) conflates matching this one trivial baseline with matching "existing white-box techniques." The ASR numbers against this baseline are still meaningful (showing ZO can match direct gradient), but the claim should be tempered to "comparable with a gradient-based white-box baseline" or similar.
 
-- **Memory numbers contain an unexplained discrepancy**: Table 1 reports the white-box (WB) attack memory for MiniGPT-4 7B as 15G. However, Section 4.4 states "image-based optimization techniques such as A-Image and WB Attack, applied to MLLMs like MiniGPT-4, use about 19GB each." This 15G vs. 19G discrepancy is unaddressed. Additionally, the memory comparison mixes text-based methods evaluated on LLaMA2-7B with image-based methods on MiniGPT-4 without clearly noting that the underlying models differ.
-
-- **No total query/forward-pass count**: The paper reports iteration counts (55 iterations) but not the total number of forward passes required per successful attack. Given that SPSA-P uses 2 forward passes per patch per iteration × 49 patches ≈ 98 forward passes per iteration, the total is ~5,390 — but this is never reported, making it harder to assess practical attack cost.
-
-- **Missing hyperparameter values**: The smoothing parameter λ and learning rate α are introduced in the method section but their specific values are never stated. This hurts reproducibility.
-
-- **No ablation of patch size**: The paper uses 32×32 patches for 224×224 images without discussing or ablating this choice. Patch size directly controls the trade-off between gradient estimation accuracy and optimization dimensionality.
-
-- **GPT-4o evaluation limited to a single showcase**: The attack on GPT-4o is demonstrated with one example. While the paper acknowledges this is a "showcase," the claim that "our method can directly attack commercial MLLMs" would benefit from systematic evaluation on even a small set of queries.
-
-- **Transferability evaluation only uses MiniGPT-4 as the source model**: Table 3 tests images optimized on MiniGPT-4 only. To fully characterize transferability, optimization on other source models (LLaVA1.5, INF-MLLM1) should also be tested.
+5. **Commercial model evaluation is limited to a single showcase example.** Section 4.6 (lines 334-342) demonstrates a successful jailbreak of GPT-4o with one example costing $0.7. While the logit_bias trick is interesting, a single example does not constitute an evaluation. Even 10-20 prompts from the Harmful Behaviors dataset (the paper's own benchmark) with a reported ASR would substantiate the claim of "directly attack commercial MLLMs." The cost is low enough that this expansion seems feasible.
 
 ### Trivial
-- None beyond the points already listed as Minor.
+
+6. **Target phrase mismatch between GCG and the proposed method is not explained.** The paper describes GCG's target as "Sure, here is" (lines 83, 100) but adopts "Sure, here it is" (line 106) for the MLLM version. The reason for this change is not discussed, and no ablation over target prefixes is provided.
+
+7. **No patch size sensitivity analysis.** The patch size is fixed at 32×32 for 224×224 images (line 149). Different patch granularities could affect both ASR and convergence, but no sensitivity analysis is provided.
 
 ## Nice-to-Haves
-- Testing attack sensitivity to different initial images (e.g., random noise vs. COCO images vs. black image).
-- Reporting per-category breakdown for MM-SafetyBench-T (which the paper mentions in Section 4.1 but the appendix is absent).
+
+- A comparison of SPSA-P against full-image SPSA on ASR, query count, and convergence (this is actually a Major gap per weakness #1, but listed here as a concrete suggestion).
+- Reporting mean, variance, and max query counts (total forward passes) per attack across the test set.
+- Patch size ablation (e.g., 16×16, 32×32, 64×64) and its effect on ASR.
+- Robustness to simple defenses (JPEG compression, blurring, pixel clipping) to strengthen the threat model.
+- An ablation over the target prefix choice ("Sure, here is" vs. "Sure, here it is").
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-1. *"Missing related works (query-based adversarial attacks for image classifiers / LLMs)"* — Removed per guidelines: missing related works should not be cited without external verification.
-2. *"The white-box baseline cannot serve as a baseline for the black-box setting"* — Removed: the paper explicitly states WB is an upper bound reported in the white-box setting, so this is not a flaw but transparency.
-3. *"GPT-4 evaluation introduces biases"* — WEAKENED to removal: this is now standard practice in the jailbreak evaluation community; the paper cites the approach from Cai et al. (2024) which validates this methodology.
-4. *"The dataset selection is on the smaller side"* — WEAKENED to removal: using 100/500 Harmful Behaviors items is standard for this line of work (many jailbreak papers use subsets), and the paper explains the random selection. The MM-SafetyBench-T dataset is used in full (168 items).
+- **"Hyperparameters λ and α not given numeric values"** — Removed per hard rule on undisclosed hyperparameter nitpicks. These may also be in the appendix (which was stripped by the parser).
+- **"The paper should report results for every scenario in MM-SafetyBench-T"** — Not present in the original reviewer's text; the paper already references detailed results in an appendix section.
+- **"The patch-only optimization evaluation"** (e.g., reporting ASR when only k patches are optimized) — This is a reasonable ask but belongs in Nice-to-Haves or as part of the SPSA-vs-SPSA-P ablation. The reviewer's framing of it as a "missing part" is too strong; it is an interesting diagnostic, not a requirement.
+- **"Reviewer questions novelty claims about being first direct black-box method"** — The paper properly qualifies with "To the best of our knowledge" (line 33), which is standard. Concerns about undiscovered prior work are speculative and cannot be verified.
 
 ## Novel Insights
 
-The reviews surface an important structural observation that goes beyond the paper's own contribution: while Zer0-Jack convincingly demonstrates that direct black-box jailbreaking of MLLMs is feasible and dramatically outperforms transfer attacks, the evaluation design conflates two distinct questions — "can zeroth-order optimization work for black-box jailbreaking?" (answered: yes) and "does the patch-coordinate descent specifically improve over naive zeroth-order methods?" (not separately tested). This distinction is crucial because it means the paper's specific technical novelty (SPSA-P vs. plain SPSA) is less supported than its high-level finding. Additionally, the GPT-4o logit-bias trick is an insightful practical contribution that could enable follow-up work on API-based attacks.
+The most interesting observation that emerges across the reviews is the tension between the paper's framing and its actual threat model. The method is presented as a "black-box" attack, but its reliance on logit access places it in a gray area between white-box and response-only black-box. The GPT-4o attack using logit_bias is simultaneously the most impressive practical demonstration and the most fragile component — it exploits a specific API affordance (the ability to bias arbitrary tokens and read their log probabilities) that could be closed at any time. This suggests that the paper's lasting contribution may not be the specific attack on commercial APIs, but rather the general insight that zeroth-order optimization with dimension reduction (patch decomposition) can effectively substitute for backpropagation in the MLLM jailbreaking setting, dramatically reducing memory requirements. The real value is less about "attacking commercial models" and more about "matching gradient-based attack quality without gradients," which the paper demonstrates convincingly for open-source models.
 
 ## Suggestions
 
-1. **Add a simple direct black-box baseline**: Run SPSA on the full image without patch decomposition, or a random search on patches, on at least one model/dataset pair. This directly validates the benefit of the patch mechanism.
-2. **Report variance**: Run each configuration 3–5 times with different random seeds and report mean ± std for ASR. This is especially important since SPSA-P involves random sampling.
-3. **Reconcile memory numbers**: Clarify why Table 1 shows WB=15G for MiniGPT-4 7B while Section 4.4 says WB uses ~19GB. If these are different settings (image size, batch size, etc.), state this explicitly.
-4. **Report total query count**: Add the number of forward passes per successful attack to the efficiency analysis.
-5. **Disclose hyperparameters**: State the values of λ and α, even if chosen by simple heuristics.
-6. **Ablate patch size**: Show results for at least 16×16, 32×32, 64×64, and full-image SPSA on one model to justify the 32×32 choice.
-7. **Expand GPT-4o evaluation**: Test on 10–20 queries and report ASR, or at minimum characterize the cost and success pattern.
+1. **Add the missing full-image SPSA baseline.** This is the most important addition. Compare SPSA-P against vanilla SPSA on the whole image for ASR, query count, and convergence. This directly validates or refutes the core design choice.
+
+2. **Report total forward passes per attack** (mean, variance, max across the dataset). Define clearly whether "55 iterations" refers to outer loops, total patch updates, or something else. This is essential for any black-box evaluation.
+
+3. **Qualify "black-box" in the title or abstract** as "logit-level black-box" or clarify that the method requires access to output logits/probabilities. This is honest about the scope and does not diminish the contribution.
+
+4. **Temper the white-box comparability claim.** Change "performing comparably with existing white-box jailbreak techniques" to something like "matching a gradient-based white-box baseline" unless additional SOTA white-box comparisons are added.
+
+5. **Expand the GPT-4o evaluation** to at least 20-30 prompts with reported ASR and average cost, to substantiate the commercial model attack claim.
 
 ## Score and Decision
 
-The paper presents a novel, well-motivated method with compelling empirical results that clearly demonstrate the viability of direct black-box jailbreaking for MLLMs. The weaknesses identified (missing ablation baseline, no variance reporting, memory discrepancies, missing hyperparameters) are all addressable and do not undermine the paper's core contribution — which is that direct zeroth-order optimization of image inputs achieves ASR comparable to white-box attacks while using far less memory. The paper is solid and the claims are largely supported by the evidence presented.
+The paper presents a genuinely novel approach (zeroth-order optimization + patch coordinate descent for MLLM jailbreaking) with strong empirical results across multiple models. The main contributions — demonstrating that direct black-box optimization can vastly outperform transfer methods while reducing memory — are real and valuable. However, two significant gaps prevent full confidence in the claims: (1) the core algorithmic novelty (patch-wise optimization) is not validated against vanilla full-image SPSA, and (2) query complexity, a primary efficiency metric for black-box methods, is not reported. The "comparable with white-box" claim is also overstated relative to the evidence. These issues are fixable in a revision (adding one ablation and reporting query counts). The paper would benefit from a short rebuttal period to address them, but in its current form the evidence falls short of fully substantiating the claims.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

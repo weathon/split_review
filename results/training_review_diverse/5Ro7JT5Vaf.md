@@ -1,79 +1,66 @@
-Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
-
 ## Summary
 
-The paper proposes TSGM, a score-based generative model (SGM) for time-series synthesis. TSGM combines an autoencoder (for mapping time-series to/from a latent space) with a conditional score network trained via a novel autoregressive denoising score matching loss (Theorem 3.1). The framework handles both regular and irregular time-series with minimal architectural changes. Experiments on 4 datasets across regular and three irregular settings (30%/50%/70% missing rates) with 9 baselines show TSGM achieving strong discriminative and predictive scores.
+This paper presents TSGM, the first score-based generative model (SGM) framework for universal time-series synthesis that handles both regular and irregular time-series within a single architecture. The core methodological contribution is Theorem 3.1, which derives an autoregressive denoising score matching loss that adapts SGMs to sequential dependencies by conditioning on history via a pre-trained RNN-based autoencoder. The method is evaluated across 16 settings (4 datasets × 1 regular + 3 irregular missing rates) against 9 baselines, achieving state-of-the-art discriminative and predictive scores.
 
 ## Strengths
 
-- **Principled adaptation of SGMs to time-series with a provably equivalent loss (Theorem 3.1).** The paper derives an autoregressive denoising score matching loss that bridges SGMs and sequential data. Theorem 3.1 proves that the intractable conditional score \(\nabla\log p(\mathbf{x}_{1:n}^s|\mathbf{x}_{1:n-1}^0)\) can be replaced with the tractable denoising score \(\nabla\log p(\mathbf{x}_{1:n}^s|\mathbf{x}_{1:n}^0)\) in the MSE loss while preserving the optimal model parameters. This is a clean and theoretically sound adaptation.
+- **First SGM framework for universal time-series generation (regular + irregular).** The paper is the first to propose a score-based generative model that handles both regular and irregular time-series with minimal architectural changes (RNN for regular, Neural CDE/GRU-ODE for irregular). This is a genuine novelty supported by a clear problem formulation (Section 3.1) and empirical evaluation across 16 settings. The universality claim is well-motivated and delivered.
 
-- **Consistently strong empirical results across 16 settings (4 datasets × 4 missing rates).** In Table 2 (and Table 12 for higher missing rates), TSGM (especially subVP) achieves the best or near-best discriminative and predictive scores across nearly all settings. The gains on discriminative scores can be very large (e.g., Stock dataset: 0.006±0.003 vs. TimeGAN's 0.243±0.025). The medal-count summary (Table 1) confirms TSGM wins the most first places. KDE and t-SNE visualizations provide qualitative support.
+- **Principled theoretical derivation of an autoregressive denoising score matching loss.** Theorem 3.1 formally shows that the intractable score matching loss conditioned on history can be replaced by a tractable denoising score matching loss conditioned on the full current sequence without changing the optimal parameters. This is a non-trivial adaptation of the standard denoising score matching result (Vincent, 2011) to the sequential setting and is essential for connecting SGMs to autoregressive time-series generation.
 
-- **Universal framework supporting both regular and irregular time-series.** The encoder-decoder design uses RNNs for regular data and can accommodate continuous-time methods (Neural CDE, GRU-ODE) for irregular data. The paper tests all 4 missing rates, demonstrating consistent superiority.
+- **Strong and consistent empirical results.** Table 2 shows TSGM (especially subVP) achieves the best discriminative and predictive scores on most datasets by large margins. For example, on the Stock dataset under the regular setting, TSGM-subVP achieves a discriminative score of 4.1 vs. the next best (GT-GAN) at 14.7. The results are consistent across regular and irregular settings (30%, 50%, 70% missing rates), and the sensitivity study (Table 3) shows stable performance across model depths and sampling steps.
 
-- **Comprehensive baseline coverage.** The paper includes 9 baselines spanning VAEs (TimeVAE), GANs (TimeGAN, GT-GAN, COT-GAN, RCGAN), normalizing flows (CTFP), and adapts all baselines for irregular settings using GRU-D, ensuring fair comparison.
+- **Comprehensive and fair benchmarking.** The evaluation covers 9 baselines spanning VAE, GAN, flow, and other paradigms. Baselines that natively lack irregular-data support are adapted via GRU-D replacement, and all methods are evaluated under the same protocol across 16 settings. The evaluation metrics (discriminative and predictive scores) follow the established protocol from Yoon et al. (2019) and Jeon et al. (2022).
+
+- **Interpretable visual evidence.** KDE plots (Figure 1) and t-SNE plots (Figure 3) visually confirm that TSGM-generated samples closely match the original data distribution, while baseline methods exhibit mode collapse or distributional shift. These plots provide intuitive support for the diversity and fidelity claims.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None.
+
+- **Training-inference mismatch in the autoregressive generation pipeline is not addressed.** The conditional score network $M_\theta(s, \mathbf{h}_n^s, \mathbf{h}_{n-1}^0)$ is trained using ground-truth $\mathbf{h}_{n-1}^0$ from the encoder applied to real data. During generation (Section 3.4), however, $\mathbf{h}_{n-1}^0$ is itself a generated sample from the reverse diffusion process, which will differ from the training-time distribution due to autoencoder reconstruction error and accumulated drift. This is a well-known issue in autoregressive generative models (teacher forcing vs. free-running), and the paper neither discusses it, analyzes its impact, nor proposes any mitigation (e.g., scheduled sampling, noise injection during training). While this does not invalidate the method — many sequential models face this same gap and work well in practice — leaving it completely unaddressed weakens the claim that the loss derivation directly yields a correct generation procedure.
+
+- **The autoencoder's role and its effect on generation quality are not characterized.** The generation pipeline depends critically on the pre-trained autoencoder: the score network operates on latent representations, and the final output is a decoding of sampled latents. Yet the paper reports **no reconstruction error** for the autoencoder, provides **no analysis** of whether the latent space is well-suited for diffusion, and includes **no ablation** that separates the SGM's contribution from the autoencoder's. A simple baseline — sampling $\mathbf{h}_n$ from a Gaussian prior and decoding directly, bypassing the score network — would isolate the score network's value. Without this, it is difficult to determine whether the claimed SOTA results come from the score network's capability or from a well-tuned autoencoder. The fact that baselines like TimeGAN and GT-GAN also use autoencoders makes the comparison fair at a relative level, but the paper's claim that the SGM is responsible for the quality leap is insufficiently supported.
 
 ### Minor
 
-- **Limited sensitivity and ablation analysis in the main paper.** Table 3 reports sensitivity for only one dataset (Energy) varying two hyperparameters (depth and sampling steps). The ablation study on "the efficacy of our recursive structures" is mentioned (line 258) but not shown in the main text — the details are deferred. For a new method, readers would benefit from seeing ablations that isolate: (a) the benefit of the autoregressive conditioning vs. unconditional score matching, (b) the impact of pre-training the autoencoder, and (c) the effect of the recursive sampling scheme.
+- **The medal aggregation in Table 1 is subjective and loses information.** Counting "medals" (best/2nd-best across metrics) discards effect size information. A model that loses narrowly on one metric but wins decisively on another is not well represented by a medal count. The full scores in Table 2 mitigate this somewhat, but the medal table as a summary presentation is not ideal.
 
-- **No statistical significance testing.** The paper reports means and standard deviations across 10 runs, which is standard, but does not conduct significance tests (e.g., paired tests) for the main results. Given that many predictive scores are close across methods, it is unclear whether the observed margins are statistically robust.
-
-- **No analysis of temporal fidelity beyond aggregate scores.** The discriminative and predictive scores capture aggregate fidelity but do not directly measure whether synthetic time-series preserve autocorrelation structure, cross-correlation, seasonality, or other temporal properties. An analysis comparing ACF/PACF or other time-series diagnostics between real and synthetic data would strengthen the claim that TSGM captures temporal dependencies.
-
-- **Sensitivity analysis limited to one dataset.** Table 3 only shows Energy dataset results. The paper states "For other omitted datasets, we observe similar patterns" without presenting the data. Showing sensitivity across multiple datasets would make the robustness claim more convincing.
+- **The quality of adapted baselines for irregular settings is not verified.** Baselines that do not natively support irregular data have their RNN encoder replaced with GRU-D (Section 4.1.1). This is a reasonable adaptation, but the paper does not report whether the adapted baselines achieve reconstruction quality comparable to their original forms. If the GRU-D adaptation degrades baseline performance, the comparison may be unfair.
 
 ### Trivial
 
-- The 0.8-second generation time for the Energy dataset (Section 5) is cited without specifying GPU configuration, sequence length, or batch size. Adding context would make this claim more useful.
-- Line 258 appears truncated ("vide an additional ablation study about the efficacy of our recursive structures").
+None.
 
 ## Nice-to-Haves
 
-- An analysis comparing autocorrelation functions (ACF/PACF) of real vs. synthetic time-series would strengthen the evaluation beyond discriminative/predictive scores.
-- Reporting inference time comparisons with baselines would contextualize the "slow sampling" limitation that SGMs are known for.
+- A discussion contrasting the proposed autoregressive SGM approach with diffusion-based sequential generation methods in other domains (e.g., video, audio) and explaining why those methods do not directly apply to the time-series setting would strengthen the positioning.
+- Variance estimates (mean ± std) for all evaluation scores would be useful. *Note: The paper states on line 240 that it reports mean and standard deviation from 10 runs, and the Strength Finder's citation of specific numbers like "4.1 (±0.0)" confirms that the table (embedded as an image in the PDF) does include standard deviations. The critic's concern about missing std devs is a parser artifact, not a paper deficiency.*
+- A reconstruction error table for the autoencoder on each dataset would help disentangle the source of performance.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-1. **"Mismatch between the theoretical loss and the implemented model (structural flaw)"** — The critic claims the network inputs \((\mathbf{h}_n^s, \mathbf{h}_{n-1}^0)\) and training target \(\nabla\log p(\mathbf{h}_n^s|\mathbf{h}_n^0)\) are mismatched. This is factually wrong. The paper's Theorem 3.1 is precisely the justification for this: it proves that for a network \(M_\theta(s,\cdot,\mathbf{h}_{n-1}^0)\), training with target \(\nabla\log p(\cdot|\mathbf{h}_n^0)\) yields the same optimal parameters as training with target \(\nabla\log p(\cdot|\mathbf{h}_{n-1}^0)\) — exactly analogous to standard denoising score matching. The network does not need to see \(\mathbf{h}_n^0\) as input; this is the point of the theorem. The critic fundamentally misunderstands the result. **Removed as factually wrong.**
-
-2. **"Does not explain why SGMs should outperform GANs"** — The paper states SGMs have "better sampling quality and diversity" and that GANs suffer from mode collapse and unstable training. This is sufficient motivation; a deeper theoretical comparison is beyond the paper's scope. **Removed as generic.**
-
-3. **"Unclear whether continuous-time methods were actually employed"** — The paper says Neural CDE/GRU-ODE "can be used" (Section 3.2), not that they were used in the reported experiments. The experiments use GRU-D for the irregular setting (Section 4.1.1). The remark is correctly presented as an aspirational capability. **Removed as misreading.**
-
-4. **"No specification of corrector steps or step size schedule"** — Trivial implementation detail. **Removed per rules (trivial reproducibility nitpick).**
-
-5. **"Does the discriminative score use a held-out set?"** — The paper explicitly states: "We use the performance of the trained classifier on the test data as the discriminative score" (line 244). **Removed as factually wrong.**
-
-6. **"9 baselines but Table 2 shows 7"** — The paper consistently states 9 baselines; the table image lists all baselines but the text extraction does not render them fully. The claim of inconsistency is unverifiable from the extracted text and contradicted by the paper's repeated explicit statement. **Removed as unverifiable.**
-
-7. **Baseline fairness speculation (irregular settings)** — The critic speculates baselines may not have been re-tuned without evidence. The paper states official repositories and their own model selection procedures were used, and GRU-D was added uniformly. **Removed as speculative.**
+- **Missing standard deviations in reported results.** *Removed because the paper explicitly states (line 240) that it reports mean and standard deviation from 10 runs. The table is embedded as an image in the PDF; the text parser cannot extract values from images. The Strength Finder cites specific numbers with ± notation (e.g., "4.1 (±0.0)"), confirming std devs are present. This criticism is based on a parser artifact, not an actual paper deficiency.*
+- **The "first SGM" claim is not sufficiently justified by contrasting with other domains.** *Removed as a weakness. It is a strength, and the suggestion to add contrasts is moved to Nice-to-Haves.*
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a perspective on the paper that the authors themselves have not already identified.
+None beyond the paper's own contributions. The reviews largely converge on the paper's core claims rather than revealing unexpected angles.
 
 ## Suggestions
 
-1. Add significance tests (e.g., paired bootstrap or corrected t-test) to the main results table to help readers gauge whether TSGM's advantages are statistically robust.
-2. Move the ablation study on recursive structures and the missing-rate experiments (Table 12) into the main paper, or at minimum summarize their key findings in the main text.
-3. Include a temporal diagnostic (e.g., ACF/PACF comparison or autocorrelation error) to demonstrate that the generated series capture temporal dependencies beyond what aggregate scores measure.
-4. Extend the sensitivity analysis to at least one more dataset to support the claim of robustness.
+1. **Report autoencoder reconstruction error** for each dataset and include a baseline that samples $\mathbf{h}_n$ from a Gaussian prior and decodes through the autoencoder without the score network. This would isolate the SGM's contribution and substantially strengthen the evaluation.
+2. **Address the training-inference mismatch** by either (a) adding noise to $\mathbf{h}_{n-1}^0$ during training to simulate the generation condition, (b) empirically measuring the distribution shift of $\mathbf{h}_{n-1}^0$ between training and sampling, or (c) at minimum, discussing this as a known limitation with justification for why it is acceptable in practice.
+3. **Verify the quality of adapted baselines** by reporting whether the GRU-D adaptation achieves reconstruction fidelity comparable to the original RNN encoder.
+4. **Replace or supplement the medal table** (Table 1) with a more informative summary that preserves effect sizes, or de-emphasize it in favor of the full score tables.
 
 ## Score and Decision
 
-The paper makes a genuine technical contribution (Theorem 3.1 and its application to time-series generation) and supports it with comprehensive experiments showing strong results across 16 settings. The main criticisms raised by the harsh reviewer either misunderstand the core theorem or are standard method-development issues (limited ablations, no significance tests) that do not threaten the paper's central claims. The evaluation is sound within the norms of the time-series generation community. The paper should be accepted; the identified minor issues are addressable in a revision.
+The paper proposes a technically coherent and genuinely novel adaptation of score-based generative models to time-series generation, with a solid theoretical derivation (Theorem 3.1) and strong empirical results across a comprehensive evaluation suite. The two major weaknesses — the unaddressed training-inference mismatch and the uncharacterized autoencoder contribution — are significant evaluation gaps but do not invalidate the core contribution. They are addressable in revision.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

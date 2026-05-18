@@ -1,75 +1,72 @@
-Now I have all the information needed. Let me construct the consolidated review.
+Now I have all the information needed. Let me write the final consolidated review.
 
 ## Summary
 
-This paper introduces FedBiOT, a federated learning framework for fine-tuning LLMs that protects both client data privacy and the LLM owner's intellectual property. It extends offsite-tuning to the federated setting by splitting the model into a trainable adapter (bottom layers) and a compressed emulator, then optimizing them via an alternating bi-level objective where the server repeatedly aligns the emulator (on a public dataset) and clients update the adapter (on private data). Experiments on LLaMA-7B across math, code, and QA tasks show numerical improvements over Offsite-tuning and FedOT baselines.
+This paper proposes FedBiOT, a federated fine-tuning framework for LLMs that protects both client data privacy and the LLM owner's intellectual property. The method splits the model into a compressed emulator (server-side) and a small adapter (client-side), and uses an alternating optimization procedure where the server periodically realigns the emulator on a public dataset while clients fine-tune the adapter on their private data. The key claimed novelty is that repeated emulator realignment during FL mitigates the distribution mismatch between the public distillation data and clients' private data, a limitation of prior work (FedOT). Experiments on LLaMA-7B across math reasoning, code generation, and question answering tasks show empirical improvements over Offsite-tuning and FedOT baselines.
 
 ## Strengths
 
-- **Novel application of iterative server-side emulator alignment in federated offsite tuning.** While prior work (FedOT) performs one-shot distillation before FL begins, FedBiOT re-aligns the emulator with the non-compressed model between communication rounds, using the current adapter parameters in the KL divergence term (Equation 2). This creates a coupling between the emulator and the client-trained adapter that does not exist in the one-shot baseline, and is a meaningful structural contribution. Evidence: Section 3, Step 1 describes emulator alignment each round "in accordance with Equation 2" using the updated adapter; Section 4.4 ablation confirms the regularization term benefits both AdapEmu and AdapFu.
+- **Timely and practically relevant problem.** The paper addresses a realistic tension: clients cannot share private data with the LLM owner, and the LLM owner will not disclose model weights. Federated fine-tuning under these dual constraints is an important and under-explored setting.
 
-- **Consistent numerical improvements across all three tasks.** The reported results show FedBiOT outperforming Offsite-tuning and FedOT on math (GSM8k, Table 1), code generation (HumanEval, Tables 2-3), and QA (HELM, Figures 2-3) for both AdapEmu and AdapFu across multiple dropout rates. Notably, FedBiOT achieves non-trivial AdapEmu performance (up to 5.85% pass@1) on code generation where baselines achieve 0% (Table 2).
+- **Consistent empirical improvements over baselines.** Across three tasks (math problem-solving, code generation, QA), FedBiOT outperforms both Offsite-tuning (single-client) and FedOT (multi-client) on the AdapFu metric, often by substantial margins (e.g., 51.20% vs. 44.15% on GSM8k at β=0.5 with Adapter 4, Table 1). On code generation with non-i.i.d. splits, FedBiOT is the only method that achieves non-zero AdapEmu accuracy (up to 5.85% at β=0.2), while baselines remain at 0%.
 
-- **Well-motivated design rationale for adapter placement.** The choice of bottom layers as the adapter is motivated by both computational efficiency (lower memory from storing fewer activation maps) and the established principle that early layers learn general features while later layers encode task-specific ones (Yosinski et al., 2014). The paper provides empirical validation of this choice across tasks.
+- **Computationally efficient adapter design.** Choosing the bottom few layers as the adapter (rather than top-and-bottom layers as in prior work) reduces client-side memory and computation. This choice is well-motivated by the observation that earlier layers learn general features and is validated empirically.
 
-- **Comprehensive ablation study identifying component-level contributions.** The ablation (Section 4.4) isolates the effects of the regularization term (ε), the distillation weight (λ), emulator update frequency, and layerwise alignment, providing practical insights for future work.
+- **The core idea of on-the-fly emulator realignment is intuitive and well-reasoned.** The paper correctly identifies that a one-time distillation (as in FedOT) may not produce an emulator that faithfully simulates the full model on out-of-distribution client data, and the proposed periodic alignment on the public dataset is a sensible response to this concern.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Uncontrolled comparison with baselines due to different adapter configurations.** This is the single most consequential weakness. FedBiOT uses only the bottom 2 or 4 layers as the adapter (lines 131), while both Offsite-tuning and FedOT use the top 2 and bottom 2 layers (lines 135, "the first two and the last two decoders as the adapter"). This changes which parts of the model are trainable and how the adapter/emulator boundary is drawn — a different inductive bias entirely. The paper acknowledges this architectural difference but never controls for it: there is no ablation where FedBiOT runs with the baselines' adapter configuration or vice versa. The reported gains (Tables 1–3, Figures 2–3) could plausibly be driven by this adapter choice rather than the bi-level optimization itself. Without this control, the experiments do not provide clear evidence for the paper's core algorithmic claim. This is a standard experimental-design issue that would need to be addressed for the paper's conclusions to be supported.
+- **The bi-level optimization framing does not match the implemented algorithm.** Equations (1)–(2) present a formal bi-level problem where the lower-level objective depends on the adapter parameters w_A (through the KL divergence term), meaning the optimal emulator changes with the adapter. The paper never explains how this coupled problem is solved (implicit differentiation, gradient unrolling, etc.). The actual algorithm is straightforward alternating minimization: fix the adapter, align the emulator on public data; fix the emulator, update the adapter on client data; aggregate. The claim that this "can optimize the bi-level problems to an equilibrium point" (line 107) is not supported by any convergence analysis, nor is it obvious why alternating minimization should solve a coupled bi-level problem where the lower-level constraint changes with the upper-level variable. This framing-vs-execution mismatch is a core presentation issue: it over-promises theoretical grounding that the method does not deliver. The paper would be better served by describing the method as "federated fine-tuning with interleaved emulator realignment via distillation on a public dataset" and treating the two updates as coordinated alternating optimization rather than a formal bi-level solution.
 
-- **Disconnect between the claimed mechanism for addressing distribution drift and the actual method.** The paper motivates FedBiOT by identifying that FedOT fails when the public distillation dataset differs in distribution from clients' private data (Section 2.2). The promised solution is bi-level optimization that aligns the emulator "especially on the clients' dataset" (lines 76-78). However, the lower-level emulator alignment (Equation 2, Step 1 in Section 3) operates *only on the public dataset* — the same data whose distribution mismatch is identified as the root problem. The emulator never directly sees client data. The indirect coupling (the emulator is re-aligned with the updated adapter parameters, which have been trained on client data) could provide some benefit, but the paper does not demonstrate this mechanism empirically (e.g., by measuring the emulator-full model gap on client-distribution data over the course of training). The claimed contribution — mitigating distribution drift — remains a claim without direct supporting evidence, and the reader is left uncertain which parts of the design (repeated distillation, proximal regularization, adapter choice) drive the improvements.
+- **The experimental comparison does not isolate the effect of the claimed novelty.** FedBiOT differs from FedOT in at least three simultaneous ways: (1) **adapter placement** — FedBiOT uses bottom layers only, while baselines use top and bottom layers (lines 55, 131, 135); (2) **proximal regularization** — FedBiOT adds a FedProx-style term (ε‖w_A − w_A^{(t)}‖²) absent in the baselines; (3) **repeated emulator alignment** — the key claimed innovation. Without a controlled experiment where FedOT is given the same adapter configuration and the same regularization (but still without repeated alignment), it is impossible to attribute the performance gains to the on-the-fly alignment mechanism. The gains could plausibly come from better adapter placement, the proximal term, or their interaction. **This is the single most important experiment needed to validate the paper's central claim.**
+
+- **The core motivation—distribution drift between public and client data—is never empirically characterized.** The paper's narrative hinges on the claim that FedOT's one-time distillation fails because Alpaca (public) has a different distribution from GSM8k/Rosetta/Dolly-15K (client data). Yet no quantitative evidence is provided: no perplexity differences, no embedding distances, no accuracy of the emulator on client data before and after alignment, no tracking of the distillation loss on a held-out portion of client data during training. The improvements from FedBiOT are attributed to better emulator alignment, but there is no direct evidence that the emulator actually becomes more faithful on the client data distribution after the on-the-fly updates, or that this correlates with downstream accuracy. This weakens the entire causal chain the paper proposes.
 
 ### Minor
 
-- **No variance reporting.** Three random seeds were used and averages reported, but no standard deviations, confidence intervals, or statistical tests are shown. Many observed improvements are modest (e.g., AdapFu on code generation at β=0.2) and may fall within random variation.
+- **No error bars or variance estimates.** The paper reports point estimates (averaged over three seeds) in all tables without standard deviations or confidence intervals. Given the randomness in LLM fine-tuning (batch sampling, local update ordering, client participation), this makes it impossible to assess whether reported gaps (e.g., 22.80% vs. 12.10% in Table 1) are statistically reliable. This is especially concerning for low-accuracy settings like code generation with AdapEmu, where small absolute differences could be noise.
 
-- **The "bi-level optimization" label is somewhat misleading.** The method alternates between emulator updates (on public data) and adapter updates (on client data), but there is no gradient through the lower-level solution nor a true bi-level solver. The paper effectively uses alternating minimization with a fixed lower-level objective. The discussion (line 107) acknowledges this indirectly by describing the process as "interchangeable" training, but the terminology inflates the technical claim.
-
-- **The "more than 4% accuracy improvement in all tasks" claim (Conclusion) is not precisely qualified.** It is unclear whether this refers to average improvement per task across all configurations, the best configuration per task, or individual sub-results. Some individual comparisons (e.g., code generation AdapFu at β=0.2) appear smaller than 4% from the reported numbers. The paper should specify which comparison supports this claim.
-
-- **Optimal values for FedBiOT-specific hyperparameters (ε, λ, number of emulator steps) are not reported.** The paper states a grid search was performed (line 133) and discusses effects qualitatively in the ablation, but the chosen values are not listed, making reproduction more difficult.
-
-- **Distributional similarity between the public dataset (Alpaca) and each task dataset is not characterized.** Since the paper's core motivation is distribution drift, quantifying this drift (e.g., token distribution statistics, perplexity gaps) would strengthen the evaluation.
-
-- **The Yosinski et al. (2014) citation supporting the adapter placement choice studied CNNs on ImageNet-style tasks, not transformer LMs.** The paper's empirical results do support the choice, but the theoretical grounding could be strengthened with LLM-specific references.
+- **The ablation study is presented qualitatively without supporting numerical results.** Section 4.4 makes specific claims (e.g., "with λ getting larger, a significant improvement can be witnessed for AdapEmu," "the regularization term benefits AdapEmu and AdapFu") as unstructured bullet points with no accompanying tables, figures, or concrete numbers. Ablation results are central to understanding which components drive performance; presenting them as unsupported qualitative statements undermines the scientific contribution.
 
 ### Trivial
-None.
+
+- None beyond the above. The paper is clearly written and the presentation is generally adequate for a conference submission.
 
 ## Nice-to-Haves
 
-- A direct measurement of the emulator-full model alignment gap on client-distribution data over the course of training, to directly test whether the repeated alignment mitigates drift.
-- A brief complexity/communication cost analysis comparing FedBiOT to FedOT (the server takes 10 extra emulator update steps per round).
-- A discussion of the 0% AdapEmu results for code generation at β=0.5 (Table 3) and whether this limits practical utility in high-compression settings.
-- Scaling experiments to larger models (e.g., LLaMA-13B) or more clients.
+- **Controlled baseline experiment:** Run FedOT with the same adapter choice (bottom layers only) and the same proximal regularization (ε) as FedBiOT, but without the repeated emulator alignment. If this enhanced FedOT still underperforms FedBiOT, the repeated alignment is the likely source of gain; if not, the novelty is incremental.
+- **Distribution drift characterization:** Compute a quantitative measure of distribution mismatch (e.g., perplexity of the initial emulator on client data vs. public data) and track how this measure evolves under FedBiOT vs. FedOT. Show that the distillation loss on a proxy for client data decreases with repeated alignment.
+- **Convergence visualization:** Plot test accuracy vs. communication rounds for FedBiOT and baselines, rather than reporting only the best checkpoint. This would reveal whether the method is stable or requires careful early stopping.
+- **Communication overhead analysis:** Report total bits communicated and the number of emulator update steps on the server, so readers can assess the cost of the repeated alignment.
+- **Reporting:** Add standard deviations to all tables.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
 
-- **"Ablation figures/tables are in the stripped appendix."** — The parser strips appendix content from all papers; these exist in the original submission. Removed per hard rule.
-- **Strength: "Novel bi-level optimization formulation that addresses distribution drift"** — The "explicitly tackles" framing conflicts with the verified weakness that the mechanism is indirect and the emulator still only uses public data. The formulation is novel but the claim that it *addresses drift* as stated is not fully supported. Moved per rule that when a strength and verified weakness conflict, the weakness wins.
-- **Strength: "Significant and consistent empirical improvements across three tasks and multiple metrics"** — The empirical numbers are present but the uncontrolled adapter comparison means the improvements cannot be attributed to the proposed optimization. Moved per rule above since the strength claim of "superiority" conflicts with the verified confound.
-- **Criticism about evaluating against the wrong model size (LLaMA-13B) or more clients** — This asks the paper to cover ground outside its stated scope (LLaMA-7B, up to 9 clients). Moved to Nice-to-Haves as scope creep.
+- **Criticism about "adaptor" vs. "adapter" typo and notation inconsistencies:** These are formatting/parser artifacts in the extracted text, not author errors.
+- **Criticism about "why both L2 and KL in lower-level objective":** The paper explicitly explains the distinct roles of these two terms (line 94: L2 for activation matching excluding adapter effects, KL for full model output distribution including adapter effects). The reviewer missed this explanation.
+- **Strength 4 from Strength Finder ("thorough ablation study"):** Conflicts with verified Weakness C5 — the ablation is presented qualitatively without numerical support, which is not "thorough."
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface two points worth highlighting: (1) The distinction between "bi-level optimization" and "alternating minimization with coupled objectives" is not merely terminological — it affects what kinds of convergence guarantees apply and how readers interpret the claimed equilibrium (line 107). (2) The most informative future experiment would be to hold the adapter configuration fixed across methods and compare FedBiOT's iterative alignment against FedOT's one-shot alignment; this single ablation would resolve whether the bi-level coupling or the adapter choice drives the gains. Neither insight is present in the paper itself.
+None beyond the paper's own contributions. The reviews surface a coherent concern about the gap between the paper's bi-level formalism and its actual alternating-minimization algorithm, and about the lack of controlled experiments that isolate the claimed novelty. These are standard experimental-design issues rather than novel insights.
 
 ## Suggestions
 
-1. **Run the critical controlled experiment:** Compare FedBiOT and FedOT using the same adapter configuration. The cleanest test is to run FedBiOT with the top+bottom adapter (layers {1,2,31,32}) and FedOT with the bottom-only adapter, to isolate the effect of the optimization scheme from the adapter choice.
-2. **Measure drift mitigation directly:** Compute the activation/generation gap between the emulator and full model on a held-out sample from client distributions at regular intervals during training, and show that FedBiOT reduces this gap compared to FedOT.
-3. **Qualify the "bi-level" terminology** to "alternating optimization" or clarify that the method is a practical alternating scheme rather than a gradient-based bi-level solver.
-4. **Report standard deviations** for all tables, and clarify which comparison supports the "more than 4% improvement" claim.
-5. **Report chosen hyperparameter values** from the grid search (ε, λ, number of emulator steps) in the main text or a table.
+1. **Reframe the optimization description.** Drop the bi-level formalism or, if keeping it, explain how the alternating scheme relates to standard bi-level optimization approaches and what guarantees (if any) can be provided. A simpler framing as "coordinated alternating optimization" or "interleaved distillation and fine-tuning" would be more honest and avoid misleading readers.
+
+2. **Add a controlled ablation that directly tests the central claim.** This is the most important experiment: give FedOT the same adapter placement (bottom layers) and the same proximal regularization (ε) as FedBiOT, and compare performance. Without this, the paper cannot attribute gains to repeated alignment — the key claimed novelty.
+
+3. **Characterize the distribution drift directly.** Compute and report the emulator's faithfulness (e.g., KL divergence or accuracy agreement with the full model) on a sample of client data before training, after FedOT's one-time distillation, and after FedBiOT's on-the-fly alignment. Track this metric across rounds to show that it correlates with downstream accuracy.
+
+4. **Add variance estimates to all tables.** Three seeds with standard deviations is the minimum bar for this type of experiment.
+
+5. **Provide numerical backing for all ablation claims.** Convert the bullet points in Section 4.4 into a proper table or figure with concrete numbers.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+The paper tackles a real and timely problem and the proposed system-level solution shows promising empirical results. However, the scientific validation has major gaps: the core claim (repeated alignment mitigates distribution drift) is not isolated from confounds and the motivating mechanism is not directly measured. The bi-level framing also over-promises relative to the actual algorithm. These issues are fixable with additional controlled experiments and revised framing, but in its current form the paper does not convincingly support its central contribution.
+
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

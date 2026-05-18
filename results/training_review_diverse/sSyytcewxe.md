@@ -1,79 +1,65 @@
-Now I have a thorough understanding of the paper and can verify each claim. Let me produce the final consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces SEED (Selection of Experts for Ensemble Diversification), an exemplar-free class-incremental learning method that maintains a fixed set of K experts with a shared backbone, but fine-tunes only one expert per task. The expert is selected via a KL-divergence-based criterion that minimizes distribution overlap for new classes. At inference, predictions are formed by ensembling Gaussians from all experts via temperature-scaled softmax averaging. The method achieves large margins over prior work on equal-split CIL scenarios, showing strong plasticity under severe data constraints and domain shift.
+This paper proposes SEED, an exemplar-free class-incremental learning method using a fixed-size ensemble of experts that share initial layers. The central idea is to train only one expert per task (selected via maximum KL divergence between new-class distributions in each expert's latent space) rather than updating all experts. This promotes diversity, mitigates forgetting, and enables task-agnostic inference via an ensemble of Bayes classifiers using multivariate Gaussian class representations. SEED achieves large margins over prior exemplar-free methods (e.g., +15.4 pp on CIFAR-100 T=10, +11.5 pp on DomainNet T=12), with consistent improvements across equal-split, large-first-task, and task-incremental settings.
 
 ## Strengths
 
-- **Selective expert update yields a strong plasticity–stability trade-off in exemplar-free CIL.** Unlike prior ensemble methods that regularize or update all experts (e.g., CoSCL), SEED updates only one expert per task, directly reducing forgetting and encouraging specialization without explicit diversity losses. This is substantiated by Table 1, where SEED outperforms the second-best method by 14.7–17.5 percentage points on CIFAR-100 equal splits, a setting where plasticity is critical. Figure 6 (left) further confirms that SEED achieves a superior forgetting–intransigence trade-off compared to EWC, LwF, and FeTrIL.
+- **State-of-the-art performance in exemplar-free equal-split CIL.** On CIFAR-100 with T=10, SEED achieves 61.7% average incremental accuracy, surpassing the next-best method FeTrIL (46.3%) by a large 15.4 pp margin (Table 1). The advantage grows with more tasks (T=50: 42.6% vs. FeTrIL's 27.0%). These margins convincingly show that SEED maintains high plasticity where methods relying on frozen/regularized backbones fail.
 
-- **The KL-max expert-selection rule demonstrably improves ensemble quality over naive alternatives.** The paper proposes selecting the expert where new-class Gaussian distributions overlap least (Equation 2). Figure 6 (selection-strategies) shows KL-max yields higher mean and median accuracy than random, round-robin, and KL-min across 10 runs on CIFAR-100 with T=20 and T=50. This is a principled and empirically validated design choice.
+- **Robust to domain shift between tasks.** On DomainNet (T=12), SEED reaches 45.0% vs. FeTrIL's 33.5% (Table 1), demonstrating that the expert selection and diversification strategy generalizes to real-world distribution shifts spanning six domains.
 
-- **State-of-the-art results on equal-split scenarios with substantial margins, including under domain shift.** On CIFAR-100 T=10, SEED achieves 61.7% average incremental accuracy vs. 47.0% for LwF*; on DomainNet T=36 it achieves 39.2% vs. 27.5% for FeTrIL (Table 1). These 14–16 point margins are unprecedented among exemplar-free methods in the challenging equal-split setting where prior methods plateau.
+- **Expert selection via KL-max is empirically validated.** Figure 5 shows that the proposed minimum-overlap selection yields higher mean and median accuracy over 10 runs than random, round-robin, or maximum-overlap baselines on CIFAR-100. This directly supports the paper's core design rationale.
 
-- **Ablation studies cleanly isolate the contribution of each component.** The ablation table (Table 4) shows that removing multivariate Gaussians drops accuracy to 53.5% (from 61.7%), removing covariance to 54.1%, and removing temperature scaling to 59.2%. This rigor strengthens confidence in the method's design choices.
+- **Ablation study confirms each component is necessary.** Removing multivariate Gaussians drops accuracy from 61.7% to 53.5%; removing covariance drops to 54.1%; removing temperature lowers performance to 59.2% (Table ablation). These ablations isolate the contribution of each design choice.
 
-- **Expert diversity arises naturally from the training design.** Figure 5 shows each task has a specialist expert (2.5+ points above average) and the ensemble consistently beats the best individual expert, confirming that diversification through selective training works without ad-hoc diversity losses.
+- **Superior plasticity–stability trade-off.** Figure 6 (left) shows SEED achieves lower intransigence than EWC/LwF while keeping forgetting lower than FeTrIL, a key advantage in the many-task equal-split setting where most methods must sacrifice one axis for the other.
 
-- **SEED outperforms task-incremental methods with fewer parameters despite targeting the harder task-agnostic setting.** On CIFAR-100 20-split, SEED achieves 86.8% task-aware accuracy with 3.2M parameters vs. CoSCL's 79.4% with 4.6M parameters (Table 3).
+- **Parameter-efficient relative to prior ensemble methods.** In the task-incremental setting, SEED uses 3.2M parameters vs. CoSCL's 4.6M while achieving 86.8% vs. 79.4% on CIFAR-100 20-split (Table 3).
 
 ## Weaknesses
+
+### Fatal
+None.
 
 ### Major
 None.
 
 ### Minor
 
-- **The standard ensemble baseline (all experts trained on all tasks) is relegated to the ablation table rather than appearing alongside the main comparisons.** The ablation shows that a standard ensemble already achieves 56.9% on CIFAR-100 T=10 vs. SEED's 61.7%, meaning roughly one-third of SEED's total advantage over single-model methods comes from the multi-expert architecture rather than the selection mechanism. The paper is transparent about this in the discussion section, but placing this baseline in the main results tables (Tables 1 and 2) would allow readers to correctly attribute the gains. As it stands, the primary empirical framing ("SEED vs. single-model methods") conflates architecture scale with the selection contribution.
+- **Ambiguous description of the distribution lifecycle for non-selected experts.** During selection (lines 101–108), distributions for new classes are computed for *all* trained experts (k ≤ t). After fine-tuning the selected expert, line 108 states "update distributions of Q_{k̄}" — only the selected expert's distributions are recomputed. For non-selected experts, the distributions computed during selection are retained unchanged (their weights did not change), which is the correct procedure. However, this lifecycle is never stated explicitly, leaving the reader to infer it. A step-by-step algorithmic description (or a single clarifying sentence) would substantially improve reproducibility.
 
-- **The "no computational overhead" claim in the abstract and contributions list is imprecise.** The selection step (lines 101–105) requires forwarding all new-task data through all trained experts to compute class-conditional distributions and evaluate Equation 1. While the backward pass is indeed limited to one expert, the forward pass for selection adds real computation relative to a single-model baseline. The claim should be qualified (e.g., "no additional backward-pass cost relative to single-model training" or "negligible overhead").
+- **Overstated claim of "no computational overhead during training."** Lines 32 and 38 state that SEED "causes no computational overhead" and "does not require more computation than single-model solutions." This is misleading: the expert selection step (line 101) requires forward passes through all trained experts' g_k modules on all new-task data to compute Gaussian distributions and pairwise KL divergences. While this cost is smaller than backpropagating through a full model, it is real overhead relative to training a single model. The claim should be qualified (e.g., "no overhead in gradient computation" or "negligible overhead from forward passes") and ideally quantified.
 
-- **The large-first-task comparisons (Table 2) are not fully controlled.** Baselines are taken from the FeTrIL paper with no verification that the training setup (augmentations, learning rate schedule, optimizer settings) matches SEED's protocol. The equal-split setting states that AugMix augmentations are used (line 121), but the paper does not specify whether the same augmentations were applied to SEED in the large-first-task setting or whether the FeTrIL baselines used them. Since SEED's training-based approach benefits more from augmentations than frozen-backbone methods, this could advantage SEED. The concern is partially mitigated by the fact that SEED loses to FeTrIL on ImageNet for T=11 and T=21, but a controlled reproduction of at least one baseline would strengthen the comparison.
-
-- **Table 2 baselines are reported as point estimates without standard deviations, while SEED reports ±σ.** Some of SEED's margins (e.g., CIFAR-100 T=21: 62.9 vs. 61.5) may overlap with baseline variance. This is a common issue when taking baselines from prior work, but it limits the statistical force of the comparison.
+- **Selection strategy noise under small-sample regimes is not discussed.** For T=50 on CIFAR-100, each task has only ~2 classes with ~100 samples each. Covariance estimates from such small data in a moderate-dimensional latent space can be noisy, yet the paper does not discuss when the KL-max criterion might degrade. A brief analysis or practical guideline would strengthen empirical rigor.
 
 ### Trivial
-
-- **The latent space dimension S is never reported.** Since SEED relies on full-covariance Gaussian estimation (S×S matrices per class), S directly affects the number of parameters and the sample size needed per class. Reporting S (and confirming per-class samples exceed S for all tasks, or describing how singularities are handled) would aid reproducibility.
-
-- **The DomainNet task construction for T=36 is under-specified.** With 6 domains and 36 tasks, each domain supplies multiple tasks. The paper does not explain whether consecutive tasks always switch domains or whether some tasks share the same domain, which affects the degree of domain shift.
-
-- **The task-incremental experiments (Table 3) do not state whether the same random class order was used for all baselines.** The results would be more reproducible with this detail.
-
-- **The paper does not discuss whether log-likelihoods from different experts are on a comparable scale.** Because each expert's covariance matrices are estimated independently, the log-likelihood magnitudes can differ. Temperature scaling helps but does not fully guarantee calibration. This is a minor unexamined issue.
+- The latent space dimension S is mentioned only in passing (line 86) and in the limitations (line 342), with no guidance on how it interacts with the number of classes per task. Given that singular covariance matrices are addressed by reducing S, a practical recommendation would be helpful.
 
 ## Nice-to-Haves
-
-- Quantify the wall-time or FLOP overhead of the selection step for a representative run (e.g., CIFAR-100 T=10) to support or correct the computational cost claim.
-- Reproduce at least one large-first-task baseline (e.g., FeTrIL) under SEED's augmentation and scheduling protocol to verify comparison fairness.
-- Extend the standard-ensemble ablation to at least one more setting (e.g., DomainNet or ImageNet) to test whether the 4.8% selection benefit generalizes.
+- A quantitative breakdown of the computational cost of the selection step (number of forward passes, wall-clock time vs. single-model training).
+- Discussion of how often individual experts are re-selected across tasks and whether knowledge distillation (L_KD) sufficiently mitigates forgetting in that case.
+- A note on how the latent space dimension S should be set relative to the class count per task.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution.
-
-- Criticism that SEED's ensemble beating the best individual expert "does not uniquely validate SEED's selection scheme" (from Harsh Critic's Discussion section). This is a generic property of many ensembles, but the paper's point is that diversity arises *without* an explicit diversity loss, which is a valid observation. The strength stands; the criticism overreaches.
-- Criticisms about the teaser figure (Fig. 1) axis labels not being explained. The figure caption provides context, and minor figure presentation details do not affect the paper's contribution.
-- "The paper does not discuss why pairwise summation is chosen over total divergence" — the ablation (Fig. 6) shows KL-max outperforms alternatives, which is sufficient empirical validation. This is an under-exploration, not a weakness.
-- "The L2 KD loss is not compared to KL-divergence-based distillation" — an unexamined design choice that does not threaten any claim in the paper.
-- "The paper should include a statistical test (e.g., paired permutation test)" — this is not standard practice in the CIL benchmarking literature and standard-deviation reporting suffices.
+- *Criticism about missing appendix / supplementary material* — The paper states code is in the supplementary material; parser-stripped sections are not author omissions.
+- *Generic "missing related work" concern* — Not verifiable without external sources.
+- *Formatting/style nitpicks* — These are parser artifacts, not author errors.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews surface the important nuance that the standard ensemble baseline accounts for a meaningful fraction (~4.8 points out of ~15) of SEED's advantage over single-model methods, but they do not introduce a fundamentally new perspective not already present in the paper's own discussion section.
+The key structural insight emerging from this review is that SEED decouples the *training cost* from the *model capacity* in ensemble-based continual learning: by training only one expert per task but keeping all experts at inference, the method achieves a rare combination of high plasticity (each new task gets a dedicated update) and high stability (most parameters remain unchanged). This contrasts with prior ensemble methods like CoSCL where all experts are updated at every task — a design that limits plasticity through regularization. The KL-max selection criterion operationalizes a "minimal disruption" principle that is novel in the CL ensemble literature.
 
 ## Suggestions
-
-1. **Move the standard-ensemble baseline into the main results tables (Tables 1 and 2).** This allows readers to directly attribute gains to the ensemble architecture vs. the selection mechanism, sharpening the paper's central claim.
-2. **Qualify the computational overhead claim** to state that the overhead arises only from the forward passes needed for selection, not from the backward pass.
-3. **Specify the latent space dimension S** used in all experiments and document how singular covariance matrices are handled.
-4. **Clarify the DomainNet task construction** for larger T values, and the class order used in the task-incremental experiments.
-5. **Reproduce at least the FeTrIL baseline in the large-first-task setting** under matched conditions, or add a paragraph explaining which variables differ and their likely direction of effect.
+1. Add a pseudocode or algorithmic box in Section 3 that explicitly states: (a) during selection, compute distributions for all trained experts; (b) after fine-tuning the chosen expert, recompute only its distributions; (c) non-selected experts retain the distributions computed in step (a) because their weights are unchanged.
+2. Qualify the "no computational overhead" claim to reflect the forward-pass cost of selection, or replace it with "negligible overhead" / "no overhead in gradient computation."
+3. Add a brief discussion of when the KL-max selection might be unreliable (e.g., very few samples per class, high latent dimension relative to class count) and how practitioners should set S.
 
 ## Score and Decision
 
-The paper presents a novel, well-motivated method with strong empirical validation in the challenging equal-split CIL setting. The weaknesses are primarily about presentation framing and minor experimental control issues rather than fundamental flaws. The core contribution is solid and well-supported.
+This is a strong paper. The core idea is novel and well-motivated, the experiments are extensive and cover multiple challenging settings, the ablations convincingly isolate each component's contribution, and the gains over prior work are large and consistent. The weaknesses are limited to presentation clarity and a slightly overstated efficiency claim — neither undermines the central contribution. I recommend acceptance.
 
 MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

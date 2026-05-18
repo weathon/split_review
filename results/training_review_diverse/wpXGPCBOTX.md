@@ -1,86 +1,71 @@
-Now I have all the information needed to produce the consolidated review. Let me verify each key claim against the paper text before finalizing.
-
----
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper provides the first rigorous sparsistency analysis for ℓ₁-regularized inverse optimal transport (iOT). It derives an irrepresentability-type condition (the "certificate") for support recovery of the ground cost, proves finite-sample complexity bounds (Theorem 1), and works out the Gaussian case in closed form, showing that iOT interpolates between the Lasso (ε → ∞) and the graphical Lasso (ε → 0). The theory is supported by numerical experiments on graph-structured costs.
+This paper studies ℓ₁-regularized inverse optimal transport (iOT) for recovering a sparse ground cost from samples drawn from an entropic optimal transport coupling. Its core theoretical contribution is a sufficient condition for sparsistency — a generalization of the Lasso's irrepresentability condition to the iOT setting — along with a sample complexity bound. For the Gaussian case, the paper derives a closed-form Hessian enabling explicit certificate computation, and shows that as the entropic regularization ε varies, the iOT problem interpolates between a classical Lasso (ε→∞) and a graphical Lasso (ε→0). Numerical experiments on synthetic graphs illustrate the behavior of the certificate.
 
 ## Strengths
 
-1. **First sparsistency theory for ℓ₁-regularized iOT with sample complexity.** The paper proves that under a non-degenerate certificate condition, the ℓ₁-iOT estimator recovers the true support with sample complexity scaling as n^{-1/2} (Theorem 1). This goes substantially beyond prior iOT work (Dupuy & Galichon, Carlier et al.) that lacked finite-sample guarantees for sparse recovery in the continuous setting.
+1. **First rigorous sparsistency analysis for inverse OT.** The paper derives a sufficient "irrepresentability-type" condition (Definition 1, Eq. C) for ℓ₁-regularized iOT that generalizes the classic Lasso condition to the non-quadratic Fenchel-Young loss of iOT. This provides a novel theoretical foundation for support recovery in continuous state spaces, going beyond prior discrete-space analyses (e.g., Chiu et al. 2022, Dupuy & Galichon 2014).
 
-2. **Generalized irrepresentability condition for a non-quadratic, non-fixed-design loss.** The certificate in Definition 1 extends the Lasso irrepresentability condition to the iOT loss, whose Hessian depends on the full coupling structure rather than a fixed design matrix. The analysis via Proposition 2 (minimal-norm subgradient) and the implicit function theorem is non-trivial and yields a condition that is both sufficient for and (via the subdifferential) connected to necessity.
+2. **Explicit sample complexity bound.** Theorem 1 provides a sample complexity rate of n^{-1/2} under the non-degenerate certificate condition, together with a bound quantifying the influence of the entropic regularization ε and the true cost magnitude via a factor exp(C‖A_soln‖₁/ε). While this bound is loose (see Weaknesses), it is the first such bound for the iOT problem and identifies the relevant problem parameters.
 
-3. **Explicit connection between iOT, Lasso, and graphical Lasso in Gaussian limits.** Propositions 4 and 5 show that as ε → ∞ the iOT certificate converges to the Lasso certificate, and as ε → 0 (with symmetric positive-definite A and isotropic covariances) it converges to the graphical Lasso certificate. This is the first result linking inverse OT to graph estimation and provides interpretable insight into how the entropic penalty dictates which sparse structure is learned.
+3. **Closed-form Hessian and limiting-case analysis for Gaussians.** Lemma 3 provides a general formula for ∇²W(A) under Gaussian distributions, enabling explicit computation of the certificate. Propositions 5 and 6 show concretely that the iOT certificate reduces to the Lasso certificate (ε→∞) and the graphical Lasso certificate (ε→0, under stated restrictions), establishing a concrete connection between iOT and two well-studied sparse estimation problems. This gives practical intuition for the role of ε.
 
-4. **Closed-form Hessian for Gaussian marginals (Lemma 3).** The paper provides an explicit formula for ∇²W(A) that extends Galichon's earlier result to a more general setting, enabling concrete computation of the certificate in the Gaussian case.
-
-5. **Finite-sample analysis of dual certificates (Proposition 3).** The paper bounds the deviation between population and empirical certificates with explicit constants, providing the non-asymptotic foundation for Theorem 1. The numerical experiments in Section 6 validate that recovery failures align with certificate degeneracy, directly supporting the theory.
+4. **Numerical evidence supporting the theory.** Figures 1–2 demonstrate on circular, planar, and Erdős–Rényi graphs that the certificate's non-degeneracy improves with larger ε and that recovery performance matches theoretical predictions: sparsistency is achieved only when the certificate is non-degenerate.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-1. **The exponential factor exp(C‖A_soln‖₁/ε) in Theorem 1 is presented without discussion of its source, implications, or whether it is improvable.**  
-   The bound requires  
-   \[
-   \max\Big\{\frac{\exp(C\|A_{\text{soln}}\|_1/\epsilon)\sqrt{\log(1/\delta)}}{\lambda},\; \sqrt{\log(2s)}\Big\} \lesssim \sqrt{n},
-   \]  
-   which is the paper's central quantitative result. The factor exp(C‖A_soln‖₁/ε) is enormous when ε is small (the empirically relevant regime for OT) or when the true cost has large ℓ₁ norm, making the bound potentially vacuous. The paper never explains where this factor comes from (e.g., Lipschitz constants of the log-partition function, strong convexity modulus, or uniform concentration bounds), whether it is an artifact of the proof technique, or whether it could be tightened using local properties such as restricted strong convexity. The paper even acknowledges numerically that sparsistency fails for ε = 0.1, which is consistent with the bound becoming vacuous, but this connection is not discussed. Since this is the headline quantitative result, the reader deserves a clear statement of the limitation and its source. **(Evidential gap; fixable but meaningful — the bound's practical regime of validity is unclear without this discussion.)**
+1. **Unaddressed gap between population and empirical centering.** Assumption 1(iii) centers the cost basis using the true marginal distributions α, β (∫ cost_k(x,y) dβ(y) = 0, ∫ cost_k(x,y) dα(x) = 0). Section 2.3 states that the finite-sample problem uses empirical centering (∑_i cost_k(x_i,y_j)=0, ∑_j cost_k(x_i,y_j)=0). The certificates z_∞ and z_n in Proposition 4 are defined with respect to different bases (Φ and Φ_n respectively), but the paper does not explain how centering error propagates through the bound on ‖z_∞ − z_n‖_∞. Since the centering transformations differ between population and empirical levels, the comparison between z_∞ and z_n requires an additional argument. Without addressing this, the claim that z_n inherits the non-degeneracy of z_∞ is not fully justified. This is a genuine gap in the theoretical argument for Theorem 1.
+
+2. **Exponential factor in the bound is not contextualized or reconciled with experiments.** The sample complexity and error bounds contain a factor exp(C‖A_soln‖₁/ε) with an unspecified constant C>0. For small ε (e.g., ε=0.1, used in the experiments) or moderate ‖A_soln‖₁, this factor is astronomically large, yet the numerical experiments with n=80 and ε=0.1 show successful recovery (albeit only for large enough λ). The paper does not discuss whether this exponential is an artifact of the proof technique or a genuine barrier, and does not attempt to reconcile the theoretical bound with the practical performance. Since the whole contribution rests on this guarantee, the looseness significantly weakens the practical relevance of the result.
 
 ### Minor
 
-1. **Lemma 3 (Gaussian Hessian formula) does not specify conditions under which the matrix inverses in the expression exist for non-invertible A.**  
-   The paper claims (lines 276–277) that Lemma 3 generalizes Galichon's formula to the case where A is rectangular or rank-deficient. However, the stated formula involves inverses of (Σ_β − Σ^⊤ Σ_α^{−1} Σ) and (Σ_α − Σ Σ_β^{−1} Σ^⊤), and the lemma statement does not specify conditions for their invertibility when A is non-invertible. The "general formula" is presented without clarifying what assumptions are needed for the expression to be well-defined. This is a methodological gap in an otherwise clean technical contribution. **(The paper should either state precise conditions or qualify the claim.)**
+1. **The irrepresentability condition is hard to verify in practice.** The certificate in Eq. (C) depends on ∇²W(A_soln), which in turn depends on the unknown true cost and the coupling it generates. While the Gaussian case provides a closed-form Hessian (Lemma 3), for general settings there is no way to check whether the condition holds without already knowing the answer. The paper frames this as a "far reaching generalization of the Lasso's irrepresentability condition," but the Lasso condition is testable from the observed design matrix, whereas here the design involves unknown quantities. The paper does not discuss how a practitioner might validate the condition.
 
-2. **Proposition 5 (ε → 0 limit) requires A to be symmetric positive-definite and Σ_α = Σ_β = I, which is a significant specialization.**  
-   The paper states these restrictions, but does not discuss how much they narrow the scope of the graphical Lasso connection. The original iOT problem does not require A to be symmetric or positive-definite, nor isotropic marginals. The reader would benefit from a brief note that this connection, while insightful, applies to a constrained version of iOT, and that relaxing symmetry would lead to a different limit.
+2. **Limiting-case analysis requires restrictive assumptions and parameter rescaling.** The ε→0 limit (Proposition 6) requires symmetric positive-definite A, Σ_α=Σ_β=I, and an explicit A≽0 constraint. Both limits also require rescaling λ by ε (λ₀/ε for ε→∞, λ₀·ε for ε→0) to obtain a non-trivial limit. The paper is transparent about these choices, but the "interpolation" claim is more limited than the abstract's language suggests, and the rescaling is externally imposed rather than emerging naturally from the iOT objective.
+
+3. **Numerical experiments do not directly validate the sample complexity bound.** The recovery performance plots (Figure 2) show the number of wrongly estimated positions as a function of λ for three ε values, but n is fixed at 80 throughout. There is no experiment varying n to verify the claimed n^{-1/2} rate or the exp(C‖A_soln‖₁/ε) scaling, weakening the connection between theory and experiments.
 
 ### Trivial
 
-1. **Figure 2 caption lacks experimental setup details.** The caption reports recovery performance vs. λ for three ε values, but does not state the number of samples N used, whether results are averaged over trials, or error bars. (The graph size n=80 is mentioned in the text, but the sample size is not clearly reported.)
-
-2. **The scaling λ = λ₀ ε in Proposition 5 is non-obvious and the paper provides no derivation.** A one-sentence explanation of why this scaling yields a non-degenerate limit would improve readability.
+- The adjoint operator Φ^* is used in the certificate and Proposition 2 without explicit definition. While standard in functional analysis, defining it explicitly would improve readability.
+- The constant C>0 in Theorem 1 and Proposition 4 is never identified or bounded; a remark on its dependence (or lack thereof) on problem dimensions would be helpful.
 
 ## Nice-to-Haves
 
-- A brief discussion of how λ could be chosen in practice given n (e.g., "λ must dominate the estimation error from Proposition 3 but be small enough that the population certificate condition holds").
-- A simple non-Gaussian synthetic example (e.g., categorical distributions) demonstrating that the certificate is computable and sparsistency holds — this would strengthen the claim that the theory applies beyond Gaussians.
-- A remark on the computational cost of verifying the irrepresentability condition a priori (it requires the Hessian of W, which itself requires solving an EOT problem).
+- A discussion of strategies to tighten or potentially remove the exponential factor (e.g., regimes where ‖A_soln‖₁ is bounded uniformly in dimension, or where ε is large) would significantly strengthen the paper.
+- A brief quantitative comparison of the bound to known results in compressed sensing or generalized linear models would help calibrate expectations.
+- Explicitly noting that the empirical centering converges to population centering at rate O_p(n^{-1/2}) and sketching how this error can be absorbed into the existing bounds would resolve the centering gap.
 
 ## Removed Points
 
-These points were removed (treated with caution):
-- **Criticism that the paper does not verify centering preserves linear structure (Section 2).** This is a standard empirical demeaning operation that preserves linearity; the concern does not affect the paper's claims.
-- **Claim that Proposition 5's symmetry constraint is not stated explicitly.** The paper *does* state "optimizing over symmetric positive semi-definite matrices" and "for symmetric A≻0." The criticism was partially inaccurate; the retained version above captures the substantive residue.
-- **Request for more baselines or comparisons.** This is a theoretical analysis paper; benchmarking against other methods is not required for the core contribution.
-- **Formatting/style nitpicks and missing appendix references.** These are parser artifacts or out-of-scope for the paper's contribution class.
+- **"Proof of the sample complexity bound is deferred to the appendix."** The parser strips appendix content from all papers; proofs exist in the original submission. Deferring proofs to an appendix is standard for conferences and does not constitute a weakness.
+- **"The paper should also cover Y / domain Z / additional tasks."** Demands for breadth outside the paper's stated scope (e.g., covering non-Gaussian settings beyond what is analyzed, or adding entirely new classes of experiments) are scope creep.
 
 ## Novel Insights
 
-The reviews surface one genuinely novel observation beyond the paper's own contributions: the exponential factor exp(C‖A_soln‖₁/ε) in the sample complexity bound is not merely a technical constant — it creates a fundamental tension between the entropic regularization strength ε and the sparsity-inducing ℓ₁ regularization. Small ε (the "sharp" OT regime) makes the bound vacuous, which numerically manifests as sparsistency failure (ε=0.1). The paper implicitly demonstrates that sparsistency is practically achievable only in the large-ε regime, which is precisely when the connection to the standard Lasso emerges. Neither the harsh critic nor the strength finder explicitly draws this connection, but together they reveal that the paper provides a rigorous explanation for *why* one must choose between accurate OT coupling (small ε) and reliable cost recovery (large ε) — a trade-off that was previously understood heuristically at best.
+None beyond the paper's own contributions. The reviews surface no observation about the paper that the authors do not already make themselves.
 
 ## Suggestions
 
-1. **Add a paragraph after Theorem 1 that identifies the source of exp(C‖A_soln‖₁/ε)** (e.g., uniform concentration bounds over the function class, or the Lipschitz constant of the log-partition function), discusses whether it can be refined via localized arguments (e.g., restricted strong convexity), and explicitly states that for small ε the bound becomes vacuous — consistent with the numerical observation that sparsistency fails in that regime.
+1. **Address the centering gap explicitly.** The simplest fix is to note that the empirical centering converges to the population centering at rate O_p(n^{-1/2}), and sketch how the bound in Proposition 4 can accommodate this additional error term. Alternatively, show that the whole analysis can be carried out in the population-centered basis, with the finite-sample estimator constrained to obey population centering (which is feasible when α, β are known or well-approximated).
 
-2. **State precise conditions for Lemma 3** (e.g., when the matrices (Σ_β − Σ^⊤ Σ_α^{−1} Σ) and (Σ_α − Σ Σ_β^{−1} Σ^⊤) are invertible), or, if the formula holds in a generalized sense (e.g., via Moore–Penrose inverses), say so explicitly.
+2. **Contextualize the exponential factor.** Add a paragraph discussing whether exp(C‖A_soln‖₁/ε) is a proof artifact or a genuine barrier. Consider showing that in regimes where ε is large relative to ‖A_soln‖₁, the bound becomes meaningful, and explain how the small-ε regime (where the graphical Lasso connection lives) may require a different analytical approach.
 
-3. **Add a sentence justifying the scaling λ = λ₀ ε in Proposition 5** and note that the symmetry/positive-definiteness restriction, while needed for the graphical Lasso connection, is a genuine constraint on the original iOT problem.
+3. **Add experiments varying n.** A simple plot of recovery probability vs. n for fixed ε and λ would directly validate the sample complexity claim and strengthen the empirical section considerably.
+
+4. **Clarify the verifiability of the condition.** For the Gaussian case, explicitly state the conditions on Σ_α, Σ_β, and the graph structure under which the irrepresentability condition is guaranteed to hold (e.g., diagonally dominant Hessian). This would make the abstract condition more interpretable.
 
 ## Score and Decision
 
-**Originality:** High — first sparsistency theory for ℓ₁-iOT with novel connections to Lasso/graphical Lasso.  
-**Importance of question:** Moderate-to-high — iOT is a growing area and theoretical guarantees are scarce.  
-**Claims supported:** Mostly, but the exponential factor in Theorem 1 requires more transparent discussion.  
-**Soundness of experiments:** Adequate for a theory paper — numerics validate the certificate condition.  
-**Clarity of writing:** Good — the paper is well-structured and the key ideas are explained.  
-**Value to community:** Positive — opens a rigorous avenue for understanding sparse cost recovery in iOT.
+The paper tackles a genuinely difficult and important problem — providing recovery guarantees for inverse OT with sparse structure. The core ideas (generalized irrepresentability condition, certificate convergence, Gaussian case analysis) are novel and represent a meaningful theoretical step. However, the unaddressed centering mismatch creates a gap in the proof of the main result, and the exponential factor in the sample complexity bound is not contextualized, making it hard to assess the practical relevance of the guarantee. These issues are fixable but need to be addressed before the contribution stands as complete and trustworthy. I recommend a borderline decision: the paper has merit and should not be rejected outright, but requires major revision to close the centering gap and to provide a more honest assessment of the bound's limitations.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

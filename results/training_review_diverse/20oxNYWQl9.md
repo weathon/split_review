@@ -1,70 +1,26 @@
-Now I have a thorough understanding of the paper. Let me construct the final consolidated review.
+Now I have a thorough understanding of the paper and all review inputs. Let me produce the final consolidated review, carefully verifying each claim against the paper.
 
-## Summary
-2-3 sentence summary of the paper's contribution.
-
-## Strengths
-- strength 1 with evidence
-- strength 2 with evidence
-
-## Weaknesses
-### Fatal
-### Major
-### Minor
-### Trivial
-
-## Nice-to-Haves
-
-## Removed Points
-
-## Novel Insights
-
-## Suggestions
-
-## Score and Decision
-
-Let me now prepare the final answer.
-
-Key decisions about which criticisms to remove:
-
-**Critical Issue 1 (Harsh Critic): "The theoretical algorithm is never specified"** — REMOVE. The paper references "Algorithm 1" (line 256) and "algorithm 2" (line 245), which would be in the appendix. The parser strips appendices. The instructions say: "REMOVE weaknesses about missing appendix, missing proofs in appendix." The paper also provides a textual description of the algorithm's mechanics in lines 54-55, 227, and 260-261.
-
-However, I should note that the theory-practice alignment issue (Critical Issue 3) is separate and valid — the paper's experimental protocol does not clearly match the theory's query model. That stays.
-
-**Critical Issue 2:** KEEP as major. The baseline comparison is genuinely insufficient.
-
-**Critical Issue 3:** KEEP as major. The theory-practice gap is real and significant.
-
-**Critical Issue 4:** KEEP as minor. Missing experimental details.
-
-**Section-by-section notes:**
-- Abstract claim about multiplicative factor vs additive error: Minor presentation issue, KEEP as trivial.
-- Definition 3 never used: Minor, but it's scoped as an extension — not a real weakness. REMOVE.
-- Algorithm not proved: REMOVE (appendix).
-- Section 4 algorithm vague: The text does describe the algorithm (lines 227, 245). REMOVE or downgrade to minor.
-- Experiments details missing: KEEP as minor.
-
-**Strength Finder filtering:**
-- Supporting Strength 1 mentions "CIFAR10, SVHN, and other datasets" — SVHN is not in the paper. Only CIFAR-10 is named. I need to remove "SVHN" from that strength claim. But the core claim about outperformance on CIFAR-10 is supported by Figure 2. Let me rephrase.
-- The strength finder's "sublinear model-inference cost" claim matches the paper's Theorem 5.
-
-Let me also check: does the Strength Finder's "Empirical outperformance on neural network benchmarks" conflict with a verified weakness? Yes - the verified weakness is that the baseline comparison is insufficient. The strength says "outperforms" but the weakness says "only 2 baselines." These don't directly conflict - the paper could outperform those specific baselines while still needing more comparisons. The "outperforms state-of-the-art" claim is the issue, not whether it beats those two specific methods. I'll keep the strength but note the limitation.
-
-OK, let me now write the review.Now I have a complete understanding of the paper and can verify each reviewer claim against the actual text. Let me construct the consolidated review.
+---
 
 ## Summary
 
-This paper proposes a data selection algorithm combining k-means clustering with sensitivity sampling for coreset construction. The main theoretical contribution (Theorem 5) proves an additive error bound that scales with the $(k,z)$-clustering cost $\Phi_k(\mathcal{D})$ rather than the data diameter — a strict improvement over the $k$-center bound of Sener & Savarese (2018) — under a Hölder continuity assumption on the loss function that is more general than the Lipschitz assumption used in prior work. The paper claims the algorithm requires only $k + O(\varepsilon^{-2})$ model inferences (independent of dataset size $n$) and extends the approach to linear regression. Empirical results are shown on a UCI regression dataset and on CIFAR-10 (plus unnamed additional datasets) for neural network classification, comparing against uniform sampling and the $k$-center coreset method.
+This paper proposes a data selection algorithm that combines $(k,z)$-clustering with sensitivity sampling to select a representative subset of training data under Hölder continuity of the loss. The core theoretical result (Theorem 5) shows that with only $O(k + 1/\varepsilon^2)$ model inferences, the weighted average loss of the selected sample approximates the full-dataset average loss up to a multiplicative $(1\pm\varepsilon)$ factor plus an additive term $\varepsilon\lambda\Phi_k$, where $\Phi_k$ is the $k$-means clustering cost. The paper also provides an $r$-round adaptive extension (Theorem 6), a discussion of linear regression (Section 4), and experiments on CIFAR-10, MNIST, and a gas sensor regression dataset showing competitive or superior performance compared to uniform sampling, $k$-center coresets (Sener & Savarese, 2018), and leverage score sampling.
 
 ## Strengths
 
-- **Theoretical guarantee that scales with clustering cost rather than data spread.** Theorem 5 bounds the error as $\varepsilon(\sum\ell(e) + 2\lambda\Phi_k(\mathcal{D}))$ where $\Phi_k(\mathcal{D})$ is the $(k,z)$-clustering cost. This is strictly tighter than the $k$-center bound of Sener & Savarese (2018), which would translate to $n \cdot \lambda \cdot \max\text{-distance}$, making the new bound much more robust to outliers and tighter when data is clusterable (Section 1.1, Theorem 5). This directly addresses two of the four questions posed in the introduction (outlier sensitivity and weak bounds).
+- **Theoretical guarantee that improves on prior $k$-center coreset bounds**: Theorem 5 proves a bound where the additive error depends on the $(k,z)$-clustering cost $\Phi_k$, which can be much smaller than the $n \cdot \max\text{-distance}$ bound implied by the $k$-center approach of Sener & Savarese (2018). This directly addresses the outlier-sensitivity issue raised in the introduction, since $(k,z)$-clustering with small $z$ is more robust than $k$-center.
 
-- **Sublinear model-inference cost independent of dataset size.** The 1-round algorithm requires only $k$ queries to the loss function $\ell$ and outputs a sample of size $O(\varepsilon^{-2})$ (Theorem 5). The total inference cost is $k + O(1/\varepsilon^2)$, independent of $n$, improving over methods that must query the entire pool before selection (Section 1, bullet 3).
+- **Very low inference cost in terms of model loss queries**: The algorithm requires only $O(k + 1/\varepsilon^2)$ queries to the loss function (Theorem 5). This sublinear number of loss evaluations is a concrete advantage over methods that must query many or all points, and directly tackles the second limitation (costly inference) noted in Section 1.
 
-- **Generality beyond classification tasks.** The analysis applies to any loss function satisfying $(z,\lambda)$-Hölder continuity, not just classification cross-entropy losses. The paper explicitly extends the framework to linear regression (Section 4) and validates it on a UCI regression benchmark (Section 5.1), marking a clear advance over Sener & Savarese (2018) which was limited to classification.
+- **Principled lower bound motivating the adaptive approach**: Theorem 4 provides a lower bound showing that uniform sampling cannot achieve error better than $\varepsilon n \sup \ell$ under only Hölder continuity, theoretically justifying the need for adaptive sampling. The paper connects this to the proposed method in Section 3.2.
 
-- **Empirical improvement over the most directly relevant baseline.** On CIFAR-10 at $k=2000$, the proposed loss-based method reaches approximately 0.79 validation accuracy versus approximately 0.78 for the $k$-center coreset (Sener & Savarese 2018) and approximately 0.77 for uniform sampling, with bands of one standard deviation over 100 runs (Figure 2a). The improvement is consistent across sample sizes.
+- **General applicability beyond classification**: The paper formulates the problem for general loss functions (Definition 2), extends to linear regression (Section 4, Assumption 8), and shows experimental results on both classification and regression tasks. This addresses the fourth question from the introduction regarding limitations of prior work to classification only.
+
+- **Empirical outperformance on standard benchmarks**: On CIFAR-10 and MNIST, the proposed loss-based and gradient-based sampling consistently achieve higher validation accuracy than both uniform sampling and the $k$-center coreset of Sener & Savarese (2018), especially at small sample sizes (Figure 2). On the gas sensor regression task (Figure 1), clustering-based sampling performs nearly on par with leverage score sampling while being drastically faster.
+
+- **Novel synthesis of clustering and sensitivity sampling**: The combination of $(k,z)$-clustering with sensitivity sampling (Feldman & Langberg, 2011) for data selection is a genuinely different algorithmic idea from prior $k$-center coresets, validated both theoretically and empirically.
+
+- **Adaptive multi-round extension**: Theorem 6 shows that with $r$ rounds of $k$ queries each, the additive error can be reduced to $\varepsilon\lambda\Phi_{k\cdot i}$, providing a trade-off between query budget and round complexity.
 
 ## Weaknesses
 
@@ -73,68 +29,82 @@ None.
 
 ### Major
 
-- **The experimental baseline comparison is too narrow to support the claimed "state-of-the-art" positioning.** The neural network experiments compare only to uniform sampling and the $k$-center coreset method of Sener & Savarese (2018). The regression experiments compare only to uniform and leverage-score sampling. Many modern active learning and data-selection methods — such as BADGE, TypiClust, CoreSet++, or more recent coreset constructions — are not included. The paper's abstract and introduction claim to "outperform state-of-the-art methods" and "outperform classic data selection approaches," but this is unsubstantiated when only two baselines (one of which is the single most directly comparable predecessor) are evaluated. The claim should be scoped to "outperforms uniform sampling and the k-center coreset baseline."
+- **The regression section (Section 4) lacks theoretical guarantees**. Unlike the main classification setting, no theorem is provided for linear regression. The paper states assumptions (Assumption 8) and sketches an algorithm, but presents no bound of the form $\Delta(S) \leq \dots$. The empirical result on one dataset (gas sensor) is promising but stands without formal backing. This makes the regression contribution feel incomplete relative to the paper's stated goal of providing a "more generic data-selection algorithm."
 
-- **The experimental protocol does not align with the theoretical setup in a way that the paper does not acknowledge or reconcile.** The theory (Theorem 5) assumes an algorithm that makes exactly $k$ queries to the loss function $\ell$ and outputs a weighted sample. In the neural network experiments: (1) an initial model is trained on $k'$ points (requiring $k'$ forward passes, and more importantly $k'$ labels and training epochs), (2) $k''$-means clustering is run on embeddings from that model, (3) $\ell$ is evaluated on the $k''$ cluster centers ($k''$ queries), (4) $\ell$ is extrapolated to all points via a Hölder approximation, and (5) the final sample is drawn. The paper uses $k' = 0.2k$ and $k'' = 0.2k$, so the total loss queries are $k' + k'' = 0.4k$ — but more critically, the initial model training on $k'$ points involves a fundamentally different kind of computation (full training, not just querying $\ell$). The paper does not discuss whether the theoretical guarantee still applies to this empirical procedure, nor does it report results for a protocol that respects the theoretical query budget of exactly $k$ queries. This disconnect between the theory and the experiments is the paper's most significant structural gap.
+- **The experimental protocol for neural networks does not cleanly align with the theoretical setting.** In Section 5.2, the algorithm uses a warm-start model trained on $k' = 0.2k$ random points, then queries $k'' = 0.2k$ cluster centers for loss values, and extrapolates to sample the remaining points. This involves a multi-stage process (initial model training, then loss extrapolation) that goes beyond the single-round fixed-loss setting of Theorem 5. The paper does not clarify whether or how the theoretical guarantees apply to this warm-start, multi-stage procedure, nor does it isolate the effect of the sensitivity sampling component from the initial training phase.
+
+- **The claimed $\Delta(S)$ formulation is not fully justified as a proxy for the actual learning objective.** The paper claims (Section 2.1) that "proving a bound on $\Delta(S)$ implies the result of Sener & Savarese (2018) (under their assumption about the model loss)," but this claim is neither argued nor proven. Sener & Savarese's goal is to bound generalization error of a model *retrained* on the coreset, not just the empirical loss approximation on a fixed model. The paper's loss approximation guarantee does not directly translate to retraining guarantees without additional assumptions that are not stated. The paper acknowledges the definitional difference but overclaims the implication.
 
 ### Minor
 
-- **Key experimental datasets are not named.** The neural network experiments show results for "different datasets" (Figure 2a, 2b) with multiple subplots, but only CIFAR-10 is explicitly identified in the text (line 265). The identities of the other datasets are not provided, which hampers reproducibility and makes it impossible to assess the breadth of the empirical evaluation.
+- **The inference cost claim ($O(k + 1/\varepsilon^2)$) does not account for the cost of obtaining embeddings.** The paper claims only $O(k + 1/\varepsilon^2)$ inferences from the model, but to compute the clustering used in the algorithm, one needs embeddings for every data point. If these embeddings come from the model itself (e.g., last-layer representations), this requires a forward pass for all $n$ points, making the total cost $O(n + k + 1/\varepsilon^2)$. The paper does mention that embeddings might come from a "generic all-purpose embedding" model (line 120), but this cost is still nonzero and should be acknowledged for honest comparison with baselines.
 
-- **Essential experimental hyperparameters are omitted.** The paper does not specify: the model architecture used (e.g., ResNet? VGG? a simple CNN?), the optimizer, learning rate, training epochs, batch size, or how the Hölder constant $\lambda$ is set in the extrapolation formula $\widetilde{\ell}(e) = \ell(A(e)) + \lambda\|e - A(e)\|_2^2$ (line 260). Without these details, the neural network experiments cannot be reproduced.
+- **The theoretical bound's additive term ($\varepsilon\lambda\Phi_k$) is not discussed in practical regimes.** The bound is only meaningful when $\Phi_k$ (the clustering cost) is small relative to the total loss. The paper acknowledges this dependency but provides no discussion of when this holds (e.g., for well-clustered embeddings where classes are separable). Without this context, a reader cannot assess the practical relevance of the guarantee.
 
-- **The abstract's phrasing of the guarantee is imprecise.** The abstract claims a "multiplicative $(1\pm\varepsilon)$ factor," but Theorem 5 gives an additive bound of the form $\varepsilon(\sum\ell(e) + 2\lambda\Phi_k(\mathcal{D}))$, which contains a multiplicative component on $\sum\ell(e)$ plus an additive term in $\lambda\Phi_k$. The abstract's wording could mislead a reader into expecting a pure multiplicative guarantee.
+- **Algorithm pseudocode is referenced (Algorithm 1, Algorithm 2) but not present in the main text.** While the high-level procedure is described in prose (Section 1.1 and Section 5.2), the formal algorithms referenced in the paper are not included. This makes it harder for the reader to verify the exact procedure.
 
-- **The regression experiment sets $\zeta \to \infty$, making Assumption 8 (label Lipschitzness) vacuous.** The paper acknowledges this (line 245, "we set $\zeta\rightarrow\infty$, which has the effect that we only look at distances and not losses"), but this means the regression experiment tests an algorithm that discards the label-based part of the theory's assumption structure. The paper does not discuss whether the theoretical result still applies under this simplification.
+- **The lower bound (Theorem 4) is presented but not used to prove optimality.** The lower bound shows that uniform sampling fails without adaptive queries, which motivates the adaptive approach. However, no matching lower bound for the adaptive setting is provided, so the optimality of the proposed method is not established.
 
-- **No ablation studies.** The choices $k' = 0.2k$, $k'' = 0.2k$, and clusters = 10% of data (regression) are presented without any ablation or sensitivity analysis. The effect of these parameters on the accuracy-query trade-off is unknown.
+- **Minor notation issue in Theorem 5**: The bound states $\Phi_k(X)$ where the text later clarifies $\Phi_k(\mathcal{D})$ — a small inconsistency.
 
 ### Trivial
-
-- The abstract states "Lipshitz" (typo for Lipschitz, line 13) and Section 1.1 continues with "Ho¨lder" (non-standard rendering, likely a parser artifact).
+- Section numbering: Section 1.1 is used after Section 1, which is non-standard.
+- Theorem 4 states "there is a constant $c_{:}$" — a typesetting artifact.
 
 ## Nice-to-Haves
-
-- Include comparisons to at least 2-3 more recent data-selection methods to support the claim of outperforming state-of-the-art.
-- Provide a table with exact numerical results (mean and standard deviation) for all methods and dataset sizes, rather than relying solely on overlapping line plots.
-- Report wall-clock runtime in a table for all methods and all datasets, not just the single CIFAR-10 runtime comparison.
-- Study the effect of the number of clusters $k''$ and the Hölder exponent $z$ on empirical performance.
-- Discuss how $\lambda$ and the $(k,z)$-clustering cost are estimated in practice, since the experiments use these quantities without explicit computation.
-- Consider an experiment that respects the exact theoretical query budget ($k$ queries, no initial training phase) to validate the theoretical claim directly.
+- A brief discussion of regimes where $\Phi_k$ is small (e.g., scaling laws for well-separated clusters) would help contextualize the bound.
+- An ablation isolating the effect of sensitivity sampling vs. clustering alone would strengthen the experimental evaluation.
+- Reporting the cost of embedding computation alongside inference cost would give a more complete picture of computational requirements.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+- **"Algorithm not specified in main text — fatal omission"** (Harsh Critic #1, severity downgraded): The algorithm IS described at a high level in Section 1.1 and concretely in the experimental protocol (Section 5.2). The formal pseudocode (Algorithm 1, Algorithm 2) was likely in the appendix, which the parser strips from all papers. The description is adequate to understand the method. Remains as a **minor** weakness about pseudocode not being in main text, not a fatal omission.
 
-- **"The theoretical algorithm is never specified" (Harsh Critic's Critical Issue 1):** The paper references "Algorithm 1" (line 256) and "algorithm 2" (line 245), which would appear in the appendix. The parser strips appendices from all papers. The main text also provides textual descriptions of the sampling procedure (lines 54-55, 227, 260-261). Per instructions, weaknesses about missing appendix content are removed.
+- **"Circularity in theoretical guarantee"** (Harsh Critic #2): This criticism misunderstands the bound. The expression $\Delta(S) \leq \varepsilon(\sum\ell(e) + 2\lambda\Phi_k)$ is a standard multiplicative-plus-additive guarantee, not circular. The total loss appearing on both sides is by design — it defines a relative error bound. This is not a weakness.
 
-- **"Section 3 theorems are stated but not proved":** Proofs would be in the appendix, which is stripped by the parser. Removed.
+- **"Lower bound not connected to the rest of the paper"** (Harsh Critic "Other Observations"): Section 3.2 explicitly states "The lower bound on $\Delta(S)$ in theorem 4 shows is that one must sample more carefully if good guarantees are desired." The connection is clearly stated. Removed as factually incorrect.
 
-- **"Definition 3 (r-adaptive) is never used"**: This is scoped as an extension and not central to the paper's claims. Not a genuine weakness.
+- **"The $k$-center guarantee translates into $n \cdot \lambda \cdot \max$"** — the reviewer's own comparison with $k$-center actually supports the paper's claim about improved robustness. Not a weakness.
 
-- **"The paper should also cover Y / domain Z / additional tasks" demands**: Demands for additional tasks beyond the paper's stated scope are removed per instructions.
+- **"Missing related works"**: Per instructions, I cannot verify this without external sources.
 
-- **Formatting nitpicks** about parser artifacts: Removed.
-
-- **Strength Finder's claim about "SVHN" datasets**: The paper does not name SVHN; this appears to be an AI hallucination in the strength finder. The strength of "empirical outperformance" is retained but scoped only to the datasets actually reported (CIFAR-10).
+- **"Typo in X vs D"** (originally presented as a sign of sloppiness): Downgraded to Trivial as a minor notation inconsistency.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a recurring tension in core-set active learning papers: the theoretical framework assumes a clean query model (exactly $k$ loss evaluations), but the practical implementation of any clustering-based method inevitably requires additional computation (initial model training, clustering, extrapolation) that falls outside the formal query model. The paper does not address this gap, and neither do the reviews identify a way to resolve it — they merely flag the inconsistency. This tension is a known issue in the field rather than a novel observation.
+None beyond the paper's own contributions. The combination of clustering and sensitivity sampling with Hölder continuity assumptions is itself the main novel contribution.
 
 ## Suggestions
 
-1. **Reconcile the theory and experiment.** The most critical revision is to clearly state whether the experimental method is a faithful instantiation of the theoretical algorithm or a heuristic variant. If the latter, rename it accordingly, adjust the claims, and discuss why the theoretical guarantee might still approximately hold. Alternatively, design an experiment that respects the exact $k$-query budget of Theorem 5.
+1. **Include a formal algorithm statement in the main text** (even a brief pseudocode box) detailing the 1-round procedure: (a) compute $(k,z)$-clustering, (b) query loss on centers, (c) extrapolate via Hölder continuity, (d) sample remaining points via sensitivity sampling. This would remove ambiguity.
 
-2. **Expand the baseline comparison.** Include at least 2-3 modern data-selection methods (e.g., BADGE, TypiClust, or a coreset method beyond $k$-center) to substantiate the claim of outperforming current approaches. Scope the claims to match the baselines actually evaluated.
+2. **Acknowledge and discuss the cost of embedding computation** explicitly. Clarify that the $O(k + 1/\varepsilon^2)$ claim refers specifically to loss-function inferences, and state the additional cost incurred for embeddings in the total runtime.
 
-3. **Complete the experimental reporting.** Name all datasets used in the neural network experiments. Report model architecture, optimizer, learning rate, epochs, batch size, and the value of $\lambda$ used. Provide a table with mean and standard deviation of accuracy for all methods at each sample size.
+3. **Either provide a theorem for the regression setting or explicitly scope it as empirical only.** The current Section 4 promises theoretical backing ("Following our theoretical analysis in Section 4") but delivers none.
 
-4. **Clarify the abstract's guarantee format.** Rephrase to match the actual bound in Theorem 5, e.g., "approximates the total loss to within an additive error of $\varepsilon(\sum\ell(e) + 2\lambda\Phi_k)$" rather than "up to a multiplicative $(1\pm\varepsilon)$ factor."
+4. **Discuss regimes where $\Phi_k$ is practically small** (e.g., separable classes in embedding space, scaling with $k$ for natural data distributions) to ground the additive term in the theoretical bound.
+
+5. **Clarify the relationship between the experimental warm-start protocol and the theoretical guarantees**, or explicitly note that the experiments go beyond the theory's assumptions.
+
+---
 
 ## Score and Decision
 
-The paper presents a genuinely novel theoretical contribution — replacing the $k$-center-based diameter-dependent bound with a clustering-cost-dependent bound under Hölder continuity — and the core idea of combining k-means with sensitivity sampling for data selection is sensible and well-motivated. However, the paper has two significant structural weaknesses that prevent acceptance in its current form: (1) the experimental evaluation is too narrow (only two baselines, with no modern comparators) to support the claimed state-of-the-art positioning, and (2) there is a clear disconnect between the theoretical algorithm (exactly $k$ queries) and the experimental implementation (initial training + clustering + extrapolation + sampling) that is neither acknowledged nor reconciled. Additionally, several experimental details necessary for reproducibility are missing (unnamed datasets, omitted hyperparameters, undefined $\lambda$). The theoretical contribution is valuable and could form the foundation of a strong paper, but the current manuscript does not adequately validate or communicate it.
+**Originality**: Strong. The synthesis of $(k,z)$-clustering with sensitivity sampling for data selection under Hölder continuity is novel and well-motivated.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+**Importance**: High. Data selection and coreset construction are central problems in efficient training of large models.
+
+**Claims support**: Moderate. The theoretical claims are clear and plausible but would benefit from formal algorithm statements. The experimental support is promising but the protocol diverges from the theoretical setting.
+
+**Soundness**: Moderate. The theory appears sound based on the stated results, though proofs are absent from the main text (likely in the appendix). The empirical methodology is reasonable but lacks ablations to isolate contributions.
+
+**Clarity**: Fair. The high-level ideas are clear, but the lack of algorithm pseudocode and unclear relationship between theory and experiments reduce clarity.
+
+**Value**: Good. The approach is a principled alternative to $k$-center coresets with clear advantages in outlier robustness and theoretical generality.
+
+The paper has genuine contributions — a novel algorithmic idea with theoretical backing and promising empirical results. The weaknesses are real but not fatal: the regression section lacks theoretical closure, the experimental protocol doesn't cleanly match the theory, the embedding cost is unaccounted for, and algorithm pseudocode should be in the main text. These are addressable with revision.
+
+**Score**: 6.0 — A solid paper with clear contributions and room for improvement in presentation and completeness.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

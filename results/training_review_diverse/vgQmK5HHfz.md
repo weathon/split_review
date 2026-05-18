@@ -1,80 +1,72 @@
-Now I have a thorough understanding of the paper and can verify every claim. Let me compile the final consolidated review.
+Now I have all the information I need. Let me write the consolidated review.
+
+---
 
 ## Summary
 
-The paper proposes NDoE-BNAF, a mutual information estimator combining the difference-of-entropies (DoE) framework with a single block-autoregressive normalizing flow (B-NAF) that jointly parametrizes the marginal entropy H(X) and conditional entropy H(X|Y) through a deactivation mechanism. The key innovation is using one architecture for both terms rather than training separate generative models, which the authors show reduces bias compared to separately trained flows. The method is evaluated on correlated, cubic-transformed, and sparse Gaussian benchmarks across dimensions 20–100 and sample sizes 32K–128K.
+This paper proposes a mutual information estimator based on the difference-of-entropies (DoE) formulation, using a single block autoregressive normalizing flow (B-NAF) to jointly estimate both \(H(X)\) and \(H(X \mid Y)\). The key idea is to "deactivate" off-diagonal weight blocks in the autoregressive architecture to switch between marginal and conditional density estimation within the same network. Experiments on correlated Gaussian, cubic-transformed Gaussian, and sparse Gaussian data (20–100 dimensions, 32K–128K samples) show lower bias than discriminative methods (MINE, SMILE, InfoNCE, NWJ) and in some settings improvement over separately trained flows.
 
 ## Strengths
 
-1. **Joint parametrization via block-autoregressive flows is a clean and well-motivated idea.** The deactivation mechanism (zeroing off-diagonal weight blocks) elegantly reuses the same flow architecture to estimate both H(X|Y) with the full network and H(X) after deactivation. The B-NAF architecture's triangular Jacobian makes this operation straightforward, and the paper explains the 2D and general nD cases (Section 3, lines 204–232).
+- **Novel application of B-NAF to joint entropy estimation.** Exploiting the block autoregressive structure to switch between marginal and conditional estimation within a single architecture is a clever design choice. The paper correctly identifies that the B-NAF's block-diagonal weight structure enables a natural "deactivation" operation (lines 197, 216–217, 232) that separate-flow approaches cannot offer, and this is well-motivated.
 
-2. **Empirical reduction of bias vs. separately trained flows on Gaussian benchmarks.** The paper directly compares NDoE-BNAF against BNAF (two separately trained flows) and shows that the separate approach "exhibits a slight bias across all true MI values" especially in cubic-transformed cases where "BNAF shows a larger bias when MI is close to zero, an issue not observed with NDoE-BNAF" (Section 4.1, line 249). This provides direct evidence for the core claim that joint estimation improves bias.
+- **Consistently lower bias than discriminative methods on tested settings.** On correlated Gaussian, cubic Gaussian, and sparse Gaussian benchmarks across 20-, 50-, and 100-d data, the proposed NDoE (B-NAF) estimator shows smaller estimation errors than MINE, SMILE, InfoNCE, NWJ, and DoE with simple parameterizations (Section 4.1, results paragraph). The underestimation pathology of discriminative methods is documented and the proposed method avoids it in the Gaussian case and mitigates it in the cubic case.
 
-3. **Consistent outperformance of discriminative lower-bound estimators.** Across all settings (correlated, cubic, sparse Gaussians), discriminative methods (InfoNCE, MINE, SMILE, NWJ, DEMI, DoE) systematically underestimate MI, while NDoE-BNAF produces estimates much closer to the true value (Section 4.1, line 248). This is a clean demonstration that generative DoE approaches can overcome the known downward bias of variational lower-bound methods.
-
-4. **Honest acknowledgment of limitations.** The conclusions explicitly discuss dependence on Gaussian base distributions, stability issues, and the need for future comparison with DINE, Butakov et al., and MINDE (Section 5, lines 251–254). This transparency is commendable and helps readers understand the scope of the contribution.
+- **Joint architecture reduces bias compared to separately trained flows in some regimes.** The paper compares against BNAF (two separate flows for each entropy) and finds that NDoE (B-NAF) exhibits less bias for smaller sample sizes and for cubic cases near zero MI (lines 248–249). This supports the claim that joint estimation helps, though the advantage is not universal (BNAF outperforms on sparse Gaussian for larger MI).
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **No empirical comparison with the most directly related generative MI estimators.** The paper cites DINE (Duong & Nguyen, 2023), the flow-based estimator of Butakov et al. (2024), and MINDE (Franzese et al., 2024) in the introduction and acknowledges them as "other generative approaches" to compare with, but defers all such comparisons to future work (lines 34, 253–254). Since these methods share the generative philosophy and represent the most relevant baselines, the paper cannot substantiate its claimed advantages over "state of the art methods" without evaluating against them. The comparison against separately trained BNAF is a helpful ablation, but it does not substitute for comparison against published generative MI estimators that also achieve strong Gaussian performance.
+- **Joint estimation procedure is underspecified, undermining the core claim.** The paper's central contribution is a single network that estimates both \(H(X)\) and \(H(X \mid Y)\) via a "deactivation" mechanism. However, the paper does not clearly specify:
+  - Whether the two entropy estimates come from independently trained parameter subsets or a single network with shared parameters that are updated under both objectives.
+  - How the deactivation mask is applied (hard zero during both forward and backward passes, or during inference only?).
+  - Whether training is sequential (train for \(H(X)\) first, then for \(H(X \mid Y)\) keeping diagonal weights fixed) or interleaved.
+  
+  The text hints at a sequential approach: "one can begin with a network that approximates \(H(X)\) and then optimize the off-diagonal weights to obtain an approximation of \(H(X|Y)\)" (line 216–217). But this is not formalized in the algorithm description. Since the DoE formula \(I = \inf_{q_X} Q(p_X, q_X) - \inf_{q_{X|Y}} Q(p, q_{X|Y})\) requires **separately optimized** infima, it is unclear whether the paper's shared-parameter approach actually yields a valid DoE estimator. Without this clarification, the theoretical grounding (unbiasedness, consistency) of the method is unverifiable.
 
-2. **No uncertainty quantification despite reporting "10 runs."** The paper states "All results were computed over 10 runs on the testing sets generated with different random seeds" (line 247) but reports results only as point estimates (estimation error I−Î) in narrative form. No error bars, standard deviations, or confidence intervals are presented for any experiment. Given that the paper's central claim is "better performance," the absence of variance information makes it impossible to assess whether differences between methods are statistically significant or merely noise across runs. This is a fundamental omission for an empirical comparison paper.
+- **Experimental validation is limited in scope and reporting.** All experiments are on Gaussian-derived distributions (correlated Gaussian, cubic-transformed Gaussian, sparse Gaussian). True non-Gaussian benchmarks from Czyż et al. (2023) beyond the sparse Gaussian variant are not evaluated. The cubic transformation does create non-Gaussian data (the reviewer's claim that it "remains close to Gaussian in structure" is incorrect — applying \(y \to y^3\) to a Gaussian produces a heavily skewed distribution), so this limitation is partial. However, the absence of results on multimodal, discrete, or more complex synthetic benchmarks means the paper's claim of "better performance across different dimensionalities and sample sizes" is only supported within the Gaussian family. Additionally, results are reported only in figures (stripped in the provided text) without tables of mean and standard deviation, and no runtime comparison with baselines is provided.
+
+- **Insufficient algorithmic detail for reproduction.** Algorithm 1 is referenced but its content is not described in sufficient text detail. Key specifics are missing: how the base distribution's parameters are set (fixed standard normal or learned), how the entropy of the base is incorporated into the final MI estimate, how the "deactivation" interacts with the optimizer (single optimizer or separate, how the two loss terms are balanced). These gaps make independent implementation and verification difficult.
 
 ### Minor
 
-3. **The training procedure is incompletely specified.** While the paper describes the architecture and the deactivation mechanism conceptually, two key specifics are missing: (a) the cost function **L₂** for H(X) is referenced ($\mathcal{L}_{2}$, line 230) but never written as an equation — the reader must infer it; (b) it is unclear whether the two objectives are optimized jointly (gradients from both at each step) or sequentially, and how the deactivation is applied during training (at initialization only, or toggled). Algorithm 1 is referenced but its content is not present in the parsed main text; even so, the surrounding text leaves ambiguity about the training dynamics. This hampers reproducibility.
+- **Claims of unbiasedness and consistency are stated without support.** The abstract and introduction claim "an unbiased and consistent mutual information estimator" (lines 4, 18). The DoE framework provides these properties asymptotically if the density models are sufficiently expressive, but the paper provides no analysis of how finite capacity, non-convex optimization, and the joint training procedure affect bias. A convergence plot (error vs. sample size) would substantiate the consistency claim but is absent.
 
-4. **The "improved bias-variance trade-offs" claim is asserted but not empirically supported.** The abstract (line 4) invokes improved bias-variance trade-offs, yet the experiments report only aggregate estimation error (I−Î) with no decomposition into bias and variance components. There is no analysis of estimator variance across runs, no comparison of the variance of NDoE-BNAF vs. discriminative methods, and no ablation isolating how the joint parametrization affects variance. The paper attributes improvements to joint estimation, but the mechanism (bias-variance trade-off) is not demonstrated.
-
-5. **Evaluation is restricted to Gaussian-based synthetic benchmarks.** The experiments cover correlated Gaussians, cubic-transformed Gaussians (non-linear but still Gaussian-derived), and sparse Gaussians. While these are standard in the MI estimation literature, the paper claims broad applicability but tests no non-Gaussian or real-world data. The cubic transformation is a step toward non-linearity, but the base distribution remains Gaussian, and the method's reliance on a Gaussian base distribution is itself a limitation the authors acknowledge. The Czyż et al. (2023) benchmarks, cited in the introduction, would have provided more challenging and diverse test cases.
-
-6. **No computational cost or parameter count comparison.** The discriminative methods and the flow-based method use fundamentally different architectures, yet the paper reports neither parameter counts nor runtime. The text notes B-NAF uses "roughly the same [hidden dimensions] as the 512 hidden units in discriminative methods" (line 246), but this is a loose comparison. Given that normalizing flow training is typically more expensive, reporting computational cost would help practitioners assess the practical trade-off.
+- **No runtime or computational cost comparison.** Normalizing flows require Jacobian determinant computations, which are more expensive per iteration than discriminative methods. The paper gives no wall-clock time or FLOPs comparison, making it difficult for practitioners to assess the trade-off.
 
 ### Trivial
 
-- The proof of Lemma 2.1 (lines 87–93) is standard and could be shortened or deferred to an appendix without loss.
-- The paper mentions "long-run training experiments" (lines 241, 249) that are not present in the parsed text (they may be in the appendix, which the parser strips). If they exist, the main paper should summarize key findings; if they do not, the claim is unsubstantiated.
+- The paper notes that Real NVP "failed to achieve realistic results" on sparse Gaussian data (line 249) but does not analyze why. A brief diagnostic would be helpful.
+- The parameter count comparison between the flow and discriminative MLPs is described as "roughly the same" (line 247) without exact counts.
 
 ## Nice-to-Haves
 
-- **Separate bias/variance decomposition** for at least one representative setting (e.g., 20-d Gaussian at varying sample sizes) to directly support the "bias-variance trade-offs" claim in the abstract.
-- **Non-Gaussian benchmarks** from Czyż et al. (2023) to test whether the method's good performance generalizes beyond Gaussian-derived data, especially given the acknowledged limitation of Gaussian base distributions.
-- **Runtime and parameter count tables** for all methods to enable practical comparison.
-- **Error bars** on all figures as standard practice for any multi-run experiment.
+- A convergence plot (estimation error vs. sample size) for a fixed dimension would help support the consistency claim.
+- A controlled comparison isolating the benefit of joint architecture from the benefit of using normalizing flows: compare NDoE (B-NAF) against two separately trained B-NAF flows (already done as "BNAF") — this exists. The authors should explicitly discuss this comparison and its implications for the joint architecture's advantage.
+- A brief analysis of the sign of the MI estimate: is the constraint \(I \ge 0\) (i.e., \(H(X) \ge H(X \mid Y)\)) enforced or checked? How often are violations observed?
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
-
-- **"The long-run training experiments... are not present in the extracted text."** — These may reside in the appendix, which the parser strips. The claim about their absence cannot be verified from the available text.
-- **"Algorithm 1 (referenced but not textually defined)"** — Algorithm 1 is likely presented in a figure/box that the parser strips. The surrounding text describes its motivation. However, the related point about L₂ not being explicitly defined is retained as valid.
-- **"The proof is not needed in the main text"** — This is a stylistic preference, not a substantive weakness. Moved to Trivial.
-- **Strength Finder's claim of "comprehensive evaluation across multiple challenging settings"** — Overstated given the Gaussian-only scope and the absence of comparisons with other generative estimators. The evaluation is methodical within its narrow scope but not comprehensive in the broader sense.
-- **Strength Finder's claim of "theoretical guarantee of convergence"** — The paper states this as a claim (line 251) but provides no formal theorem, proof, or convergence rate. It is a stated property of the DoE framework with sufficient capacity, not a novel theoretical contribution with proof.
+- **"Comparison to natural baselines is missing"**: The paper already includes BNAF (two separate flows) as a baseline (line 245, item 6), which directly tests the benefit of joint vs. separate estimation. The DoE baseline with simple parameterizations is standard from McAllester & Stratos (2018). This criticism is not factually supported.
+- **"Proof of Lemma 2.1 contains unjustified steps"**: The proof (lines 87–93) is present and correct. The derivation from \(Q(p,q)\) to \(H(X|Y) + D_{\mathrm{KL}}(p \parallel \tilde{q})\) uses the identity \(Q(p, \tilde{q}) = H(X,Y) + D_{\mathrm{KL}}(p \parallel \tilde{q})\) for the joint density \(\tilde{q}(x,y) = q(x|y)p_Y(y)\), which follows from Equation 2. The steps are compact but valid.
+- **"Choice of \(H(X)-H(X\mid Y)\) rather than \(H(Y)-H(Y\mid X)\) is not motivated"**: Either factorization is equally valid; this is not a weakness.
+- **"Figures are not visible"**: This is a PDF parser artifact, not an author error. The original submission contains the figures.
+- **"Cubic transformation does not change the distribution structure"**: This is incorrect — applying an element-wise cubic transformation to a Gaussian variable produces a heavily skewed, non-Gaussian distribution with substantially different tail behavior. The cubic experiment is a meaningful non-Gaussian test.
 
 ## Novel Insights
 
-The key insight from the reviews that goes beyond the paper's own narrative is that the paper's primary empirical contribution — showing that joint parametrization reduces bias vs. separate flow training — is a reasonable ablation, but the paper overclaims by not comparing against the most directly related generative methods (DINE, Butakov et al., MINDE) that also use density-estimation approaches to MI. The reviewers collectively see a method that is well-motivated and mechanically sound but insufficiently differentiated from the existing generative MI literature. The paper's honesty about limitations is a strength, but it also highlights that the current contribution is preliminary: the architecture is novel, but the evidence that it advances the state of the art is incomplete.
+None beyond the paper's own contributions. The reviews do not surface an observation about the paper that the paper itself does not already state or imply.
 
 ## Suggestions
 
-1. **Add comparisons with DINE, Butakov et al. (2024), and MINDE** — these are the most directly related methods and must be included before claiming superiority over generative approaches.
-2. **Report error bars** (e.g., ±1 std over 10 runs) in all figures and numerical results. This is a minimal standard for any multi-run experiment.
-3. **Define L₂ explicitly** and clarify whether training is joint, sequential, or alternating. Specify how the deactivation mask is applied during optimization (gradient masking, weight zeroing, or architectural separation).
-4. **Include at least one non-Gaussian benchmark** (e.g., from Czyż et al., 2023) to demonstrate robustness beyond Gaussian-derived data.
-5. **Add a bias/variance decomposition** for a representative experiment to substantiate the "bias-variance trade-offs" claim in the abstract.
+1. **Specify the training procedure in full detail.** Clearly describe: (a) whether training is sequential (first diagonal-only for \(H(X)\), then full network for \(H(X \mid Y)\)) or joint; (b) whether the diagonal weights are frozen during the conditional training phase; (c) how the mask is applied (hard zero during forward/backward); (d) the exact form of the loss for each phase; (e) how the base distribution parameters are set and how base entropy is computed.
+2. **Provide quantitative tables** with mean and standard deviation of estimation error across 10 runs for each configuration, and a convergence plot (error vs. sample size) for at least one dimension.
+3. **Expand experimental validation** to at least one non-Gaussian benchmark from the Czyż et al. (2023) suite that does not derive from a Gaussian base distribution, to demonstrate the method works beyond the Gaussian family.
+4. **Add a runtime comparison** (wall-clock time per epoch or total training time) against at least the discriminative baselines.
+5. **Tone down the unbiasedness/consistency claims** or provide explicit analysis of the conditions under which they hold for the joint architecture.
 
 ## Score and Decision
 
-The paper's core idea — joint parametrization of H(X) and H(X|Y) via a deactivated block-autoregressive flow — is sensible and well-motivated. The empirical comparison against separately trained BNAF provides a clean ablation showing bias reduction. However, the evaluation is too narrow to support the broad claims of state-of-the-art performance: the most directly related generative competitors are not compared against, results lack any uncertainty quantification, and the experimental scope is limited entirely to Gaussian-derived data. The training procedure description has gaps that hurt reproducibility. These are not fatal flaws (the method itself is sound), but they substantially weaken the contribution's significance in its current form. With major revisions — especially adding comparisons to other generative MI estimators and uncertainty quantification — the paper could become a solid contribution.
-
-**Score:** 5.0
-**Decision:** Reject
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+**MY FINAL SCORE: <pineapple>5.0</pineapple>**
+**MY FINAL DECISION: <orange>Reject</orange>**

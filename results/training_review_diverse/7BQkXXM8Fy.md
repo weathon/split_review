@@ -1,22 +1,18 @@
-Now I have all the information I need. Let me verify the key claims against the paper and write the consolidated review.
-
----
+Now I have a thorough grasp of the paper and can verify the reviewer claims. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper presents a systematic empirical study of design choices for diffusion planning in offline reinforcement learning, training over 6,000 models to investigate four key components: guided sampling algorithms, network architecture, action generation methods, and planning strategies. It identifies several counterintuitive findings (e.g., unconditional Monte Carlo sampling with selection can outperform guided sampling, Transformer outperforms U-Net as the denoising backbone, jump-step planning is beneficial) and distills them into a simple baseline method (Diffusion Veteran). The paper should be evaluated as an empirical investigation/design-space study, not as a novel-algorithm paper.
+This paper conducts a large-scale empirical study (6,000+ trained models) to identify the key design components of diffusion planners for offline RL. The authors systematically analyze guided sampling algorithms, network architectures, action generation strategies, and planning horizons, culminating in the Diffusion Veteran (DV) baseline that achieves state-of-the-art results on D4RL benchmarks. The paper provides several counterintuitive findings — e.g., Monte Carlo sampling with selection outperforms guided diffusion, Transformer surpasses U-Net, and jump-step planning beats dense-step planning — along with practical takeaways for practitioners.
 
 ## Strengths
 
-1. **Large-scale systematic investigation.** The paper trains and evaluates over 6,000 diffusion models across four key design dimensions — far exceeding the scale of any prior study in diffusion planning. This provides a broad empirical foundation for the conclusions (abstract, Section 4).
+1. **Comprehensive, large-scale systematic ablation.** The paper trains and evaluates over 6,000 models across multiple design axes (Section 3.2), using a control-variable methodology to isolate the effect of each component. The scale of this empirical effort is a genuine strength and directly supports the paper's claim of providing a thorough dissection of diffusion planning.
 
-2. **Counterintuitive and practically useful findings.** The paper identifies several design choices that contradict common practice: (a) unconditional Monte Carlo sampling with selection (MCSS) can outperform classifier/classifier-free guidance when datasets contain sufficient near-optimal trajectories (Section 4.5, Fig. 7); (b) Transformer outperforms U-Net as the denoising backbone, especially on long-horizon tasks (Section 4.3, Fig. 5a); (c) jump-step planning consistently beats dense-step planning (Section 4.2, Fig. 4). Each finding is backed by controlled experiments with error bars.
+2. **Counterintuitive, actionable findings.** Several results run counter to common practice in the field: MCSS > CG/CFG (Section 4.5), Transformer > U-Net (Section 4.3), jump-step > dense-step planning (Section 4.2), and "separate" action generation > "joint" (Section 4.1). These are specific, evidence-backed insights that advance understanding beyond what individual prior works offer.
 
-3. **Value-distribution analysis providing mechanistic insight.** Beyond raw performance numbers, Figure 7(b) plots the value distribution of data across environments and shows a clear correlation: MCSS works when the dataset contains substantial near-optimal trajectories, while CFG is preferable when most data is suboptimal. This hypothesis-generating analysis gives readers a tool to predict which guidance method suits their setting.
+3. **Strong baseline (DV) with clear specification.** Diffusion Veteran achieves state-of-the-art on standard D4RL benchmarks (Table 1, referenced in Section 4), and the pseudocode in Algorithm 1 makes the method fully reproducible. This provides the community with a simple, strong reference point.
 
-4. **Concrete, actionable takeaways.** Section 4.8 distills the findings into seven specific, non-obvious practical tips (e.g., "use inverse dynamics for action generation," "try jump-step planning," "try Transformer for long-horizon tasks"). These make the results immediately useful for practitioners and future researchers.
-
-5. **Honest discussion of limitations and future work.** Section 5 provides a balanced discussion of the computational cost, the System 1/System 2 framing (appropriately caveated as an analogy), and open problems — showing awareness of the paper's scope and boundaries.
+4. **Mechanistic interpretation via attention visualization.** Figure 5(b) provides an empirical look into why Transformers outperform U-Nets, showing that the model learns invariant long-range dependencies across different planning strides. This goes beyond mere benchmarking to offer some explanatory insight.
 
 ## Weaknesses
 
@@ -25,60 +21,55 @@ None.
 
 ### Major
 
-1. **Imprecise state-of-the-art claim that is partially contradicted by the paper's own results.** The abstract claims DV "achieves state-of-the-art results on standard offline RL benchmarks" and Section 4 states DV "outperforms all previous diffusion planning and diffusion policy methods." However, Figure 8 explicitly shows that DQL (a diffusion policy method) outperforms DV on MuJoCo locomotion tasks, and the paper acknowledges this in the caption. While DV may be SOTA on Kitchen/Maze2D/AntMaze collectively, the blanket phrasing in the abstract and Section 4 is inconsistent with the nuanced results presented in Figure 8. This needs to be qualified per task family.
+1. **Component analysis starts from a single best model — generalizability of "insights" is unverified.** The core methodology (Section 3.2, step 2) identifies the single best model via grid search + manual tuning, then varies one component at a time from that configuration. While this is described as a "control variable method," it does not guarantee that the reported preference directions (Transformer > U-Net, separate > joint, jump-step > dense-step) would hold when starting from a substantially different base configuration. The paper's "insights" are presented as general design principles (Section 4.8), but they have only been verified from one reference point. A more robust approach would check whether preferences directionally agree across a few distinct reasonable base models. The cross-task validation partially mitigates this, but it does not fully address the concern that interactions between components may be specific to the chosen configuration.
 
-2. **Insufficient reporting of basic experimental methodology for an empirical study.** The paper repeatedly shows "error bars" but never states whether they are standard deviations across random seeds, across rollouts, or something else. The number of random seeds used is not reported anywhere in the visible text. While the paper explicitly says it excludes "common deep learning hyperparameters such as learning rates" (Section 3) and likely places numerical results in the appendix (reference to Table 10), the omission of seed counts and error-bar definitions from the main paper is a significant gap for an empirical study that positions itself as "a solid starting point." For example, how many seeds were used for the key result that Transformer outperforms U-Net in 8/9 subtasks? Without this information, the reader cannot assess the statistical reliability of the findings.
+2. **Insufficient statistical rigor for comparative claims.** The paper mentions error bars only in the caption of Figure 5 (and refers to an appendix table for numerical results). For the remaining experiments (Figures 3, 4, 6, 7, 8), it is unclear whether results reflect single runs or multiple seeds. Given the well-known variance of offline RL evaluation, single-run comparisons are insufficient to support the paper's comparative claims — especially because some differences (e.g., CG vs. CFG in Figure 7) appear small. The paper should systematically report multi-seed statistics (mean ± std over at least 3-5 seeds) for all experimental conditions or clearly acknowledge which results are from single runs.
+
+3. **Adroit validation is essentially absent.** Section 4.7 claims the findings generalize to the Adroit Hand dataset but provides no numerical results whatsoever — just a single sentence stating consistency. Given that Adroit involves high-degree-of-freedom manipulation and is the paper's main cross-domain generalization evidence, the absence of any quantitative support weakens this claim significantly. Even a supplementary table of results would suffice.
 
 ### Minor
 
-1. **Control-variable analysis anchored on a single best configuration limits generalizability.** The paper's three-step procedure (Section 3.2) finds one best model via search, then varies one component at a time from that configuration. This is a standard ablation approach, but the paper does not demonstrate that its key conclusions (e.g., Transformer > U-Net, MCSS > guidance) hold when starting from different base configurations. For instance, the finding that MCSS outperforms CG/CFG (Section 4.5) may depend on properties of the chosen critic function or sampling budget N in the DV configuration. Replicating the main conclusions from 2–3 different base configurations would substantially strengthen confidence in their generality.
+1. **The critic used for MCSS plan selection is not ablated.** Algorithm 1 trains a critic (V_φ) that scores candidate plans. The quality of this critic and its potential for value overestimation are not analyzed. Since MCSS is one of the paper's central findings (Section 4.5), understanding how sensitive the result is to critic quality would strengthen the conclusion.
 
-2. **Adroit validation (Section 4.7) contains zero quantitative results.** The subsection states findings are "consistent with our findings" but provides no numbers, table, or figure. For a paper that claims generalizability, this is a gap. Even a brief summary table would suffice.
+2. **Computational cost is acknowledged but not quantified.** The Discussion (Section 5) notes the computational cost is "substantial" but provides no actual figures (GPU hours, number of parameters, inference cost with N candidates). For practitioners considering adopting DV, this information would be directly relevant.
 
-3. **Attention weight analysis is over-interpreted relative to the evidence.** The paper argues that "attention length × stride ≈ constant" from Figure 5(b) and that this shows "invariant correlations across the stride, contributing to the generalization performance." This interpretation is based on visual inspection of attention patterns from a *single* Transformer on a *single* task (Kitchen). The paper acknowledges more study is needed ("In-depth study will be needed to fully understand..."), but the strength of the language in the main text ("invariant correlations contributing to generalization") exceeds what one anecdotal example supports.
-
-4. **Comparison limited to a single diffusion policy method.** The comparison in Section 4.6 contrasts DV (diffusion planning) only with DQL as a representative of diffusion policy. While this is defensible given the paper's focus on planning, the claim that DQL is "the representative" of diffusion policy methods is not justified — methods such as IDQL, Diffusion-QL, and others exist. This does not invalidate the paper's findings, but the reader should interpret the diffusion-planning-vs.-diffusion-policy comparison as a preliminary observation rather than a comprehensive analysis.
+3. **Diffusion planning vs. policy comparison relies on single representatives.** Section 4.6 compares DV (one diffusion planner) against DQL (one diffusion policy). While the paper acknowledges this framing, the observed performance differences could partly reflect implementation-specific details rather than the planning-vs.-policy distinction itself.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
 
-- **Multi-factorial validation:** Verifying the main conclusions from 2–3 alternative base configurations would significantly strengthen the paper's claims of generalizability.
-- **Full Adroit results in the main text:** Even a brief table would address the current omission.
-- **Seed/statistics disclosure in the main text:** Stating the number of seeds and the meaning of error bars would address the reproducibility concern efficiently.
+- A multi-base robustness check: verify that the reported component preferences directionally hold when starting from 2-3 distinct reasonable base configurations (e.g., best model with CG, best with CFG, best with U-Net backbone).
+- Full multi-seed reporting across all experimental conditions.
+- Numerical results for the Adroit validation, even as a supplementary table.
+- A brief analysis of how the critic's quality affects MCSS performance.
 
 ## Removed Points
 
-- **"6,000 models claim not substantiated":** The paper clearly states this figure and describes the search procedure (comprehensive search via grid search + manual tuning). The control-variable analysis from a single best config is a legitimate ablation methodology concern (kept as a minor weakness above), but the claim that the 6,000 figure itself is unsubstantiated is not supported by the paper text.
-- **"DQL outperforms DV on MuJoCo undermines SOTA claim":** This specific sub-point misreads the paper — the paper *acknowledges* this in Figure 8's caption and discusses the task-dependent trade-off in detail. The broader issue of an imprecise SOTA claim in the abstract is retained above.
-- **"Missing related works":** Cannot be verified without external sources (per instructions).
-- **"More diffusion policy baselines needed":** The paper is about diffusion *planning*; comparing with one representative diffusion policy method is a defensible scope choice for a design-space study. This is a wishlist item, moved to Nice-to-Haves.
-- **"Table 1 missing from parsed text":** The parser strips tables/appendices from all papers; the table exists in the original submission. Numerical results are likely in the appendix (reference to Table 10).
-- **"Missing hyperparameters (learning rates, batch size, etc.)":** The paper explicitly scopes out "common deep learning hyperparameters such as learning rates" (Section 3), which is a reasonable choice for a design-space paper. The more fundamental omission (seeds, error-bar definitions) is retained above.
-- **Strength Finder's claim about "Adroit validation as a strength":** Removed because the subsection lacks quantitative results — it is a weakness, not a strength.
+These points were flagged for removal; they are listed here for completeness but should be treated with caution:
+
+- **"Overfitting to the test benchmark through extensive model selection"** (as framed by the harsh critic). The framing of "test set leakage from the dataset" misunderstands the standard offline RL evaluation protocol, where the test is environment rollouts, not a held-out partition of the dataset. The real concern (selection bias from picking among 6,000 models) is addressed above under Major weakness #1 (component analysis starting from one best model). The critic's specific framing of a "validation split from the dataset" is not standard practice in offline RL and would not be the correct fix.
+- **"System 2 vs. System 1 analogy is speculative"** — This is a brief discussion paragraph, clearly identified as speculation. It occupies negligible space and is not presented as a contribution. This is a minor style opinion that does not affect the paper's merit.
+- **"No comparison to simple planning baselines (BC + inverse dynamics, non-diffusion optimizer)"** — The paper's scope is specifically about *diffusion* planning components. Demanding non-diffusion baselines is scope creep; the paper would become a different, broader comparison paper rather than a stronger version of itself.
+- **"Transformer vs. U-Net should compare multiple sizes"** — The paper already does this in Section 4.4 (Figure 6, multiple Transformer depths) and states that parameter counts are comparable between the two architectures. The critic missed this existing analysis.
+- **"No discussion of dataset splitting or cross-validation"** — As noted above, model selection via environment evaluation is standard in offline RL. This criticism applies a supervised-learning framing to a RL benchmark where it does not fit.
 
 ## Novel Insights
 
-The most genuinely novel observation emerging from the review process is the **value-distribution conditional recommendation** (Fig. 7b): the paper shows that the optimal guided sampling algorithm depends on the concentration of near-optimal trajectories in the dataset, providing a testable hypothesis for when to use MCSS vs. CFG/CG. This is more specific and actionable than the typical "guidance is good" heuristic and deserves more emphasis. The attention-weight "stride × attention-length ≈ constant" observation is intriguing but too preliminary to count as a robust insight.
+The most valuable synthesis to emerge from these reviews — beyond the paper's own empirical findings — is the observation that the paper's methodological strength (the large-scale search) is also its primary vulnerability: by finding a single optimal configuration among 6,000 candidates and then conducting a component analysis from that single point, the paper simultaneously demonstrates thoroughness and raises doubts about whether the reported design preferences would survive under different base configurations. This tension between scale and robustness is a genuine meta-insight about empirical methodology in RL research. The paper's conclusions would be significantly stronger if the authors could show directional consistency across a few distinct base models rather than relying on a single reference point.
 
 ## Suggestions
 
-1. **Qualify the SOTA claim per task family.** The abstract and Section 4 should say something like "DV achieves state-of-the-art results on long-horizon planning tasks (Kitchen, Maze2D, AntMaze) and is competitive with diffusion policy methods on locomotion tasks" — this accurately reflects Figure 8.
-
-2. **Add a brief table in the main text** reporting DV's performance with standard deviations and number of seeds for each task. This single addition would address the most serious reproducibility concern.
-
-3. **State the number of random seeds and what the error bars represent** explicitly in the experimental setup (Section 3) — e.g., "All results are averaged over 5 random seeds; error bars show ±1 standard deviation."
-
-4. **Include the Adroit results** — even a short paragraph with a few numbers would transform Section 4.7 from a placeholder into evidence.
-
-5. **Tone down the attention analysis language.** Replace "invariant correlations contributing to generalization" with "suggestive evidence that warrants further investigation" — the current phrasing oversells one visual example.
+- Add a robustness check: repeat the component analysis (Sections 4.1–4.5) starting from 2-3 distinct base configurations (e.g., the best model found with U-Net backbone, the best with CG guidance, etc.) and report whether the preference directions (Transformer > U-Net, separate > joint, etc.) hold directionally across all starting points.
+- Provide multi-seed statistics (mean ± std, at least 3 seeds) for all experimental conditions, even if some results are deferred to the appendix.
+- Include actual numerical results for the Adroit validation (Section 4.7) — even a brief supplementary table would suffice.
+- Add an ablation or analysis of the critic used in MCSS (e.g., correlation between critic scores and actual returns).
+- Quantify the computational cost of DV (training time, inference cost per N candidates) to help practitioners assess the trade-off.
 
 ## Score and Decision
 
-**Originality:** Good — the paper tackles a timely question with a scale of experimentation that exceeds prior work. **Importance:** High — diffusion planning is an active area with inconsistent design choices; systematic guidance is valuable. **Claims support:** Moderate — the control-variable analysis is reasonable but the blanket SOTA claim is imprecise, and experimental methodology details (seeds, error-bar definitions) are insufficiently reported. **Soundness:** Moderate — the core experiments appear well-designed, but incomplete reporting undermines verifiability. **Clarity:** Good — the paper is well-structured and the takeaways are clearly presented. **Value to community:** High — the practical tips and baseline will likely be used by other researchers.
+The paper makes a solid empirical contribution with genuinely useful findings for the diffusion planning community. The weaknesses are real but addressable — none are fatal. The component analysis methodology could be more rigorous, and the statistical reporting needs strengthening, but the scale of the experiments and the consistency of findings across tasks give reasonable confidence in the results. The paper is a net positive contribution that will serve as a useful reference.
 
-The paper makes a genuine contribution through its large-scale empirical investigation and counterintuitive findings. However, the imprecise SOTA claim and gaps in experimental reporting (seeds, error-bar definitions, missing Adroit numbers) reduce confidence in the results. These issues are addressable with moderate revision.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

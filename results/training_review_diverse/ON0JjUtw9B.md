@@ -1,18 +1,18 @@
-Now I have all the information needed. Let me produce the final consolidated review.
+Now I have a clear picture of the paper and the reviews. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper proposes WIN, a LiDAR upsampling network that decouples the standard range view (RV) into two orthogonal virtual views — Horizon Range View (HRV) and Vertical Range View (VRV) — to overcome the geometric limitations of single-view interpolation. A Contrast Selection Module (CSM) with probabilistic confidence modeling fuses the two views. The method is evaluated on CARLA and KITTI against explicit and implicit baselines, and tested on a downstream depth completion task. WIN achieves consistent improvements (+4.53% MAE, +7.01% IoU on CARLA) with only 1.7M parameters.
+This paper addresses LiDAR point cloud upsampling (increasing the resolution of sparse 16-line scans to denser 64+ line equivalent). Existing implicit methods (e.g., ILN) interpolate on the range image (radial distance *r*), which poorly handles edges and vertical surfaces because *r* is nonlinear across discontinuities. WIN instead interpolates two separate geometric attributes on the *same* range image grid — the horizontal distance *d* = √(*x*²+*y*²) and the vertical height *z* — then converts each back to range via spherical trigonometry (*r* = *d*/cos *v* or *r* = *z*/sin *v*). A lightweight contrast selection module (CSM) learns a per-point confidence score to fuse the two interpolation results, supervised by a Gaussian-derived probabilistic soft label rather than a hard binary choice. Experiments on CARLA (synthetic) and KITTI (real) show consistent improvements in MAE and IoU over prior methods, with only +0.4M parameters added over the ILN baseline.
 
 ## Strengths
 
-- **Variable-view decoupling addresses a genuine limitation of range-view interpolation.** The paper identifies that a single range view cannot accurately represent complex local geometry (e.g., object edges, ground surfaces) and proposes decoupling into HRV and VRV. This is well-motivated by concrete examples in Figure 1, and the quantitative results (Table 1: +4.53% MAE, +7.01% IoU on CARLA over ILN) directly validate the core claim.
+- **Geometrically motivated multi-attribute interpolation improves accuracy.** The core insight — that *d* and *z* are more locally linear than *r* in different scene regions (vertical vs. horizontal surfaces) — is principled and validated. The ablation (Table 4) confirms the variable-view component is responsible for the bulk of the gains, and results on both CARLA and KITTI show consistent superiority over ILN (e.g., +7.01% IoU on CARLA, Table 1).
 
-- **Contrast Selection Module with probabilistic confidence modeling is novel and effective.** Instead of a hard binary view classifier, the CSM models view fusion as a confidence prediction problem using a Gaussian-based loss (Eq. 9) and a custom margin loss (Eq. 10). Ablation results (Table 4) show CSM contributes ~2.4% MAE and ~2.9% IoU improvement. The probabilistic supervision is shown to outperform binary cross-entropy (Figure 5).
+- **Probabilistic supervision for view selection avoids training instability.** Instead of a hard binary label for "which view is better" (which changes during training as branches converge at different rates), the CSM uses a Gaussian-derived soft confidence score (Eq. 9) with an asymmetric loss (Eq. 10). The ablation shows this outperforms binary cross-entropy (Table 4), and Figure 5 shows the BCE loss plateaus while the proposed loss converges cleanly.
 
-- **Consistent improvements across datasets, scales, and downstream tasks.** WIN outperforms both explicit (TULIP, LiDAR-SR) and implicit (ILN, LIIF) methods on single-scale (Table 1), multi-scale (Table 2), and downstream depth completion (Table 3: 20mm RMSE reduction over ILN) on both synthetic CARLA and real KITTI data, all while adding only +0.4M parameters over ILN.
+- **Lightweight and flexible.** WIN adds only +0.4M parameters over ILN (1.7M total), reuses the same local features for both interpolation branches, and works at arbitrary upsampling factors (Table 2). This is a practical strength for deployment on resource-constrained platforms.
 
-- **Thorough ablation study.** Table 4 systematically removes variable-view interpolation, the CSM, and the confidence loss, demonstrating that each component is necessary for the reported gains. The binary classification baseline provides a clear comparison point.
+- **Thorough empirical validation.** Experiments span synthetic and real datasets, multiple upsampling ratios (Table 2), and a downstream depth-completion task (Table 3). The ablation study (Table 4) isolates each component's contribution. Qualitative results (Figure 4) support the quantitative findings.
 
 ## Weaknesses
 
@@ -20,61 +20,46 @@ This paper proposes WIN, a LiDAR upsampling network that decouples the standard 
 None.
 
 ### Major
-
-- **Non-standard KITTI evaluation protocol undermines comparability with prior work.** The paper adjusts the KITTI projection (referencing Fan et al. 2021), citing non-unique projection centers in the standard KITTI setup, and retrains all methods under this adjusted setting. While this ensures within-paper fairness (all methods compared under identical conditions), the deviation from the de facto standard means the results in Table 1 are not directly comparable with any previously published numbers. The paper should report results under **both** the standard KITTI projection and its adjusted projection, or provide a stronger justification for why the adjustment is necessary. This is the most significant evidential concern — it does not invalidate the core contribution, but it requires the reader to trust the modified protocol without being able to cross-reference against the literature.
+None.
 
 ### Minor
 
-- **Methodology description for virtual views is underspecified.** The paper explains that HRV interpolates horizontal distances (z ignored) and VRV interpolates heights (x,y ignored), and Eq. 3 gives the interpolation formulas with divisions by cos v and sin v. However, the forward mapping from 3D points to HRV/VRV "grids" is never formally defined — the description focuses on what values are interpolated rather than the coordinate transformation. A reader familiar with LiDAR spherical projection can reconstruct the mechanism (d_t = sqrt(x²+y²), cos v/sin v convert back to range), but the paper should provide explicit forward/inverse projection equations for both virtual views. This does not prevent reproducibility (the mechanism is inferable) but is a clarity gap that should be addressed.
+- **"Variable-view" framing is inflated relative to what the method actually does.** The paper repeatedly describes HRV and VRV as independent "virtual view representations" that "eliminate distortion caused by spherical projection" (Sec. 3.3) and presents Figure 1 as if the method uses distinct projections. In reality, the interpolation operates on the *same* (*u*, *v*) range image grid using the *same* pixel neighborhoods — the only change is which attribute (*d* vs. *z*) is interpolated, followed by a trigonometric conversion back to range. This is a genuine and useful technical contribution (interpolating complementary geometric attributes on the same grid), but it is *not* a new view or projection in any standard geometric sense. The framing overclaims novelty and could mislead readers about what was actually achieved. This is fixable with more precise terminology (e.g., "multi-attribute interpolation" or "geometric decoupling") but should be corrected.
 
-- **No point-level geometric metrics despite the paper's central claim about geometric accuracy.** The paper emphasizes that single-view interpolation fails to capture local geometry, yet evaluates only MAE on range images and voxel IoU at 0.1 m. These are standard metrics, but adding Chamfer distance, point-to-mesh distance, or surface normal consistency (especially on CARLA where ground truth is clean) would directly substantiate the geometric accuracy claim. The downstream depth completion task partially addresses this, but not at the point level.
+- **Key quantity *d* is never explicitly defined.** The paper uses *d* throughout (Eq. 3, the spherical projection formula in Eq. 1, the text) but never states *d* = √(*x*² + *y*²) explicitly. It is inferable from context but should be formally defined for clarity.
 
-- **Hyperparameter λ (Gaussian standard deviation scale) is neither reported nor ablated.** The probabilistic loss in Eq. 9 depends on λ, which controls the width of the confidence distribution. The paper states λ is a constant but never specifies its value or studies its sensitivity. Given that the probabilistic loss is a key novelty, a sensitivity analysis or at least a stated value is needed.
+- **Architecture details are insufficiently specified in the main paper.** The MLPs for weight prediction and the CSM are mentioned only as "MLP" or "shared convolutional network" without layer counts, hidden dimensions, or channel sizes (Sec. 3.3, Sec. 3.4). While these may be in the supplementary, a brief summary of key architectural choices belongs in the main text for reproducibility.
 
-- **Depth completion pipeline details are insufficient.** The downstream experiment (Section 4.4) does not state which specific depth completion method is used, whether it is trained from scratch or uses a pre-trained model, or whether the same completion model is applied to all upsampling outputs. These details are needed for reproducibility and to rule out confounding factors.
-
-- **No runtime or FLOPs reported.** The paper claims "minimal memory and computation time" but reports only parameter counts (1.7M). Given that WIN adds two interpolation branches and a CSM, inference time or FLOPs would substantiate this claim.
-
-- **No statistical significance reported.** Standard deviations or confidence intervals are absent from all main tables. Given the limited test samples in KITTI, variance could be non-trivial.
+- **ILN baseline reproduction could be clearer.** The paper notes that TULIP's reproduction of ILN was inaccurate and that ILN was retrained after discussion with the original authors (Sec. 4.2), with details deferred to the supplement. The ablation study (Table 4) showing the "remove variable-view" case matches ILN's reported numbers mitigates this concern, but the main paper should at least summarize the nature of the retraining differences.
 
 ### Trivial
-
-- Figure 5 shows loss curves which are informative but do not directly prove better point cloud quality — this is a presentation choice, not a flaw in the experiments.
+- The terms "horizon range" and "vertical range" are used in the abstract and introduction without formal definition. They become clear from context but should be stated explicitly early on.
 
 ## Nice-to-Haves
-
-- A geometric analysis grouped by surface orientation (ground vs. wall vs. pole) showing where HRV vs. VRV excels would provide direct evidence for the claimed complementarity, going beyond the qualitative examples in Figure 4.
-- Reporting both standard and adjusted KITTI results would resolve the comparability concern without adding much experimental burden.
-- The λ sensitivity analysis would strengthen the probabilistic contribution.
+- **Visualization of the learned confidence map** *Ĝ* overlaid on actual point clouds (e.g., color-coding points where HRV is preferred vs. VRV is preferred) would directly validate the claim that HRV handles vertical surfaces and VRV handles flat regions. Currently, this claim relies solely on the schematic in Figure 1.
+- **Sensitivity analysis on λ** (the scale parameter in the Gaussian model, Eq. 7) would strengthen confidence in the probabilistic modeling.
+- Adding a "no upsampling" baseline to the downstream task (Table 3) would show how much each upsampling method contributes over the raw 16-line input.
+- A brief parameter count breakdown (how many parameters for the second interpolation branch vs. the CSM) would be informative.
 
 ## Removed Points
+The following points from the reviewer inputs were removed or downgraded for the reasons stated:
 
-These points are flagged to be removed; treat them with caution:
-
-- **"Methodology is structurally flawed/non-reproducible"** (Harsh Critic, Critical Issue 1): This characterization is too severe. The paper communicates the core mechanism — interpolation weights are predicted from shared range-view features, HRV interpolates d_t values, VRV interpolates z_t values, and divisions by cos v/sin v convert to range. While the description could be clearer, it is inferable and not a structural flaw. Removed per rules about downgrading overblown severity and because the paper's description, though compact, conveys the essential design.
-
-- **"Uncertain fairness — reader cannot assess whether retrained baselines are optimal"** (Harsh Critic, Critical Issue 2, second part): The paper retrains all methods under the same setting, which ensures within-paper fairness. The concern about optimality of retrained baselines is standard for any reproduction effort and applies equally to all methods. The paper references Supplementary Material for details. Kept as the non-standard projection issue (Major), but the more general "uncertain fairness" framing is removed as it implies asymmetry that does not exist.
-
-- **"The evaluation does not test the authors' own claim"** (Harsh Critic, Critical Issue 3, framing): The evaluation does test the claim — MAE on range images and voxel IoU are geometry-sensitive metrics, and the downstream depth completion task directly measures geometric accuracy. The request for additional metrics is valid (kept as Minor), but the claim that the evaluation does not test the paper's own claims is incorrect. Softened.
+- **Loss function justification (implied missing explanation):** The paper *does* provide the intuition for the asymmetric loss — it explicitly states the design goal (zero loss when *g* is on the correct side of *ĝ*, Sec. 3.5). The reviewer's request for more conceptual justification is a nice-to-have, not a weakness. Moved to Nice-to-Haves.
+- **"No intuitive explanation" for selection loss:** As above, the explanation is present in the paper. Removed.
+- **Criticism that the method does not change projection/create new views → framed as fatal:** This is a valid observation about framing, but the reviewer themselves downgraded it to non-fatal. I agree — it is a minor presentation issue, not a scientific flaw. Reclassified as Minor.
+- **Demand for quantitative *Ĝ* analysis:** Valid suggestion but not a weakness — the paper's claims are supported by global metrics and ablation. Moved to Nice-to-Haves.
+- **Formatting/style nitpicks and any reproducibility concerns about cited references:** None present in the input that need removing beyond what is already handled.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews do not surface a perspective on the work that the paper itself does not already articulate clearly.
+The reviews collectively highlight an interesting tension: the paper's empirical contribution is genuinely effective and well-validated, yet its core intellectual contribution is somewhat different from what the framing advertises. The method does not introduce a new projection or view geometry — instead, it shows that on a *fixed* range-image grid, different geometric attributes (*d*, *z*) have different interpolation properties, and learning to fuse them outperforms interpolating the native range value *r*. This observation is valuable and generalizable beyond LiDAR upsampling (it could apply to any grid-based interpolation of 3D data), but the "variable-view" framing obscures this simplicity. The strongest takeaway from the reviews is that the paper would be even stronger if it leaned into this precise description rather than the inflated one.
 
 ## Suggestions
-
-1. **Provide explicit forward/inverse projection equations** for HRV and VRV in the methodology section (or supplementary), clarifying how 3D points map to each virtual view and how interpolated values are converted back.
-2. **Report results under both the standard KITTI projection and the adjusted projection** side-by-side, or provide a more detailed justification for the adjustment that addresses why the standard protocol is unsuitable.
-3. **Add a point-level geometric metric** (Chamfer distance or point-to-mesh distance) on CARLA, where clean ground truth is available, to directly support the geometric accuracy claim.
-4. **Report λ value and include a sensitivity analysis** over a reasonable range.
-5. **Add runtime/FLOPs inference** and **statistical significance** (standard deviations across multiple runs or test splits) to the main tables.
-6. **Specify the downstream depth completion method** (which specific model, training protocol, whether shared across all upsampling outputs) in the main text.
+1. Revise the terminology throughout: replace "variable-view" / "virtual view representations" with language such as "multi-attribute decoupling" or "geometric decomposition," and clearly state that the interpolation grid is the same — only the target attribute changes. This would make the contribution *easier* to understand and cite, not harder.
+2. Explicitly define *d* = √(*x*² + *y*²) and the terms "horizon range" / "vertical range" in Section 3.1.
+3. Add a sentence or two summarizing the MLP architectures (e.g., number of layers, hidden dimensions) to the main paper.
+4. If space permits, include a visualization of the learned confidence map *Ĝ* to directly support the geometric-complementarity claim.
 
 ## Score and Decision
 
-**Score: 6.5 / 10**
-
-The paper proposes a well-motivated and clever idea — decoupling the range view into two orthogonal views for LiDAR upsampling — and supports it with consistent experimental improvements across multiple settings. The CSM with probabilistic loss is a genuine methodological contribution. The weaknesses are addressable: the primary concern is the non-standard KITTI projection, which limits comparability with prior work but does not invalidate within-paper comparisons. The clarity gaps in the methodology description are minor and fixable. The addition of geometric metrics and efficiency numbers would further strengthen an already solid submission.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

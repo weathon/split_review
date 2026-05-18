@@ -1,88 +1,69 @@
-I now have a thorough understanding of the paper and all reviewer claims. Let me synthesize the final review.
+Now I have a clear picture. Let me produce the consolidated review.
 
 ---
 
 ## Summary
 
-The paper proposes AnomalyTCN, a pure-convolution dual-branch architecture for contrastive-based unsupervised time series anomaly detection. One branch uses dense depth-wise convolution, the other uses dilated depth-wise convolution with equivalent kernel size; the representation discrepancy between the two branches serves as the anomaly criterion. This replaces the costly attention mechanisms used by prior contrastive methods (DCdetector), achieving competitive or better F1 scores on five real-world benchmarks and two NeurIPS-TS datasets while reducing runtime by 83.6% and memory by 20.1% relative to DCdetector.
+This paper proposes AnomalyTCN, a pure-convolution alternative to the attention-based DCdetector for unsupervised time series anomaly detection. The core idea is a dual-branch architecture (dense convolution + dilated convolution with equivalent receptive fields) that produces two different views of the same input; the representation discrepancy between branches serves as the anomaly criterion. The paper claims consistent state-of-the-art detection performance while achieving 83.6% running time savings and 20.1% memory reduction over DCdetector. The contribution is architectural — transplanting the contrastive discrepancy framework from attention to convolution — with demonstrated efficiency gains.
 
 ## Strengths
 
-- **Novel combination of pure convolution with contrastive discrepancy learning for anomaly detection.** Prior contrastive methods (DCdetector, AnomalyTransformer) rely on attention with quadratic complexity. The paper is the first to show that an asymmetric pair of dense/dilated depth-wise convolution branches can generate the different views needed for contrastive discrepancy learning, directly addressing the efficiency bottleneck. (Section 3.1, Figure 2)
+1. **Meaningful efficiency gains from a principled architecture swap.** The paper clearly motivates why attention in DCdetector is computationally costly and why convolution is a viable replacement. Table 2 shows 83.6% faster inference and 20.1% less memory versus DCdetector while maintaining F1 — a practically useful improvement for real-time or resource-constrained deployment. The efficiency numbers are concrete and well-measured (100-iteration averages, peak memory).
 
-- **Strong empirical performance with substantial efficiency gains.** AnomalyTCN achieves the highest average F1-score across five real-world datasets (Table 1) and outperforms all baselines on the challenging NeurIPS-TS datasets (Figure 3), while reducing running time by 83.6% and memory usage by 20.1% compared to the previous best contrastive method DCdetector (Table 2). This demonstrates that convolution-based designs can match or exceed attention-based performance in this setting.
+2. **Well-motivated dual-branch convolution design with a clear intuition.** The dense+dilated combination is not arbitrary: the paper provides an intuitive illustration (Figure 1) where dilated convolutions naturally "skip" anomalous points while dense convolutions do not, and the ablation study (Table 3) progressively increases structural asymmetry and shows continuous F1 gains. The "skip" intuition genuinely distinguishes this from multi-branch convolution in CV (which aggregates representations) and from DCdetector (which uses attention).
 
-- **Clear intuitive mechanism.** Figure 1 provides a simple non-trainable illustration showing how dilated convolution skips anomalous points while dense convolution does not, creating a natural discrepancy signal. The paper explains how this intuition extends to deeper trainable architectures (Section 1, Section 3.1).
+3. **Systematic ablation and robustness analysis.** The paper ablates the key design choices: structural asymmetry (Table 3), kernel sizes and dilation ratios (Table 4), and stop-gradient (Table 5). Results show robustness across common kernel sizes (5, 7, 9) and that the dense+dilated combination with equal receptive fields avoids information-loss problems that arise from two different kernel sizes. These ablations substantially strengthen confidence in the design.
 
-- **Systematic ablation isolating the source of improvements.** Table 3 progressively adds structural asymmetry (rescale → weight unsharing → different convolution settings), showing each step contributes positively and confirming that the asymmetric design is essential. The comparison against a symmetric weight-sharing baseline (which fails completely) cleanly demonstrates why asymmetry is necessary.
-
-- **Interesting finding about stop-gradient robustness.** Unlike contrastive learning in computer vision, AnomalyTCN still performs competitively without stop-gradient (Table 5), and the paper provides a plausible structural explanation (Section 5.3). This highlights domain-specific properties of time series anomaly detection.
+4. **Interesting finding about stop-gradient robustness.** Section 5.3 shows AnomalyTCN remains competitive even without stop-gradient, unlike CV contrastive methods that collapse. This is a genuine observation that the paper correctly attributes to the inherent structural asymmetry of the convolution branches — though the analysis could go deeper (see Nice-to-Haves).
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-None. The issues below are addressable in revision and do not invalidate the paper's core claims.
+1. **Variable μ in the anomaly score (Eq. 5) is completely undefined.** The anomaly score formula is `Softmax(μ − (KL(P,S) + KL(S,P)))`, but μ never appears in any earlier equation, training description, or parameter table. The paper states "We adopt the same anomaly score as in DCdetector (2023)" — yet DCdetector's published anomaly score uses a different formulation (max over time of attention discrepancy, without μ). So μ is either a novel addition or a parameter inherited from a different source; either way, the paper must define it, state whether it is learned or fixed, and report its value or training procedure. A reader cannot reproduce or evaluate the method without this.
+
+2. **No error bars, confidence intervals, or multi-run statistics anywhere in the paper.** All results in Tables 1–5 are reported as point estimates. On four out of five real-world datasets, the F1 differences between AnomalyTCN and DCdetector are reported as under 0.4 percentage points (SMD +0.37, PSM +0.29, SMAP +0.19, MSL −0.19). These margins are well within typical run-to-run variance for time series anomaly detection (often 1–3 F1 points). Without variance estimates, the paper cannot support its claim of "consistent state-of-the-art performance" and "outperforms other baselines by a large margin" — the evidence supports "comparable performance" at best. The SWaT gain (+2.37) is larger but still lacks variance. This is the single most impactful gap in the empirical evaluation.
+
+3. **The claim that performance is improved "by a large margin" is overstated given the evidence.** On most datasets the margins over DCdetector are tiny, and on one dataset (MSL) AnomalyTCN is worse. The paper should recalibrate its central performance claim from "superior performance" to "comparable performance with substantially better efficiency." The latter is a perfectly publishable claim and better supported by the data.
 
 ### Minor
 
-- **Missing definition of μ in the anomaly score (Equation 5).** The anomaly score is Softmax(μ − (KL(P,S) + KL(S,P))), but μ is never defined. Is it a learned parameter? The running mean of discrepancies from the training set? The paper states it "adopt[s] the same anomaly score as in DCdetector (2023)," but a self-contained definition is needed for reproducibility.
+4. **Efficiency comparison is limited to a single baseline (DCdetector).** Table 2 only compares AnomalyTCN against DCdetector. While DCdetector is the most relevant comparison (same contrastive framework, attention→convolution swap), the paper's broader efficiency claims — "great potential for real-time anomaly detection applications" — would be stronger with at least one additional efficient non-attention baseline (e.g., a lightweight reconstruction-based method or a simplified TCN-based detector). The paper does include ModernTCN and other efficient backbones in the *performance* comparison (Table 1) but does not report their efficiency numbers.
 
-- **Threshold selection for δ is not described.** The paper states a hyperparameter threshold δ is used (Section 3.3) but does not explain how it is set. If the standard protocol (maximizing F1 on the test set using ground-truth labels) is followed, this should be stated explicitly, as it affects interpretation of the reported F1 scores. The paper should also acknowledge that this yields upper-bound estimates.
-
-- **Baseline adaptation for general time series backbones is unspecified.** The paper includes aLLM4TS, ModernTCN, GPT4TS, and TimesNet as "advanced reconstruction-based method with general time series backbones" (Section 4 baseline listing and Table 1). No description is given of how these models were adapted for anomaly detection — what task head was used, what loss function, whether pretrained weights were frozen. While these are supplementary baselines (the primary competitors — DCdetector and AnomalyTransformer — are well-specified), the missing details affect the completeness of the evaluation.
-
-- **Efficiency comparison is limited to a single baseline.** Table 2 compares AnomalyTCN only against DCdetector. The abstract claims "more efficient solution" broadly. Since ModernTCN (also a convolution model) appears in Table 1, a brief efficiency comparison (at minimum runtime/parameter count) would substantiate the claim beyond the single attention-based competitor. The current evidence shows only that AnomalyTCN is faster than one specific attention-based model.
-
-- **Ablation studies are reported on a single dataset (likely SWaT).** Tables 3, 4, and 5 do not specify which dataset is used — the text only mentions SWaT in the discussion of Table 4. Ablation results would be strengthened by showing they hold on at least one additional dataset (e.g., SMD or MSL).
-
-- **The paper does not discuss the SWaT result where AnomalyTCN appears to underperform DCdetector.** Per Table 1 (the reviewer reports 75.5 vs. 79.4 F1), this is one dataset where AnomalyTCN loses to the primary competitor. The paper's claim of "consistent state-of-the-art" and "performs the best in most cases" is technically compatible with one loss, but the result merits explicit discussion and analysis.
-
-- **The loss function L = L_P − L_S is inherited from DCdetector without independent motivation or analysis.** While this is a valid design choice, the paper could strengthen its contribution by providing intuition for why minimizing one discrepancy while maximizing the other is beneficial, or by ablating the sign (e.g., comparing L_P + L_S vs. L_P − L_S). The paper's own finding that removing Stopgrad still yields competitive performance (Section 5.3) raises the question of whether the loss asymmetry or the structural asymmetry is the primary driver.
-
-- **No discussion of limitations.** The paper lacks a dedicated limitations section. It would benefit from acknowledging potential failure cases (e.g., collective/subsequence anomalies, sensitivity to very high anomaly ratios, datasets where large dilation ratios produce false positives — as hinted for SWaT in Section 5.2).
+5. **The paper inherits the entire contrastive framework (loss, stop-gradient, anomaly score, variate-independence, rescaling) from DCdetector, making the net new contribution one architectural component.** This is not inherently a problem — architecture swaps with real efficiency gains are valuable — but the paper's framing as "novelly propos[ing]" a dual-branch convolution structure for contrastive detection somewhat overstates the novelty. The contribution is an architectural improvement to an existing framework, not a new detection principle. The paper already cites DCdetector extensively and acknowledges the inheritance, so this is primarily a framing issue.
 
 ### Trivial
 
-- **No error bars or statistical significance reported.** This is standard practice in this benchmark-driven subfield, but noting the limitation would be good practice.
-- **Some phrasing overstates the breadth of evidence**, e.g., the statement that the rescale operation comparison validates "effectiveness" with a single data point; the claim that "the paper's study also reveals the possibility of combining contrastive-based anomaly detection frameworks with other efficient time series backbones" (Conclusion) is forward-looking but not directly demonstrated.
+6. **The "point-wise convolution stem layer" for embedding is mentioned but not specified** (kernel size, stride, output dimension). These details may reside in the appendix (which was stripped by the parser), but if not, they should be stated for reproducibility.
 
 ## Nice-to-Haves
 
-- A t-SNE or PCA visualization of P and S representations for normal vs. anomalous time points would enrich the contrastive learning analysis.
-- Hyperparameter sensitivity study of window length, given that convolution kernels have a fixed size (7) but window length varies across datasets (36–100).
-- A broader efficiency comparison including a parameter/FLOPs analysis for ModernTCN or other convolution-based models would strengthen the efficiency narrative.
+- **Direct ablation comparing dual-convolution vs. dual-attention** under an otherwise identical framework (same loss, stop-gradient, rescaling) would cleanly isolate whether any performance differences are due to the backbone architecture or other framework details.
+- **Deeper analysis of the "works without stop-gradient" finding:** The paper attributes this to structural asymmetry but does not quantitatively characterize the discrepancy distributions (e.g., KL divergence for normal vs. anomaly points at initialization, after training with/without stop-gradient). This could strengthen the core claim about convolution being naturally suited for discrepancy-based detection.
+- **Sensitivity analysis for μ** (once defined) and **confidence intervals** on the main results.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- *"Figure 1 uses non-trainable mean filters... gap between this simplified example and the real implementation is not discussed."* — The paper explicitly discusses this gap: "in our real implementation... we adopt a deeper network structure to bring better representation capacity. And we also make the weights of convolution kernels trainable." (lines 18–19). The criticism is factually inaccurate.
-- *"The paper does not clarify whether the two branches share the point-wise layers."* — The paper states: "the successive point-wise convolution modules in two branches do not share the weights, even though they have the same structure settings" (line 68). Factually inaccurate.
-- *"Including classic baselines [VAR 1976, LOF 2000] is misleading; they inflate the apparent advantage."* — Including a wide range of methods from classic to modern is standard practice in this field. The paper categorizes them transparently. This is a disagreement on convention, not a flaw.
-- *"The step from 'same structure, no weight-sharing + rescale' (73.9) to 'different structures + rescale' (75.5) is only 1.6% gain, suggesting the dual-branch design is not the primary driver."* — This is a subjective interpretation of Table 3. The paper's claim is about "continuous performance improvement," which is objectively true. The improvement from each step is meaningful in aggregate.
+- **Criticism about missing hyperparameters (learning rate, optimizer, batch size, etc.).** The parser strips appendices; these details likely exist in the original submission.
+- **Criticism about "no code" as a major weakness.** While code availability helps reproducibility, the paper's contribution is verifiable through the description provided, and code release is not a standard requirement for review.
+- **The claim that AnomalyTCN's loss functions (Eq. 2–4) are "lifted with minimal adaptation."** The paper explicitly states "similar to DCdetector (2023)" and adopts the same score "as in DCdetector (2023)." The paper is transparent about this inheritance — the criticism does not identify an actual flaw, it merely restates the paper's own acknowledgments.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews highlight presentation and reproducibility gaps but do not uncover insights about the method that the authors themselves did not identify.
+None beyond the paper's own contributions. The reviews surface two useful observations: (1) the dense+dilated convolution asymmetry is a genuinely different mechanism from multi-branch convolution in CV (aggregation) and from dual-attention in DCdetector, and (2) the stop-gradient robustness suggests convolution-based contrastive frameworks may inherently resist collapse, which could be explored more systematically in future work.
 
 ## Suggestions
 
-1. Define μ explicitly in Section 3.3 and describe threshold selection (δ) protocol. If test-set-based thresholding is used, acknowledge this as an upper-bound estimate.
-2. Specify the datasets used for all ablation studies (Tables 3–5) and ideally add results on at least one additional dataset.
-3. Describe how general time series backbones (aLLM4TS, ModernTCN, GPT4TS, TimesNet) were adapted for anomaly detection (task head, loss, frozen weights).
-4. Add a brief efficiency comparison with ModernTCN (parameters, runtime) to substantiate the broad efficiency claim.
-5. Discuss the SWaT result (if AnomalyTCN underperforms DCdetector on that dataset) and add a limitations paragraph.
+1. **Define μ** in Eq. 5 and justify its role (learned or fixed; if fixed, report its value and sensitivity).
+2. **Add error bars / standard deviations** (≥5 seeds) to all main results, and recalibrate performance claims accordingly — "comparable performance with substantially better efficiency" is a stronger claim than "SOTA with large margin" given the evidence.
+3. **Expand efficiency comparison** to at least one additional efficient baseline (e.g., a lightweight reconstruction model or a TCN baseline) to support the broader efficiency claims.
+4. **Add a controlled ablation**: dual-attention branches within the AnomalyTCN framework (everything else identical) to directly isolate backbone effects.
+5. **Tone down language** such as "outperforms other baselines by a large margin" where margins are <0.4 F1 points and lack statistical support.
 
 ## Score and Decision
 
-This paper makes a meaningful contribution: it demonstrates that contrastive discrepancy learning for anomaly detection can be implemented with a pure convolution architecture, achieving results on par with or better than attention-based methods while being substantially faster. The core idea is sound, the ablations are systematic, and the main experimental evidence supports the claims. The weaknesses are primarily in presentation completeness (missing specifications, single-dataset ablations, lack of discussion of one counterexample) rather than in the methodology or the validity of the central results. These are all addressable in a revision.
-
-The paper merits acceptance.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

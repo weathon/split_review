@@ -1,20 +1,16 @@
+Now I have all the information needed. Let me write the consolidated review.
+
 ## Summary
 
-This paper introduces Boltzmann Priors for Implicit Transfer Operators (BoPITO), a framework that incorporates a pre-trained Boltzmann Generator as an equilibrium prior into Implicit Transfer Operator (ITO) learning of transition densities. The method contributes three elements: (1) using the prior to seed many short MD trajectories for data generation, (2) decomposing the score into a fixed equilibrium term and a learned dynamic term with exponential decay ($\hat{\lambda}^N$), and (3) using this decay factor to interpolate between biased/off-equilibrium models and the equilibrium distribution, with the interpolation parameter fitted to match unbiased observables. Experiments on the Prinz potential and alanine dipeptide demonstrate improved sample efficiency (roughly 10× less transition-data to match ITO accuracy) and successful correction of biased dynamics via interpolation.
-
----
+The paper introduces Boltzmann Priors for Implicit Transfer Operator Learning (BoPITO), a framework that leverages pre-trained Boltzmann Generators (BGs) as equilibrium priors for learning deep generative surrogates of molecular dynamics transition densities. BoPITO improves over standard ITO learning in three ways: (1) using BGs to initialize MD trajectories for broader configurational coverage, (2) decomposing the score model into a fixed equilibrium part (from the BG) plus a learned dynamic part scaled by $\hat{\lambda}^N$ — an inductive bias that ensures the model asymptotically converges to the equilibrium prior at long times, and (3) introducing an interpolation scheme that scales the dynamic component for lags beyond the training range to recover dynamics from biased data, calibrated against unbiased observables. Experiments on the Prinz potential and alanine dipeptide show roughly one order-of-magnitude improvement in sample efficiency and demonstrate the ability to correct biased models via interpolation.
 
 ## Strengths
 
-1. **Demonstrated order-of-magnitude improvement in sample efficiency.** Figure \ref{fig:long-term} shows that BoPITO achieves ITO-equivalent accuracy on long-time correlation functions with ~10× less transition-data on alanine dipeptide. The comparison is clean: same data, same architecture, only the score decomposition differs. The result is practically meaningful — it turns a data-intensive method into one viable in data-limited regimes.
-
-2. **Principled score decomposition that separates equilibrium from dynamics.** The decomposition $s_{\boldsymbol{\theta}} = s_{\mathrm{eq}} + \hat{\lambda}^N s_{\mathrm{dyn}}$ (Eq. \ref{eq:bopito-score}) is a clear inductive bias grounded in the spectral decomposition of the transfer operator. Fixing $s_{\mathrm{eq}}$ and learning only $s_{\mathrm{dyn}}$ reduces the effective parameter count, which is the direct mechanism behind the sample-efficiency gain.
-
-3. **Novel interpolation protocol for inverse problems with biased data.** The BoPITO interpolator (Section 3.3) allows recovery of approximate unbiased dynamics from models trained on deliberately biased simulations, by matching a tunable interpolation parameter to an unbiased dynamic observable. Figure \ref{fig:interpolation-correlation} demonstrates successful correction on alanine dipeptide. This is the first such capability for deep generative surrogates of transition densities.
-
-4. **Clear motivation and thorough framing.** The paper clearly identifies a real bottleneck in ITO learning (data hunger), explains why equilibrium priors address it, and situates the contribution well against related work in MSM reweighting, Boltzmann generators, and latent-space simulators.
-
----
+- **One-order-of-magnitude sample efficiency improvement**: Figure 3 (bottom panels) shows that for alanine dipeptide, BoPITO trained on 5 trajectories achieves the same accuracy as ITO trained on 50 trajectories — a clear quantitative demonstration directly supporting the paper's central claim.
+- **Principled score decomposition with inductive bias for long-time behavior**: Equation (4) splits the score into $s_{\mathrm{eq}} + \hat{\lambda}^N s_{\mathrm{dyn}}$. This spectral-decomposition-inspired parameterization ensures that as $N \to \infty$, only the equilibrium term remains, providing a structural guarantee absent in prior ITO models. The fixed $s_{\mathrm{eq}}$ reduces the number of parameters that must be learned from scarce MD data.
+- **BoPITO interpolators can recover dynamics from biased data using experimental calibration**: Figure 4 shows that tuning $N_{\mathrm{int}}$ to match an unbiased time-correlation function corrects systematic errors in biased-data models. Figure 5 further validates that the corrected model recovers the correct marginal distributions of $\phi$ and $\psi$ torsion angles — a nontrivial validation going beyond the calibrated observable alone.
+- **Effective use of Boltzmann Generators for data-generation initialization**: Figure 2 quantitatively shows that initializing short MD trajectories from BG-sampled configurations yields lower correlation errors than starting from a single structure, especially at long lag times and with few trajectories.
+- **Coherent integration of multiple information sources**: The paper provides a single framework that blends models trained on biased/off-equilibrium simulations with an equilibrium prior and experimental observables — addressing a gap in the literature where prior deep generative transition density surrogates lacked such capabilities.
 
 ## Weaknesses
 
@@ -22,72 +18,48 @@ This paper introduces Boltzmann Priors for Implicit Transfer Operators (BoPITO),
 None.
 
 ### Major
-
-- **Single-exponential approximation limits the generality of the interpolator.** The score decomposition (Eq. \ref{eq:bopito-score}) and interpolator (Eq. \ref{eq:bopito-int-score}) scale the entire learned dynamic component by $\hat{\lambda}^{N_{\text{int}}}$ — a single global exponential factor. Real molecular systems have a spectrum of relaxation rates, and $s_{\mathrm{dyn}}$ encodes contributions from multiple eigenfunctions decaying at different speeds. Scaling uniformly cannot, in general, reproduce the correct relative weighting of fast and slow processes at large lags. The success on alanine dipeptide may rely on it having a single dominant slow mode (the $\phi$ transition). The paper acknowledges this as a limitation (Section 6) but does not characterize the sensitivity to $\hat{\lambda}$ or test on a system with multiple distinct slow processes. This is a **structural limitation of the interpolation claim** — not fatal, but it narrows the conditions under which the approach is expected to work.
+None. The paper's core contributions are supported by the experimental evidence, and none of the issues below undermine its main claims.
 
 ### Minor
 
-- **The "order of magnitude" claim does not account for the cost of training the equilibrium prior.** The BoPITO pipeline requires first training $s_{\mathrm{eq}}$ (Section 3.2: "we first train $s_{\mathrm{eq}}$ (if not provided) using equilibrium data"). The headline "one order of magnitude reduction" refers only to the transition-density training phase. A reader could reasonably ask whether the total simulation budget (prior training + transition training) is similarly reduced. The paper would be strengthened by acknowledging this and discussing scenarios where a good prior can be obtained cheaply (e.g., from already-available biased simulations using reweighting, as noted in Section 2 under Boltzmann Generators). As written, the claim is technically accurate about the phase it describes, but the framing under-weights the prior's cost.
+- **The hyperparameter $\hat{\lambda}$ is not reported, and its selection is not discussed.** The paper states that $0<\hat{\lambda}<1$ is a hyperparameter (Section 3.2) and that it "defines a global relaxation or mixing time-scale" (Limitations), but does not state what value was used in any experiment, how it was chosen, or whether results are sensitive to it. Since $\hat{\lambda}$ controls the decay of the dynamic score and appears in both the core model (Eq. 4) and the interpolation scheme (Eq. 5), its value is not a trivial implementation detail. The authors should report the chosen $\hat{\lambda}$ values for both systems and describe the selection procedure.
 
-- **"Guarantees asymptotically unbiased equilibrium statistics" is stated too strongly.** The model converges to the distribution implied by $s_{\mathrm{eq}}$ as $N \to \infty$, not necessarily to the *true* Boltzmann distribution. If $s_{\mathrm{eq}}$ is imperfect (as all learned models are), the asymptotic distribution inherits those errors. The paper uses a near-perfect prior in experiments, so the results are not affected, but the abstract's phrasing ("guaranteeing asymptotically unbiased equilibrium statistics") and the introduction ("by construction, guarantees asymptotically unbiased equilibrium statistics") overstate the guarantee. The more precise language used in Section 3.2 — "asymptotically samples from an *available* equilibrium model" — is the correct framing and should be used consistently.
+- **The "asymptotically unbiased equilibrium statistics" claim is technically about convergence to the BG prior, not the exact Boltzmann distribution.** The abstract and contribution list state that BoPITO "guarantees asymptotically unbiased equilibrium statistics." The mathematical guarantee is that as $N \to \infty$, the model's score converges to $s_{\mathrm{eq}}$ — the score of the pre-trained Boltzmann Generator, which is itself an imperfect surrogate of the true Boltzmann distribution. The paper's own Figure 4 shows the BG-based equilibrium model deviates from the true unbiased correlation, and interpolation corrects this. The language should be softened to reflect that the guarantee is about consistency with the equilibrium prior, not the exact target distribution.
 
-- **Time-scale split in Figure \ref{fig:long-term} is not defined.** The caption refers to "short, medium, and long time-scales" without specifying how these ranges are determined (e.g., number of eigenvalues, physical cutoffs). This makes the figure harder to interpret and the results harder to reproduce.
+- **The sample efficiency comparison counts only the ITO training data, implicitly treating the BG as free.** The paper reports "one order of magnitude reduction in the simulation data needed for training." This comparison counts only the new MD trajectories used for ITO training, while the pre-trained BG itself required data (or biased simulations) to train. This framing is conventional in transfer learning settings, but the paper should explicitly acknowledge the data/compute cost of obtaining the BG prior and discuss practical scenarios where a BG can be obtained cheaply (e.g., from biased/enhanced sampling data). The current framing is not incorrect, but it is incomplete.
 
-- **Interpolation sensitivity to $\hat{\lambda}$ is not characterized.** The interpolator depends on both $\hat{\lambda}$ (a free hyperparameter) and $N_{\text{int}}$ (fitted to data). The paper reports results for one fixed $\hat{\lambda}$ and does not show whether the optimal $N_{\text{int}}$ or the quality of the correction is robust to reasonable variations in $\hat{\lambda}$.
+- **The interpolation method uses a single decay rate $\hat{\lambda}$, which is a strong spectral approximation.** The interpolation scheme (Eq. 5) approximates the lag-$N_{\mathrm{int}}$ score by scaling $s_{\mathrm{dyn}}$ by $\hat{\lambda}^{N_{\mathrm{int}}}$. The true spectral decomposition (Eq. 2) involves a sum over eigenfunctions with different eigenvalues $\lambda_i$. Replacing this with a single global rate will be inaccurate when multiple relevant timescales are present. The paper only tests this on alanine dipeptide where one dominant slow process ($\phi$ transition) is removed — a favorable case. The Limitations section mentions the lack of Chapman-Kolmogorov self-consistency but does not discuss the more fundamental single-rate approximation. The authors should either provide conditions under which this approximation holds, test a scenario with multiple blocked slow processes, or more cautiously scope the interpolation method's generality.
 
 ### Trivial
-None.
-
----
+- The paper states "BoPITO is the first method to allow for the integration of multiple sources of information into the generation of deep generative surrogates of molecular dynamics." The qualifier "deep generative surrogates" saves the claim from being false (since MSM-based methods like TRAM already integrate multiple data sources), but the statement should be positioned more carefully to avoid overclaiming.
 
 ## Nice-to-Haves
-
-- Test interpolation on a system with multiple distinct slow processes (e.g., a small peptide with two dihedral transitions at different rates) to probe where the single-exponential scaling assumption holds or breaks.
-- Add a brief discussion of how $\hat{\lambda}$ could be estimated from data (e.g., from the dominant eigenvalue of a Markov state model), rather than treated solely as a free hyperparameter.
-- Discuss robustness of the observable-matching procedure to noise or sparsity in the reference observable $O^*_N$.
-
----
+- An analysis comparing the chosen $\hat{\lambda}$ to the true second eigenvalue $\lambda_2$ of the transfer operator (e.g., on the Prinz potential where eigenvalues are known analytically) would directly validate the core inductive bias.
+- Training a BG on the same equilibrium data used for ITO training and comparing total data budgets (BG training + new trajectories vs. ITO alone) would make the practical benefit claim more self-contained.
+- Reporting the BG's accuracy on each system (e.g., a plot of BG vs. true equilibrium) would help the reader assess how much of the improvement comes from the BG quality vs. the BoPITO framework itself.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution.
-
-- **Strength Finder's "asymptotically unbiased guarantee" as an unqualified strength.** The strength finder claimed "no prior deep generative surrogate offers this theoretical guarantee" without caveat. Since the guarantee is modulo prior accuracy (per verified weakness #2 above), this claimed strength is kept but subsumed into Strength #1 (the sample-efficiency gain) and the principled score decomposition (Strength #2), with appropriate qualification in the main text.
-
-- **Critic's suggestion to test interpolation on a multi-timescale system.** This is a valid suggestion but more appropriate as a Nice-to-Have than a weakness, since the paper's experiments already demonstrate the method working on a realistic system. Moved to Nice-to-Haves.
-
----
+- **Interpolation theoretical basis as a "critical issue"**: The harsh critic framed the single-$\hat{\lambda}$ interpolation as a fatal flaw. The paper acknowledges limitations and the method is presented as an interpolation heuristic validated empirically, not a theoretically guaranteed recovery. The concern is real but overstated by the reviewer; moved to Minor with appropriate qualification.
+- **Sample efficiency as "misleading"**: The harsh critic claimed the comparison "ignores the data cost of the BG." The paper's framing ("one order of magnitude reduction in the simulation data needed for training") clearly refers to the MD trajectory data for ITO training. The BG is a separate pre-trained component. The concern is partially valid (the total data cost is higher than stated) but the paper is not misleading; moved from "critical issue" to Minor with acknowledgment.
+- **Various suggestions that amount to "add more experiments" (e.g., test on system with two slow processes blocked)**: These are reasonable but fall under Nice-to-Haves, not weaknesses.
+- **"The related work description of Timewarp and Score Dynamics is brief"**: This is a presentation preference, not a weakness.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
-
----
+Both reviewers independently identify the tension between the paper's principled spectral decomposition framing and the pragmatic nature of the interpolation approximation. The paper motivates the $s_{\mathrm{eq}} + \hat{\lambda}^N s_{\mathrm{dyn}}$ form from rigorous spectral theory, then extends this to interpolation by treating $\hat{\lambda}$ as a tunable knob for matching experimental data — a move that is more engineering than theory. The fact that the interpolation works at all on alanine dipeptide is noteworthy, but the single-$\hat{\lambda}$ approximation means the method's domain of validity is likely limited to systems with one dominant slow timescale. This is not a flaw per se, but rather an important characterization of when the method can be expected to work.
 
 ## Suggestions
-
-1. In the abstract and introduction, replace "guarantees asymptotically unbiased equilibrium statistics" with "guarantees asymptotic convergence to the available equilibrium model" or similar language that makes the dependence on prior accuracy explicit.
-2. Qualify the "order of magnitude" claim by noting it refers specifically to the transition-density training phase, and briefly discuss the total data budget (prior + transition) in a practical setting.
-3. Add a definition of how "short, medium, and long" time-scales are determined in Figure \ref{fig:long-term} (caption or methods).
-4. Characterize the sensitivity of the interpolator to $\hat{\lambda}$ — either by showing robustness across a range of values, or by providing guidance on how to estimate it.
-
----
+1. Report $\hat{\lambda}$ values and selection procedure for both systems.
+2. Soften the "asymptotically unbiased equilibrium statistics" language to clarify convergence to the BG prior.
+3. Explicitly acknowledge the data/compute cost of the BG prior when claiming sample efficiency.
+4. Add a brief discussion of the single-$\hat{\lambda}$ approximation's domain of validity and test on a scenario with multiple slow processes, or clearly scope the interpolation method's generality.
+5. Show the BG's accuracy relative to the true equilibrium to help readers assess the source of improvements.
 
 ## Score and Decision
 
-**Originality:** The score decomposition with an equilibrium prior is novel within deep generative transition models. The interpolation protocol is also new.
+**Originality**: Good — using BGs as priors for ITO is novel. **Importance**: High — sample-efficient learning of MD surrogates is practically relevant. **Claims**: Well-supported with minor overstatements. **Soundness**: Experiments are appropriate for the scope and claims. **Clarity**: Good. **Value**: Useful contribution to the molecular simulation community.
 
-**Importance:** The problem — reducing the data cost of learning surrogate dynamics — is well-motivated and practically relevant.
-
-**Claims support:** The sample-efficiency claim is well-supported by experiments. The interpolation claim is supported on one system with acknowledged caveats. The "guarantee" language is slightly over-claimed but fixable.
-
-**Soundness:** Experimental methodology is appropriate. Multiple replicates with confidence intervals. Comparisons are fair (same architecture, same data).
-
-**Clarity:** The paper is well-written and clearly structured. The main ideas are communicated effectively.
-
-**Value:** The method fills a real gap — no prior deep generative transition surrogate could leverage equilibrium priors. The 10× data reduction is practically significant.
-
-**Overall:** A solid, well-motivated paper with a principled contribution and convincing empirical validation. The weaknesses are real but not fatal — the major limitation (single-exponential interpolation) is acknowledged, and the minor issues are addressable in revision.
+The paper has real contributions and the experimental evidence supports its core claims. The weaknesses are addressable in revision and do not undermine the core contributions.
 
 MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

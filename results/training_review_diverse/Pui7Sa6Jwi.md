@@ -1,20 +1,20 @@
-Now I have verified all the claims against the paper. Let me write the consolidated review.
-
----
+Now I have a thorough understanding of the paper. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes CLEAR, a representation learning framework for visual offline RL that explicitly models exogenous distractions. The paper formalizes the problem as an ExoPOMDP, identifies theoretically why standard latent dynamics models incorporate "superfluous information" from distractions, and introduces a method with separate encoders for agent state and exogenous factors, regularized by inverse-dynamics-based objectives. Empirical results on the DeepMind Control Suite with multiple distraction types show that CLEAR substantially outperforms prior methods, achieving near-oracle performance in the hardest settings (e.g., ~99 on Walker-Walk with 2×2 Grid vs. ~70 for the best baseline).
+This paper formalizes visual offline RL as an ExoPOMDP and identifies, through an information-theoretic lens, why standard latent-dynamics models retain distraction-correlated "superfluous information" in their representations. The authors propose CLEAR, which learns two disentangled representations (agent-centric state and exogenous factors) using a joint ELBO objective with an adversarial inverse-dynamics regularization that encourages action-controllability of the state encoding while suppressing exogenous information. The method is evaluated on DeepMind Control Suite tasks with four levels of distraction, where CLEAR consistently achieves the best or near-best normalized scores and is the only latent-dynamics method that maintains performance invariance as distractions intensify.
 
 ## Strengths
 
-1. **Principled information-theoretic identification of the distraction problem.** The paper formalizes visual offline RL as an ExoPOMDP and derives (Equation 2) that maximizing predictive information in standard latent dynamics models inevitably captures "superfluous information" about exogenous factors that cannot be minimized without explicit modeling. This provides a clean theoretical diagnosis of why methods like SLAC degrade under distractions (Section 2.2).
+- **Principled information-theoretic diagnosis of prior failures**: The paper identifies (Section 2.2) why standard SSM-based objectives (e.g., SLAC) necessarily retain superfluous information in the presence of exogenous variables, providing a clear theoretical motivation for a disentangled two-encoder approach that goes beyond "this is a known problem."
 
-2. **Novel controllability-based regularization.** CLEAR uses a min-max objective (Equations 6–7) that maximizes action predictability from state representations while minimizing it from exogenous representations. This is a principled way to enforce that the state encoder captures only controllable factors. The ablation study (Table 3, Figure 5) confirms the regularization is critical: without it, representations can "flip" or become degenerate.
+- **Consistent and highest empirical performance across diverse distractions**: CLEAR achieves the best or near-best normalized scores in nearly all environment–distraction combinations in Table 1 (e.g., Cheetah 2×2 Grid: 66.7 vs. next best 54.5; Walker 2×2 Grid: 94.4 vs. next best 60.5). It is the only latent-dynamics method that maintains performance invariance as distraction difficulty increases, directly supporting the claim of distraction-free representations.
 
-3. **Strong empirical performance across distraction levels.** On the DMC Suite with clean, video, and grid distractions, CLEAR consistently achieves the highest or near-highest normalized scores (Table 1). The gap is most dramatic on harder distractions — e.g., on Walker-Walk with 2×2 Grid, CLEAR matches its clean-environment performance while the best baseline (InfoGating) drops substantially, showing the method successfully identifies the controllable agent even among multiple identical-looking agents.
+- **Demonstration of successful disentanglement and the critical role of regularization**: Qualitative reconstruction results (Figure 4) show CLEAR cleanly separates agent from background, identifying the correct agent among four in the 2×2 Grid. The ablation study (Table 3, Figure 5) shows that without the inverse-dynamics regularization, the model converges to "flipped" or degenerate representations (normalized scores dropping from 95.5 to 38.2 and 59.6), validating the design.
 
-4. **Qualitative and quantitative validation of disentanglement.** Ground-truth state regression (Table 2) shows CLEAR maintains low MSE across all distraction levels. The compositional decoder visualizations (Figure 4) demonstrate that the model cleanly separates the agent from background distractions, and even recovers occluded background content.
+- **Quantitative evidence that representations track ground-truth state**: The linear regression task (Table 2) shows CLEAR's frozen representations achieve low MSE in predicting the true state across environments and distractions (e.g., Cheetah 2×2: 0.34 vs. SLAC 0.67, Iso-Dream 0.51), confirming the state encoder captures control-relevant information without losing fidelity.
+
+- **Thorough comparison against diverse baselines**: The paper evaluates nine baselines spanning latent-dynamics methods (SLAC, TiA, Iso-Dream, Den-MDP, RePo), multi-step inverse-dynamics methods (ACRO, InfoGating), and model-free methods (DrQ-v2), and discusses their specific limitations in Section 4.
 
 ## Weaknesses
 
@@ -28,51 +28,51 @@ None.
 
 ### Minor
 
-1. **Incomplete derivation from the information-theoretic objective to the training loss.** The paper defines an information-theoretic objective J(θ) (Equation 3) and states a lower bound can be derived, jumping directly to Equation 4–5 without showing the algebraic steps. Additionally, there is an inconsistency: the exogenous encoder is defined as p_θ(ê_t|o_t) (line 74), but the KL divergence in Equation 5 uses p_θ(ê_t|o_t, ê_{t-1}) without explanation. The overall loss is plausible and the method works well empirically, but the paper's framing as a fully-derived "information-theoretic framework" is weakened by these gaps. The derivation should either be completed in the paper or the paper should more candidly describe the loss as inspired by information-theoretic principles followed by practical design choices.
+- **Eq. (2) decomposition mixes ground-truth and learned variables without proper justification**. The equation writes I_{θ*}(Ŝ_{t-1}, A_{t-1}; O_t) = I(S_{t-1}, A_{t-1}; S_t) + I_{θ*}(Ŝ_{t-1}, A_{t-1}; O_t | S_t), where the first term uses the ground-truth state S (not the learned representation Ŝ) and does not involve θ. This is not a standard mutual information decomposition — it mixes variables from different spaces (learned and ground-truth) without showing how the two relate. The paper cites Federici et al. (2020) and says it "resembles" the supervised learning decomposition, but no formal connection is established. Since this decomposition is the key motivation for why "superfluous information" exists and why a new method is needed, it should be stated with mathematical precision. The actual method (Eq. 3 onward) does not rely on this equation, so the imprecision does not invalidate the empirical results, but it weakens the paper's theoretical framing.
 
-2. **Min-max optimization details are underspecified.** The paper describes optimizing Equation 7 via "alternating fashion" (line 120) but does not specify update frequencies, learning rates, or whether the inner maximization is taken to convergence. Stability of this adversarial training is not discussed. While these details may appear in the (parser-stripped) appendix, the main text should at least summarize the procedure.
+- **Min-max optimization for J_InvDyn-E (Eq. 7) lacks analysis of training dynamics**. The objective trains an inverse-dynamics predictor q_ψ(a_t | ê_t, ê_{t+1}) to be accurate while the encoder θ tries to make it inaccurate — a sensible adversarial approach to minimize I_θ(A_t; Ê_t, Ê_{t+1}). However, the paper does not discuss optimization schedules (number of inner ψ updates per outer θ update), gradient clipping, learning-rate tuning specific to this term, or convergence behavior. The reconstruction loss in J_ELBO prevents collapse, but the interaction between objectives is unanalyzed. The paper states that implementation details are in Appendices G and H (stripped by the parser), so some specifics may exist, but the broader question of optimization robustness across environments remains unaddressed.
 
-3. **Ablation study limited to one environment.** The ablation in Table 3 is conducted only on Cheetah with Multiple Videos distraction. The claim that the regularization term is "broadly helpful" would be strengthened by ablating on at least one additional environment/distraction combination (e.g., Walker-Walk or the Grid setting).
+- **Several baselines obtain very low or zero normalized scores** (e.g., Den-MDP, RePo, TiA on Hopper 2×2 Grid). While the paper explains why reward-based regularization methods struggle (Section 4), the dramatic underperformance compared to their established results in other settings raises a question about whether hyperparameters were specifically tuned for this setting. The paper states it used original hyperparameters where possible, which is standard practice, but a sensitivity analysis or additional tuning for these baselines would strengthen the claim that CLEAR's advantage is not partially an artifact of suboptimal baseline configurations.
 
-4. **No discussion of statistical significance.** Several baselines show high variance (e.g., SLAC Hopper Clean at 28.4 ± 11.1, Iso-Dream Cheetah Grid at 16.0 ± 31.9). The paper reports standard errors but does not perform significance tests or discuss whether differences between methods are reliable.
-
-5. **One claim is slightly overstated.** The paper states "CLEAR is the only latent dynamics method that can consistently remove superfluous information and maintain a level of invariance" (line 167). On Hopper-Hop, CLEAR does not achieve full distraction-robustness (the paper acknowledges this on line 177), so "consistently" is too sweeping given this exception. Qualifying the claim would be more accurate.
-
-6. **No limitations paragraph.** The paper does not discuss limitations of the compositional decoder (e.g., the assumption that state and exogenous factors are spatially separable via a pixel-wise mask; failure cases when distractions overlap with the agent or move in sync with it), nor cases where the ExoPOMDP assumptions might be violated.
+- **No limitations section**. Important limitations worth acknowledging include: (a) the compositional decoder assumes agent and distraction occupy different spatial regions, which may fail for non-spatial distractions (e.g., color changes, lighting shifts); (b) CLEAR does not achieve full distraction robustness on Hopper, suggesting some types of distractions are harder to disentangle; (c) the method adds training complexity via the adversarial inverse-dynamics network.
 
 ### Trivial
 
-- The qualitative results (Figure 4) are compelling but not quantified across seeds — reporting the fraction of seeds that achieve the desired disentanglement pattern would strengthen the presentation.
+- **KL weight values not reported in the main text**. The paper mentions (line 132) using two different constants for the two KL terms in J_ELBO, which "control the amount of information that passes through each encoder and improve performance," but does not report the values or sensitivity to them. These may be in the appendix (stripped by parser), but a brief mention in the main text would help.
 
 ## Nice-to-Haves
 
-- **Additional distraction types.** The paper tests static backgrounds, video overlays, and a grid of agents. Testing other exogenous variations (e.g., camera shake, lighting changes, occlusions) would broaden the empirical scope, though the current set is already reasonable within the paper's stated scope.
-- **Statistical significance testing.** A simple test (e.g., overlapping confidence intervals or paired bootstrap) would help readers assess whether reported improvements are reliable given the observed variance.
-- **Limitations discussion.** A short paragraph discussing when the compositional decoder's spatial-separability assumption might fail and potential failure modes of the adversarial training would strengthen the paper.
+- The theoretical motivation for equating "superfluous information" with exogenous information could be tightened with a more explicit argument about how the residual term in a proper decomposition of I(Ŝ_{t-1}, A_{t-1}; O_t) relates to the exogenous-factor dynamics p^e(e_{t+1}|e_t).
+
+- The qualitative disentanglement results (Figure 4) could be complemented with quantitative disentanglement metrics (e.g., DCI, MIG, or regression of ê_t onto ground-truth distraction variables) when ground-truth distraction factors are available.
+
+- A brief discussion of why CLEAR's single-step adversarial approach might be preferable to multi-step inverse dynamics (beyond noting ill-posedness) would be helpful.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-- **Criticism about baselines not being re-tuned / hyperparameter disclosure.** The paper explicitly states that hyperparameter details are in Appendices G and H (line 231). Since the parser strips appendices, this criticism reflects missing appendix content, not an author error.
-- **Claim that the lower bound "may not actually be a valid bound."** The paper's lower bound follows standard variational bounding techniques (ELBO of an SSM + VAE) that are well-established in the cited literature (Hwang et al., 2023; Hafner et al., 2020). While the derivation steps are not shown, there is no evidence the bound is invalid — this is an overly strong characterization of a presentation gap.
-- **Criticism that the paper should test on more environment types (camera shake, lighting, occlusions).** These are outside the paper's stated scope; the paper constructs its own challenging distractions (video, grid) because existing benchmarks lack dynamic distractions. Demanding additional distraction types amounts to scope creep beyond what would strengthen the paper's core contribution.
-- **Complaint about the compositional decoder not being "forced by the ExoPOMDP assumptions."** The paper explicitly states at line 134: "assuming the state variables and exogenous variables occupy different parts of the visual observation, we employ a compositional decoder." This is transparently a practical design choice, not a claim of theoretical necessity. The reviewer's framing as a weakness is unwarranted.
+These points are flagged to be removed; treat them with caution:
+
+1. **"Consistency with ExoPOMDP" is not formally justified** (from Harsh Critic Critical Issue 1) — The paper uses "consistent with" to mean "structurally aligned with the ExoPOMDP's causal structure," not "provably recovers the true latent variables." The objective in Eq. (3) is derived to encourage the exact properties defined by the ExoPOMDP (independence, action-invariance of E, Markov property for S). This is standard usage and not an overclaim about identifiability. The reviewer reads a stronger technical meaning into "consistent" than the paper intends.
+
+2. **Comparison with multi-step inverse dynamics methods is insufficient** (from Harsh Critic's "Missing Parts") — The paper already addresses this in Section 4 (lines 144-145), noting that multi-step inverse dynamics is "inherently ill-posed since there are multiple actions that can achieve the same transition" and positioning CLEAR's single-step adversarial approach as an alternative regularization. Criticism is already addressed.
 
 ## Novel Insights
 
-The most instructive finding from this review is that **the cleanest evidence for the paper's core claim comes not from the offline RL scores alone but from the combination of the ground-truth regression (Table 2) with the qualitative analysis (Figures 4–5).** Table 2 shows that SLAC's state representations degrade in MSE as distractions increase, while CLEAR's stay low — but the paper also notes that low MSE does *not* guarantee good RL performance (e.g., SLAC on Cheetah Grid has low MSE but poor RL score). This asymmetry, combined with the ablation showing that *without* regularization the representations can flip or degenerate even though reconstruction quality remains high (Figure 5), makes a compelling case that the inverse-dynamics regularization is doing qualitatively different work from simply improving reconstruction. The failure mode of "flipped" representations (state encoder captures the video background, exogenous encoder captures the agent) is particularly instructive — it shows that the information-theoretic objective J_ELBO alone is insufficient to break symmetry, and that controllability (action predictability) is the right inductive bias to resolve this ambiguity.
+None beyond the paper's own contributions. The reviews identify no new connection or implication that the paper itself does not already present.
 
 ## Suggestions
 
-1. Provide the full derivation from Equation 3 to Equation 5 in a short appendix (or clarify which steps follow standard results from Hwang et al., 2023). In particular, explain the transition from I(Ê_t; O_t|Ŝ_t) - I(Ê_t; O_t) to the KL term involving ê_{t-1} — either correct the conditioning or clarify that the encoder is actually p_θ(ê_t|o_t, ê_{t-1}).
-2. Add a brief note on the min-max optimization procedure: update frequency for ψ vs. θ, learning rates, and any early-stopping or gradient-clipping used for stability.
-3. Add a limitations paragraph discussing the spatial-separability assumption of the compositional decoder and potential failure cases.
-4. Soften the claim on line 167 from "the only latent dynamics method that can consistently" to "the only latent dynamics method that can broadly" or add the caveat that full consistency was not achieved on Hopper.
-5. Run ablations on at least one additional environment (e.g., Walker-Walk) to strengthen the claim about the regularization term's general utility.
+1. **Fix the mathematical imprecision in Eq. (2)**: Either re-derive the decomposition properly by establishing conditions under which I_{θ*}(Ŝ_{t-1}, A_{t-1}; O_t) can be related to I(S_{t-1}, A_{t-1}; S_t) (e.g., assuming Ŝ is a sufficient statistic), or replace the decomposition with a more qualitative motivation that does not mix ground-truth and learned variables in the same equation.
+
+2. **Add analysis of the min-max optimization in Eq. (7)**: Report the inner/outer optimization schedule, any gradient clipping or learning-rate tuning specific to this term, and provide convergence curves for the adversarial loss across training. This is critical for reproducibility.
+
+3. **Add a limitations section** discussing the spatial-decoder assumption, the Hopper failure case, and the added complexity of the adversarial training.
+
+4. **Report the KL weight constants and their sensitivity** in the main text or explicitly reference the appendix section that contains them.
 
 ## Score and Decision
 
-This paper makes a clear contribution: it identifies a genuine problem (superfluous information in latent dynamics models under distractions), provides a clean theoretical diagnosis, and proposes a method that demonstrably outperforms existing approaches, especially on the hardest distraction settings. The weaknesses are all addressable: the derivation can be completed, the ablation can be extended, and a limitations paragraph can be added. No weakness threatens the core findings. I recommend acceptance.
+This paper presents a well-motivated method for an important problem in visual offline RL. The theoretical framing (ExoPOMDP + information-theoretic diagnosis of prior methods' failures) provides clear motivation, and the proposed CLEAR method is supported by strong empirical results across multiple environments and distraction types. The ablation study convincingly validates the design choices, and the qualitative analysis confirms the intended disentanglement. The main weaknesses are theoretical imprecision in the motivational decomposition, lack of optimization analysis for the adversarial component, and missing discussion of limitations — all addressable with revisions. These do not undermine the core contribution, which advances the state of the art in distraction-free representation learning for visual offline RL.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,88 +1,73 @@
-Now I have a thorough understanding of the paper. Let me construct the final consolidated review.
-
----
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes Conditional Adversarial Support Alignment (CASA) for unsupervised domain adaptation under label shift. It introduces a novel conditional symmetric support divergence (CSSD) that aligns the supports of *class-conditioned* feature distributions (rather than marginal ones), provides a theoretical target risk bound incorporating CSSD, and presents an algorithm that minimizes CSSD via a pseudo-label proxy. Empirical results on USPS→MNIST, STL→CIFAR, and VisDA-2017 show consistent improvements over prior methods, particularly under severe label shift.
-
----
+This paper proposes CASA (Conditional Adversarial Support Alignment), a method for unsupervised domain adaptation under label shift. It introduces the conditional symmetric support divergence (CSSD) — a conditional, class-aware variant of the symmetric support divergence — and derives a target risk bound involving CSSD. The algorithm minimizes CSSD via a proxy using pseudo-labels and the outer product of features and classifier predictions (similar to CDAN). Experiments on USPS→MNIST, STL→CIFAR, and VisDA-2017 show consistent improvements over baselines, especially under severe label shift.
 
 ## Strengths
 
-1. **Novel CSSD divergence that incorporates label structure.** Definition 2 introduces CSSD, which weights per-class support distances by class proportions. This is a genuine conceptual advance over the marginal SSD of Tong et al. (2022) and directly addresses the known failure of marginal alignment under label shift.
+- **Consistent empirical advantage under severe label shift.** CASA outperforms baselines on 11 of 15 transfer tasks, with the largest margins under the most severe shifts (α=0.5): +3.6% on USPS→MNIST, +1.6% on STL→CIFAR, and +0.7% on VisDA-2017 over the second-best method. The average accuracy across all shift levels also exceeds the second-best by 4.1%, 1.8%, and 1.0% respectively.
 
-2. **New theoretical target risk bound.** Theorem 1 provides an upper bound on target risk in terms of CSSD plus several controllable terms. Remark 3 gives a concrete comparison to the marginal SSD bound, showing the trade-off between support distances and sup-norm terms. This gives CASA a theoretical foundation that prior support-alignment work (ASA) lacked, and the localized hypothesis spaces per class are a nontrivial extension of prior analysis.
+- **Novel theoretical bound with CSSD.** Theorem 1 provides a target risk decomposition that incorporates the conditional symmetric support divergence, extending the ASA/IMD framework to the class-conditional setting. The bound motivates the algorithm design even if the justification is partial.
 
-3. **Consistent empirical superiority across multiple benchmarks and shift levels.** The paper reports that CASA achieves the highest average accuracy on 11 of 15 transfer tasks. Under severe label shift (α=0.5), it outperforms the second-best method by 3.6% on USPS→MNIST, 1.6% on STL→CIFAR, and 0.7% on VisDA-2017. Results are reported over 5 runs with variance, and performance remains robust across mild to extreme shift settings.
+- **2D visualization directly links reduced CSSD to improved accuracy.** Figure 2 shows that CASA achieves the lowest CSSD (0.02) and highest accuracy (99%), compared to CDAN (CSSD=0.13, 85%) and ASA (CSSD=0.05, 93%). This concrete empirical link supports the paper's central thesis.
 
-4. **Comprehensive baseline comparison.** The evaluation includes 10+ methods spanning distribution alignment (DANN, CDAN, VADA), label-shift-aware approaches (IWCDAN, IWDAN, sDANN, ASA), and pseudo-label methods (PCT, SENTRY), using the standard Dirichlet-shift protocol from prior work.
+- **Ablation study validates each loss component.** The ablation (Table 3) shows that removing any of L_align, L_ce, or L_v degrades accuracy across all levels of label shift, confirming that all three terms contribute to the method's robustness.
 
----
+- **Honest acknowledgment of the CSSD vs. SSD trade-off.** Remark 2 explicitly discusses that while the conditional support term may be larger than the marginal one, the per-class sup-norm terms can be smaller — giving a balanced comparison rather than overselling the theoretical advantage.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **The core claim — that conditional support alignment (CSSD) is superior to marginal support alignment (SSD) — is not rigorously isolated in the experiments.** The paper compares CASA (which uses conditional alignment + entropy minimization + VAT) against ASA (which uses marginal alignment + entropy minimization + VAT) using published ASA numbers. The ablation study (Table 4) removes individual loss terms from CASA, but this shows only that the full CASA objective is better than partial versions — not that conditional alignment *per se* outperforms marginal alignment. A controlled experiment that replaces CASA's conditional alignment loss with ASA's marginal alignment loss (keeping all other components — backbone, VAT, entropy minimization, hyperparameters — identical) would directly test the CSSD vs. SSD hypothesis. Without this, the observed improvements could plausibly stem from implementation differences (e.g., data splits, tuning, or the specific discriminator architecture) rather than the conditional support mechanism. This is the most consequential gap in the paper's evidence chain.
+- **The theory-algorithm gap weakens the paper's central theoretical claim.** Theorem 1's bound includes the terms ∑ q_k δ_k + p_k γ_k and the ideal joint risk inf_h L_S(h) + L_T(h), which the algorithm does not minimize and simply assumes to be "small" (lines 177–179). The bound is stated in terms of true labels Y, but the algorithm minimizes an approximation via pseudo-labels Ŷ, and the gap between the two regimes is unanalyzed. Proposition 1 only gives an equivalence at zero — the regime where the divergence is already eliminated — not a bound on how well minimizing the joint proxy approximates minimizing CSSD at non-zero values. This means the bound serves as qualitative motivation but does not constitute a rigorous justification, making the abstract's claim that the bound "justifies the merits" of the approach over marginal support alignment somewhat overstated.
+
+- **The theoretical advantage of CSSD over SSD is not established.** The paper's main theoretical novelty is the CSSD-based bound versus the existing SSD-based bound, but Remark 2 explicitly identifies a trade-off (conditional support term larger, per-class sup-norm terms smaller) and does not prove that minimizing CSSD yields a *tighter* bound under any identifiable condition. The paper would need to characterize when the trade-off favors CSSD (e.g., when per-class supports are well-separated, or under specific label shift levels) for the theory to genuinely "justify" the method over ASA.
 
 ### Minor
 
-- **The theoretical bound's connection to the actual algorithm is indirect.** Theorem 1 contains terms (δ_k, γ_k) that depend on localized hypotheses and are assumed small without analysis. The paper acknowledges this ("we assume the ideal joint risk term and Σ q_k δ_k + p_k γ_k values to be small"), but does not analyze how these terms behave under extreme label shift or different localization parameters r¹, r². The bound motivates CSSD minimization but does not guarantee it is the dominant term — the claim that the bound "justifies the merits of aligning the supports of conditional feature distributions" is therefore somewhat overstated. This is standard in DA bounds (Ben-David et al., Dhouib et al.) and does not invalidate the theory, but the paper would benefit from a more measured claim about what the bound strictly guarantees.
+- **The distance function d in the alignment loss (Eq. 8) is underspecified.** The paper defines d as "a proper distance on the latent space Z" (Definition 3) and "a well-defined distance on the conditional Z|Y space" (line 124). However, in L_align (line 219), d is applied to a discriminator output r(s(x)) (a scalar in [0,1]) and a *set* of discriminator outputs {r(s(x_j^T))}. The operation d(scalar, set) is never defined — it is not clear whether this is min_{j} |r(s(x)) - r(s(x_j))|, average absolute difference, or something else. This is a missing implementation detail that affects reproducibility.
 
-- **The pseudo-label proxy for CSSD is not analyzed for reliability under the conditions the method targets.** CASA replaces the unobservable CSSD (requires target labels) with a joint-space support divergence using pseudo-labels (Proposition 1). The equivalence holds only when pseudo-labels have positive probability for each class in both domains — a condition that can fail under severe label shift for underrepresented classes. The paper mentions entropy conditioning (citing Long et al., 2018) as mitigation, but provides no analysis, ablation, or diagnostic showing how pseudo-label accuracy correlates with CASA's performance across shift levels. Since this proxy is central to the method, its failure modes deserve explicit treatment.
+- **No hyperparameter sensitivity analysis.** The ablation shows each loss term helps, but there is no analysis of how sensitive results are to the values of λ_align, λ_ce, and λ_v. Since the method introduces at least one new hyperparameter (λ_align) not present in ASA, understanding robustness to its value is important.
 
-- **The distance computation in the support alignment loss is underspecified.** Equation (loss:ssd) applies the distance function *d* between a scalar discriminator output *r*(s(x_i)) and a *set* of scalar outputs {*r*(s(x_j))}. The paper defines *d* as a "proper distance" on the latent space but does not specify how distance to a set is computed (minimum? average? L1? L2?). This is a reproducibility gap for practitioners wanting to implement the method.
+- **No statistical significance or variance reporting for the comparison claims.** The paper reports 5-run averages but does not provide error bars or significance tests for the reported improvements over baselines. Claims like "outperforms by 3.6%" would be strengthened by showing that the margin exceeds the variance.
+
+- **No computational cost comparison.** Given that CASA adds a pseudo-label-based joint discriminator similar to CDAN on top of ASA, it would be useful to report overhead relative to ASA or CDAN to help practitioners assess the trade-off.
 
 ### Trivial
 
-- **Hyperparameter sensitivity is not discussed.** The weights λ_align, λ_ce, λ_v are introduced but no information is given about how they were chosen, whether they are fixed across datasets/shift levels, or how performance varies with them. This is important for fairness in baseline comparisons and for practical adoption.
-
----
+- The paper does not discuss whether CDAN's known vulnerability to noisy pseudo-labels carries over to CASA, given the shared outer-product architecture.
 
 ## Nice-to-Haves
 
-- A diagnostic plot showing pseudo-label accuracy vs. shift level (α) and its correlation with CASA's final accuracy would strengthen confidence in the proxy objective.
-- A note on computational cost (training time, memory) relative to ASA would help practitioners assess practical trade-offs.
-- A limitations paragraph explicitly discussing when conditional support alignment might fail (e.g., when pseudo-labels are very poor, or when δ_k, γ_k are not small) would improve the paper's completeness.
-
----
+- An analysis of the correlation between D_supp(P_{Z,Ŷ}, Q_{Z,Ŷ}) and D^c_supp(P_{Z|Y}, Q_{Z|Y}) across training would directly address the theory-algorithm gap and show whether the pseudo-label proxy is empirically faithful.
+- Identifying a concrete condition (e.g., per-class support separation, label shift severity) under which the CSSD-based bound is provably tighter than the SSD-based bound would convert the informal Remark 2 into a genuine theoretical justification.
+- Reverse-direction experiments (MNIST→USPS) would round out the empirical coverage.
 
 ## Removed Points
 
-These points are flagged to be removed — treat them with caution:
+These points have been removed from the main review per the meta-review guidelines:
 
-- The harsh critic's note that "Tables are not visible in the text" is a parser artifact, not a paper flaw. The original submission contains tables.
-- The criticism about "published ASA numbers" is not clearly supported: the paper reports results for ASA across multiple α values and 5 runs, which strongly suggests they re-ran ASA themselves under the same protocol. The broader point about missing controlled ablation (above, under Major) is the substantive concern.
-- The generic claim that the bound "does not directly justify minimizing CSSD" without more analysis was kept in weakened form (Minor) because the paper's own remarks acknowledge the auxiliary terms are assumed small.
-
----
+- **"The experimental results cannot be fully verified"** (parser-stripped tables, line 264 references \input). The tables exist in the original submission; the parser removed them.
+- **"The paper does not include reverse direction comparisons (MNIST→USPS)."** This is a legitimate suggestion but does not rise to the level of a weakness for a paper already covering three datasets with multiple shift levels. It is moved to Nice-to-Haves.
+- **"The loss terms δ_k and γ_k are never explicitly connected to any component of the algorithm."** The paper acknowledges these are assumed small (line 178), which is standard practice for such bounds. The critic's suggestion to connect them to VAT regularization is a Nice-to-Have, not a flaw.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
-
----
+None beyond the paper's own contributions. The reviews largely converge on the same assessment: the method is sound and the empirical results are the main contribution, while the theoretical justification is partial and the bounds serve as motivation rather than rigorous proof. The key insight from cross-referencing the paper with the reviews is that the paper's central claim — that the bound "justifies" the method over ASA — is the weakest link; the empirical comparison with ASA is the actual strength.
 
 ## Suggestions
 
-The most impactful revision would be to add a controlled experiment: run CASA with its conditional alignment loss replaced by ASA's marginal SSD alignment loss, keeping all other components (backbone, VAT, entropy minimization, training protocol, hyperparameters) identical. If CASA (conditional) consistently beats this variant, the paper's central claim is strongly supported. If the advantage is smaller than claimed, the paper would benefit from an honest discussion of where conditional alignment helps and where it doesn't. Additionally, providing the distance specification for *d*(·, {·}) and a brief pseudo-label quality analysis would substantially improve clarity and rigor.
-
----
+1. **Specify the distance d in L_align.** State whether d(r(s(x)), {r(s(x'))}) = min_{x'} |r(s(x)) - r(s(x'))| or another concrete form. This is essential for reproducibility.
+2. **Acknowledge the theory-algorithm gap more explicitly.** Replace claims of "justification" in the abstract and introduction with more measured language (e.g., "motivates," "suggests") to better match what the bound actually provides.
+3. **Add error bars or confidence intervals** to the main result tables for the 5-run experiments.
+4. **Include a hyperparameter sensitivity analysis** for λ_align, at minimum, to demonstrate robustness.
 
 ## Score and Decision
-
-**Originality:** 3.5/5 — CSSD is a novel divergence; the theory extends Dhouib et al. in a nontrivial way.  
-**Importance of Research Question:** 4/5 — UDA under label shift is practically important and theoretically interesting.  
-**Claims Well-Supported:** 2.5/5 — The central claim (CSSD > SSD) is plausible but not rigorously isolated experimentally.  
-**Soundness of Experiments:** 3/5 — Good breadth of baselines and shift levels, but missing the key controlled comparison.  
-**Clarity of Writing:** 3.5/5 — Generally clear; the theory section is notation-heavy but well-structured.  
-**Value to Community:** 3.5/5 — The CSSD concept and bound are useful; the algorithm is competitive.
-
-The paper makes a genuine contribution — a novel divergence with a theoretical bound and a well-performing algorithm. However, the central claim that conditional alignment is better than marginal alignment is not as rigorously supported as it should be given the paper's framing. The major weakness is fixable, and the remaining issues are minor. On balance, the paper merits acceptance with the expectation that the experimental gap be addressed in the camera-ready version.
 
 MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

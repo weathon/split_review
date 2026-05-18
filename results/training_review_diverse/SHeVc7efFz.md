@@ -1,20 +1,28 @@
-Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
+Now I have all the information I need. Let me verify the critical factual claim in the harsh critic's point #2 before writing.
+
+The paper clearly states that the 47.91m ATE on KITTI corresponds to row 3 ("no depth regularization"), which keeps depth initialization, MVS, and NAT — it only disables the adaptive regularization weight C_i. The actual "no depth prior" ablation (row 7) removes depth initialization from row 6 (no NAT & no MVS) and leads to "more than 10x" error increase. So the harsh critic's claim that "'no depth prior' achieves an ATE of 47.91m" is factually incorrect — that number belongs to a different ablation condition.
+
+Now let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes RoMeO, a monocular RGB visual odometry system that leverages pre-trained monocular metric depth models (DPT-Hybrid) and multi-view stereo (MVS) models (MaGNet) as priors to improve VO robustness and recover metric-scale trajectories. Key innovations include: (1) adaptive depth regularization that selectively applies depth priors based on photometric error checks, (2) MVS priors with motion/overlap filters, and (3) noise-augmented fine-tuning that adapts the flow network to depth-enhanced inputs while preserving robustness to depth noise. RoMeO is evaluated across 6 diverse indoor/outdoor zero-shot datasets and shows consistent, large improvements over prior SOTA (DPVO) in both trajectory shape (RTE) and metric-scale accuracy (ATE).
+2-3 sentence summary of the paper's contribution.
+
+The paper proposes RoMeO, a monocular visual odometry system that leverages pre-trained monocular metric depth and multi-view stereo (MVS) models as priors to recover metric-scale trajectories and improve zero-shot robustness. Key technical innovations include adaptive depth-guided bundle adjustment that selectively enables depth regularization only when the predicted depth is reliable, MVS integration conditioned on motion/overlap constraints, and noise-augmented training that adapts the flow network to depth-enhanced inputs while maintaining robustness to prediction noise. RoMeO consistently and significantly outperforms prior SOTA (DPVO) across 6 diverse indoor/outdoor datasets, reducing RTE and ATE by 55.2% and 77.8% on average.
 
 ## Strengths
 
-- **Consistent and large performance gains across diverse zero-shot data**: RoMeO substantially outperforms both learning-based and classical baselines on all 6 datasets spanning indoor/outdoor, driving/handheld/MAV scenes. Unlike prior depth-guided methods (DROID-Metric3D) that hurt accuracy on some datasets, RoMeO improves consistently across the board (Table 2, Fig. 1a). This is a genuinely novel capability.
+- **Consistent and large improvements across diverse zero-shot datasets**: Table 2 shows RoMeO reduces RTE and ATE on average by 55.2% and 77.8% over DPVO, with improvements on every single benchmark (indoor and outdoor) and >90% ATE reduction on challenging datasets like KITTI Odometry. This breadth of zero-shot generalization is unprecedented for monocular VO.
 
-- **Well-validated adaptive depth regularization**: The photometric-error-based condition (Eq. 2) selectively enables depth regularization only when depth is reliable. Ablation (Table 4) confirms that always-on regularization degrades RTE on 4Seasons from 19.59m to 117.95m, while always-off degrades ATE on KITTI from 3.81m to 47.91m; the adaptive strategy retains benefits across both. This mechanism is central to the paper's contribution and is convincingly validated.
+- **Adaptive filtering of noisy depth priors in bundle adjustment**: Section 3.1 introduces a photometric-error-based condition (Eq. 2) that selectively enables depth regularization only when predicted depth is reliable. Ablation Table 4 (row 2 vs. full) shows that always-enabling regularization causes RTE on 4Seasons to degrade from 19.59m to 117.95m, while always-disabling it causes KITTI ATE to degrade from 3.81m to 47.91m. The adaptive strategy preserves gains while rejecting noise.
 
-- **Metric-scale recovery from monocular RGB without IMU or 3D sensors**: RoMeO is the first method to achieve reliable metric-scale trajectories from monocular video alone, demonstrated by drastic ATE improvements (e.g., KITTI: 140.28m→3.81m) and trajectory visualizations (Fig. 4). This directly addresses a fundamental limitation of prior learning-based VO.
+- **Novel MVS integration with explicit motion/overlap conditions**: Section 3.3 enforces a minimum translation sum (>0.1m) and bounded rotation angle (10°–30°) between recent keyframes before using MVS, and applies MVS only after the 8th BA iteration. Table 4 (row 5, "no MVS") confirms removing MVS guidance hurts both RTE and ATE across all datasets.
 
-- **Noise-augmented training (NAT) is a novel and validated contribution**: Fine-tuning the flow network with depth-enhanced inputs (while aligning only predictions with >20% error) is shown to be critical — ablation (Table 4, row 6 vs. row 5) shows removing NAT increases ATE by >2× on 4Seasons. This training strategy enables a positive feedback loop between better depth and better flow/poses.
+- **Noise-augmented training adapts the flow network**: Section 3.4 fine-tunes the pre-trained flow network on TartanAir with monocular depth initialization, aligning predicted depth to GT only when error exceeds 20%. Table 4 (row 6, "no NAT & no MVS") shows removing this step more than doubles ATE on 4Seasons.
 
-- **Thorough experimental methodology**: Evaluation on 6 diverse zero-shot datasets, comparison to both classical and learning-based baselines, transfer to full SLAM (Table 3), ablation isolating each component (Table 4), and efficiency analysis with a fast variant (Table 5). The ablation study cleanly validates each of the claimed contributions.
+- **Performance gain transfers to full SLAM**: Table 3 demonstrates that when global BA is enabled, RoMeO-SLAM retains the same large margins (e.g., 93.3% RTE reduction and 97.6% ATE reduction on KITTI), extending the contribution beyond VO alone.
+
+- **Systematic depth model comparison justifies lightweight design**: Table 1 evaluates multiple monocular depth models and shows that the lightweight DPT-Hybrid achieves comparable accuracy to much larger models (DepthAnythingV2-Large, Metric3DV2-Large) while keeping overhead small — a practical insight.
 
 ## Weaknesses
 
@@ -22,60 +30,52 @@ This paper proposes RoMeO, a monocular RGB visual odometry system that leverages
 None.
 
 ### Major
-
-- **Claimed average improvement percentages (55.2% RTE, 77.8% ATE) do not appear reproducible from Table 2.** The abstract and Section 4.1 state these numbers. A reviewer recomputation from Table 2 gives roughly 71.9% RTE reduction (simple average of absolute values) or 59.5% (per-dataset percentage averages), and ~93.1% or ~87.0% for ATE — none matching 55.2%/77.8%. Since Table 2 is embedded as an image in the parsed text, I cannot independently verify the exact numbers, but this discrepancy — if correct — is a clear numerical inconsistency that must be resolved. The individual results remain strong and the overall contribution is not invalidated, but the headline claim must match the table. The authors should either correct the percentages or clarify the averaging methodology (e.g., whether a particular weighting was used).
+None.
 
 ### Minor
 
-- **"First method" framing overstates novelty.** The paper states it is "the first method that can leverage (noisy) depth priors to enable robust VO and recover metric scale poses" (abstract, line 4) but acknowledges DROID-Metric3D as prior work that also uses predicted depth. DROID-Metric3D already demonstrated depth-prior-guided VO with metric scale recovery, albeit with less robustness. The claim would be more accurate as "first to do so *robustly* with consistent improvements across diverse zero-shot data" or similar. This is a framing issue, not a technical flaw.
+- **ATE/RTE metric definitions need precise specification of the alignment protocol.** The paper states that RTE aligns the trajectory scale with GT, while ATE follows RGB-D VO (Campos et al., 2021) and does not include scale alignment. However, standard ATE evaluation (Sturm et al., 2012) for monocular trajectories typically applies a Sim(3) alignment (rotation, translation, and scale). The paper's distinction between ATE (without scale alignment) and RTE (with scale alignment) is clear in principle, but the exact alignment applied to the trajectory before computing ATE (first-pose-only? rigid R,t transformation?) is not stated. Since the metric-scale claim hinges on ATE not involving scale alignment, the paper should specify the exact alignment protocol to eliminate ambiguity. This does not invalidate the results — the dramatic ATE reductions are consistent with the visualizations in Fig. 4 — but it is a reproducibility concern.
 
-- **Separate depth models/hyperparameters for indoor vs. outdoor weakens the "robustness" claim.** The paper acknowledges this limitation (line 133, line 214), but the use of different DPT scale/shift parameters, MaGNet models, and α values (1.5 indoor / 1.75 outdoor) means the system is not evaluated with a truly unified configuration. The ablation (Table 4, DPT→Metric3D) further shows depth model choice affects performance. A stronger paper would demonstrate results with a single depth model/hyperparameter set across all scenes, or provide an explicit analysis of how scene-specific tuning bounds the generalization claim.
+- **Hyperparameter values are dataset-specific and lack sensitivity analysis.** The method uses α=1.75 for outdoor scenes and α=1.5 for indoor scenes (Section 4, Implementation), separate DPT-Hybrid scale/shift parameters, and separate MaGNet models for indoor/outdoor. The paper acknowledges this limitation in the conclusion. However, no analysis is provided of how performance varies with α or the MVS activation thresholds over a plausible range. While two settings (indoor/outdoor) is not unreasonable, some sensitivity characterization would strengthen claims of practical robustness.
 
-- **No DPVO+DPT baseline to isolate RoMeO's robust techniques.** The paper includes DROID-Metric3D (which uses a different depth model and base VO), but adding a simple DPVO+DPT baseline (naive depth injection without RoMeO's adaptive filtering, MVS, and NAT) would directly quantify the value of RoMeO's robust components over a plain depth-augmented baseline on the same architecture.
+- **Averaging method for headline reduction percentages is unspecified.** The paper reports 55.2% RTE reduction and 77.8% ATE reduction "on average." The per-dataset reductions vary substantially (e.g., ~97% ATE reduction on KITTI vs. smaller margins on other datasets). The paper should specify whether this is a simple arithmetic mean, a weighted average, or a median to avoid potential confusion.
 
-- **Key hyperparameters lack sensitivity analysis.** The adaptive condition threshold α (1.5/1.75) and MVS enable thresholds (Eq. 3: 0.1m translation, 10°–30° rotation) are critical to system behavior but receive no ablation or justification beyond single chosen values. A sensitivity study on even one or two datasets would strengthen confidence that these are not overfit to the evaluation sets.
+- **Efficiency comparison uses inconsistent resolutions.** Table 5 compares RoMeO-VO-fast against the base system, but the fast version uses reduced resolutions (e.g., 224×448 vs. 320×512 on KITTI, 192×256 vs. 240×320 on TUM-RGBD). This makes it unclear how much of the speed gain comes from resolution reduction vs. architectural choices. Reporting FPS with a consistent input resolution across variants would clarify this.
 
-- **No statistical significance or variance reported.** VO results can exhibit non-deterministic behavior; reporting results from a single run without noting seed behavior or variance reduces confidence, especially for the reported fine-grained improvements.
-
-- **Fast variant (RoMeO-VO-fast) not included in the main results table.** Table 5 reports its speed but not its RTE/ATE, making it impossible to assess the speed–accuracy trade-off quantitatively from the main evaluation.
+- **MVS activation rate not reported.** The MVS model is applied only when conditions in Eq. 3 are met, and only every 3 keyframes. It would be informative to report what fraction of keyframes actually trigger MVS guidance in practice across datasets, to help readers understand how often this component contributes.
 
 ### Trivial
-
-- **Non-standard metric naming could cause confusion.** ATE is typically computed after similarity alignment; here ATE is "absolute (unscaled) trajectory error" while RTE is "scale-aligned trajectory error." The paper defines this clearly in Section 4 (line 151), but readers accustomed to standard conventions may misinterpret results. A brief clarification or renamed acronyms (e.g., "Absolute (unscaled) TE" and "Scale-Aligned RTE") would help.
+None.
 
 ## Nice-to-Haves
 
-- A single-configuration evaluation (same depth model, same α) across both indoor and outdoor scenes would directly test the claim of "robust to both indoor and outdoor" with a unified system.
-- Qualitative analysis of the photometric error condition's true/false positive rates for filtering noisy depth would strengthen the robustness story.
-- Sensitivity analysis on α and MVS thresholds over a small set of datasets.
-- Including RoMeO-VO-fast's RTE/ATE in Table 2 for a complete picture.
+- A direct comparison against DROID-VO (the dense-flow architecture that RoMeO builds on) in the ablation table would help isolate the contribution of depth priors from architectural improvements over DPVO (which uses sparse flow for speed). The current "no depth prior" row (row 7) has errors that are "more than 10x" higher than row 6, suggesting it is much worse than DPVO, so this is not a flaw in the paper's attribution — but including explicit DROID-VO numbers would be cleaner.
+- A study of failure cases where the adaptive filter incorrectly disables or enables depth regularization would be helpful for future work.
+- Reporting GPU memory and detailed latency breakdown (depth model vs. VO core) across all datasets would strengthen the efficiency claims.
 
 ## Removed Points
 
-- **"No comparison to hybrid VO systems (SuperPoint+SuperGlue+DSO-style)"**: This demands a comparison not standard in the learning-based VO evaluation paradigm the paper targets. Removed per the rule against missing related-work critiques.
-- **Formatting/style nitpicks**: Removed per hard rules.
-- **"ATI on KITTI: 140.28→3.81 likely reflects DPVO lacking metric scale"**: This observation was already part of the paper's own framing and contribution. Not a weakness — the paper explicitly argues metric-scale recovery is a key contribution.
-- **Generic strengths from Strength Finder**: All six strengths were retained as they are specific and evidence-backed.
+- **Harsh Critic Point #2 ("no depth prior ablation substantially outperforms DPVO"):** REMOVED — factually incorrect. The reviewer attributed the 47.91m ATE (KITTI) to the "no depth prior" ablation. In the paper, 47.91m is from row 3 ("no depth regularization"), which still uses depth initialization, MVS, and noise-augmented training. The actual "no depth prior" ablation (row 7) removes depth initialization from "no NAT & no MVS" and causes "more than 10x" error increase — likely far worse than DPVO, not better. The criticism is based on a misreading of Table 4.
+- **Harsh Critic Point about "Inconsistent averaging for 55.2%/77.8% reduction":** REMOVED — the reviewer's claimed ~97% ATE reduction via "simple arithmetic mean" cannot be verified since the exact per-dataset numbers are embedded in an image table. The wording "on average" is standard; the paper could be more precise, but there is no evidence of inconsistency.
+- **Criticisms about missing appendix, missing proofs, or formatting:** Automatically removed per instructions — these are parser artifacts, not author errors.
+- **Generic/overblown framing:** The reviewer's characterization of the ATE issue as "decisive" and "fatal" is downgraded — the paper's metric definitions are explicit (RTE = with scale alignment, ATE = without), and the metric-scale claim is additionally supported by Fig. 4 visualizations showing trajectories without any scale alignment. The remaining concern is about the exact (non-scale) alignment applied, which is a minor clarity issue.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one key insight: the paper's core technical contribution lies not in simply adding depth priors to VO — which prior work (DROID-Metric3D) had attempted — but in the *conditioning mechanisms* (photometric error gating, motion/overlap filters for MVS, noise-augmented training) that make depth priors robust rather than harmful on zero-shot data. This reframing — that the filtering strategies are the actual contribution, not the depth priors themselves — sharpens what is novel and what future work should build upon.
+None beyond the paper's own contributions. The reviewer reviews do not surface a genuinely novel synthesis that the paper itself does not already articulate.
 
 ## Suggestions
 
-1. **Correct the claimed average improvements (55.2%/77.8%)** to match Table 2, or clearly state the averaging methodology if a specific weighting was used (e.g., macro vs. micro average, or dataset-specific weights).
-2. **Add a DPVO+DPT baseline** (even without RoMeO's robust techniques) to Table 2 or the ablation to quantify each component's marginal contribution.
-3. **Include a sensitivity analysis** on the key hyperparameters (α, MVS thresholds) for at least 1–2 datasets in the appendix or supplement.
-4. **Clarify metric naming** with a brief note or parenthetical clarification to avoid confusion with standard ATE conventions.
-5. **Report variance** across multiple seeds or runs, or at minimum note whether results are deterministic under the current setup.
+1. In the Metrics section, state explicitly: "ATE is computed after aligning the trajectory to the ground truth with a rigid (rotation + translation) transformation only — no scale alignment is applied. RTE is computed after additionally aligning scale."
+2. Add a small sensitivity table showing RTE/ATE for α ∈ {1.25, 1.5, 1.75, 2.0} on at least one indoor and one outdoor dataset.
+3. Report the averaging method (simple mean? median?) for the 55.2%/77.8% reduction claims.
+4. In the efficiency table, include a row where all variants use the same input resolution.
+5. Report the fraction of keyframes where MVS guidance is activated per dataset.
+6. Include explicit DROID-VO numbers in Table 2/4 for readers who want to compare against the dense-flow baseline directly.
 
 ## Score and Decision
 
-The paper presents a well-designed system with a clear, substantial contribution: it is the first method to consistently and robustly improve VO across diverse zero-shot data while recovering metric scale. The experimental evaluation is thorough (6 datasets, multiple baselines, SLAM transfer, ablation). The weaknesses are predominantly presentation and precision issues rather than structural flaws. The only notable evidential concern is the numerical discrepancy in the claimed average improvement percentages, which is fixable by correction or clarification. No weakness threatens the core contribution.
+The paper presents a well-motivated system with clear technical contributions, thorough ablations, and unusually strong empirical results across 6 zero-shot datasets. The weaknesses are minor and addressable — none threaten the core claims. The ATE/RTE clarity concern is the most important to fix, but the paper already draws the key distinction explicitly; it only needs precision about the exact alignment used. On balance, this is a solid paper with impressive results.
 
-**Score**: 7.0/10 — a solid paper with clear contributions and thorough evaluation, marred by a numerical reporting issue and minor framing overclaims that are addressable.
-
-**Decision**: Accept
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

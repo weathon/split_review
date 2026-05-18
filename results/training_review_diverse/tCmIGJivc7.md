@@ -1,26 +1,20 @@
-Now I have all the information I need. Let me produce the final consolidated review.
+Now I have the full picture. Let me compile the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes Topic-XICL, a demonstration selection method for cross-lingual in-context learning (XICL) that trains a latent topic model on a compact LLM (BLOOMZ-1.7B) and selects demonstrations via topic inference. The method first clusters English training data into topics using K-means on multilingual Sentence-BERT embeddings, then learns topic-specific token embeddings by fine-tuning a small LLM. For each test instance, its topic is inferred via semantic similarity, and the top-\(k\) candidates (ranked by topic-model probability) within that topic serve as demonstrations. Experiments on XNLI, XCOPA, and TyDiQA-GoldP across three LLMs (BLOOM, Qwen1.5, Llama3.1) report average gains of 1.77–3.32% over clustering-based and semantic-similarity baselines.
-
----
+This paper proposes Topic-XICL, a demonstration selection method for cross-lingual in-context learning (XICL). The approach clusters source-language training data via Sentence-BERT embeddings, learns per-cluster topic token embeddings by fine-tuning a compact LLM (BLOOMZ-1b7), and selects demonstrations by maximizing the learned topic probability for each cluster. Evaluated on XNLI, XCOPA, and TyDiQA-GoldP across three LLMs (BLOOM, Qwen1.5, Llama3.1), the method achieves average improvements of 3.32%, 2.47%, and 1.77% over off-the-shelf baselines (random, semantic similarity, cluster-based) with only 15–30 minutes of training.
 
 ## Strengths
 
-1. **Novel application area.** The paper extends Bayesian-inference-based demonstration selection (previously limited to monolingual classification) to cross-lingual settings and non-classification tasks (reasoning, QA). This is a genuine extension of prior work by Wang et al. (2023).
+1. **First to extend Bayesian-motivated demonstration selection to non-classification, cross-lingual tasks.** Prior work (Wang et al. 2023) was limited to classification. The paper applies the same family of techniques to XCOPA (multiple-choice) and TyDiQA-GoldP (question answering), supported by consistent gains on these harder task formats (Section 4.4).
 
-2. **Consistent empirical trends across tasks and models.** Table 1 reports that Topic-XICL outperforms the strongest baseline (ICL cluster) on average across three LLMs on TyDiQA-GoldP (+3.32%), XCOPA (+2.47%), and XNLI (+1.77%). Per-language results in Figure 3 show meaningful gains on several low-resource and unseen languages (e.g., +10.3% on Bengali for BLOOM in TyDiQA, +10.9% on Vietnamese for BLOOM in XCOPA).
+2. **Consistent improvements across three tasks, three LLMs, and multiple shot settings.** Table 1 shows Topic-XICL outperforms all three baselines on every task-model combination reported. The ICL-cluster baseline (which itself combines semantic similarity with diversity) is a strong comparator, and Topic-XICL beats it by margins that grow with task complexity (largest gains on TyDiQA-GoldP).
 
-3. **Practical efficiency.** The topic model trains on BLOOMZ-1.7B in 15–30 minutes (Section 5.3), and the learned topic tokens transfer to different target LLMs (BLOOM, Qwen1.5, Llama3.1) without retraining. Even with BLOOMZ-560M, the method maintains gains on two of three tasks.
+3. **Efficient training that transfers to larger models.** The topic model is trained on BLOOMZ-1b7 (or even BLOOMZ-560m) in 15–30 minutes, yet the selected demonstrations improve performance on 7–8B parameter LLMs (Section 5.3, Figure 7). This makes the approach practical for settings without access to the target LLM's weights.
 
-4. **Ablation study provides partial validation.** Figure 5 shows that the full Topic-XICL method outperforms variants with simpler test-instance topic classification (top-1 topic, k-means predict), confirming that the topic-inference-based classification step contributes positively.
-
-5. **Generalizability to non-English source languages.** Experiments with Chinese and Italian as source languages (Section 5.4, Figures 8–9) show that Topic-XICL consistently outperforms baselines, and Italian even surpasses the English-based baseline on Llama3.1.
-
----
+4. **Robustness to source language variation.** Experiments using Chinese and Italian as source languages (Section 5.4, Figure 8/9) still yield improvements over baselines, with Italian even surpassing English-based performance on Llama3.1. This shows the method is not tied to English.
 
 ## Weaknesses
 
@@ -29,67 +23,50 @@ None.
 
 ### Major
 
-1. **The contribution of the learned topic tokens is not fully isolated from within-cluster ranking.**  
-   The key baseline, ICL cluster, uses the same K-means clustering and the same test-instance topic classification as Topic-XICL but *randomly* samples \(k\) demonstrations per cluster. Topic-XICL ranks candidates within each topic using the topic-token probabilities and selects top-\(k\). The improvement over ICL cluster could therefore come from *any* sensible within-cluster ranking, not specifically from what the topic tokens capture. The paper does not include a control where within-cluster ranking is done by a simpler method (e.g., Sentence-BERT similarity to the cluster centroid). Without this, the central claim that the topic model "learns additional features automatically through the Topic variables" (Section 4.4) is not fully substantiated — the ranking mechanism itself, rather than the specific learned representation, may be responsible for the gains. The ablation study (Figure 5) only varies how test instances are assigned to topics, not how candidates are selected within a topic.
-
-2. **Baseline set is limited and does not include stronger off-the-shelf retrievers.**  
-   The paper compares only against random selection, Sentence-BERT semantic similarity, and cluster+random. While these are reasonable starting points, the field has competitive off-the-shelf cross-lingual retrievers (e.g., LaBSE, XLM-R-based retrieval) that could set a higher bar. The paper argues against task-specific retrievers (which are expensive), but does not compare against lightweight multilingual retrievers that are directly relevant. Without these comparisons, the claimed improvements sit in a weaker reference frame than necessary.
+1. **No comparison against trained retriever baselines, despite framing the paper against this family.** The abstract and introduction explicitly contrast Topic-XICL with "task-specific retrievers trained with LLM feedback" (Section 1, line 12; Section 2, line 35), citing Shi et al. (2022) as a representative approach. Yet all three baselines are off-the-shelf (random, semantic, cluster-based). The paper argues that trained retrievers require access to model parameters unavailable for black-box LLMs — but Topic-XICL itself trains a retriever (on BLOOMZ-1b7) and uses it to select demonstrations. Without knowing whether a simpler trained retriever (e.g., a cross-encoder or bi-encoder trained on LLM log-probabilities for the same tasks) matches or exceeds these results, the reader cannot assess the relative advantage of the topic-modeling approach. The reported gains over off-the-shelf methods are modest (1–3%), so a trained retriever could plausibly close or reverse the gap. This is a structural gap in the evaluation, not a minor omission.
 
 ### Minor
 
-3. **Inconsistent gains and selective reporting.** The paper's overall averages (1.77% on XNLI) can mask per-model failures. The text acknowledges that on XNLI, "apart from BLOOM's performance on the unseen language Turkish (tr), where it did not surpass the strongest baseline" — but does not disclose whether Topic-XICL underperforms ICL cluster on BLOOM for XNLI overall (the critic's reported numbers suggest this may be the case). Per-model breakdowns are not provided in the main results table, making it difficult to assess where the method truly helps versus where it hurts. Given overlapping standard deviations in some settings, this is a reporting gap.
+2. **Overstated theoretical grounding.** Section 3.1 presents a Bayesian framing (latent topic variable θ, causal graph, Bayes optimal decoder) that the paper claims to "extend" to practical applications. The actual algorithm does not perform Bayesian inference over a latent variable — it clusters by Sentence-BERT similarity, adds learnable token embeddings per cluster, fine-tunes those embeddings on the LM objective, and selects demonstrations by the fine-tuned model's softmax probability. This is a reasonable algorithm, and following Wang et al. (2023)'s precedent of theory-motivated design is defensible, but claims like "extending Bayesian inference theory" (line 23) and "effectively applies Bayesian theory" (line 178) overreach. The substantive algorithmic contribution is clustering + per-cluster prompt tuning, not a new Bayesian framework. Reducing the rhetorical gap between the theory and the practice would make the paper stronger.
 
-4. **No statistical significance testing.** Given the variance across languages and seeds, paired bootstrap tests or signed tests per language would clarify whether the improvements are reliable. The paper reports standard deviations but does not test significance.
-
-5. **The Bayesian theoretical framing has a loose connection to the algorithm.** The paper derives its method from the Bayesian ICL framework of Wang et al. (2023), but the practical instantiation — K-means clusters on Sentence-BERT embeddings treated as "topics," with learned token embeddings — does not clearly correspond to the latent variable \(\theta\) in the theoretical model. The gap between theory and practice is substantial; the algorithm could be described and evaluated without the Bayesian framing. This does not invalidate the method but weakens the claimed theoretical contribution.
-
-6. **Brittleness on simpler tasks with a smaller topic model.** When trained on BLOOMZ-560M, the method fails on XNLI (classification), with most languages falling below the strongest baseline (Section 5.3). The paper briefly notes this ("more clarity clustering information may be necessary") but does not analyze why the method degrades specifically on classification versus reasoning/QA. This inconsistency raises questions about robustness.
+3. **No statistical significance testing given modest improvements.** The average gains are 3.32%, 2.47%, and 1.77% over baselines, with reported standard deviations of 0.5–2%. Figure 3 shows negative per-language results for several languages (e.g., BLOOM on Turkish in XNLI). The paper reports three seeds with means and standard deviations, which is standard practice, but does not provide confidence intervals or paired tests. Given the modest margins and per-language variance, it is unclear whether the method reliably outperforms baselines across all settings or is simply better on average. A method requiring training a separate topic model should demonstrate a clear, statistically robust advantage.
 
 ### Trivial
-
-- The paper reports that BLOOMZ-560m and BLOOMZ-1b7 have "approximately the same" training time (15-30 minutes), but the sentence in Section 5.3 appears to be cut off/grammatically incomplete.
-- Some figure references in the text (e.g., "Table 9" on line 227) seem to point to figures that are not clearly labeled in the provided text.
-
----
+None that survive filtering. (The missing Sentence-BERT specification and hyperparameter guidelines are appendix content stripped by the parser — they exist in the original submission.)
 
 ## Nice-to-Haves
 
-- **Within-cluster ranking ablation:** Compare Topic-XICL's probability-based within-cluster ranking against ranking by semantic similarity to the cluster centroid (or to the test instance). This would isolate whether the learned topic tokens add value beyond simple ranking within clusters.
-- **Stronger baselines:** Add at least one additional off-the-shelf cross-lingual retriever (e.g., LaBSE) to calibrate the reference frame.
-- **Statistical testing:** Report paired bootstrap tests or per-language signed tests for the main comparisons.
-- **Sensitivity analysis:** Vary the number of topics \(n\) and topic tokens \(c\) on at least one dataset to show how robust performance is to these hyperparameters.
-- **Per-model breakdown:** Include a table or figure showing results separately for each model on each dataset, not just grand averages.
+- **A cleaner ablation isolating the contribution of learned topic tokens.** The current ablation (Section 4.5, Figure 5) compares three topic-assignment methods (top-1, k-means, top-10 majority) and shows all outperform the ICL-cluster baseline. This validates the voting-based assignment but does not isolate whether the fine-tuned topic-token embeddings add value beyond the cluster centroids themselves. An experiment comparing topic-token-based selection (using learned P(θ^a|X,Y)) vs. centroid-distance-based selection (controlling for same cluster assignment) would directly demonstrate the value of the fine-tuning step.
 
----
+- **Comparison with at least one simple trained retriever** (e.g., a bi-encoder trained on LLM log-probabilities, following the spirit of Shi et al. 2022) would substantially strengthen the paper's positioning relative to the second family of methods it criticizes.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
+These points were raised by reviewers but removed after verification against the paper:
 
-- **Criticism that Figure 1 caption does not clarify "sem":** The caption explicitly states "'sem' refers to semantic-based selection, while 'random' refers to random selection." This claim is factually incorrect and is removed.
-- **Criticism about not testing target LLM as topic model:** The paper's design choice (training on BLOOMZ, testing on other LLMs) is intentional to demonstrate transferability. Testing the target LLM as the topic model would test a different research question. Moved to Nice-to-Haves.
-- **"Section 5.4 is inconclusive":** The paper explicitly acknowledges this ("no clear conclusion as to which source language's demonstrations provide more benefit") and frames it as an exploratory analysis. Criticizing it for being inconclusive misreads the section's purpose.
-- **Strength Finder's claim of "statistically significant" improvements:** The paper does not report significance tests, so this claim overstates what is supported. The strength is kept but reworded to remove "statistically significant."
-
----
+- **"Missing specification of which multilingual Sentence-BERT model was used."** The paper references this via a footnote marker (superscript 2 on line 136), which appears in the appendix (stripped by the parser). Per the parser-artifact rule, this criticism is removed.
+- **"Hyperparameter guidelines missing from main text."** The paper writes "The guidelines for the hyper-parameters section can be seen in A" (line 136), referencing an appendix section stripped by the parser. Removed per same rule.
+- **"Reproducibility concern about training details in the appendix."** The paper states these details exist in Appendix A. Removed.
+- **Minor presentation/formatting nitpicks and typos.** These are parser artifacts from PDF extraction, not author errors.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a genuine methodological gap (the missing within-cluster ranking ablation) that the paper's own analysis does not address, but do not reveal a fundamentally new perspective on the work.
-
----
+The most interesting observation emerging across the reviews is the tension between the paper's Bayesian framing and its actual algorithmic contribution. The paper positions itself as extending Bayesian ICL theory, but the practical algorithm is closer to "cluster-then-prompt-tune" — a potentially useful but theoretically mundane technique. The reviews collectively surface that the paper would be stronger if it either (a) embraced the practical framing (cluster-conditional soft prompting for XICL) and dropped the overclaim, or (b) actually used the Bayesian derivation to make non-trivial predictions (e.g., ordering effects, demonstration interactions) that the clustering view would not predict. Neither direction is pursued, leaving a mismatch between rhetoric and method that weakens the paper's impact despite solid experimental execution.
 
 ## Suggestions
 
-1. **Add a within-cluster ranking ablation.** This is the single most impactful addition: compare Topic-XICL (rank by topic-token probability) against within-cluster ranking by Sentence-BERT similarity to the cluster centroid. If Topic-XICL still wins, the learned topic tokens are doing meaningful work. If not, the contribution reduces to "any reasonable within-cluster ranking beats random."
-2. **Provide per-model per-dataset breakdowns** in the main paper, not just grand averages. This allows readers to see where the method succeeds and fails.
-3. **Add at least one stronger baseline** from off-the-shelf multilingual retrievers (e.g., LaBSE) to strengthen the evidential bar.
-
----
+1. **Add at least one trained retriever baseline** — a cross-encoder or bi-encoder trained to score candidate demonstrations using the target LLM's output probabilities (or a proxy). This directly addresses the most serious evaluation gap.
+2. **Add statistical significance tests** — e.g., paired bootstrap over languages or a sign test across per-language per-seed comparisons — to establish that the average gains are unlikely under the null.
+3. **Reframe the theoretical contribution.** Replace "extending Bayesian inference theory" with a more precise characterization: "We extend Wang et al. (2023)'s theory-motivated demonstration selection framework to non-classification cross-lingual tasks by introducing semantic clustering as a prior for topic discovery." This is accurate without overclaiming.
+4. **Add the cleaner ablation** suggested in Nice-to-Haves (topic-token-based vs. centroid-distance-based selection, controlling for cluster assignment) to directly demonstrate the value of the fine-tuned embeddings.
 
 ## Score and Decision
 
-The paper proposes a clearly motivated approach with a plausible mechanism and provides broad empirical validation across three tasks and three LLMs. The main weakness — that the contribution of the learned topic tokens is not fully isolated from simple within-cluster ranking — is addressable but does not invalidate the overall finding that the method outperforms baselines. The baseline set, while not exhaustive, includes the most natural comparisons (random, semantic, cluster-random). The work is a solid applied contribution to cross-lingual demonstration selection, with a practical efficiency profile that makes it usable in resource-constrained settings. The weaknesses are not fatal and can be addressed with additional analysis.
+The paper presents a sound, practically-motivated method with solid experimental coverage (3 tasks × 3 models × multiple shot settings) and consistent if modest gains. The main weaknesses are the absence of comparison with trained retriever baselines (which the paper explicitly frames itself against) and an overstated theoretical framing. These are addressable but significant. The contribution is incremental — adapting an existing line of work (Wang et al. 2023) to cross-lingual and non-classification settings — and the evidence, while positive, is not strong enough to overcome the evaluation gap. 
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Score: 5.0**
+
+The paper is borderline but falls short of the bar for acceptance at a competitive venue in its current form. With the suggested revisions (particularly adding a trained retriever baseline and toning down the theoretical claims), it could become acceptable.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

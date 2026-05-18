@@ -1,22 +1,20 @@
-Here is my final consolidated review.
-
----
+Now I have all the information I need to carefully verify each reviewer claim against the paper. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes Semantic Entropy Probes (SEPs) — linear probes trained on LLM hidden states to predict semantic entropy (SE), a sampling-based uncertainty measure. By distilling SE into a probe that operates on a single generation, SEPs eliminate the 5–10× test-time cost of sampling-based hallucination detection while retaining much of the performance. The central empirical finding is that SEPs generalize better to out-of-distribution tasks than probes trained on accuracy labels, across five models (Llama-2 7B/70B, Mistral-7B, Phi-3, Llama-3-70B) and four QA datasets.
+The paper proposes Semantic Entropy Probes (SEPs), linear logistic regression models trained on LLM hidden states to predict semantic entropy (SE). SEPs offer a middle ground: they are cheaper than sampling-based SE (requiring only a single forward pass at test time) while generalizing better out-of-distribution than probes trained directly on accuracy labels. The paper provides extensive experiments across 5 models, 4 datasets, and both short- and long-form generation settings, showing that SEPs achieve AUROC values of 0.7–0.95 for predicting SE and consistently outperform accuracy probes in OOD generalization (+2.2 to +10.5 AUROC).
 
 ## Strengths
 
-- **Computational efficiency**: SEPs reduce the test-time overhead of semantic uncertainty quantification to a single forward pass, avoiding the 5–10× cost of sampling-based methods (Section 4, Figure 1). This is a practically meaningful contribution given the adoption barriers of prior SE methods.
+1. **Well-motivated and cleanly designed method.** Using SE (a model-internal uncertainty measure) as a supervision signal for probes rather than accuracy labels (an external, noisy signal) is intuitively appealing and is supported by the results (§§4, 7). SEPs require no ground-truth accuracy labels for training, solving a practical bottleneck of prior probing approaches.
 
-- **Consistent OOD generalization advantage**: SEPs outperform accuracy probes on held-out tasks across all 7 model/dataset configurations in Table 2, with ΔAUROC ranging from +2.2 to +10.5 percentage points. The trend is consistent across models (Mistral-7B, Phi-3, Llama-2 7B/70B, Llama-3-70B) and both short- and long-form generation.
+2. **Strong empirical support for SEP efficacy across configurations.** SEPs achieve AUROC values of 0.7–0.95 for predicting binarized SE across models (Llama-2-7B/70B, Mistral-7B, Phi-3, Llama-3-70B) and tasks (TriviaQA, SQuAD, BioASQ, NQ Open) in both short- and long-form generation settings (§6, Figs. 2–3, Table of long results). The results hold across mid-to-late layers and for both SLT and TBG token positions.
 
-- **Uncertainty predicted before generation (TBG)**: SEPs successfully capture semantic entropy from the hidden state of the *last input token*, before any output is generated (Figures 3–4). This enables uncertainty-aware deferral with a single forward pass.
+3. **Consistent OOD generalization advantage over accuracy probes.** The leave-one-dataset-out evaluation shows SEPs outperform accuracy probes by margins of +7.7 (Llama-2-7B), +10.5 (Mistral-7B), +9.9 (Phi-3), +7.9 (Llama-2-70B) in short-form, and +6.2 (Llama-3-70B) in long-form (§7, Table 2, Figs. 4, 6). Per-layer plots confirm this advantage holds across almost all layers, not just cherry-picked ones.
 
-- **Counterfactual validation**: The context-addition experiment (Figure 5) shows that SEP predictions shift in the same direction as ground-truth SE when the task difficulty changes, confirming the probe captures meaningful uncertainty rather than spurious correlations.
+4. **TBG results are a notable finding.** The demonstration that SE can be predicted from hidden states *before generation begins* (Fig. 3) is a clean result with practical implications — uncertainty quantification in a single forward pass with no generation needed (§6).
 
-- **Comprehensive ablations**: Performance is mapped across layers, token positions (SLT/TBG), models, generation lengths, and tasks, showing that SE is broadly encoded in mid-to-late layers (Figures 1–4).
+5. **Counterfactual context-addition experiment provides causal evidence.** Adding context to TriviaQA questions shifts the SEP's predicted high-SE probability from ~0.9 to ~0.5, consistent with the drop in ground-truth SE from 1.84 to 0.50 (Fig. 5). This confirms SEPs capture genuine uncertainty rather than spurious correlations.
 
 ## Weaknesses
 
@@ -24,58 +22,57 @@ This paper proposes Semantic Entropy Probes (SEPs) — linear probes trained on 
 None.
 
 ### Major
-
-- **No empirical comparison to other unsupervised probing methods.** The paper claims to set "a new state-of-the-art for cost-efficient hallucination detection" (lines 67, 78) and suggests SEPs "may be the best unsupervised method" (line 378), yet the only probing baseline is an accuracy-supervised probe. Several prior works propose unsupervised or self-supervised probing objectives for truthfulness that also operate on a single generation — most notably CCS (Burns et al., 2024) and the linear "truth direction" methods (Marks et al., 2023; Azaria & Mitchell, 2023). The paper reviews these in Section 2 and notes their validity has been questioned (Farquhar et al., 2023), but never *empirically* compares SEPs to them. Without this comparison, the reader cannot assess whether SE is a *distinctively* good probing target or whether *any* internal-consistency target would yield similar OOD benefits. The overclaim relative to the evidence is the paper's most significant weakness.
+None.
 
 ### Minor
 
-- **Binarization of semantic entropy is not validated against a regression variant.** The paper converts continuous SE into binary labels via a threshold (Eq. 1) and trains a logistic regression classifier. The paper mentions alternatives such as soft labelling were explored and defers to the appendix (line 206), but the core methodological question — whether binarization discards useful signal compared to directly regressing on raw SE values — is not addressed in the main text. Since SEPs are evaluated on AUROC for a *binary* task (correct/incorrect), this may be adequate, but the paper would benefit from showing that a regression-trained probe (or that performance is robust to threshold choice) does not materially change the conclusions.
+1. **OOD evaluation is limited to QA datasets with similar structure.** All four tasks (TriviaQA, SQuAD, BioASQ, NQ Open) are extractive or short-answer QA datasets with similar question formats. The "leave-one-dataset-out" setup tests generalization across knowledge domains but not across fundamentally different task types (e.g., summarization faithfulness, dialogue, biography generation with FactScore). The paper's claim that SEPs are "the best choice for cost-effective uncertainty quantification in LLMs, especially if the distribution of the query data is unknown" (§7) is partially overclaimed — the evidence supports this claim for QA-like distributions but does not demonstrate it for genuinely different task formats. The paper would be strengthened by acknowledging this limitation more explicitly or adding at least one non-QA OOD evaluation.
 
-- **Generalization results are on a limited task scope (4 QA datasets) without formal significance testing.** The leave-one-out OOD evaluation uses only four datasets (TriviaQA, SQuAD, BioASQ, NQ Open), all free-form QA. The paper reports standard errors but no paired significance test (e.g., Wilcoxon signed-rank) across the 4 tasks. While the consistent advantage across 7 model/dataset configurations mitigates this, the claims about generalization beyond QA (e.g., to summarization, dialogue, reasoning) are unsupported. The paper acknowledges this in passing but the framing in the abstract and conclusions emphasizes generalization more strongly than the evidence supports.
+2. **Limited comparison to other probing methods despite SOTA claims.** The paper claims "a new state-of-the-art for cost-efficient hallucination detection" (§1) but the probe baselines consist only of accuracy-supervised probes. Other probing-based approaches — such as Burns et al.'s unsupervised CCAP direction or Marks/Azaria truthfulness directions — are cited in related work (§2) but not included as experimental baselines. While the paper's core comparison (SE supervision vs. accuracy supervision) is clean and internally consistent, the SOTA claim would carry more weight with a broader comparison to other probe designs. This is a gap the authors could address without changing the paper's structure.
 
-- **Training cost of SEPs is under-discussed.** The paper emphasizes test-time cheapness but requires generating 10 samples per training query (Section 4) and running an NLI model for clustering to compute SE labels. This upfront cost is non-trivial. A transparent discussion of the total cost of producing training data (especially relative to simply using accuracy labels) would help readers assess practical trade-offs.
-
-- **"Cheap detector" baselines are limited.** Beyond accuracy probes, the cheap (single-generation) methods compared are only log-likelihood and p(True). Other low-cost detectors such as logit-based uncertainty on the first token or internal consistency checks are not included.
+3. **Layer selection for aggregated results is deferred to the appendix.** The main text reports aggregated results using "a representative set of high-performing layers for both probe types" with a reference to the appendix (§7). While the per-layer plots (e.g., Fig. 4) convincingly show that the OOD advantage is robust across layers, the exact procedure for selecting layers deserves a brief description in the main text for reproducibility. (Note: this is a minor presentation issue since the appendix exists in the original submission.)
 
 ### Trivial
-None.
+
+- None beyond the procedural clarification above.
 
 ## Nice-to-Haves
 
-- An experiment training SEPs on truly unlabelled data (e.g., LLM-generated questions) would significantly strengthen the practical appeal, as suggested in the Future Work section.
-- Per-task breakdown of the leave-one-out results in a dedicated table (beyond Figure 7) showing AUROC for each held-out dataset individually rather than aggregates would clarify whether the advantage is driven by any single dataset.
+- A regression-based variant of SEPs (predicting continuous SE rather than binarized SE) could be compared on the same AUROC metric by thresholding post-hoc, avoiding any concern about the binarization threshold (§4). The authors' current choice is defensible, but this would be a clean ablation.
+- A breakdown of SEP failure modes (e.g., by question type or SE level) would help users understand when the method is safe to deploy.
+- A fixed decision rule for the SE threshold (e.g., 80th percentile of training SE) would test sensitivity to the optimized threshold in Eq. 5.
 
 ## Removed Points
 
-These points were raised by reviewers but are removed with justification:
+These points are flagged to be removed; treat them with caution.
 
-- **"Paper provides no direct evidence that hidden states better encode SE than accuracy"** (Harsh Critic, Discussion section) — This is factually incorrect. The paper *does* provide such evidence at lines 449–451, where in-distribution AUROC for predicting SE is shown to be significantly higher than AUROC for predicting accuracy (Figures referenced as fig:acc_vs_se_prediction_id_*). The evidence may not use representational similarity analysis, but it is present and valid.
+- **Layer-selection procedure underspecified (Harsh Critic, Issue 1):** The paper references `\cref{app:exp_details}` for the layer selection procedure. The appendix was stripped by the parser but exists in the original submission. Moreover, the per-layer plots (Fig. 4 for Llama-2-7B, and referenced Fig. for Mistral-7B) already demonstrate that the OOD advantage of SEPs holds across most layers, not just a selected subset, making the robustness concern empirically addressed.
+  
+- **Binarization as a limiting choice (Harsh Critic, Other Observations):** The paper explicitly motivates binarization (§4): the ultimate goal is binary hallucination detection, and binarization enables a direct comparison to binary accuracy probes. The authors also note that logistic regression outputs probabilities, preserving fine-grained signal. This is a reasoned design choice, not a flaw.
+  
+- **Context-addition experiment is qualitative (Harsh Critic, Other Observations):** The paper reports specific quantitative values: p(high SE) shifts from ~0.9 to ~0.5, ground-truth SE from 1.84 to 0.50, accuracy from 26% to 78% (§6). This goes beyond a purely qualitative description.
 
-- **"Per-task results are not inspected / aggregated numbers hide dataset-driven effects"** — Per-task results *are* visible in Figure 7 (short-gen-ood bar plot) and are discussed in the text (e.g., BioASQ differences highlighted at line 383). A deeper analysis (e.g., removing BioASQ) would be a nice addition but is not absent.
+- **Demand for non-QA OOD task (Harsh Critic, Strengthening section):** While useful, adding a summarization or biography-generation evaluation would substantially expand the paper's scope beyond what is standard for a conference submission. The paper already evaluates across 4 datasets × 2 generation settings × 5 models. The existing OOD setting — leave-one-dataset-out among diverse knowledge domains — is a meaningful and widely used protocol.
 
-- **Criticisms about missing appendix content** (soft labelling details, prompt templates, layer selection) — The parser strips appendix sections from all submissions; these exist in the original paper.
-
-- **"Weakness about unfair comparison"** — The criticism about missing CCS comparison is retained above; it is a real gap. However, any suggestion that the paper should have used *different* baselines that would favor the reviewer's preferred method is not present here.
+- **Demand for feature attribution of accuracy probes (Harsh Critic, Strengthening section):** This is a nice research direction but well beyond what is needed for a paper presenting a new method.
 
 ## Novel Insights
 
-The reviews highlight an important distinction about the paper's contribution: the paper convincingly shows that SE is a *better supervisory signal than accuracy* for probe-based OOD generalization, but the claim that SE probes are the "best unsupervised method" conflates two different axes (supervisory signal vs. probing objective). The key insight that emerges is that *model-internal* uncertainty signals (SE) transfer better across tasks than *external* labels (accuracy) — this is the paper's real contribution. The missing comparison to CCS/Marks et al. is important because those methods also use model-internal signals (activation patterns for truthfulness) and would test whether the advantage comes from SE specifically or from using any internal consistency signal.
+Beyond the paper's own contributions: The reviews collectively surface an interesting tension — SEPs are presented as an *unsupervised* method (no accuracy labels needed), yet their training requires access to SE computed from multiple generations (N=10). This hybrid character (unsupervised with respect to ground-truth labels, but requiring supervised training on model-derived SE labels) is worth explicit discussion. It means SEPs are "unsupervised" in a different sense than Burns et al. — they don't need human labels, but they do need a multi-sample SE computation for training data creation. This distinction is blurry in the paper's terminology and could be sharpened.
 
 ## Suggestions
 
-1. **Add an empirical comparison to at least one unsupervised probing baseline** (e.g., CCS on the same hidden states and tasks). This is the single most impactful addition for supporting the "state-of-the-art" and "best unsupervised method" claims.
+1. Temper the claim "best choice for cost-effective uncertainty quantification... especially if the distribution of the query data is unknown" to reflect that the OOD evaluation covers QA datasets. Something like "best choice for cost-effective hallucination detection on question-answering tasks, especially when generalizing across knowledge domains" would be more precise.
 
-2. **Validate the binarization**: train a regression variant of SEP (predicting raw SE values instead of binary labels) and compare AUROC on the end hallucination-detection task. Show that the threshold (Eq. 1) is stable across tasks or that performance is robust to its choice.
+2. Add at least one comparison to another probing baseline (e.g., a probe trained on the CCAP direction or a truthfulness direction) to support the SOTA claim, or qualify the claim to reference only accuracy-supervised probes.
 
-3. **Add a statistical significance test** for the OOD comparison (e.g., paired Wilcoxon across the task folds).
+3. Include a brief description of the layer selection procedure in the main text (e.g., "we selected layers that achieved peak AUROC on in-distribution validation data for each probe type independently").
 
-4. **Tone down the "state-of-the-art" and "best unsupervised method" claims** to match the evidence, or qualify them as "among single-generation probing methods" / "relative to accuracy-supervised probes."
-
-5. **Include a Limitations paragraph** transparently discussing: (a) evaluation restricted to QA, (b) only 4 datasets, (c) no comparison to other unsupervised probes, (d) upfront training cost of SE label generation.
+4. Consider a fixed-threshold variant of the binarization (e.g., always using median or 80th percentile of training SE) to test sensitivity to the optimized split in Eq. 5.
 
 ## Score and Decision
 
-The paper proposes a well-motivated and useful method with a clear conceptual contribution: that semantic entropy is a more transferable probing target than accuracy. The experiments are reasonably thorough across models and show a consistent and practically meaningful OOD improvement. The main weakness is overclaiming relative to the comparison set — the absence of any empirical comparison to CCS or similar unsupervised probing methods undermines the "state-of-the-art" and "best unsupervised method" framing. This is addressable with additional experiments and more measured claims. The core scientific finding (SE > accuracy as a probing target for OOD generalization) is solid and well-supported by the evidence presented.
+The paper makes a genuine contribution: it identifies a useful supervision signal (SE) for probing, demonstrates that this choice yields better OOD generalization than accuracy supervision, and provides thorough experimental validation across models and settings. The weaknesses are limited in scope — the OOD evaluation is confined to QA datasets, and the probe baseline comparison could be broader — but neither undermines the core results. The paper is well-written, the method is practical and deployable, and the main findings are clearly supported.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

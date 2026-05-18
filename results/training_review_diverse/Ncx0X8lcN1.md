@@ -1,97 +1,82 @@
-Now I have thoroughly verified all claims against the paper. Let me produce the final consolidated review.
-
----
+Now I have all the information I need to verify the reviewer claims against the paper. Let me produce the consolidated review.
 
 ## Summary
 
-The paper presents HiReview, a two-stage framework for automatic literature review generation (LRG). In the first stage, it retrieves a relevant subgraph from a citation network using neighbor-aggregated BM25, then produces a hierarchical taxonomy tree via a jointly-trained GNN-based clustering module and a fine-tuned LLaMA topic generator. In the second stage, GPT-4o generates review content for each topic guided by this taxonomy. Experiments on a dataset of 518 annotated literature reviews show HiReview outperforming AutoSurvey and other baselines on LLMScore and BERTScore metrics. Code and dataset are released.
+This paper presents HiReview, a two-stage framework for automatic literature review generation that first constructs a hierarchical taxonomy from a citation network (via graph-context-aware retrieval and hierarchical graph clustering) and then uses that taxonomy to guide LLM-based content generation. The approach is evaluated on a curated dataset of 518 review papers with extracted taxonomy trees and citation networks, showing consistent improvements over AutoSurvey and other baselines on LLMScore and BERTScore metrics.
 
 ## Strengths
 
-1. **Graph-context-aware retrieval demonstrably improves relevance.** The neighbor-aggregated BM25 scoring (Eq. 1) is a simple but effective augmentation of standard retrieval. Ablation in Table 2 confirms this: removing the retrieval module drops Coverage from 0.9163→0.6705 and Relevance from 0.9428→0.7073, establishing its critical role.
+- **Taxonomy-then-generation paradigm demonstrably improves structure and relevance.** Table 1 shows HiReview achieves Structure 0.9484 and Relevance 0.9428, substantially ahead of AutoSurvey (0.9122, 0.9093) and all other baselines. The ablation in Table 2 confirms removing the taxonomy drops Structure to 0.8790 and Coverage to 0.8612, directly validating that the hierarchical taxonomy drives the improvement.
 
-2. **Hierarchical clustering with adaptive soft-to-hard strategy is novel and well-motivated.** The clustering function uses soft clustering (overlap allowed) at the first level and hard clustering (disjoint components) at higher levels — a design choice directly motivated by the structure of literature reviews, where papers can belong to multiple subtopics but higher-level topics must be exclusive (Section 4.2.1). Table 3 shows this outperforms LLM-based and K-means clustering baselines.
+- **Graph context-aware retrieval is critical to overall performance.** Table 2 ablation shows that removing the retrieval module collapses Coverage from 0.9163 to 0.6705 and Relevance from 0.9428 to 0.7073 — worse than zero-shot LLMs — establishing that the graph-aware retrieval is essential for both topic coverage and content relevance.
 
-3. **End-to-end integration of GNN clustering with LLM topic generation via graph-embedded prompts.** The framework jointly pre-trains the GNN for hierarchical clustering and then fine-tunes the PLM (LLaMA via LoRA) with graph embeddings from the GNN to generate central topics per cluster (Eq. 13–14). The ablation shows removing the taxonomy tree degrades Structure from 0.9484→0.8790 (Table 2), supporting the value of this integration.
+- **Consistently low variance across runs.** Table 1 reports standard deviations of ±0.03 or smaller across all LLMScore metrics for HiReview, reliably lower than AutoSurvey (±0.04–0.07) and pure LLMs (±0.07–0.14), indicating the framework produces stable, reliable outputs — a practical advantage for automated systems.
 
-4. **Consistent empirical gains across all metrics and low variance.** HiReview achieves the highest scores across all LLMScore dimensions (Coverage 0.9163, Structure 0.9484, Relevance 0.9428, Average 0.9358) and BERTScore (0.8449), with lower standard deviations than all baselines (e.g., ±0.02 Structure vs. AutoSurvey ±0.05), indicating superior consistency.
+- **Novel soft-to-hard hierarchical clustering aligned with taxonomy structure.** The clustering design (Section 4.2.1) uses soft clustering at the base level (allowing paper overlap across topics) and transitions to hard clustering at higher levels, matching how real literature taxonomies organize papers. Table 3 shows this approach outperforms both K-means and LLM-based clustering.
 
-5. **New annotated dataset.** A dataset of 518 literature reviews with extracted taxonomy trees and 2-hop citation networks (average 6,658 papers and 11,632 edges per review) provides a structured benchmark for future LRG research.
+- **Dataset contribution.** A manually curated dataset of 518 review papers with extracted taxonomy trees and 2-hop citation networks (average 6,658 papers, 11,632 edges) is constructed and released, providing a valuable resource for training and evaluating taxonomy-driven review generation.
 
-6. **Clear problem decomposition.** The paper explicitly formulates three key challenges (retrieval from large citation networks, joint text+topology clustering, hierarchical taxonomy generation) and designs dedicated modules for each, making the contribution easy to follow.
+- **Efficient joint training via pre-training and LoRA.** The two-step training strategy (Section 4.4) pre-trains the GNN clustering module, then fine-tunes the PLM with LoRA while keeping the GNN fixed. This avoids training instability from simultaneous GNN+LLM optimization and makes the approach computationally feasible.
 
 ## Weaknesses
 
 ### Fatal
-None.
+None. The core claims are supported by experimental evidence, and no fundamental methodological flaw invalidates the contribution.
 
 ### Major
 
-1. **No human evaluation; primary metric (LLMScore) uses LLM evaluators with potential same-family bias.** The paper relies on LLMScore, evaluated by "multiple LLMs" (unspecified which ones, line 203), while the content generator for HiReview and AutoSurvey is GPT-4o. Even though the paper cites AutoSurvey's finding that "LLM-based evaluations of literature review align well with human preferences," this does not rule out a relative bias when the same model family both generates and judges. Without any human evaluation (expert ratings, user studies, or even small-scale annotations), the central claim that HiReview produces *superior* reviews rests on a single automated metric class whose calibration for this specific comparison is untested. This is the most consequential weakness for the paper's credibility.
-
-2. **Ablation confound prevents isolating the contribution of hierarchical clustering.** The "w/o clustering*" variant removes clustering *and* switches from fine-tuned LLaMA to GPT-4o as the topic generator (the paper acknowledges this on line 211: "It is marked with * because the topic generator in this case is an LLM i.e., GPT-4o, rather than a fine-tuned LLaMA"). Two variables change simultaneously. The variant still achieves 0.8612 Coverage and 0.9078 Relevance — close to AutoSurvey's 0.8646 and 0.9093 — so it is unclear whether the gain of the full HiReview over AutoSurvey comes primarily from graph-context-aware retrieval, from hierarchical clustering, from the fine-tuned topic generator, or from their interaction. A cleaner comparison (e.g., using HiReview's own fine-tuned LLaMA with and without clustering) is needed to attribute gains.
-
-3. **Only paper titles are used as textual input throughout the pipeline.** The retrieval step (Section 4.1) computes BM25 between query and paper *titles*. The clustering step (Section 4.2.1) uses "the title of nodes to initialization text embedding." The topic generation step (Section 4.2.2) uses "the titles of all papers under node j." No abstracts or full-text content are incorporated at any stage. A literature review is expected to discuss methods, results, and findings — information rarely conveyed fully by titles alone. This limitation constrains the depth and informativeness of the generated reviews and weakens the practical significance of the claimed results.
-
-4. **Dataset construction and clustering evaluation metrics are underspecified.** (a) The 518 taxonomy trees were "extracted" from review articles (line 199), but the extraction methodology is not described (manual? automated from ToC/section headings? with what criteria?). No inter-annotator agreement is reported. (b) The clustering evaluation in Table 3 reports "Accuracy" without defining it in the text. The paper states "As shown in Table 3, when considering the clustering task alone, both baselines underperform" — but without knowing what Accuracy measures or what the ground-truth clusters are (how were the reference hierarchical clusters derived from the 518 reviews?), the clustering results are not interpretable.
+1. **Factual accuracy is claimed in the abstract but not directly evaluated.** The abstract claims "superior ... factual accuracy," and the introduction motivates the work by noting LLM hallucination problems. However, the evaluation relies entirely on **LLMScore** (coverage, structure, relevance) and **BERTScore** (semantic similarity to human-written reviews). Neither metric directly measures factual correctness, grounding, or whether specific claims in the generated review are accurate. A plausible confound exists: a well-structured, fluent review containing factual errors could score well on both metrics. This is a mismatch between what is claimed and what is measured. The authors should either (a) add a direct evaluation of factual accuracy (e.g., fact-checking against the source papers, human annotation of factual errors per generated paragraph), or (b) remove the factual accuracy claim and confine the stated contributions to what the metrics actually measure (coverage, structure, relevance).
 
 ### Minor
 
-1. **BERTScore is not informative for this task.** It measures token-level n-gram overlap with a single human-written reference review, which is only one possible valid organization of the same papers. The score differences are small (0.8449 vs. 0.8256) and the paper does not interpret them. This metric adds little evidentiary value.
+2. **Clustering evaluation metric undefined and baselines too narrow.** Table 3 reports "Accuracy of hierarchical clustering" without defining what accuracy means (exact cluster match? pairwise agreement? adjusted Rand index?). The baselines compared are LLM clustering and K-means, which are not standard graph clustering methods. Adding comparisons to citation-network clustering methods (e.g., Louvain, Leiden) and reporting a clear metric (e.g., adjusted Rand index or normalized mutual information against the ground-truth taxonomy at each hierarchical level) would make the clustering contribution verifiable.
 
-2. **Hyperparameter α in the graph context-aware retrieval (Eq. 1) is not specified or ablated.** The paper says the aggregation of neighbor scores "leads to a significant improvement" (line 100) but reports no α value, sensitivity analysis, or selection procedure. This impacts reproducibility.
+3. **Key hyperparameter values not reported.** The paper introduces several hyperparameters (α for neighbor weight in retrieval, p_τ for edge connection threshold, τ for temperature, λ_l for hierarchical loss weighting, number of hierarchical levels L, LoRA rank, learning rates, train/test split) but does not report their values or how they were selected. Providing these is essential for reproducibility.
 
-3. **Number of hierarchical levels in the taxonomy is not reported.** The clustering process recurs "until a stopping criterion is met" (line 108), but the actual number of levels used in experiments — a basic architectural parameter — is not stated.
+4. **Taxonomy extraction process from review papers is not described.** The paper states (Section 5.1) that taxonomy trees were extracted from 518 review papers but never explains how. Was this done by parsing section headings automatically? Through human annotation? What was the inter-annotator agreement? This matters because the extracted taxonomy trees serve as ground truth for both clustering supervision and evaluation, and the quality of the dataset depends on this process.
 
-4. **Training details are sparse.** LoRA rank, learning rates, batch sizes, GNN architecture (number of GAT layers, hidden dimensions), and hardware are not reported. This hinders reproducibility.
+5. **No comparison to dense retrieval methods for the retrieval module.** The graph-context-aware retrieval uses BM25 on paper titles with neighbor score aggregation. The paper claims "significant improvement in retrieval accuracy" but provides no retrieval ablation comparing BM25+neighbor against dense retrieval options (e.g., Sentence-BERT, SPECTER) that could leverage paper abstracts or full text. Since titles are short and retrieval quality bounds downstream performance, this comparison would strengthen the paper.
 
-5. **No qualitative examples or failure analysis.** The paper would benefit from at least one concrete example comparing a HiReview-generated taxonomy/review with an AutoSurvey output, to help readers assess quality qualitatively and understand failure modes.
+6. **Limited human evaluation grounding.** While the paper follows AutoSurvey's protocol (citing Wang et al. that LLMScore aligns with human preferences), the field would benefit from at least a small-scale human evaluation (e.g., 5–10 topics, rated by domain experts on coverage, structure, and factual accuracy) to validate the automated metrics for this specific method. This is noted as minor because the paper's evaluation approach is consistent with prior work in the area.
 
 ### Trivial
 
-- Notation mismatch in the preliminaries: Eq. 3 uses $\bar{C}_l = \bar{f}(\bar{G}_l)$ while the method section uses $C_l = f(G_l, X_{G_l})$. The meaning is clear but inconsistent.
-- The claim that existing methods "overlook critical prior knowledge, such as citation relationships" (line 23) is slightly overstated — AutoSurvey's retrieval pipeline could incorporate citation patterns implicitly — though the paper's broader point that no prior work explicitly models citation topology for LRG stands.
+7. **The multi-version selection step (generating multiple reviews and selecting the best via LLM evaluation) introduces uncontrolled variance.** The paper does not analyze how this selection process affects the scores or what consistency the selection criterion achieves across runs.
+
+8. **"Hyper-parameters" — the paper refers to α as "a pre-defined weighting factor" without specifying the value or a sensitivity analysis.**
 
 ## Nice-to-Haves
 
-- Incorporating abstracts (in addition to titles) for retrieval and clustering would substantially strengthen the generated reviews' informativeness and the paper's practical relevance.
-- A human evaluation study — even modest in scale (e.g., 20 queries × 3 expert judges on coverage, structure, factual accuracy) — would transform the strength of the empirical evidence.
-- A comparison of the proposed neighbor-aggregated BM25 against the exact retrieval method used by AutoSurvey would help disentangle the contributions of retrieval vs. hierarchical taxonomy.
+- A sensitivity analysis on α (neighbor weight) and p_τ (clustering threshold) would demonstrate robustness to hyperparameter choices.
+- A discussion of failure cases (e.g., when the citation graph is sparse, when topics cut across citation clusters) would provide practical guidance on when HiReview works best.
+- Reporting the number of hierarchical levels per review on average and how the stopping criterion (no further meaningful clusters) is operationalized would improve reproducibility.
+- Analysis of whether the taxonomy extracted from human-written reviews matches the paper's predicted taxonomy (beyond just clustering accuracy) would validate the overall approach more directly.
 
 ## Removed Points
 
 These points are flagged to be removed; treat them with caution.
 
-- *Criticism about "the same LLM family used for both generation and evaluation is a well-known risk of superficial agreement"* — Retained (Major #1) but in a softened form. The concern is real but the paper does cite prior validation and uses "multiple LLMs" (not just GPT-4o). The core issue is the absence of human evaluation, not that the metric is invalid.
-- *Complaint that standard deviations are not used for statistical significance testing* — Removed. Significance testing with overlapping ±1σ ranges is not the standard in this benchmark-driven line of work, and the paper's improvements are consistent across all metrics.
-- *Claim that "the primary evaluation metric (LLMScore) is inadequate and introduces systematic bias" framed as structural/fatal* — Downgraded to Major. The metric is standard in the field (used by AutoSurvey itself) and the paper cites validation. The real gap is the absence of human evaluation, not that LLMScore is invalid.
-- *"The method is good at organizing paper titles but does not generate depthful, content-rich reviews"* — Retained as Major #3 but stated as a limitation rather than a fatal judgment.
-- *Criticism that "the paper's claim that existing methods 'overlook critical prior knowledge, such as citation relationships' is too strong"* — Downgraded to Trivial. The claim is defensible: AutoSurvey does not explicitly model citation topology, even if it may capture some relationships implicitly through retrieval.
-- *"The formal definition of hierarchical graph clustering (Equation 3) uses notation that does not match the method section"* — Moved to Trivial.
-- *Strength Finder's item 6 ("Systematic ablation validating each component")* — Kept but note the confound in w/o clustering* weakens the "systematic" characterization.
-- *Strength Finder's item 7* — Kept.
-- *"No discussion of how many levels are used"* — Moved to Minor.
-- *"No failure analysis or qualitative examples"* — Moved to Minor.
-- *"Training details are sparse"* — Moved to Minor.
-- *"Computational cost not discussed"* — Moved to Nice-to-Haves.
-- *Complaint about "no ablation showing the effect of the soft-to-hard design choice"* — Removed as scope creep; the ablation already covers retrieval, clustering, and taxonomy removal.
-- *Criticism about table 3 only showing "Accuracy" with no NMI/ARI/F1* — According to the Strength Finder, the table may include NMI and ARI values (the table is an image). The issue is the text doesn't define "Accuracy," which is retained as Major #4b.
+1. **"Contradiction about fine-tuning the topic generator"** — REMOVED. The reviewer claims a contradiction between fine-tuning LLaMA on 518 reviews and the w/o clustering variant using GPT-4o "as the number of taxonomy trees is insufficient for effective fine-tuning." This is not a contradiction. The main experiment fine-tunes LLaMA on the **per-cluster topic generation** task, where each cluster at each hierarchical level provides a training example (many more than 518). The w/o clustering variant generates the entire taxonomy in a single step, for which only 518 examples exist. Different granularities → different data quantities → no contradiction.
+
+2. **"First claim overstated"** — REMOVED. The paper does not explicitly claim to be "the first" to use hierarchical taxonomy generation from citation networks. It uses "novel" (standard academic language). The only explicit novelty claim ("an issue that no existing work addresses") refers specifically to the soft-to-hard clustering transition — a narrow technical point that is defensible. The paper clearly distinguishes its taxonomy-then-generation approach from AutoSurvey's outline-then-generation.
+
+3. **"Scalability concern about small graphs"** — REMOVED. The 2-hop citation networks averaging ~6.6K nodes are the appropriate scale for evaluating LRG on individual review topics. The paper's method processes the subgraph after retrieval, and the paper does not overclaim large-scale capabilities. Scaling to larger fields is a future-work consideration, not a weakness.
+
+4. **"Multi-version selection adds uncontrolled variance"** — Kept as Trivial (see above).
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a clear tension: the paper presents a well-designed and well-motivated pipeline with consistently positive results, but the evaluation framework — no human study, a confounded ablation, and titles-only input — does not match the strength of the claims. The most valuable observation from the cross-review is that fixing these evaluation gaps (especially the human evaluation and the ablation confound) is largely an engineering/effort problem, not a methodological flaw, meaning the paper's core technical contribution is likely sound but currently undersupported.
+The most striking finding from the reviews is that the graph-context-aware retrieval module is by far the most critical component — its removal causes a catastrophic drop (Coverage from 0.9163 to 0.6705, Relevance from 0.9428 to 0.7073) that is much larger than the drop from removing the taxonomy itself. This suggests that for literature review generation, getting the right papers is both harder and more important than organizing them well — a finding with practical implications for future LRG system design. Conversely, it also means that the paper's main claimed novelty (hierarchical taxonomy generation) produces a comparatively modest incremental gain over the retrieval + clustering pipeline, which warrants clearer acknowledgement.
 
 ## Suggestions
 
-1. **Add a human evaluation.** Even a modest study (20 queries, 3 judges) rating coverage, structure, and factual accuracy would substantially strengthen the empirical foundation and address the most serious weakness.
-2. **Disentangle the ablation confound.** Compare HiReview against a variant that uses graph retrieval *with* the fine-tuned LLaMA topic generator but *without* hierarchical clustering (i.e., flat topic generation). This isolates the marginal contribution of the hierarchical taxonomy.
-3. **Describe the taxonomy extraction process** for the 518 reviews and define the clustering evaluation metric. Report inter-annotator agreement if extraction was manual.
-4. **Add abstract-level information** to at least one pipeline stage and discuss the current titles-only limitation explicitly.
-5. **Report key hyperparameters** (α, number of hierarchical levels, LoRA rank, learning rates, GNN layers/hidden size, hardware).
+- Directly address the factual accuracy gap: either add a factual accuracy evaluation (e.g., LLM-as-judge for factual consistency against source papers, or human annotation of factual errors) or remove the claim from the abstract and introduction.
+- Define the clustering accuracy metric in Table 3 and include comparisons to standard graph clustering methods (e.g., Louvain, Leiden).
+- Report all hyperparameter values (α, p_τ, τ, λ_l, number of levels, LoRA rank, learning rates) and the train/test split.
+- Describe how taxonomy trees were extracted from review papers (annotation protocol, quality control, inter-annotator agreement if human).
+- Add a retrieval ablation comparing BM25+neighbor against a dense retriever (e.g., SPECTER, all-MiniLM-L6-v2) to justify the design choice.
 
 ## Score and Decision
 
-The paper presents a technically sound and well-motivated framework for an important problem. The core ideas — graph-context-aware retrieval and soft-to-hard hierarchical clustering for taxonomy generation — are novel and clearly explained. The results are consistently positive across all metrics. However, the evidence for the central claim is weakened by three structural gaps: no human evaluation, an ablation confound that prevents isolating the key contribution, and titles-only input that limits depth. These are addressable, but in their current form, the paper's claims outpace its support.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

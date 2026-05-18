@@ -1,22 +1,18 @@
-Now I have a thorough understanding of the paper and can produce the consolidated review.
+Now I have all the information I need. Let me synthesize the final review.
 
 ## Summary
 
-This paper presents Dynamic-SUPERB Phase-2, a community-driven benchmark for instruction-based universal speech/audio models. It expands from 55 to 180 tasks (the largest such benchmark), introduces a two-level task taxonomy (17 domains across speech, music, and audio), describes a community contribution pipeline that accepted 91 new tasks, and evaluates 8 models. The core contributions are the benchmark scale, taxonomy, and community process; the evaluation findings are secondary.
+Dynamic-SUPERB Phase-2 is a community-driven benchmark for evaluating instruction-based universal speech/audio models. It expands from 55 to 180 tasks (the largest in the field), covering speech, music, and audio across a two-level task taxonomy (8 speech domains, 9 audio/music domains). The paper evaluates several current models (SALMONN, Qwen-Audio, WavLLM, etc.) using a GPT-4o-based evaluation pipeline, finding that no model performs well universally and that spoken language models sometimes outperform music-specialized models on music tasks, suggesting benefits from diverse training data.
 
 ## Strengths
 
-- **Largest benchmark for speech and audio evaluation**: With 180 tasks, Dynamic-SUPERB Phase-2 surpasses all prior benchmarks (SUPERB: 13, SLUE: 7, HEAR: 19, MARBLE: 13, AIR-bench: 19) by a wide margin (Table 1). This directly supports the paper's central claim of scale.
+1. **Largest scale in speech/audio evaluation.** With 180 tasks, this benchmark has more than 3× the tasks of Dynamic-SUPERB Phase-1 (55) and an order of magnitude more than SUPERB (13), HEAR (19), or MARBLE (13). It simultaneously covers speech, music, and audio — no prior benchmark does so at this scale (Table 1, Section 3.1).
 
-- **First detailed task taxonomy in speech/audio benchmarking**: The paper introduces a two-level taxonomy with 8 speech domains and 9 audio/music domains (Figures 2–3), developed with reference to INTERSPEECH sessions and IEEE SPS EDICS. This enables targeted capability analysis beyond simple task lists.
+2. **Community-driven dynamic expansion mechanism.** The structured call-for-tasks pipeline (Section 3.3) collected 91 new tasks from 145 proposals (March–July 2024) with iterative editor review rather than binary acceptance. This directly addresses the limitation of fixed-task benchmarks (SUPERB, SLUE) and enables the benchmark to evolve with the field.
 
-- **Diverse task types beyond classification**: Unlike Phase-1 (classification only), Phase-2 includes regression and sequence generation tasks (Section 3.2), with distinct evaluation pipelines for each type (Section 4.2), enabling coverage of tasks like MOS prediction and ASR.
+3. **Comprehensive task taxonomy for interpretable evaluation.** The two-level taxonomy (Figures 2a/2b, Section 3.4) is the first fine-grained categorization in speech processing, developed by referencing INTERSPEECH sessions and IEEE SPS EDICS. It enables capability-specific diagnosis (e.g., "paralinguistics" vs. "speaker recognition") rather than aggregate scores, as demonstrated in the domain-level analysis (Figure 4).
 
-- **Community-driven expansion with quality control**: The paper describes a call-for-tasks process with editor review, receiving 145 proposals and accepting 91 new tasks between March–July 2024 (Section 3.3). This demonstrates a sustainable model for evolving the benchmark.
-
-- **Core task subsets for efficient evaluation**: Tasks from SUPERB, MARBLE, and HEAR are reformulated into the instruction format with reduced data sizes, enabling quick-round experiments while bridging established encoder benchmarks with the instruction-following paradigm (Section 3.4).
-
-- **Open-source commitment and standardized evaluation**: All task data and the evaluation pipeline will be open-sourced (Reproducibility Statement), with GPT-4o temperature set to 0 for evaluation consistency, facilitating future benchmarking.
+4. **Insightful empirical findings.** The evaluation reveals that (a) SALMONN-13B excels at English ASR (2.8% WER) while WavLLM achieves 79.1% on emotion recognition, but (b) no model generalizes well across domains, and (c) spoken language models can outperform music-specialized models on music tasks — suggesting diverse training data aids cross-domain transfer (Figure 4, Table 2).
 
 ## Weaknesses
 
@@ -25,72 +21,52 @@ None.
 
 ### Major
 
-- **LLM-as-judge evaluation pipeline is used without any validation.** GPT-4o serves as a referee for classification tasks and as a post-processor for regression tasks (Section 4.2), yet the paper reports no human agreement rates, inter-rater reliability, or even a small-scale sanity check. For classification, accuracy is defined as the percentage of outputs the LLM judge considers aligned with ground truth, but no evidence is provided that GPT-4o's judgments are correct or consistent. For regression, the N/A rate scaling (multiplying by 1−N/A when higher-is-better, dividing by 1−N/A when lower-is-better) is ad-hoc and conflates instruction-following with task performance in an unvalidated manner. The paper claims this approach is "widely adopted in the NLP community" (Section 4.2) but does not validate its application to the diversity of speech/audio tasks here. The reported domain-level scores and comparative claims (e.g., "spoken language models outperform music models on music tasks") are therefore of unknown reliability. This is the paper's most significant weakness because the evaluation results are a substantial part of the presented analysis.
+1. **Unvalidated LLM-based evaluation pipeline (Section 4.2).** The paper relies entirely on GPT-4o as an automated judge for classification and as a post-processor for regression, but provides no human agreement study, no correlation analysis with standard metrics, and no empirical evidence that the LLM judge produces accurate or consistent decisions. The paper cites NLP works (Wang et al., Liu et al., Chiang et al.) that validated their LLM judges against human judgments, but does not replicate such validation here. Since the paper's central empirical claims about model capabilities (e.g., "spoken language models outperform music models in music-related domains," "SALMONN-13B achieved 2.8% WER") depend on this pipeline, the lack of validation substantially weakens confidence in the numerical results. The pipeline itself is a claimed contribution ("we propose an automated pipeline that uses LLMs to assess and process model outputs"), so the gap is not merely in the demonstration but in the contribution. *This is the single most impactful issue to address.*
 
-- **Domain-level relative-score aggregation is fragile and can misrepresent performance.** The paper averages relative improvements over a single baseline (Whisper-LLaMA) across tasks within a domain (Section 5.1). This method is sensitive to outlier tasks (acknowledged by the authors), and the choice of baseline strongly influences all scores. For music and audio domains, Whisper-LLaMA is arguably meaningless because Whisper cannot transcribe non-speech content; the paper excludes tasks where Whisper-LLaMA scores zero, but this creates selection bias that limits what the domain scores represent. The resulting domain scores (Figure 4) mix tasks with vastly different metrics and scales, making it impossible to interpret the practical significance of a given score difference. While the paper acknowledges some of these limitations (Section 5.1, Figure 4 caption), the aggregation scheme is presented as a primary analytical tool and its fragility undermines the strength of the domain-level conclusions.
+2. **Core task results for MARBLE and HEAR are not reported in the main paper.** The paper defines core tasks from SUPERB, MARBLE, and HEAR (Section 3.5), and the results section is titled "Core tasks results" (Section 5.2), but only SUPERB results appear in Table 2. MARBLE and HEAR core tasks were reformulated into the benchmark framework but no results are shown. This makes the "core task" coverage claim incomplete in the main paper.
 
 ### Minor
 
-- **Community task acceptance criteria are unspecified** (Section 3.3). The paper reports that 91 of 145 proposals were accepted after editor review, but no criteria for acceptance or rejection are given. Without understanding what fraction of tasks are trivial variants or why tasks were rejected, the claim that 180 tasks constitute the "largest benchmark" is meaningful primarily in count, not in demonstrated coverage or challenge.
+1. **Domain-level relative-score aggregation has interpretability limitations for non-speech domains (Section 5.1, Figure 4).** The relative score uses Whisper-LLaMA as a universal baseline. For music and audio tasks where Whisper cannot meaningfully transcribe non-speech content, the baseline is near floor. While the paper excludes tasks where the baseline scores zero, the relative scores for included music/audio tasks can still be inflated, making cross-domain comparisons of absolute values difficult. Cross-model comparisons within a domain are still valid (same baseline applies to all models), but the paper should more explicitly discuss this limitation.
 
-- **Taxonomy leaf coverage is not documented.** The taxonomy is presented at two levels (Figures 2–3), but no table or analysis shows how many tasks fall under each leaf, which leaves are thin, or whether the taxonomy was validated by independent raters. This limits the ability to assess how representative the benchmark is of real-world spoken language understanding.
-
-- **"First detailed taxonomy" claim is made without comparison.** The paper states it is "the first to provide such a detailed task taxonomy in speech processing" (Section 3.4) but does not compare its taxonomy's granularity against existing benchmark groupings (e.g., SUPERB's four categories, AIR-bench's organization). A brief comparison would substantiate this claim.
-
-- **Core task data reduction is undocumented.** The paper states core tasks are "reduced subsets" (Section 3.4) but does not report how data was subsampled or whether the reduced subsets preserve original task difficulty. If subsets are small or easy, core-task results may not reflect true model capability.
-
-- **Multi-audio input concatenation is not validated.** For models without multi-input interfaces, audio files are concatenated with 0.5s silence (Section 4.1). This workaround could affect temporally sensitive tasks (speaker verification, diarization), but no ablation or comparison with models that natively support multiple inputs is provided.
-
-- **Whisper 30-second limit impact is not quantified.** The paper mentions Whisper's 30-second limit (Section 4.1) but never reports how many test samples across the 180 tasks exceed this duration, making it impossible to gauge the impact on model results.
-
-- **No human or random baselines.** The paper reports no human performance or random-guess baselines for any task. Even a simple majority-class baseline for classification tasks would contextualize the reported numbers and help distinguish genuine capability from chance.
-
-- **Instruction sensitivity is not analyzed.** Each task has multiple instruction templates (Section 3.2), but no analysis is given of whether model performance varies significantly across different phrasings of the same task. If it does, the benchmark's reliability as a measure of capability is weakened.
-
-- **No confidence intervals or variance measures.** Given the LLM-as-judge evaluation pipeline and reduced core task data sizes, the absence of bootstrap confidence intervals or variance estimates for any result (Table 2, Figure 4) is a gap.
+2. **No validation of the taxonomy structure.** The taxonomy is presented as an organizational framework for interpretable evaluation, but the paper provides no analysis of its stability or empirical validity (e.g., whether tasks within the same leaf node produce correlated model performance, or inter-annotator agreement on task categorization). This limits the taxonomy from being more than a plausible organizational structure.
 
 ### Trivial
-- None of consequence beyond what is covered in Minor.
+None.
 
 ## Nice-to-Haves
-
-- Validate the GPT-4o evaluation pipeline on a subset of tasks by comparing with human judgments (e.g., Cohen's kappa on 50–100 samples per task type). This would dramatically strengthen the credibility of all evaluation findings.
-- Replace the ad-hoc N/A scaling with a more principled approach (e.g., reporting metric on valid outputs and N/A rate separately, or using a simple product of metric × (1−N/A) consistently).
-- Replace the relative-score aggregation with a rank-based method (average rank per model across tasks) or normalize scores within each task to [0,1] before averaging, to reduce sensitivity to baseline choice and outlier tasks.
-- Provide a table showing the distribution of tasks across taxonomy leaves to demonstrate coverage and reveal which domains are thin.
+- Validate the GPT-4o judge on a subset (e.g., 5–10 tasks) against human annotations, reporting accuracy or Cohen's kappa. This would dramatically strengthen confidence in all empirical findings.
+- Report median (not just mean) relative scores per domain to reduce sensitivity to outlier tasks, as the paper acknowledges that "domain-level scores can be distorted by specific tasks" (line 342).
+- Include a brief discussion of dataset sizes and quality assurance beyond "checking for major issues" for the community-contributed tasks.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution:
-
-- **Strength about "Domain-level relative-score analysis" being an interpretable strength**: Removed because it conflicts with the verified weakness that the aggregation is fragile and potentially misleading. A verified weakness takes precedence over a conflicting strength.
-- **Criticism about "no persistent DOI or versioned release"**: Removed per hard rule — the paper states materials will be open-sourced; citing a DOI is a formatting/reproducibility nitpick that does not affect the paper's core claims.
-- **Criticism about "datasets with proper licenses" constraint not being discussed**: Removed as it asks for additional depth on a logistical detail that would not change the paper's contribution or believability.
-- **Criticism that the paper doesn't discuss whether models were disadvantaged by text instruction format**: Removed because the paper explains the design choice and its rationale (Section 3.2); the concern is speculative without evidence of actual disadvantage.
-- **Criticism about the paper not being able to be accepted**: Re-framed — the benchmark contribution is strong enough to support acceptance despite the evaluation methodology issues requiring major revision.
+- *Criticism that the relative-score approach makes cross-model comparisons invalid for music/audio domains*: The paper uses the same baseline for all models within a domain, so cross-model comparisons remain valid. The concern is about absolute interpretability, not comparative validity. Moved to Minor.
+- *Criticism about missing MARBLE/HEAR core task results as a major omission*: These results are likely in the appendix, which the parser strips from all submissions. The paper defines the core tasks and reports the SUPERB subset in the main text.
+- *Criticism about dataset quality control being insufficiently described*: The paper describes iterative editor review (Section 3.3), which is standard for community benchmarks.
+- *Criticism about taxonomy requiring validation of task correlation within leaf nodes*: This goes beyond what is standard for benchmark taxonomy presentations. Moved to Nice-to-Haves.
+- *Demands for additional coverage (e.g., "the paper should also cover Y")*: These are scope creep requests that would turn the paper into a different, broader project.
+- *Formatting/style nitpicks, grammar issues, missing symbols*: These are parser artifacts, not author errors.
 
 ## Novel Insights
 
-The reviews surface a clear tension between the paper's genuine contributions (largest benchmark, detailed taxonomy, community process) and the reliability of its evaluation methodology. The key insight is that the LLM-as-judge pipeline—unchallenged within the paper—is the weakest link. If the evaluation findings were de-emphasized or validated, the benchmark contribution alone would be solid. Conversely, if the paper is read primarily for its evaluation claims about which models excel where, those claims are not yet trustworthy. This tension is not fatal because the benchmark itself is the primary artifact, but it means the paper needs either (a) validation of the evaluation pipeline or (b) a reframing that clearly distinguishes the benchmark contribution (strong) from the preliminary evaluation findings (qualified).
+The most interesting observation cutting across the reviews is the tension between the paper's primary contribution (the benchmark itself — its scale, community mechanism, and taxonomy) and its secondary contribution (the evaluation pipeline and empirical findings). The benchmark is clearly valuable and advances the state of the art substantially; the community-driven expansion model is an innovative solution to the stale-benchmark problem. However, the paper's own empirical claims about model capabilities — which serve as the benchmark's demonstration of value — rest on an evaluation pipeline that lacks validation. This creates a curious situation where the benchmark's credibility as a tool for the community is high, but the specific results the paper uses to motivate its use are on weaker footing. The paper would be significantly strengthened by acknowledging this asymmetry and either validating the pipeline or presenting the empirical findings with appropriate caveats about their provisional nature.
 
 ## Suggestions
-
-1. Add a human-validation experiment for the GPT-4o judge on at least 3–5 diverse tasks (classification + regression), reporting Cohen's kappa or percentage agreement. Even a small-scale check (50–100 samples per task) would substantially increase confidence in all reported results.
-2. Replace the N/A scaling in the domain-level analysis with separate reporting of (a) metric on valid outputs and (b) N/A rate, or use a consistent product formulation (metric × (1−N/A)) for all metrics.
-3. Consider reporting average ranks instead of relative scores for domain-level aggregation, or normalize all task metrics to a common scale (e.g., [0,1]) before averaging.
-4. Add a table showing the count of tasks per taxonomy leaf to demonstrate coverage.
-5. Add random-guess / majority-class baselines to Table 2 for all classification tasks.
+- Add a human validation study for the GPT-4o evaluation pipeline (even on 5–10 tasks) and report agreement metrics. This single addition would substantially increase confidence in all experimental findings.
+- Include the MARBLE and HEAR core task results in the main paper (or point to the appendix clearly) to complete the core task evaluation.
+- Discuss the limitations of the Whisper-LLaMA baseline for music/audio domains more explicitly, and consider reporting median relative scores alongside means to reduce sensitivity to outlier tasks.
+- Provide inter-annotator agreement or stability analysis for the task taxonomy to strengthen it as a methodological contribution.
 
 ## Score and Decision
 
-**Originality**: 7/10 — The benchmark scale and community process are novel contributions; the taxonomy is a useful organizational contribution but not conceptually surprising.  
-**Importance of research question**: 8/10 — A comprehensive benchmark for universal speech models is timely and needed.  
-**Claims well supported**: 5/10 — The benchmark scale claim is well supported; the evaluation findings are not, due to the unvalidated LLM judge.  
-**Soundness of experiments**: 5/10 — The evaluation methodology has significant unaddressed risks (LLM judge validity, aggregation fragility, no baselines).  
-**Clarity of writing**: 7/10 — Generally clear; the taxonomy and task formulation are well explained.  
-**Value to the research community**: 8/10 — The 180-task benchmark and open-source release will be valuable resources even with evaluation methodology caveats.
+**Overall assessment:** This is a solid benchmark paper with a valuable contribution. The scale (180 tasks), community-driven expansion, and task taxonomy are genuine advances that fill a clear gap in speech/audio evaluation. The main weakness — an unvalidated LLM evaluation pipeline — is significant but addressable and does not invalidate the benchmark itself. The benchmark will be a useful resource for the community regardless of the specific model results reported here.
 
-The paper's primary contribution—the 180-task benchmark and its taxonomy—is real and valuable. The evaluation methodology, however, has significant weaknesses that undermine the secondary findings about model capabilities. The paper merits acceptance primarily for the benchmark contribution, with the understanding that the evaluation results should be treated as preliminary and that the methodology requires validation in future work or a revision.
+- Originality: Good — largest benchmark in the field, first with this taxonomy and community mechanism.
+- Importance of research question: High — comprehensive evaluation of universal speech models is a critical need.
+- Claims well-supported: Partially — benchmark claims well-supported; empirical findings need stronger validation.
+- Soundness of experiments: Adequate but with noted gaps.
+- Clarity: Good.
+- Value to community: High.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

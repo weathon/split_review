@@ -1,83 +1,74 @@
+Now I have a thorough understanding of the paper and all the reviewer claims. Let me compose the final consolidated review.
+
 ## Summary
 
-The paper introduces ConvCodeWorld, a reproducible environment for benchmarking multi-turn conversational code generation with nine systematically varied feedback scenarios (combining compilation, execution with partial/full coverage, and novice/expert verbal feedback), and ConvCodeBench, a static log-based proxy that achieves Spearman rank correlations of 0.82–0.99 with the live environment using pre-generated logs from a weaker reference model. Extensive evaluation across 17 models reveals several non-obvious insights about how models utilize different feedback combinations, including that weaker models with expert verbal feedback can surpass the single-turn performance of GPT-4o.
+This paper introduces CONVCODEWORLD and CONVCODEBENCH, two benchmarks for evaluating LLMs in multi-turn conversational code generation. CONVCODEWORLD systematically constructs 9 feedback scenarios by combining compilation feedback, execution feedback (none/partial/full test coverage), and verbal feedback (none/novice/expert level simulated via GPT-4o). CONVCODEBENCH is a static proxy that uses pre-generated interaction logs from a weak reference model (CodeLlama-7B-Instruct), achieving Spearman rank correlations of 0.82–0.99 with the live environment while eliminating costly API calls. Extensive evaluation of 17 models (3 closed-source, 14 open-source) on 1,140 BigCodeBench-Instruct problems yields several insights: performance varies substantially across feedback combinations, weaker models with sufficient feedback can surpass single-turn SOTA, training on a fixed feedback combination can hurt generalization to unseen combinations, and there is a trade-off between MRR (speed) and Recall (coverage).
 
 ## Strengths
 
-- **Systematic feedback taxonomy with nine distinct, realistic combinations.** The paper formalizes three feedback dimensions—compilation, execution (partial/full coverage), and verbal (novice/expert)—and takes their Cartesian product to create nine scenarios. Table 6 explicitly contrasts this coverage with existing multi-turn benchmarks (InterCode, MINT), showing that prior work lacks execution coverage breadth and/or differentiated verbal feedback. This directly enables the paper's central claim of diversified evaluation across realistic interactive conditions.
+1. **Systematic, reproducible construction of 9 feedback combinations.** The paper formalizes feedback scenarios as a Cartesian product over compilation (always present), execution (φ/fₑ/fₑ*), and verbal (φ/fᵥ/fᵥ*) feedback (§2.2, Table 6). This is a strictly richer set than existing multi-turn benchmarks (InterCode lacks full test coverage and verbal feedback; MINT uses only GPT-4 verbal feedback with narrow scope, §5). The explicit formalization makes each scenario precisely reproducible.
 
-- **Non-obvious empirical insights about feedback interactions.** The paper documents findings that go beyond simple ranking: (a) weaker open-source models with expert verbal feedback (DeepSeek-Coder-6.7B-Instruct at 82.8 MRR) can outperform GPT-4o in single-turn mode (82.3 MRR) — Tables 3 and 4; (b) ReflectionCoder, trained on a specific feedback combination, generalizes poorly to unseen combinations (Section 4.2.3); (c) a clear MRR–Recall trade-off exists where the model with highest MRR (GPT-4o) is not the one with highest Recall (GPT-4). These are genuine contributions to understanding interactive code generation.
+2. **CONVCODEBENCH achieves strong rank correlation with the live environment.** Using CodeLlama-7B-Instruct logs, the static benchmark yields Spearman's ρ between 0.82 and 0.99 across feedback settings (§4.3, Figure 2). This validates the core practical contribution: a cheap, reusable proxy that avoids costly per-evaluation LLM calls.
 
-- **Large-scale and challenging problem foundation.** The paper extends BigCodeBench-Instruct (1,140 problems, 5.6 test cases/problem, 99% branch coverage), providing a more robust evaluation basis than smaller benchmarks like HumanEval or MBPP. The 99% branch coverage enables meaningful partial vs. full test-coverage distinctions.
+3. **Large-scale, high-quality base dataset and broad model coverage.** The benchmarks build on BigCodeBench-Instruct (1,140 problems, avg. 5.6 test cases, 99% branch coverage, §4.1), providing greater statistical power than smaller alternatives (HumanEval: 164, MBPP-sanitized: 399–427). Evaluation across 17 models spanning 7B–70B and closed/open-source (§4.1) is more comprehensive than comparable benchmarks.
 
-- **Broad and consistent model coverage.** Evaluations include 17 LLMs (3 closed-source, 14 open-source from 7B to 70B) under the same interactive protocol, allowing the paper to draw comparative conclusions about feedback sensitivity across model families without cherry-picking.
+4. **Empirically demonstrated MRR–Recall trade-off and feedback-dependent rankings.** The paper shows that GPT-4o achieves highest MRR (fewest turns) while GPT-4 obtains best Recall (most problems solved), and similar patterns appear in open-source models (§4.2.4, Tables 3–4). This reveals a design tension in multi-turn evaluation that goes beyond simple leaderboard ranking. The finding that model rankings shift across feedback combinations (§4.2.1) underscores the necessity of evaluating under diverse feedback conditions.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **Verbal feedback simulation is underspecified and unvalidated.** The paper's central design — nine feedback scenarios — hinges on the distinction between "novice-level" and "expert-level" verbal feedback generated by GPT-4o (Section 2.1, 2.2). However:
-  - **No prompts are provided** for generating either expertise level. A different lab attempting to replicate the benchmark would have to guess the prompting strategy.
-  - **No validation is reported** — no human evaluation, automated checks, or any evidence that the generated feedback actually exhibits the intended novice/expert properties. The verbal feedback could differ only in length or confidence rather than actual expertise quality.
-  
-  This is a structural flaw because it undermines the benchmark's core design. While the authors commit to releasing code, the prompting strategy is the crucial scientific specification that should be documented in the paper itself. The key empirical claims about how different models benefit from different feedback levels rest on an opaque simulation.
-
-- **ConvCodeBench correlation evidence is incomplete.** The paper claims that CodeLlama-7B-Instruct "outperforms both DeepSeek-Coder-6.7B-Instruct and GPT-4 as reference models" (Section 3, line 104), but **no correlation data for alternative reference models is presented anywhere in the paper**. Only the correlations for CodeLlama-7B-Instruct are shown (Section 4.3, Figure 2). The reader cannot evaluate whether the choice is valid or whether the reported 0.82–0.99 correlations are specific to this reference model. Since both ConvCodeWorld and ConvCodeBench use GPT-4o for verbal feedback generation, the high correlation may partly reflect a shared feedback generator rather than the static-log approach generalizing. This is a genuine evidential gap for the paper's second major contribution.
+None.
 
 ### Minor
 
-- **Prompt templates for the evaluation pipeline are not shown.** The paper notes that the experiments use "a custom prompt pipeline built using DSPy" (Section 4.1), but no prompts are provided for how compilation errors, execution results, or verbal feedback are presented to the target model. The prompt format for multi-turn interactions — how previous code, feedback, and task description are structured — directly affects model performance, especially for open-source models sensitive to formatting. Without this information, the results are not fully reproducible from the paper alone, and confounding from prompt design cannot be ruled out.
+1. **The expertise manipulation for novice vs. expert verbal feedback is not described in the visible text.** The paper's central design claim is that it covers "verbal feedback generated by GPT-4o with different levels of expertise" (§1, §2.2), but the main text never explains how expertise levels were instantiated (e.g., system prompt differences, few-shot examples, or a separate calibration step). This information is crucial for reproducibility and for assessing whether the two levels are genuinely distinguishable in content or helpfulness. The paper would be strengthened by including the exact prompts used and ideally a small validation (human ratings or LLM-as-judge) showing the categories are meaningfully different.
 
-- **No limitations section.** The paper does not discuss: (a) that verbal feedback is generated by GPT-4o, not real humans, so the "expertise" simulation may not generalize; (b) that ConvCodeBench's logs come from a single reference model, introducing potential bias; (c) that all verbal feedback in both benchmarks originates from the same LLM source (GPT-4o), limiting diversity. A dedicated limitations section would strengthen the paper.
+2. **The CONVCODEBENCH correlation analysis lacks uncertainty estimates.** The Spearman correlations of 0.82–0.99 are reported over only 17 models. With this sample size, a single outlying model can substantially affect the coefficient, yet no confidence intervals, bootstrap intervals, or per-combination breakdowns are provided (§4.3). Given that the paper's second core contribution is CONVCODEBENCH as a reliable cheap proxy, this validation would be more convincing with bootstrapped CIs. The paper states "per-combination analysis" exists but does not report uncertainty for it.
 
-- **No statistical comparisons.** The paper makes strong claims about performance patterns (e.g., "weaker models struggle to utilize complex feedback") without confidence intervals or significance tests. Given 1,140 problems, small differences in MRR or Recall could be noise. Statistical grounding would strengthen the empirical contribution.
+3. **The generalization insight in §4.2.3 rests on narrow empirical evidence.** The finding that "training on a specific feedback combination can reduce performance on other combinations" is supported by comparing two pairs of models (ReflectionCoder-DS vs. DeepSeek-Coder-Instruct at 6.7B and 33B), all from a single model family and trained on exactly one feedback combination. While the paper's phrasing is appropriately hedged ("indicates," "can reduce"), this remains a single-family observation rather than a robust general principle. Testing across multiple training configurations or model families would substantially strengthen the claim.
 
 ### Trivial
 
-- The $\langle\phi,\phi,\phi\rangle$ baseline in Tables 3 and 4 is presented alongside the nine ConvCodeWorld scenarios, but the paper states that compilation feedback is "always present" in ConvCodeWorld. This is in fact a separate single-turn baseline, not part of the nine combinations. The tables should explicitly label it as such for clarity.
+1. **The 10-turn cutoff is not justified.** The paper sets $n=10$ as the maximum number of turns (§4.1) without providing a rationale (e.g., preliminary experiments showing diminishing returns, or typical real-world interaction limits).
+
+2. **No variability estimates for Tables 3 and 4.** MRR and Recall scores across feedback combinations are reported as point estimates without standard errors, confidence intervals, or bootstrapped ranges. While the 1,140-problem set is large, reporting uncertainty would help readers assess whether observed gaps are meaningful.
 
 ## Nice-to-Haves
 
-- A quantitative cost/speed comparison between ConvCodeWorld and ConvCodeBench (the abstract mentions $1.2 for verbal feedback per evaluation, but no concrete savings analysis is provided).
-- The exclusion criteria for ConvCodeBench (omitting scenarios without verbal feedback and $\langle f_c, \phi, f_v\rangle$) are mentioned but not empirically justified beyond a single sentence. A brief analysis would help.
-- Confidence intervals for the Spearman correlations or a permutation test would further support the claim that ConvCodeBench preserves rankings reliably.
+- Full prompt templates for novice vs. expert GPT-4o verbal feedback generation, along with calibration/validation results showing the two categories are distinguishable.
+- Bootstrap confidence intervals for the Spearman correlations in §4.3, and scatter plots per feedback combination (Figure 2 likely shows these already; reporting the per-combination ρ values with CIs would be ideal).
+- A brief rationale for the 10-turn cutoff based on preliminary analysis.
+- Direct quantitative comparison with InterCode and MINT on the same model set (currently only a qualitative coverage comparison is given in Table 6).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points from the reviewer inputs are removed or downgraded after verification against the paper:
 
-- **Criticism about missing related works (SWE-bench, HumanEvalPack, AgentBench, WebArena).** The paper focuses on multi-turn code generation with *diverse feedback*, a distinct focus from bug-fixing (SWE-bench), multi-language generation (HumanEvalPack), or general agent behavior (AgentBench, WebArena). Demanding coverage of these is scope creep beyond the paper's stated focus. *Removed per Soft Rule: scope creep.*
-
-- **Claim that the formalization using regular-expression notation is unclear.** The nine combinations are listed in Table 6 explicitly, so the notation is supplementary. The reviewer's concern about clarity is not a structural weakness. *Removed per Soft Rule: does not harm the core claim.*
-
-- **Claim that the ReflectionCoder generalization finding is "expected" and therefore modest.** The finding is factually correct and provides evidence for a real phenomenon; that it aligns with intuition does not make it non-contributory. *Removed per Soft Rule: value judgment, not a weakness.*
-
-- **Criticism about the paper not discussing a cost comparison (mentioned under "Missing Parts").** The paper provides cost figures and the comparison between live and static benchmarks is implicit in the design. This is at most a nice-to-have. *Moved to Nice-to-Haves above.*
-
-- **Strength from Strength Finder about ConvCodeBench reference model choice being "empirically justified (Table 2)."** Table 2 shows raw performance of three models at turns 0 and 10, not correlation data for alternative reference models. The justification is a rationale (weaker model = better differentiation), not a comparative empirical demonstration. *Dropped from Strengths.*
+- **"Only one reference model used"** — The paper explicitly states that three reference models were compared: "We find that using CodeLlama-7B-Instruct as the base model outperforms both DeepSeek-Coder-6.7B-Instruct (a stronger code model) and GPT-4 (one of the state-of-the-arts) as reference models (§4.3)" (§3). The critic's claim that only one model was tested is incorrect.
+- **"No scatter plots"** — Figure 2 is described as "Correlation between MRR on CONVCODEBENCH... and MRR on CONVCODEWORLD with different feedback combinations Ω," which is a scatter plot (image invisible to parser).
+- **"$1.2 formatting artifact"** — The incomplete cost figure "only $1.2)" is a parser artifact (original text likely had "$1.2 per X"); not an author error.
+- **General "missing details" (temperature, max tokens, sandboxing, Python version)** — These implementation details would typically reside in the appendix, which the parser strips. The paper cannot be penalized for their absence in the visible text.
+- **"No comparison with InterCode/MINT on same models"** — This is a nice-to-have expansion, not a weakness. The paper provides a qualitative comparison (Table 6) which is appropriate for a benchmark paper establishing a new evaluation framework.
 
 ## Novel Insights
 
-The reviews surface one genuinely novel observation beyond the paper's own contributions: the existence of the $\langle\phi,\phi,\phi\rangle$ baseline in the tables creates a tension with the paper's claim that compilation feedback is "always present" in ConvCodeWorld. While this is resolvable (it is a separate single-turn baseline, not part of the nine scenarios), the presentation could mislead readers about what ConvCodeWorld contains. The more significant insight from the combined reviews is that the paper's two main contributions — the nine feedback scenarios and the static benchmark proxy — each have a distinct evidential gap: the former lacks specification of how the novice/expert verbal feedback distinction is operationalized, and the latter lacks comparative evidence for the reference model choice. Addressing these would substantially strengthen an otherwise well-motivated contribution.
+The reviews surface an important tension that the paper does not fully resolve: the CONVCODEBENCH proxy is validated only for the specific logs of one weak model, yet the paper's own analysis shows that model rankings shift across feedback combinations (§4.2.1). This means the proxy's validity may itself be feedback-combination-dependent — a possibility the paper acknowledges implicitly (by reporting per-combination correlations) but does not discuss explicitly as a limitation. A deeper question emerges: does a static benchmark that feeds another model's code to the target measure the same skill as interactive generation? The high rank correlations suggest yes, but this finding would be strengthened by analyzing which models gain or lose the most relative rank between CONVCODEWORLD and CONVCODEBENCH.
 
 ## Suggestions
 
-1. **Release the verbal feedback prompts and include them in the paper or an appendix.** Provide the exact prompts used to generate novice-level vs. expert-level feedback from GPT-4o, along with a brief validation study (e.g., human ratings or automated checks showing the two levels differ in specificity, actionability, or correctness).
-2. **Report Spearman correlations for at least two alternative reference models** (e.g., DeepSeek-Coder-6.7B-Instruct and GPT-4) for the same set of feedback combinations. If the ranking is robust to reference model choice, this should be shown. If it is not, the paper should acknowledge the limitation.
-3. **Publish the full prompt template** used in the DSPy evaluation pipeline, showing how previous code, feedback, and problem descriptions are structured for the target model across turns.
-4. **Add a Limitations section** discussing the reliance on GPT-4o for verbal feedback, the potential bias from a single reference model in ConvCodeBench, and the generalizability of the findings to human-provided feedback.
-5. **Clarify the role of $\langle\phi,\phi,\phi\rangle$** in the tables — explicitly state it is a separate single-turn baseline, not one of the nine ConvCodeWorld scenarios.
+1. Add the exact system/user prompts for novice and expert GPT-4o verbal feedback to the main paper (or clearly reference their location in the appendix). Ideally, include a small validation showing the two expertise levels are distinguishable in content quality.
+2. Report bootstrap confidence intervals for each Spearman correlation in §4.3, and show per-feedback-combination ρ values with uncertainty. This is the single most impactful improvement for the CONVCODEBENCH validation.
+3. Soften the generalization claim in §4.2.3 to explicitly note the narrow empirical base (two model pairs from one family), or add experiments with additional families to broaden support.
+4. Add a brief justification for the 10-turn limit, even a sentence citing preliminary experiments or practical interaction constraints.
 
 ## Score and Decision
 
-This is a benchmark paper that identifies a genuine gap — lack of diverse, systematically varied feedback in interactive code generation benchmarks — and proposes a practical solution with two complementary benchmarks. The nine-scenario taxonomy is well-motivated, the model coverage is broad, and the empirical findings (weaker models + expert feedback > stronger models without feedback, MRR–Recall trade-off) are non-trivial and actionable. The paper is clearly written and the contributions are well-scoped.
+The paper addresses a genuine gap — multi-turn code generation benchmarks that vary feedback quality — and does so with a well-motivated design, broad model coverage (17 models), and a large problem set (1,140 problems). The core contributions (a systematic feedback taxonomy, a validated static proxy benchmark, and empirical insights about feedback-dependent performance) are solid. The weaknesses are all minor/trivial and addressable: the expertise-level instantiation needs to be disclosed (likely already in the stripped appendix), the correlation analysis could be more rigorous with CIs, and one empirical insight rests on narrow evidence. These do not threaten the paper's central claims.
 
-However, the two major weaknesses are significant: the verbal feedback simulation (the heart of the nine scenarios) is underspecified and unvalidated, and the evidence for ConvCodeBench's correlation with the live environment is incomplete for the central claim about reference model choice. Both are addressable in revision but affect the paper's current credibility. The minor issues (missing prompt templates, no limitations section) are standard problems that should be fixed.
-
-The paper is on the right track with a solid foundation, but needs additional evidence and documentation to be fully convincing.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

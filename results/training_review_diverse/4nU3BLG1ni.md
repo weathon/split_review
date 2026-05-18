@@ -1,20 +1,20 @@
-Now I have a comprehensive understanding of both the paper and the reviews. Let me produce the final consolidated review.
+Now I have a complete picture. Let me synthesize my findings into a consolidated review by verifying each claim against the actual paper text.
+
+---
 
 ## Summary
 
-This paper studies decentralized multi-player multi-armed bandits (MMAB) with stochastic delayed feedback—a practical but underexplored problem in cognitive radio networks. It proposes DDSE (Decentralized Delayed Successive Elimination), which uses a leader-follower structure where players coordinate using deliberately outdated consensus arm sets ($\mathcal{M}_{p-q}$) to avoid collisions under delay. The paper provides a centralized lower bound (Theorem 1), a regret upper bound for DDSE (Theorem 2), a comparison bound for a naive variant without delay estimation (Theorem 3), and experiments on synthetic and real-world spectrum data.
+This paper introduces DDSE, the first algorithm for decentralized multi-player multi-armed bandits (MMAB) with stochastic delayed feedback — a realistic but previously unexplored setting. The key algorithmic idea is a leader-follower structure with periodic communication phases that use an intentionally outdated consensus set (\(\mathcal{M}_{p-q}\)) to avoid collisions when players receive feedback at different times. The paper provides regret upper bounds for DDSE (Theorem 2), a lower bound for the centralized setting (Theorem 1), and an analysis of a no-delay-estimation ablation (Theorem 3) showing that ignoring delay leads to an exponential regret penalty. Experiments on synthetic and real-world spectrum data compare DDSE against six existing MMAB algorithms and the ablation.
 
 ## Strengths
 
-1. **First algorithm for a well-motivated underexplored problem.** Decentralized MMAB with stochastic delayed feedback is a realistic problem in cognitive radio networks that prior work on MMAB (Boursier & Perchet, 2019; Wang et al., 2020; Xiong & Li, 2023) has not addressed. The paper identifies this gap clearly.
+1. **Novel problem formulation addressing a genuine gap.** The paper correctly identifies that all existing decentralized MMAB algorithms assume immediate feedback, which does not match practical cognitive radio networks where spectrum sensing and transmission introduce delays (Section 1). Formalizing stochastic delayed feedback in the decentralized MMAB setting is a meaningful contribution that opens a new research direction.
 
-2. **Clever algorithmic idea with theoretical payoff.** The central insight—using deliberately outdated consensus sets ($\mathcal{M}_{p-q}$) rather than the latest information to maintain synchronization under delay—is conceptually sound. Theorem 2 shows this avoids an exponential regret term that appears in the naive version (Theorem 3), and the ablation against "DDSE without delay estimation" experimentally confirms the value of this design choice.
+2. **Clever algorithmic mechanism with theoretical justification.** The core idea — using the most recent *fully-received* consensus set \(\mathcal{M}_{p-q}\) rather than the latest \(\mathcal{M}_{p}\) to maintain synchronization — is simple yet effective. The theoretical analysis (Theorem 2 vs. Theorem 3) rigorously demonstrates that this avoids an exponential regret term \(\exp(\mathbb{E}[d]/(KM) + \sigma_d^2/(2K^2M^2))\) that arises from naive delay-oblivious updating. This contrast cleanly justifies the algorithm's core design choice.
 
-3. **Regret decomposition and near-optimal guarantee.** The paper provides a lower bound (Theorem 1) for centralized MMAB with delays and an upper bound (Theorem 2) that matches it up to $T$-independent additive terms. The decomposition into exploration regret (Lemma 1) and communication regret (Lemma 2) cleanly separates the sources of regret, and the communication regret is shown to be constant in $T$.
+3. **Rigorous theoretical analysis.** The paper provides both regret upper bounds (decentralized) and a lower bound (centralized), showing the upper bound matches the lower bound up to constant and additive terms that are independent of \(T\). Lemma 1 and Lemma 2 decompose the regret into exploration and communication phases, with the communication-phase regret shown to be constant in \(T\). Theorem 3's analysis of the ablation provides strong evidence that the delay-adaptive mechanism is essential.
 
-4. **Realistic delay model.** The paper adopts a sub-Gaussian delay assumption (Assumption 1) rather than a hard bound $d_{\max}$, permitting rare large delays. This is more practical than assumptions in prior single-player delayed bandit work and is justified by references to real network characteristics.
-
-5. **Empirical validation on real-world data.** Beyond synthetic simulations, the paper evaluates DDSE on spectrum measurement data from the 5G-Xcast project, measuring cumulative throughput and collisions (Figures 3–5). This grounds the theoretical claims in a concrete application domain.
+4. **Experimental validation on both synthetic and real-world data.** The paper evaluates DDSE across varying delay expectations, delay variances, and numbers of players (Figures 1-2), and on real spectrum measurement data (Figures 4-5), comparing against six baselines plus the ablation. The consistent performance advantage and the ablation comparison provide evidence that the algorithmic innovations translate to practice.
 
 ## Weaknesses
 
@@ -22,61 +22,57 @@ This paper studies decentralized multi-player multi-armed bandits (MMAB) with st
 None.
 
 ### Major
-
-1. **Algorithm description is unclear in critical aspects, making the main contribution hard to evaluate from the text alone.** While Algorithm 1 (referenced in the paper) likely contains the pseudocode, the textual description in Section 3 leaves several key mechanics underspecified:
-   - **How $q$ (the number of communication phases to step back) is determined from delay estimates.** The paper mentions $\hat{\mu}_d^j$ and $(\hat{\sigma}_d^2)^j$ (line 146) but never describes how these are computed online or how they translate into a specific $q$ such that $\mathcal{M}_{p-q}$ is the "safe" consensus set. This is the core adaptation mechanism that distinguishes DDSE.
-   - **The exploration phase procedure.** The paper states the leader "explores all arms and gradually eliminates sub-optimal arms" (line 33) but provides no elimination rule, confidence bound, or stopping condition. Readers familiar with successive elimination can guess the structure, but the paper should be self-contained.
-   - **The communication phase protocol is confusing.** The description of Part 1 (Remove Arm, line 136) is particularly hard to parse: the leader identifies $a_p^-$ in the current set $\mathcal{M}_p^M$ but then selects the arm at the same position from the *older* set $\mathcal{M}_{p-q}^M$. The mechanism is explained in only a few dense sentences, and the reasoning for why this ensures synchronization under delay is not made intuitive. A worked example (e.g., $K=3, M=2$) would substantially clarify the protocol.
-
-   This is the paper's primary contribution, and the description should enable a reader to understand, if not fully re-implement, the algorithm from the main text. In its current form, it does not.
+None.
 
 ### Minor
 
-2. **The lower bound (Theorem 1) contains a term $\mathbb{E}[d] - \sigma_d\sqrt{\theta/(1-\theta)}$ that can become negative for large $\sigma_d$, making the bound potentially vacuous or even reversed in sign.** The paper does not discuss the regime in which this bound is meaningful or what values of $\theta$ and $\sigma_d$ keep it non-trivial. This does not invalidate the bound, but the lack of discussion weakens the reader's confidence in the near-optimality comparison.
+1. **Underspecified delay estimation procedure.** The paper mentions that the full DDSE estimates \(\hat{\mu}_d^j\) and \((\hat{\sigma}_d^2)^j\) (line 146 contrasts the ablation "does not estimate" these), and the bounds depend on \(\mathbb{E}[d]\) and \(\sigma_d^2\), but the text never explicitly describes how players compute these estimates from observed delays. While a standard sample-mean and sample-variance approach would suffice, the absence of any specification is a gap for reproducibility. (The algorithm pseudocode — "Algorithm 1" — is referenced but was stripped by the parser; if it contains these details, this point is moot; if not, it remains a gap.)
 
-3. **The near-optimality claim is overstated relative to the evidence presented.** The gap between Theorem 1 (centralized lower bound) and Theorem 2 (decentralized upper bound) involves a constant factor of roughly 646 in the leading $\frac{\log T}{\theta\Delta_k}$ term and a structural gap in the delay-dependent terms when $K-M$ is small (e.g., $M = K-1$). The paper states the result is "near-optimal" (lines 37, 165, 178) but does not discuss these gaps or the regime where the constant factor is acceptable. A more nuanced discussion would strengthen the claim.
+2. **"Near-optimal" claim resting on a centralized lower bound.** Theorem 1 provides a lower bound for the *centralized* setting, while Theorem 2 is a regret upper bound for the *decentralized* setting. The paper acknowledges this (line 157: "we compare our results with the centralized lower bound to evaluate how the additional information exchange impacts regret reduction") and shows the gap is constant in \(T\). This is a standard and defensible approach. However, the claim of "near-optimality" would be stronger if accompanied by a lower bound for the decentralized setting itself, or at least a discussion of whether the extra \(O\big(\frac{M\sum_{k>M}\Delta_k}{K-M}\sqrt{\sigma_d^2\log K}\big)\) term is unavoidable.
 
-4. **Experiments compare only against baselines designed for immediate feedback, with no delay-adapted variants.** The paper acknowledges these baselines "are ill-suited" to delay (line 24), making the comparison somewhat self-fulfilling. While the inclusion of "DDSE without delay estimation" as an ablation partially addresses this, adding at least one simple delay-robust adaptation of a baseline (e.g., a variant that discards stale observations or uses a timeout) would make the empirical case for DDSE significantly stronger.
+3. **Baselines used without discussion of delay impact.** The experiments evaluate six existing MMAB algorithms (SIC-MMAB, MCTopM, etc.) without any modification for delayed feedback, and the paper states "Parameters are set the same with the original works" (line 223). This is a valid and informative comparison for showing that *naive application* of existing algorithms fails under delay. However, the paper would be strengthened by briefly discussing *why* unmodified use is a reasonable comparison (i.e., these algorithms have no built-in mechanism to handle delay, so the experiment tests exactly what happens when they encounter delays). Without this discussion, the comparison's interpretation is left implicit.
 
-5. **No discussion of limitations.** The conclusion (Section 6) does not mention the paper's known assumptions: the need for pre-assigned player ranks and known $M$, the requirement $M \leq K$, the sub-Gaussian delay model, and that $M$ is fixed over time. These are reasonable for a first work, but acknowledging them improves scholarly completeness.
+4. **Large constants and minimum-gap dependence in bounds.** The regret upper bound (Theorem 2) involves large constants (323, 195) and a term \(C_1 = 4M e^{-\delta^2/2}/\delta^2\) that depends on the minimum gap \(\delta\) and can blow up for small \(\delta\). The paper does not discuss whether these constants are artifacts of the analysis or inherent, nor does it address the \(\delta\) dependence. A brief discussion would help readers assess the tightness.
 
 ### Trivial
-None.
+- Table 1 defines \(\tilde{d}_1, \tilde{d}_2, \tilde{d}_3\) but the prose explains their role in the bounds only briefly (line 18-19, 35-37). Adding a sentence clarifying which terms they appear in would help readability.
+- The communication phase is described in prose with three parts (lines 136-140); providing a compact summary of the three-part structure in pseudocode form would aid comprehension.
 
 ## Nice-to-Haves
-- A small worked example (e.g., $K=3, M=2$) illustrating the communication protocol step-by-step would dramatically improve clarity.
-- A proof sketch for the lower bound (Theorem 1) or the key steps in Lemma 1 would help readers assess the theoretical contribution without needing to consult the appendix.
-- Discussion of whether the algorithm can handle unknown or time-varying $M$.
+
+- **Adapted baselines:** The paper could strengthen the empirical evaluation by adapting one or two baselines to handle delay (e.g., inserting a waiting period after each pull until feedback arrives) and showing that even adapted versions still underperform DDSE. This would address a natural reader question: "Could existing algorithms be trivially fixed?"
+- **Guidance on choosing \(\theta\):** The quantile parameter \(\theta\) appears in the bounds and the algorithm (via the quantile function \(d(\theta)\)), but no practical guidance is given for setting it. A brief discussion relating \(\theta\) to the trade-off between regret and confidence would be useful.
+- **Experiments with non-Gaussian / heavy-tailed delays:** The paper uses Gaussian rewards and sub-Gaussian synthetic delays. Testing with heavy-tailed delay distributions (e.g., log-normal) would probe the robustness of the sub-Gaussian assumption.
 
 ## Removed Points
 
-The following points from the reviewer inputs have been removed with justification:
+The following points from the reviews were removed or downgraded after verification against the paper:
 
-- **"No intuition given for exponential term in Theorem 3"** — The paper provides intuition at lines 214–215: followers receive incorrect information when $\mathcal{M}_{p'}^j \neq \mathcal{M}_{p'}^M$, leading to exponential regret. The critic's claim that "no intuition is given" is factually inaccurate.
-- **"Missing proof sketches in main text"** — Proofs are standardly deferred to the appendix in this venue's format. The parser strips those sections; they exist in the original submission.
-- **"Algorithm cannot be evaluated independently"** — The paper references Algorithm 1 (the pseudocode) which was stripped by the parser. Some implementation details are legitimately in the pseudocode. However, the textual clarity criticism remains valid (kept in Major #1).
-- **Strength Finder's generic framing** — The identified strengths are factually correct and supported by the paper, so they are retained with appropriate qualification rather than removed.
-- **"Quantile function is defined but never used"** — The quantile function $d(\theta)$ is defined and its parameter $\theta$ appears in all the regret bounds (Theorems 1–3, Lemmas 1–2). The function itself is not invoked in the bounds, but the definition is contextually relevant.
+- **"Unfair and invalid baseline comparisons render experimental evaluation uninformative"** (Critic's Point 1): The paper compares existing algorithms unmodified in a new setting for which they were not designed. This is a standard and informative comparison — it demonstrates exactly what the paper claims: that existing algorithms fail under delay. The critic's claim that this is "fatal" and "invalid" is overblown. The comparison is legitimate; the paper could add a brief justification, but the experiments are not uninformative. Moved to Minor weakness #3 above.
+
+- **"Algorithm description incomplete" — sub-points about missing Algorithm 1 pseudocode and common clock synchronization**: The paper references "Algorithm 1" (line 127), which was likely stripped by the PDF parser. Per the hard rules, parser-stripped content is assumed to exist. The assumption of a shared time index is standard in the MMAB literature and stated in the paper (players know their rank and total count, line 127). These are parser artifacts or standard assumptions, not author errors.
+
+- **"How players determine q in a decentralized way"**: The paper explains that \(q\) is determined by finding the most recent communication phase whose feedback has been fully received (line 146: "Denote \(p'\) as the communication phase whose result is the most recent to have been completely received"). This is a clear and sensible description for a decentralized setting where each player locally tracks received feedback.
+
+- **Strength Finder's "rigorous experimental validation"**: The description is kept but reframed more carefully to note the baseline issue. The core claim that experiments validate DDSE's effectiveness is accurate.
+
+- **Strength Finder's "near-optimal theoretical guarantees with lower bound"**: Kept but qualified to note the centralized vs. decentralized caveat, which appears in Minor weakness #2.
 
 ## Novel Insights
 
-The key insight that emerges from reading the paper against the reviews is a tension: the paper's central algorithmic idea (using $\mathcal{M}_{p-q}$ to maintain synchronization) is genuinely clever and the theoretical bounds credibly show it avoids exponential regret, yet the presentation is too terse to make this idea accessible. The reviewers' most productive observation is that the paper needs a clear, step-by-step exposition of how $q$ is chosen and how the communication phase encodes the arm update via position-based collision signaling. The real-world spectrum experiments are a strength that the reviews underweight relative to the synthetic experiments.
+The reviewer feedback surfaces an interesting tension that the paper does not fully address: the cost of decentralization under delay manifests both as explicit communication-phase regret (constant in \(T\)) and as an implicit constraint that forces players to use stale information (\(\mathcal{M}_{p-q}\) instead of \(\mathcal{M}_p\)). The paper's central trade-off is that using older information avoids collisions but slows reaction to changing best-arm estimates. The ablation analysis (Theorem 3) convincingly shows the exponential penalty of using *too recent* information, but the paper does not explore whether there exists a *sweet spot* — i.e., an optimal \(q\) that balances staleness against collision risk. This could be a fruitful direction for follow-up work.
 
 ## Suggestions
 
-1. **Rewrite Section 3 (Algorithm) with a worked example.** Show a concrete run for $K=3, M=2$ across a few communication phases, illustrating how the leader and followers use $\mathcal{M}_{p-q}$ to stay synchronized, how $q$ is inferred from delay estimates, and what happens in the communication phase (remove/add/notify). This would resolve the primary clarity concern.
-
-2. **Add at least one delay-adapted baseline to the experiments.** A simple approach: have each baseline player run a standard delayed UCB for single-player bandits (discarding feedback that arrives before their next action) and ignore collisions, or apply a timeout-based communication protocol to SIC-MMAB. This would make the "ill-suited" claim empirically grounded rather than self-fulfilling.
-
-3. **Discuss the regime of the lower bound.** Add a sentence explaining when $\mathbb{E}[d] - \sigma_d\sqrt{\theta/(1-\theta)}$ is positive and what this implies for the bound's utility.
-
-4. **Add a limitations paragraph to the conclusion.** Acknowledge the need for known $M$, pre-assigned player ranks, $M \leq K$, fixed $M$, and sub-Gaussian delays.
-
-5. **Soft-pedal the "near-optimal" claim** or add a discussion of the constant-factor gap and the centralized-vs-decentralized structural gap, especially for extreme values of $K-M$.
+1. Add a brief description of how players empirically estimate \(\mathbb{E}[d]\) and \(\sigma_d^2\) from observed delays (e.g., via running sample mean and variance). This fills the main reproducibility gap.
+2. Add a short paragraph qualifying the "near-optimal" comparison: clarify that the gap relative to the centralized lower bound includes an unavoidable cost of decentralization, and note whether the extra \(O(\sqrt{\sigma_d^2 \log K})\) term is conjectured to be necessary.
+3. Add one sentence explaining *why* unmodified baselines are a reasonable comparison: "These algorithms have no mechanism to handle delay, so the experiment shows what happens when they encounter it without modification."
+4. Discuss the large constants (323, 195) and the \(\delta\) dependence in \(C_1\) — even a brief note about whether these are artifacts of the proof technique would help.
+5. Provide a compact pseudocode or table summarizing the communication phase steps (remove, add, notify) for quick reference.
 
 ## Score and Decision
 
-The paper addresses a genuine gap, proposes a reasonable algorithm with theoretical backing, and provides empirical evidence. However, the unclear algorithm description in the main text is a significant weakness for a method paper, and the near-optimality claim needs more careful qualification. The core contribution is real but the presentation substantially hinders evaluation.
+The paper addresses a meaningful and underexplored problem with a well-motivated algorithm and solid theoretical analysis. The weaknesses are minor and addressable: no structural flaws or fatal methodological gaps exist. The core contributions (problem formulation, algorithmic mechanism with provable guarantees, and experimental validation) are solid. The paper merits acceptance.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

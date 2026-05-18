@@ -1,20 +1,22 @@
-I now have a thorough understanding of the paper. Let me synthesize the final review.
+Now I have a thorough understanding of the paper and can verify each claim. Let me produce the consolidated review.
+
+---
 
 ## Summary
 
-The paper investigates the role of the first reasoning step in multi-step math tasks. It first shows that smaller models (2B–8B) often possess the knowledge to solve problems but fail because they select an incorrect first reasoning step — demonstrated via oracle sampling experiments (Figure 1) and large gains when a correct first step is provided by a stronger LLM (Table 1, up to 3× improvement). The paper then proposes **QuestCoT**, a prompting strategy where the model generates a sub-question to guide its initial reasoning step before proceeding with the full chain. Across 7 models and 4 datasets (GSM8K, SVAMP, ASDiv, MultiArith), QuestCoT consistently outperforms standard Chain-of-Thought and sub-question decomposition (Subques).
+This paper investigates the "first-step advantage" in multi-step math reasoning: smaller language models often fail because they cannot reliably select the correct initial reasoning step, even though they possess the knowledge to solve the task. The authors first demonstrate that providing the correct first step from a larger LLM (e.g., GPT-4) boosts small-model accuracy by up to 3× (Table 1), and that weaker first-step guidance can actually hurt performance. They then propose QuestCoT, a prompting strategy where the model asks itself a guiding sub-question before generating its chain of thought. QuestCoT yields consistent improvements over standard CoT across four math reasoning datasets and seven small models (Table 2). The core contributions are establishing the causal role of the first step in small-model reasoning and a simple, zero-training method to realize this benefit.
 
 ## Strengths
 
-- **Strong diagnostic experiment establishes the core claim (Figure 1, Section 3.1):** The paper shows that Mistral-7B's "answer exists in any sample" oracle accuracy rises from ~45% (1 sample) to ~90% (35 samples), narrowing the gap with GPT-4 from ~50 points to <10 points. This directly supports the claim that smaller models are capable but fail to consistently select the correct initial chain, providing clear motivation for the work.
+- **Direct causal evidence that getting the first step right is the critical bottleneck.** Table 1 reports dramatic gains when the first step is provided by GPT-4—e.g., OlMo-7B rises from 13.64 to 37.90 on GSM8K (nearly 3×), Gemma-2B from 7.50 to 17.84, and LLaMA2-7B from 10.53 to 23.27. The monotonic improvement with guiding-model quality (LLaMA2-70B → GPT-3.5 → GPT-4) confirms that first-step *quality* drives the effect, not just having any guidance.
 
-- **Dramatic and monotonic gains from providing a correct first step (Table 1):** Across six smaller models, providing GPT-4's first-step guidance yields large improvements (e.g., OlMo-7B: 13.6% → 37.9% on GSM8K; 18.6% → 49.9% on SVAMP). The monotonic improvement with guidance model strength (LLaMA2-70B < GPT-3.5 < GPT-4) confirms the causal role of first-step quality, not just general assistance.
+- **Demonstration that smaller models possess latent knowledge they cannot consistently surface.** Figure 1 shows that with 35 samples, the accuracy gap between Mistral-7B and GPT-4 on GSM8K narrows from ~50 points to <10 points, supporting the claim that small models *can* generate correct answers but struggle to select the right chain on the first attempt.
 
-- **QuestCoT consistently outperforms CoT across models and datasets (Table 2):** Gains are observed on all four datasets across seven models, with the largest improvements on weaker 7B models (OlMo-7B: +5.8 GSM8K, +8.6 SVAMP, +5.0 ASDiv, +7.2 MultiArith). The broad evaluation (28 model–dataset combinations) strengthens the generality claim.
+- **QuestCoT delivers consistent, non-trivial improvements over CoT across models and datasets.** In Table 2, QuestCoT outperforms CoT on 25/28 model×dataset combinations. The gains are largest for the weakest models—OlMo-7B gains +5.8 (GSM8K), +8.6 (SVAMP), +5.0 (ASDiv), +7.2 (MultiArith)—where improving the first step has the most room to help.
 
-- **QuestCoT outperforms Subques at lower cost (Figure 3):** The comparison shows QuestCoT beats sub-question decomposition across all models, and the paper provides a reasoned explanation (multiple subquestions accumulate errors). The Venn diagram (Figure 4) further shows QuestCoT captures the strengths of both CoT and Subques.
+- **Thorough leakage analysis.** The paper manually verifies on 1000 development samples that the first-step guidance does not leak the final answer (999/1000 cases where the first-step equation result does not match the final answer).
 
-- **Qualitative error analysis (Figure 5) provides mechanistic understanding:** The paper identifies specific failure modes of CoT (unnecessary calculations, missing real-world knowledge, context confusion) and shows concrete examples where QuestCoT resolves them, adding interpretability beyond aggregate metrics.
+- **Qualitative analysis identifies concrete failure modes.** Figure 5 (in the paper) provides specific examples of unnecessary calculations, real-world knowledge errors, and context-understanding errors that CoT makes but QuestCoT avoids by starting with a well-chosen sub-question.
 
 ## Weaknesses
 
@@ -22,51 +24,53 @@ The paper investigates the role of the first reasoning step in multi-step math t
 None.
 
 ### Major
-None.
+
+- **No variance estimation or significance testing for the main QuestCoT results (Table 2).** The paper reports only point accuracies with greedy decoding (temperature=0) and a single random draw of 4-shot prompts from the test set. The gains for high-baseline models (e.g., Phi3-Mini: +2.0 on GSM8K, LLaMA3-8B: +1.0 on GSM8K) are small enough that they could be within the noise introduced by prompt selection—especially since "randomly selected from the test set" means different prompt draws could yield different results. Because the paper's central empirical claim is that QuestCoT *consistently* outperforms CoT, the absence of any variance characterization weakens the evidence. This is the most significant gap. (Note: the first-step guidance results in Table 1 involve much larger gains and are less vulnerable to this concern.)
+
+- **The few-shot prompts for QuestCoT (Table 2) are sampled from the test set, which is non-standard.** The paper states (line 189) that "4-shot prompting with prompts randomly selected from the test set" is used. This means the few-shot examples are drawn from the same distribution as the evaluation samples, and a single random draw is used without characterizing variance across draws. While both CoT and QuestCoT use the same prompts (so the relative comparison is fair), the absolute accuracy numbers may not be directly comparable to standard benchmarks, and the results could shift with different prompt draws. The standard practice is to use training-set prompts or fix the prompts and average over multiple draws.
 
 ### Minor
 
-- **Few-shot exemplars drawn from the test set (Section 3.3, line 189):** The paper states "To compare CoT and QuestCoT, we used 4-shot prompting with prompts randomly selected from the test set." Drawing exemplars from the test set is non-standard and could inflate absolute accuracy numbers. **However, this does not invalidate the QuestCoT results** because both CoT and QuestCoT use the same exemplars — the relative comparison remains fair. The paper should clarify whether the same four examples were used for all test queries and ideally replicate with train-set exemplars.
+- **The first-step guidance experiment lacks a clean control for *any* initial hint vs. a *correct* initial hint.** The paper partially addresses this by showing that guidance from a weaker model (LLaMA2-70B) can *hurt* Phi3-Mini's performance (Table 1: 76.95 → 75.10 on GSM8K), demonstrating that not all guidance is beneficial. However, a more direct control—e.g., providing a plausible but incorrect first step—would more cleanly separate the effect of "having guidance" from "having correct guidance." The "starting right" claim is central to the paper's framing, so this distinction matters.
 
-- **No direct quantitative evidence that QuestCoT improves first-step correctness specifically:** The paper's central narrative is that small models fail because they start incorrectly, and QuestCoT helps them start correctly. Yet only final answer accuracy is reported. While the qualitative examples (Figure 5) illustrate this mechanism, adding a quantitative analysis — e.g., manually or automatically labeling whether the first reasoning action is correct for CoT vs. QuestCoT on a sample of outputs — would substantially strengthen the causal link.
+- **The Subques comparison is shown only on two datasets (GSM8K, SVAMP) and in figure form without a full table reporting token costs.** Figure 4 shows that QuestCoT outperforms Subques across models, and the paper claims lower token costs, but no token counts are reported. A full table with exact accuracy numbers and token cost comparisons across all four datasets would strengthen this analysis.
 
-- **No statistical significance or variance reported:** Given the modest gains for several models (e.g., +0.4–1.1 points for Gemma-2B, +0.4–1.2 for LLaMA3-8B) and the use of greedy decoding (single run), confidence intervals or bootstrap estimates would help assess reliability.
+- **The Venn diagram analysis (Figure 6) is based on a single model (Phi3-Mini).** The finding that QuestCoT shares more correct solutions with both CoT and Subques than those two share with each other is interesting, but replicating it on at least one more model (e.g., Mistral-7B or OlMo-7B) would make the claim more robust.
 
-- **Answer leakage check is on training data, not test data (Section 4, line 212):** The paper checks 1000 samples from the GSM8K *training* set (finding 999/1000 no leakage). While the first-step is limited to one equation and problems require 2–8 steps, verifying on the actual test sets would be more rigorous. This is a minor concern — the paper's instructions and the multi-step nature of the problems already provide strong safeguards.
+- **The error analysis in Section 5 is qualitative and based on non-random selection of success cases.** The paper examines "instances where QuestCoT was successful" and categorizes errors. This is a standard and useful qualitative approach, but a systematic categorization on a larger, defined sample (e.g., all cases where QuestCoT succeeded and CoT failed) would add rigor.
 
 ### Trivial
 
-- **Section 3.1 (oracle experiment) interpretation:** The reviewer notes that high oracle accuracy could mean the correct chain appears stochastically rather than the model "understanding." While this is a philosophical nuance, the paper's actual claim ("smaller models can answer correctly but struggle to select the right chain") is well-supported by the data and does not over-claim.
+- The phrase "the model learns this questioning itself" (line 191) slightly overstates what is happening—the model is prompted to ask a sub-question via few-shot examples, not trained through a learning procedure. The paper immediately clarifies that "the only change from CoT is to add an extra question in the prompt as a demonstration," so this is a minor wording imprecision.
 
-- **Venn diagram (Figure 4) could report unique successes explicitly:** The paper reports overlaps (82 with CoT, 95 with Subques) but the absolute numbers of questions uniquely solved by QuestCoT are inferable but not stated. This is a presentation detail.
+- The 1B-model null result is described as "not statistically significant improvements" but no formal test is reported. For a model achieving only 3-3.5% accuracy on GSM8K, the lack of meaningful improvement is clear, but the phrasing invites unnecessary criticism.
 
 ## Nice-to-Haves
 
-- **Additional baseline comparisons:** Including self-consistency (used as motivation in Section 3.1) or Plan-and-Solve would further contextualize QuestCoT's effectiveness, though the current comparison against CoT and Subques is already adequate.
-- **Token-cost vs. accuracy trade-off analysis:** The paper notes QuestCoT adds a token but does not quantify the overhead. A brief comparison of generation lengths would aid practitioners.
-- **Manual validation of first-step quality on a subset** would directly tie the mechanism to the results.
+- Reporting token-cost comparisons between CoT, QuestCoT, and Subques in a table format.
+- Averaging results over multiple draws of few-shot prompts (even 3-5 runs) to provide variance estimates.
+- A control condition in the first-step guidance experiment with a randomly generated or deliberately incorrect initial step.
 
 ## Removed Points
 
-- **"Abstract misleadingly combines +24 point LLM-guidance gain with QuestCoT's smaller gains"** — Removed because the abstract clearly separates the two claims: the +24 points is attributed to "using a larger model to guide smaller models" and the QuestCoT gains are reported separately with their own numbers. No conflation.
-- **"Section 3.1 interpretation is flawed"** — Removed because the paper's claim is simply that smaller models *can produce* correct answers (oracle exists), not that they "understand" in a deep sense. The evidence supports the paper's stated claim.
-- **"Insufficient check for leakage undermines the entire LLM-guidance experiment"** — Downgraded from the reviewer's characterization. The paper provides a reasonable check (999/1000 no match, first step limited to one equation for 2–8 step problems) and the concern is a degree-of-thoroughness issue, not a fatal flaw.
-- **"Missing confidence intervals" as a major weakness** — Moved to Minor. Single-run greedy decoding is standard in this literature; confidence intervals would strengthen but their absence is not a structural flaw.
+- **Criticism that Figure 1 metric "slightly overclaims" that smaller models can solve the task.** The paper is transparent about using "accuracy if an answer exists in one of the output chains" and explicitly interprets this as showing the model *can* produce correct answers, not that it reliably selects them. This is an accurate and appropriately qualified claim. The paper's own framing is coherent.
+- **Criticism about the multiple-sampling metric being "accuracy if an answer exists."** This is the correct metric for testing whether the model has the knowledge to produce the correct answer—it directly tests the stated hypothesis. No overclaim.
 
 ## Novel Insights
 
-The most interesting observation from the reviews is that the paper's strongest evidence comes from two complementary angles: (1) the oracle sampling experiment showing capability exists but selection fails, and (2) the controlled LLM-guidance experiment showing that fixing the first step alone produces large gains. Together, these provide a clean decomposition that isolates the "starting right" bottleneck from other potential sources of error (e.g., general reasoning weakness). This two-step argument structure — diagnose the bottleneck, then measure the effect of fixing it — is an effective empirical template for studying reasoning chain failures. The paper would benefit from tightening this connection in QuestCoT's evaluation: the method is introduced as a way for models to "learn to start correctly," but whether it actually achieves better first steps (not just better final answers) remains untested quantitatively.
+None beyond the paper's own contributions. The review-derived insight of noting that the test-set prompt contamination and the lack of variance estimation compound each other—both increase uncertainty about whether the observed gains reflect a stable improvement or prompt-selection noise—is already implicit in the individual weaknesses.
 
 ## Suggestions
 
-1. **Replicate the QuestCoT experiments with fixed exemplars drawn from the training split** (or held-out development set) to address the most significant methodological concern. Report whether the same 4-shot exemplars were used for all test queries.
-2. **Add a direct analysis of first-step quality:** For a random subset of CoT and QuestCoT outputs, annotate whether the first reasoning action (equation or sub-question) is correct, and show the correlation with final accuracy. This would directly substantiate the claimed mechanism.
-3. **Report results with variance** (e.g., bootstrap confidence intervals or repeated sampling at nonzero temperature) for the main QuestCoT results in Table 2, especially for models with small gains.
-4. **Clarify the exemplar selection procedure** — whether the same four examples were used for all test queries or resampled per instance — for reproducibility.
+1. **Characterize variance for Table 2.** Even a small number of repeated runs with different few-shot prompt draws (3–5 draws), reporting mean and standard deviation, would substantially increase confidence in the QuestCoT gains. A bootstrap on the test set would also help.
+2. **Switch to training-set prompts or development-set prompts** for the few-shot examples in the QuestCoT comparison, or explicitly justify why test-set prompts are used and report variance across prompt draws.
+3. **Add a control for the first-step guidance experiment** where a plausible-but-incorrect first step is provided, to confirm that the benefit comes from correctness rather than from any hint.
+4. **Expand the Subques comparison** to a full table with exact accuracies and token costs across all four datasets.
+5. **Replicate the Venn-diagram analysis** on at least one additional model (e.g., Mistral-7B) to show the pattern generalizes.
 
 ## Score and Decision
 
-This paper makes a clear and well-motivated contribution: it diagnoses a specific bottleneck in small-model reasoning (first-step selection) and proposes a simple, effective intervention (QuestCoT). The empirical evaluation is broad (7 models, 4 datasets) and the evidence for the core claim is supported by converging experiments. The most significant methodological concern (test-set exemplars) does not threaten the validity of the relative comparisons, and the remaining issues are addressable with minor revisions. I recommend acceptance.
+The paper makes a genuinely useful observation—that starting correctly is the critical bottleneck for small-model reasoning—and proposes a simple, practical solution. The first-step guidance results (Table 1) are striking and well-controlled. The main weaknesses are in the presentation of the QuestCoT results (Table 2), where the lack of variance characterization and the non-standard test-set prompt selection reduce confidence. These are fixable issues that would strengthen a paper whose core finding is likely robust given the consistency of the pattern across 7 models × 4 datasets. The paper is a solid empirical contribution to understanding and improving small-model reasoning.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,20 +1,20 @@
-Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me construct the consolidated review, carefully verifying each claim against the paper.
+
+---
 
 ## Summary
 
-This paper proposes FoRDE (First-order Repulsive Deep Ensemble), which applies particle-based variational inference (ParVI) to diversify neural network ensembles in the space of input gradients (gradients of logits w.r.t. inputs) rather than in weight space or function space. The authors argue that input-gradient space avoids the inefficiency of weight-space repulsion (due to over-parameterization) and the underfitting problem of function-space repulsion on training data. They develop a data-dependent PCA-based kernel for the repulsion term and show that FoRDE-PCA achieves gains in accuracy and calibration under covariate shift (CIFAR-10/100-C, TinyImageNet-C) over standard Deep Ensembles and other repulsive ensemble methods, while FoRDE-Tuned matches or exceeds DE on clean data as well.
+This paper proposes FoRDE (First-order Repulsive Deep Ensemble), which applies particle-based variational inference (ParVI) to promote diversity in the *input-gradient space* (rather than weight or function space) among ensemble members. The authors define a kernel over input gradients of the true class, introduce a data-dependent PCA-based lengthscale selection that encourages repulsion along high-variance data dimensions, and evaluate on image classification benchmarks (CIFAR-10/100, TinyImageNet) under covariate shift. FoRDE-PCA achieves consistent improvements on corrupted benchmarks (+1.3–2.4 percentage points accuracy) over deep ensembles and other repulsive ensemble methods.
 
 ## Strengths
 
-- **Consistent and substantial improvement under covariate shift**: FoRDE-PCA achieves +2.4% corrupted accuracy (cA) on CIFAR-10-C (80.5 vs. 78.1 for DE, Table 2) and +1.8% on CIFAR-100-C (56.1 vs. 54.3 for DE, Table 1), with corresponding improvements in cNLL and cECE. These gains hold across three datasets (CIFAR-10, CIFAR-100, TinyImageNet) and are consistent across multiple corruption metrics.
+- **Novel and well-motivated repulsion space.** The paper clearly identifies limitations of both weight-space repulsion (inefficient due to over-parameterization) and function-space repulsion (underfitting when restricted to training inputs), and proposes input-gradient space as a principled alternative with dimensionality advantages and functional guarantees (Section 2). This conceptual contribution is supported by toy experiments showing improved uncertainty capture.
 
-- **Input-gradient repulsion avoids the underfitting problem that plagues function-space repulsion**: The toy experiments (Figure 2: 1D regression, Figure 3: 2D classification) qualitatively demonstrate that FoRDE maintains high predictive uncertainty outside the training data, whereas function-RDE collapses (visible as low-entropy regions in Figure 3). This directly validates a core motivation of the paper.
+- **Consistent empirical gains across multiple corruption benchmarks.** FoRDE-PCA achieves the best cA/cNLL/cECE on CIFAR-10-C (80.5 / 0.71 / 0.07, +2.4% over next best), CIFAR-100-C (56.1 / 1.90 / 0.05, +1.3% over next best), and TinyImageNet-C. The improvements are consistent across 5 seeds and three datasets. Table 3 further shows FoRDE-PCA outperforms baselines even when those baselines use the EmpCov prior, demonstrating synergy between input-gradient repulsion and data-manifold-aware kernels.
 
-- **PCA-based kernel with principled motivation**: The connection to the EmpCov prior (Section 3.3) provides theoretical grounding for using inverse eigenvalues as lengthscales. The ablation showing FoRDE-PCA outperforms FoRDE-Identity under corruptions (Tables 1–2) confirms the design choice is empirically beneficial, and the explanation (encouraging reliance on high-variance features) is well-reasoned.
+- **Thorough baseline comparison.** The paper compares against seven baselines (weight-RDE, function-RDE, feature-RDE, LIT, node-BNNs, SWAG, DE) with multiple FoRDE variants (Identity, PCA, Tuned), all using identical architecture (ResNet18), ensemble size (10), and 5 seeds. The EmpCov-controlled experiment (Table 3) is a particularly careful design choice.
 
-- **FoRDE-Tuned demonstrates no clean-data degradation**: FoRDE-Tuned matches the best clean accuracy on CIFAR-100 (82.1%, Table 1) while still outperforming DE on corrupted data (55.3 cA vs. 54.3), showing the method does not trade off in-distribution performance for robustness when lengthscales are appropriately tuned.
-
-- **Transfer learning validation**: Figure 5 (labeled Fig. 4 in the harsh critic) shows FoRDE outperforms baselines in a transfer learning setting (ViT features on CIFAR-10/100) on both in-distribution and shifted test sets, with higher epistemic uncertainty (functional diversity) than DE and other RDE methods — demonstrating generality beyond the main benchmark setup.
+- **Transfer learning extends practical applicability.** Experiments using pretrained Vision Transformer features (Figure 5) show FoRDE outperforms baselines under both in-distribution and covariate shift, with direct measurement of functional diversity via epistemic uncertainty (last column), supporting the core diversity argument.
 
 ## Weaknesses
 
@@ -23,55 +23,55 @@ None.
 
 ### Major
 
-- **Missing standard deviations for corruption metrics (Tables 1–3)**. The paper reports ± error bars for all clean-data metrics (NLL, Accuracy, ECE) but provides only point estimates for cA, cNLL, and cECE. While results are averaged over 5 seeds, without variance information the reader cannot assess whether the reported gains (e.g., +2.4% cA on CIFAR-10-C, +1.3% on CIFAR-100-C) are significant or within the noise of training seeds. This is the most significant weakness because it concerns the paper's central claim (improved corruption robustness). The pattern is consistent across datasets, which is reassuring, but standard deviations should still be reported.
-
-- **Transfer learning results (Figure 5) lack error bars**. The caption states results are "averaged over 5 seeds" but no measure of variance is shown. Given that this is a second experimental setting validating the method's generality, the missing error bars weaken the evidence.
+- **Missing error bars on corruption metrics.** Despite averaging over 5 seeds, the tables report cA/cNLL/cECE as single values without standard errors (Tables 1–3). Clean metrics (NLL, Accuracy, ECE) include ± ranges, but the corruption metrics do not. This makes it impossible to assess whether the observed gains (e.g., 56.1 vs. 54.8 on CIFAR-100-C) are statistically significant. Given the modest margins (1.3–2.4 pp), this is a meaningful gap in presentation.
 
 ### Minor
 
-- **Overclaimed "guarantee" of functional diversity (Abstract, Introduction)**. The paper states that input-gradient repulsion "guarantees that ensemble members are functionally different" (Abstract) and "each ensemble member is guaranteed to correspond to a different function" (Introduction, item 1). The paper does acknowledge "up to translation" (line 7), but "guarantees" is too strong for two reasons: (a) the repulsion is a soft force in the gradient update, not a hard constraint; (b) two functions could have identical input gradients yet differ by a per-class additive constant, leaving softmax predictions unchanged. The core idea is still valid — the language should be softened to "encourages" or "promotes."
+- **Theoretical justification for the data-dependent kernel is incomplete.** The paper acknowledges (line 147–148) that the KDE approximation depends on the data distribution through the kernel, and acknowledges (lines 207–208) that mini-batching introduces biased stochastic gradients. However, it does not analyze under what conditions the gradient-flow interpretation (which relies on a standard KDE over parameter space) remains valid with this non-standard kernel. The authors state "we found no convergence issues in practice," but a theoretical discussion of whether the kernel remains positive-definite on Θ (it does, as an expectation of a PSD kernel) and whether the KDE approximation remains reasonable would strengthen the contribution.
 
-- **Interaction between PCA lengthscales and the median heuristic is unexamined**. The PCA kernel sets inverse squared lengthscales to eigenvalues (Section 3.3), which the paper acknowledges could drive the RBF kernel toward zero for high-variance dimensions (line 187). The median heuristic (Section 3.4) introduces a global bandwidth that mitigates this, but no ablation is provided that disentangles the two effects (e.g., fixed bandwidth vs. median heuristic for each lengthscale variant). While FoRDE-Identity vs. FoRDE-PCA is a controlled comparison, the mechanism by which PCA scaling and median heuristic interact remains unclear.
+- **The PCA-kernel connection has an unvalidated assumption.** The PCA basis is computed from the training inputs **x** (line 178), but the repulsion operates on normalized input gradients ∇_x f(x; θ)_y / ||·|| (Eq. 9). The paper argues that repelling more strongly along high-variance data directions is beneficial (lines 171–172), and connects this to the EmpCov prior (lines 190–198). However, the paper does not empirically verify that input gradient directions actually align with the PCA basis of the input data during training. A synthetic experiment or correlation analysis would strengthen this reasoning.
 
-- **Implementation of second-order derivatives not described**. The update rule (Eq. 3) requires computing ∇_θ k(θ_i, θ_j), which involves Hessian-vector products (gradients of ∇_x f w.r.t. θ). The paper mentions "another backward pass" (line 218) but does not explain how this is implemented (e.g., double backprop, functional API, or JAX/ PyTorch-specific approach). This is a reproducibility concern for researchers wishing to implement the method.
+- **The comparison to LIT reveals the ParVI framework's standalone contribution is unclear.** FoRDE-Identity and LIT perform nearly identically on clean data (CIFAR-100: 82.1% vs. 81.9%, both 0.70 NLL) and corruption (54.1 vs. 54.4 cA). The improvement over LIT comes almost entirely from the PCA kernel. The paper's claim that FoRDE is "more flexible" than LIT (line 228) is fair (PCA kernels are not available to LIT), but it would be informative to see whether the ParVI framework itself adds anything beyond the orthogonalization objective — e.g., an ablation replacing the RBF+PCA kernel with a simple cosine repulsion in the same ParVI framework.
 
-- **EmpCov comparison (Table 3) is not fully controlled**. The EmpCov prior is applied only to first-layer weights, while FoRDE's PCA kernel affects all layers through the gradient path. The paper acknowledges this difference (Section 3.3: "the difference is that while [izmailov2021dangers] incorporates knowledge... into the prior, we embed this knowledge into our approximate posterior via the kernel"), but the comparison remains asymmetric. The results are still informative — FoRDE outperforms EmpCov-augmented baselines — but the framing should more clearly note the different mechanisms at play.
+- **Overclaiming in specific statements.** (a) The claim that FoRDE is "the only method that exhibits high uncertainty in all input regions outside the training data" (line 319) is based on visual inspection of 2D classification figures, and the paper's own Figure 2 suggests function-RDE also shows elevated uncertainty away from data. (b) The abstract's "significantly outperforms" language (line 11) is somewhat strong relative to the modest margins (1.3–2.4 pp), especially absent error bars on corruption metrics. The paper's own discussion more cautiously states "outperforms" (line 375), which is appropriate.
+
+- **3× computational cost vs. modest gains is not fully contextualized.** The paper transparently reports the 3× training cost (Section 3.5) and discusses it as a drawback (Section 6), but a practitioner choosing between DE and FoRDE would benefit from a more explicit cost-benefit framing (e.g., a scatter plot of accuracy vs. training time, or results for smaller ensemble sizes).
 
 ### Trivial
-
-- **The "biased stochastic gradients" issue (line 208) is noted but not analyzed**. The paper states that mini-batching leads to "biased stochastic gradients" and that "in practice, we found no convergence issues." A brief theoretical comment or a small ablation (full-batch vs. mini-batch on a small problem) would address this cleanly. As is, the acknowledgment is reasonable but minimal.
+None.
 
 ## Nice-to-Haves
 
-- A direct quantitative measure of input-gradient diversity during training (e.g., mean pairwise cosine similarity of normalized gradients) correlated with robustness gains would strengthen the causal link claimed in the paper.
-- A sensitivity analysis of the median heuristic bandwidth (e.g., fixed h vs. adaptive) would help clarify the interaction with PCA lengthscales.
-- The paper could discuss whether FoRDE's 3× training cost is justified in settings with smaller ensemble sizes or limited data.
+- An analysis of which corruption types (blur vs. noise vs. digital) benefit most from FoRDE-PCA could clarify the mechanism and strengthen the PCA kernel motivation.
+- A sensitivity analysis of the median heuristic (trajectory of h during training, effect of different batch sizes) would improve reproducibility.
+- An ensemble size ablation (e.g., M=5, 10, 20) would help calibrate the cost-benefit tradeoff.
+- Reporting the tuned lengthscale weight (selected on validation) would aid reproducibility — the paper says details are in the appendix (stripped by parser).
 
 ## Removed Points
 
-These points are flagged to be removed — treat them with caution:
+These points are flagged for removal as they violate the stated rules; treat them with caution.
 
-1. **"Missing baseline: more recent variants of LIT" (Harsh Critic)**: The critic asked for "[methods] more recent variants" of LIT without naming specific works. This is too vague to constitute a valid weakness and is removed per the rule against requesting unbounded additional related work.
-
-2. **"PCA kernel notation inconsistency" (Harsh Critic)**: The critic claimed the notation was ambiguous ("inverse square lengthscales equal to eigenvalues" vs. Eq. 9). On inspection, the notation is consistent: squared lengthscales S = L^{-1}, so the quadratic form uses S^{-1} = L (the eigenvalues), which is exactly what Eq. 9 writes. The notation is correctly reconciled.
-
-3. **"Strength: addressed an important problem" (Strength Finder — implied generic framing)**: The Strength Finder's output was all specific and evidence-backed, so no strengths needed removal under the filtering rules.
+- **Criticism about the "Tuned variant not fully specified":** The paper says "Details on lengthscale tuning are presented in \cref{sec:tuning_lengthscales}" (line 324). This detail is in the appendix, which is stripped by the parser. Per the rule about missing appendix content, this criticism is removed.
+- **Criticism that the paper "treats the WGD update rule as unchanged":** The paper acknowledges the data-dependent nature of the kernel explicitly (line 147–148). The update rule itself is structurally the same; the change is in the kernel definition, which the paper discusses.
+- **Criticism about "no discussion of repulsion strength":** The paper discusses the median heuristic which adaptively sets the global bandwidth (lines 210–214), and the kernel structure controls repulsion magnitude. This is the standard approach in SVGD-based methods and is adequately described.
+- **Criticism about "no analysis of ensemble size":** This is a useful extension but not a core weakness — the paper uses a fixed ensemble size of 10, consistent with prior work.
+- **Criticism that the paper should also cover more domains/tasks:** Scope-creep demands outside the paper's stated image classification focus.
+- **Strength from Strength Finder about "Large and consistent gains":** "Large" is softened to "Consistent gains" in the strengths section above, as the margins are modest (1.3–2.4 pp). The core observation of consistency is kept.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a pattern or limitation that the paper itself does not already touch on.
+None beyond the paper's own contributions. The key insight — that input-gradient space offers a sweet spot between weight-space and function-space repulsion for ParVI ensembles — is the paper's own contribution and is well-articulated.
 
 ## Suggestions
 
-1. **Most important**: Add standard deviations (or confidence intervals) for all corruption metrics (cA, cNLL, cECE) in Tables 1–3 and Figure 5. This single change would address the most significant weakness.
-
-2. Soften the "guarantee" language in the Abstract and Introduction to "promotes" or "encourages" functional diversity, noting the translation-invariance caveat.
-
-3. Add a brief implementation note on how the second-order gradients (gradients of ∇_x f w.r.t. θ) are computed — a sentence or two describing the software mechanism (e.g., `torch.autograd.grad` with `create_graph=True`).
+1. **Add error bars to corruption metrics.** Since results are averaged over 5 seeds, reporting standard errors for cA/cNLL/cECE is straightforward and would significantly strengthen the paper's claims about significance.
+2. **Tonel down absolute language.** Replace "significantly outperforms" (abstract) with "outperforms" or "consistently outperforms" and soften the "only method" claim about toy experiments.
+3. **Add a small empirical validation of the PCA-gradient alignment assumption.** Even a simple correlation analysis or a toy experiment showing that gradient directions correlate with PCA directions during training would substantially strengthen Section 3.3.
+4. **Consider an ablation separating the ParVI framework from the kernel choice.** Comparing FoRDE-PCA against a version of LIT with PCA-weighted repulsion (if feasible) or against FoRDE with a cosine kernel would clarify what the ParVI machinery contributes beyond the orthogonalization objective.
 
 ## Score and Decision
 
-The paper proposes a novel and well-motivated approach (input-gradient-space repulsion for ensembles) that addresses a genuine limitation of existing ParVI ensemble methods (weight-space inefficiency and function-space underfitting). The experimental evidence consistently shows improvements under covariate shift across multiple datasets and metrics. The main weakness — missing standard deviations for corruption metrics — is a reporting gap rather than a methodological flaw, and the pattern of results is consistent enough to be credible even without them. The overclaimed "guarantee" language is a minor rhetorical issue. Overall, the contribution is solid and the paper is ready for acceptance with minor revisions.
+The paper presents a novel, well-motivated idea with consistent empirical support across multiple benchmarks and careful baseline comparisons. The main concerns — missing error bars on corruption metrics, modest theoretical depth on the non-standard kernel, and some overclaiming — are addressable. The contribution is solid and the method is likely to be of interest to the ensemble/uncertainty estimation community.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,86 +1,79 @@
-Now I have complete understanding of the paper and all reviewer claims. Let me compose the final authoritative review.
+Now I have a thorough understanding of the paper. Let me synthesize the consolidated review.
+
+---
 
 ## Summary
 
-The paper proposes LeBD (LayerCAM-enabled Backdoor Detector) and CA-LeBD, run-time defenses against backdoor attacks in YOLOv5 object detection. The core idea is to use LayerCAM to localize potential trigger regions in detected objects, occlude them, and compare predictions before/after occlusion to flag triggers. The paper also provides a systematic analysis of CAM behavior in YOLOv5, identifying why GradCAM fails (noise in shallow layers, center-bias in deep layers due to anchor-based design, and SPPF module effects). Experiments report >90% true positive rates in both digital and physical-world scenarios.
+This paper proposes LeBD and CA-LeBD, runtime defenses against backdoor attacks in YOLOv5 object detection. The core idea is to use LayerCAM to locate suspicious regions in detected objects, occlude them, and compare predictions before/after occlusion to identify triggers. The method is evaluated on digital images and physical-world video streams. A key contribution is the analysis of CAM behavior across YOLOv5 layers, identifying that deep-layer saliency maps concentrate on bounding-box centers due to YOLO's anchor-based training, motivating the use of shallower layers for trigger localization.
 
 ## Strengths
 
-- **First run-time backdoor defense specifically targeting object detection in the physical world.** The paper correctly identifies that prior defenses (STRIP, NEO, Februus) were designed for digital-world classification settings and cannot meet real-time OD requirements. This fills a genuine gap in the literature.
+- **Novel application of LayerCAM to runtime backdoor defense for object detection in the physical world.** The paper tackles an underexplored and practically important setting. It evaluates on physical-world video streams and reports >90% true-positive detection rates (Table 1), which is a meaningful advance over prior defenses that either focus on image classification or digital-only scenarios.
 
-- **Systematic analysis of CAM behavior in YOLOv5 (Section 3.2).** The paper provides a detailed, evidence-driven explanation of why GradCAM fails on YOLOv5: noise in shallow layers, center-focus in deep layers caused by anchor-based training and NMS, and SPPF module effects that expand hot regions. This analysis is a genuine contribution that goes beyond naive application of existing CAM methods and motivates the choice of LayerCAM from an intermediate layer.
+- **In-depth analysis of CAM behavior in YOLOv5 layers (Section 3.2).** The paper identifies that high-layer GradCAM/LayerCAM saliency maps concentrate on bounding-box centers due to YOLOv5's anchor-based training and NMS, and explains why the SPPF module causes hot-region expansion. This diagnosis is non-trivial, provides a principled justification for choosing shallower layers, and is a generally useful finding beyond this paper.
 
-- **High detection rates reported in both digital and physical settings.** Table 1 reports LeBD and CA-LeBD achieve over 90% TP rate in physical-world scenarios, substantially outperforming GradCAM (0%), while operating with far fewer false positives than NEO.
+- **Well-motivated threat model and practical assumptions.** The defender does not modify the model, has no access to poisoned training data, and has no prior knowledge of the trigger. This matches real-world deployment constraints.
 
-- **Practical speed advantage over NEO.** LeBD adds ~10× overhead (~200ms per image) versus NEO's >100× overhead (Table 5). This relative efficiency is a meaningful advance for deployment scenarios where NEO's scanning-based approach is prohibitive.
-
-- **Ablation study demonstrating the role of mean filtering.** Table 4 shows that mean filtering improves TP rates by >10% in the digital world and >20% in the physical world, with a plausible mechanism (destruction of residual trigger pixel values at occlusion boundaries).
-
-- **Hyperparameter robustness documented through systematic sweeps.** Tables 2 and 3 evaluate size constraints and CAM thresholds, showing stable performance across reasonable parameter ranges.
+- **Ablation study on mean filtering (Table 4) demonstrates a simple and effective post-occlusion enhancement.** The paper compares mean, median, Gaussian, and no filtering, showing mean filtering boosts TP by 10–20%. The explanation (mean filtering aggressively disrupts residual trigger signal at occlusion boundaries) is plausible and grounded.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Physical-world experimental setup is not described.** This is the most serious weakness. The paper's central claim is a real-time backdoor defense for the *physical world*, and it repeatedly positions itself as the first such work. Yet Section 5 gives zero details about the physical-world evaluation: What videos were used? Were printed triggers physically placed in real environments (with varying lighting, angles, distances) or were images digitally composited to simulate physical conditions? How many environments, cameras, or lighting conditions were tested? How many video frames? What was the trigger format (printed pattern vs. physical object)? The only clues are the vague statement "video streams in the physical world" (Section 5) and a mention that "the photographed trigger is not consistent with the trigger during training" (Section 5.1). Without this information, the physical-world results (~90% TP) cannot be interpreted, reproduced, or trusted. **This undermines the paper's primary claimed contribution.**
+- **CA-LeBD is not described.** The paper lists CA-LeBD as a core contribution ("We integrate counterfactual attribution into the calculation of saliency maps") and reports its results in all tables, but never explains what counterfactual attribution means computationally. How does CA-LeBD differ from LeBD? What does "CA LayerCAM" compute differently? The only clue is in the runtime analysis (Section 5.4), which contrasts "CA LayerCAM on all 80 classes" versus "only one class," suggesting it involves computing CAM for multiple classes — but this is never stated, let alone formalized. A reader cannot understand what was actually implemented or evaluate whether the claimed improvements are methodologically sound.
 
-- **CA-LeBD method (counterfactual attribution) is not defined.** Counterfactual attribution is listed as a key contribution ("We integrate counterfactual attribution into the calculation of saliency maps") and appears throughout the paper (abstract, contributions, experimental comparisons), but Section 4 provides no algorithm, formula, pseudocode, or even a textual description of how CA is combined with LayerCAM. The reader cannot tell whether CA involves subtracting the source-class saliency map, computing a class-difference heatmap, or something else entirely. The time overhead discussion (Section 5.4) mentions analyzing "only one class" versus "all 80 classes" for CA, but does not specify which class is chosen or how. **This is a claimed methodological contribution that is entirely unspecified, making CA-LeBD unassessable and the claimed improvement over LeBD unverifiable.**
+- **Experimental setup is critically underspecified.** The paper reports detection rates, false positive rates, and IOUs in multiple tables, but omits essential details: (a) what dataset(s) are used for digital-world experiments? (b) what exact triggers (size, pattern, placement strategy), poisoning fraction, and training recipe are used for the backdoored YOLOv5 model? (c) what are the physical-world capture conditions (camera, resolution, lighting, number of frames, trigger objects)? (d) how many total poisoned and benign samples are tested? (e) are results averaged over multiple runs with standard deviations? Without these, the numerical results in Tables 1–4 are ungrounded and non-reproducible.
+
+- **No evaluation on clean (non-backdoored) models.** The reported FP rate (~8%) for LeBD is presumably measured on poisoned images where the model is backdoored. It is unclear what happens when LeBD is applied to benign objects in a clean deployment scenario (no backdoor at all). Would the method produce false alarms on benign objects whose salient features happen to change classification when occluded? This is a critical missing baseline for a defense that must not degrade normal operation.
 
 ### Minor
 
-- **Baseline comparison is limited and the NEO adaptation is not specified.** Only NEO and GradCAM are evaluated as baselines. STRIP, Februus, and other sample-level defenses are discussed in related work but not compared, even though an adaptation attempt would strengthen the claims. More importantly, NEO is designed for image classification, not object detection; the paper gives no detail on how it was adapted to YOLOv5 (trigger blocker sizing, scanning in the presence of multiple bounding boxes, handling per-object predictions). Without this, the reported high FP rate for NEO may partly reflect adaptation choices rather than inherent limitations.
+- **The "real-time" claim is overstated.** LeBD adds ~200 ms overhead (Table 5), yielding ~4.5 FPS total. The paper calls this "completely acceptable in a real-time OD system," but typical real-time object detection applications (autonomous driving, surveillance) require 30 FPS. The paper does not specify what real-time threshold it is targeting, and the comparison to NEO (which is much slower) does not make 5 FPS real-time. The mention of parallel analysis of multiple objects is not backed by experimental results.
 
-- **FP rates are missing from key tables.** (a) Table 1 reports only TP rates for LeBD and CA-LeBD — FP rates are mentioned in the text (~8% for LeBD, higher for CA-LeBD) but should appear in the main comparison table. (b) Table 4 (ablation on filtering schemes) shows only TP rates; mean filtering that improves TP by >20% could also increase false alarms on benign objects, and this is critical for deployment. (c) Table 3 (CAM threshold) reports only TP. The paper's usefulness depends on the balance between detection and false alarms, and FP rates should accompany every experimental table.
+- **"Connect graph" is never defined.** Line 5 of the algorithm description refers to calculating the "connect graph" to determine the crucial region from the saliency map. This operation is central to the pipeline but is never explained. A reader cannot know what this step does (connected components? a graph over high-activation pixels?).
 
-- **The "real-time" claim is overstated.** LeBD adds ~200ms per image (5 FPS), which the paper calls "completely acceptable." For many real-time OD applications (e.g., autonomous driving, where 30 FPS is typical), 5 FPS is far below real-time thresholds. While the defense could be run at reduced frequency or in parallel, no such analysis or demonstration is provided, and the paper's framing of "real-time" is misleading without qualification.
+- **"First work on backdoor defense in the physical world" is overclaimed without rigorous justification.** The paper itself cites STRIP, NEO, and Februus as defenses that could theoretically be applied to physical-world images. While these methods may not be optimized for real-time object detection, the claim of "first" requires a more precise delimitation (e.g., "first run-time defense for YOLO with physical-world video evaluation") rather than a blanket assertion. The paper acknowledges that prior defenses "can theoretically be adopted in the physical world" but "can hardly meet the real-time requirements," which partially addresses this — however, the phrasing in the contributions section ("first work on backdoor defense in the physical world") is still too broad.
 
-- **Algorithm 1 leaves key implementation details unspecified.** The "connect graph" computation from the saliency map is never defined — it is simply stated as a step (Line 5). The size constraint rule for the occluded region (Line 7) is described only qualitatively ("too small or too large") with the exact rule deferred to the hyperparameter analysis. These gaps undermine reproducibility.
-
-- **The training dataset for the backdoored YOLOv5 model is not named.** The paper does not specify which dataset (COCO? Pascal VOC? Custom?) was used, nor the poisoning rate, trigger size, or training hyperparameters. This is essential for reproducibility.
-
-- **Parallel processing is claimed but never demonstrated.** The conclusion states that "our backdoor detection algorithms support parallel analysis of multiple objects," but no results, speedups, or implementation details are provided.
-
-- **The claim "first work on backdoor defense in the physical world" (Section 1) is overly broad.** The paper's scope is object detection in the physical world; the claim should be scoped accordingly to avoid overclaiming.
+- **Missing comparison with Februus.** Februrus (Doan et al., 2020) also uses GradCAM for trigger localization and reconstruction. It is cited in related work but not compared against experimentally. While Februrus targets classification, adapting a reasonable version to YOLO would strengthen the evaluation and clarify what LeBD adds beyond prior CAM-based defenses.
 
 ### Trivial
-None.
+
+- The paper defers key implementation details to Algorithm 1 and figures that are not fully readable in the parsed text. The algorithm reference (Line 1, Line 4, etc.) in the prose is helpful, but the pseudocode itself would aid clarity.
 
 ## Nice-to-Haves
 
-- **Discussion of adaptive attacks.** The paper does not consider whether an adversary could craft a trigger that evades LayerCAM highlighting (e.g., by placing it in low-contribution regions). A brief limitations section would strengthen the paper.
-- **Comparison with STRIP/Februus adapted to OD.** While the paper justifiably notes these methods cannot meet real-time requirements, even a single-frame comparison would help contextualize the trade-offs.
-- **Ablation on filtering-then-occluding vs. occluding-then-filtering** to justify the current design choice.
+- A sensitivity analysis or principled guidance for setting hyperparameters (occluded region size constraint, CAM threshold) beyond observed trends.
+- Evaluation on non-anchor-based detectors (e.g., FCOS, DETR) to validate the explanation that the center-bias is caused by anchor-based training.
+- Discussion of adaptive attacks: an adversary aware of the defense could craft triggers that produce diffuse CAM responses or exploit the occlusion/mean-filtering threshold.
 
 ## Removed Points
 
-These points are flagged as removed per the reviewer guidelines; treat them with caution.
-
-- *"The high FP rate reported for NEO may reflect an unfair or suboptimal adaptation"* — This is speculation without evidence. The paper reports NEO's FP rate as-is; there is no indication of an unfair implementation.
-- *"The order of operations (occlude, then filter) seems arbitrary; filtering before occlusion might produce different results"* — This is a design choice critique with no evidence that the alternative would be superior. The paper's chosen pipeline demonstrably works.
-- *"STRIP, Februus... could be adapted" (as a required baseline)* — The paper explicitly explains why these methods cannot meet real-time requirements (Section 2.3). Demanding their evaluation is scope creep; moved to Nice-to-Haves.
-- Generic phrasing from the Strength Finder (e.g., "the paper addressed an important problem") that lacked specific content or a citable anchor.
-- The "unrelated weaknesses" section from the human finder (comparing to other papers) is not relevant to this review.
+- *"The algorithm text is not included in the main body"* — The paper provides a detailed prose description of LeBD with line references to Algorithm 1. The algorithm pseudocode likely exists in a format stripped by the parser. However, the core issue (CA-LeBD being undescribed) is retained in Major above.
+- *"The paper does not explain why mean filtering works better than median/Gaussian"* — The paper does provide this: Table 4 compares all three, and Section 5.3 explains that mean filtering has "the most pronounced impact on pixel values, especially at the edge of the occluded region... The destruction of the pixel value inhibits the attack ability of the residual trigger." This is a sufficient explanation for an empirical observation.
+- *"The center-bias validation requires experiments on non-anchor-based detectors"* — The paper's explanation in Section 3.2 is well-reasoned and grounded in YOLOv5's training objective (only grids closest to object center compute positive-sample loss) and NMS behavior. While extra validation would strengthen the paper, this is an analysis/diagnosis, not an unsubstantiated claim. Moved to Nice-to-Haves.
+- *"GradCAM and NEO results are uninterpretable without knowing runtime specifics"* — The runtime analysis (Table 5) clearly reports time per image. While the paper does not achieve conventional 30 FPS real-time, the measurement itself is clear. The real-time claim is addressed in Minor above.
 
 ## Novel Insights
 
-The most valuable insight that emerges from triangulating the reviews is the structural asymmetry in the paper: the **LeBD algorithm itself** (CAM-based localization → occlusion → re-prediction) is clearly described and plausible, yet **two of the paper's three headline contributions** — (1) physical-world defense and (2) CA-based improvement — are effectively unsupported by the current write-up. The CAM analysis of YOLOv5's center-bias (Section 3.2) is a solid, standalone contribution that could motivate future work regardless of the defense's final form. Combined with the missing FP reporting, the paper reads as one where the core idea is promising but the evidential scaffolding is incomplete. A revision that adds physical-world experimental details, defines CA, and reports FP/TP jointly could substantially strengthen the paper without any changes to the underlying method.
+The most striking observation from the reviews is that the paper's strongest contribution may not be LeBD/CA-LeBD itself but rather the systematic analysis of LayerCAM behavior across YOLOv5 layers (Section 3.2). The finding that deep-layer saliency maps consistently focus on bounding-box centers due to YOLO's anchor-based training — and that this can be traced to the positive-sample assignment rule — is a genuinely useful diagnostic that extends beyond the backdoor defense context. This analysis could inform any downstream task using CAM-based interpretability on one-stage detectors. The paper would benefit from framing this as a standalone finding rather than burying it in Preliminaries.
 
 ## Suggestions
 
-1. **Describe the physical-world setup in full**: number and duration of video sequences, camera model, lighting/angle variations, trigger types (printed patterns, physical objects), how triggers were placed, criteria for true positive detection, and number of frames evaluated.
-2. **Define the CA mechanism** in Section 4 with at least a formula or pseudocode. If CA is simply LayerCAM for the target class minus LayerCAM for the source class, state that explicitly.
-3. **Report FP rates alongside TP rates in every table** (especially Tables 1, 3, and 4).
-4. **Specify the dataset, poisoning rate, trigger size, and training hyperparameters** used to create the backdoored model.
-5. **Qualify the "real-time" claim**: state the actual per-image latency, specify what frame rate the defense supports, and discuss under what conditions (e.g., parallel execution, reduced frequency) it could meet application-specific real-time thresholds.
-6. **Define the "connect graph" computation** in Algorithm 1.
-7. **Narrow the novelty claim** to "first backdoor defense for object detection in the physical world" rather than "first backdoor defense in the physical world" generally.
+1. **Provide a complete, self-contained description of CA-LeBD in the main text.** What is the counterfactual attribution objective? How does it modify the LayerCAM computation? Which classes are compared, and how does this help localize triggers?
+
+2. **Add a table summarizing experimental conditions:** dataset, trigger specifications, poisoning rate, physical-world capture setup (camera, environment, number of frames/samples), and sample counts for all experiments.
+
+3. **Report means and variances across multiple runs or seeds** to establish reliability of the reported numbers.
+
+4. **Evaluate LeBD on a clean (non-backdoored) model** to measure false positive rates in benign conditions.
+
+5. **Replace the "first work on backdoor defense in the physical world" claim** with a precise statement such as "first runtime defense for object detection evaluated on physical-world video streams at <measured FPS>."
+
+6. **Define "connect graph"** — is this a connected-components algorithm on the thresholded saliency map? A graph cut? Clarify the operation.
+
+7. **Discuss real-time feasibility honestly.** State the measured FPS, specify the target application's FPS requirement, and suggest optimizations (e.g., running CAM every N frames, on suspicious objects only, or using hardware acceleration).
 
 ## Score and Decision
-
-The paper addresses a relevant problem and contains a genuinely useful analysis of CAM behavior in YOLOv5. The LeBD pipeline is intuitive and the reported detection rates are promising. However, the paper's strongest claims — that the defense works in the physical world and that the CA extension improves it — are structurally undersupported: the physical-world experiment is not described, and the CA-LeBD method is not defined. These are not minor presentation issues; they are evidential gaps that prevent the paper from being accepted in its current form. The paper could be made acceptable with major revisions that fill these gaps.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

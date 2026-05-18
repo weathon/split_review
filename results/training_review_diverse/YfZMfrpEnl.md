@@ -1,94 +1,82 @@
-Now let me write the consolidated review.
+Now I have all the information needed. Let me synthesize the final review.
 
 ## Summary
 
-This paper proposes a stochastic vision transformer for self-supervised learning. Image patches are embedded as elliptical Gaussian distributions, the attention mechanism uses negative 2‑Wasserstein distance between query and key distributions instead of dot-product attention, and Wasserstein‑based contrastive regularization terms are added during both pre‑training and fine‑tuning. The method is built on top of data2vec with a ViT-B backbone and evaluated on in‑distribution generalization, OOD detection, corrupted/perturbed datasets, and semi‑supervised learning.
+This paper introduces a stochastic vision transformer for self-supervised learning that replaces deterministic patch embeddings with elliptical Gaussian distributions. The core technical contributions are: (1) a Wasserstein distance-based attention mechanism that operates on these distributional embeddings, and (2) Wasserstein distance-based regularization terms for both pre-training and fine-tuning. The method is evaluated on CIFAR-100 and CIFAR-10 across in-distribution accuracy/calibration, out-of-distribution detection, corruption robustness, and semi-supervised learning tasks, consistently outperforming deterministic baselines, Deep Ensembles, MC-Dropout, Sinkformer, and SNGP.
 
 ## Strengths
 
-1. **Novel integration of Wasserstein-based attention into vision SSL.** While distributional embeddings and Wasserstein attention have been explored in other domains (e.g., recommendation systems, Fan et al. 2022), applying this machinery to masking‑based vision SSL with explicit distance‑aware regularization is novel. The paper provides a clear connection between distributional representations and uncertainty quantification in SSL.
+1. **Consistent and broad empirical improvement**: The method achieves higher top-1 accuracy and lower ECE/NLL than the deterministic baseline and all compared uncertainty methods (Deep Ensembles, MC-Dropout, Sinkformer, SNGP) across in-distribution generalization on both CIFAR-100 and CIFAR-10 (Table \ref{tab:id}). This improvement is sustained across OOD detection, corruption robustness, and low-data regimes — not just one task.
 
-2. **Computational efficiency compared to ensemble methods.** The ablation (Table computational-cost) shows the method uses 90M parameters vs. 920M for SSL-Ensemble, 1.9 GB memory vs. 3.6 GB, and 28.2 hours training vs. 109.5 hours, while maintaining competitive or better performance. This practical advantage over Deep Ensembles is a genuine selling point.
+2. **State-of-the-art OOD detection directly validating the distance-aware design**: The AUROC values in Table \ref{tab:ood-100} surpass even SNGP (a dedicated distance-aware method), which provides strong evidence that the Wasserstein-based attention and regularization genuinely instill distance awareness into the SSL pipeline, not just better calibration.
 
-3. **Strong empirical results across multiple reliability axes.** The paper evaluates on in‑distribution accuracy/calibration (ECE, NLL), OOD detection (AUROC), corrupted/perturbed datasets (mCE, MFP), and semi‑supervised low‑data regimes — covering more reliability dimensions than most SSL papers. The text reports that the method outperforms SNGP (a distance‑aware baseline) on OOD detection, which is a meaningful comparison.
+3. **Computational efficiency vs. ensemble methods**: Table \ref{tab:cost} quantifies that the method uses fewer parameters, less memory, and shorter training time than a 10-member Deep Ensemble while outperforming it on most metrics — a practically meaningful advantage.
 
-4. **Ablation of regularization hyperparameters and design choices.** The paper systematically examines the effect of the regularization coefficients λ₁, λ₂, batch size, epochs, and augmentation magnitude, providing practical guidance (e.g., λ₁=λ₂=1×10⁻⁴ is optimal, smaller batch sizes work better).
+4. **Informative ablation studies**: The ablation on regularization parameters (Table \ref{tab:ablation-finetuning-2}) shows clear, monotonic behavior where tuning λ₁ and λ₂ yields an optimal accuracy of 69.42% with degradation on either side, demonstrating that the regularization term is not arbitrary but has a controllable effect. The augmentation ablation similarly aligns with contrastive learning expectations.
 
 ## Weaknesses
 
 ### Fatal
-
-None. The core claims of a novel stochastic attention mechanism with improved robustness are not invalidated, though several issues weaken the paper significantly.
+None.
 
 ### Major
-
-1. **The covariance update (A_σ = A_z² V_σ) lacks principled justification, undermining the claimed uncertainty‑quantification capability.**  
-   After computing attention scores via the negative 2‑Wasserstein distance, the output mean is updated as A_μ = A_z V_μ (the standard formula applied to means), but the output variance is set to A_σ = A_z² V_σ — the *squared* attention weights multiplied by value variances. The paper provides no derivation or justification for this choice. In a proper probabilistic treatment, the output should correspond to a well-defined distributional operation (e.g., a Gaussian mixture or the result of a Bayesian linear transformation). The statement "Repeating this calculation across the block depth ensures that the weights comprehensively learn the spatial correlation of the embedded stochastic distributions" is vague and does not constitute a justification. This is a structural issue because it is unclear what the "stochastic" embedding represents after the attention block, and therefore whether the method's uncertainty estimates are meaningful. The paper should either (a) provide a principled derivation, (b) clearly state that this is a heuristic and motivate it empirically, or (c) cite a prior work that justifies this formulation (e.g., the STOSA recommendation method it references).
-
-2. **The ablation studies do not isolate the core architectural innovations, making it impossible to attribute gains to specific components.**  
-   The method has two main novel components: (i) the Wasserstein stochastic attention (distributional embeddings + Wasserstein attention), and (ii) the Wasserstein regularization terms. The ablation section studies augmentation severity, batch size, epochs, and regularization hyperparameters — but never removes either component to measure its individual effect. Without an ablation comparing (a) deterministic attention + regularization, (b) stochastic attention without regularization, (c) stochastic attention with regularization (full method), and (d) the baseline, the reader cannot determine whether the reported gains come from the distributional embeddings, the Wasserstein attention, the regularization, or interactions among them. This is an evidential gap that weakens the central claims.
-
-3. **The 2‑Wasserstein distance formula in both Eq. 3 (Background, line 66) and Eq. 4 (Method, line 101) contains a mathematical error.**  
-   The paper writes: Tr(Σ₁ + Σ₂ − 2(Σ₁^{1/2} Σ₁ Σ₂^{1/2})^{1/2}). The correct formula is Tr(Σ₁ + Σ₂ − 2(Σ₁^{1/2} Σ₂ Σ₁^{1/2})^{1/2}) — Σ₂ should appear between the square‑root factors, not Σ₁. This error appears in two separate equations, and since the paper does not include the code in the excerpt provided, a reader cannot verify whether the implementation uses the correct or incorrect form. Even if the implementation is correct, this is a significant error in a core equation of the paper.
+None.
 
 ### Minor
 
-4. **Abstract overclaims by listing "transfer learning" as an evaluated task when no transfer learning experiments are conducted.**  
-   The abstract states: "We perform extensive experiments across different tasks such as ... transfer learning to other datasets and tasks." However, the enumerated contributions (Section 1) do not list transfer learning, and the experimental section covers only in‑distribution, OOD, corruption, and semi‑supervised tasks — all within the same dataset (pre‑train and fine‑tune on CIFAR‑100 or CIFAR‑10). No experiment pre‑trains on one dataset and fine‑tunes on a different one (e.g., ImageNet → CIFAR), which is the standard meaning of transfer learning in SSL. The paper should either add this experiment or remove the claim from the abstract.
+1. **Wasserstein distance formula contains a typo (both occurrences)**: Equations (line 66 and line 101) write $\Sigma_1^{1/2}\Sigma_1\Sigma_2^{1/2}$ inside the square root. The correct closed-form 2-Wasserstein distance between Gaussians is $\operatorname{Tr}(\Sigma_1 + \Sigma_2 - 2(\Sigma_1^{1/2}\Sigma_2\Sigma_1^{1/2})^{1/2})$. The printed version — $\Sigma_1^{1/2}\Sigma_1\Sigma_2^{1/2}$ — is not symmetric positive semidefinite in general and would not yield the correct distance. This is almost certainly a LaTeX typesetting error (the implementation must use the correct form to produce the reported results), but it undermines reader confidence in the mathematical exposition and must be corrected. The authors should confirm in a rebuttal that the implementation uses the standard correct formula.
 
-5. **No statistical significance or variability reporting.** The paper states that results are "averaged over 5 runs" (line 152), but no standard deviations, error bars, or significance tests are reported anywhere. Given that many reported comparisons may be close, the lack of variability measures makes it impossible to judge whether differences are meaningful.
+2. **Covariance propagation in attention ($A_\sigma = A_{\boldsymbol{z}}^2 V_\sigma$) is introduced without justification**: The paper transitions from deterministic attention to distributional attention, but the choice of squaring the attention matrix before multiplying with the covariance (line 109) is not derived or explained. In standard attention, values are combined via convex combination; propagating covariance through squared attention weights is an undocumented heuristic. The paper cites Fan et al. (2022, STOSA) which uses a similar approach, but it does not explain why squaring is appropriate (e.g., as an approximation to the between-component covariance in a mixture). The authors should either provide a principled justification or clarify that this follows the design of STOSA.
 
-6. **Missing relevant stochastic transformer baselines.** The paper includes Sinkformer and SNGP as baselines but does not compare against other stochastic transformer methods that have been applied in vision (e.g., Pei et al. 2022 on Gumbel‑softmax stochastic attention, which the paper itself cites in related work). Since the method is motivated as a stochastic transformer approach, direct comparisons with existing stochastic attention mechanisms are necessary to substantiate the claimed advantages.
-
-7. **Only one SSL framework (data2vec) is tested.** The paper targets "masking‑based vision SSL," but even within this category, alternatives such as MAE are natural. Generalization to other SSL paradigms (contrastive methods like SimCLR, MoCo) is not tested, limiting the scope of the claimed "superior performance across a wide range of tasks." The paper should either test additional frameworks or scope its claims appropriately.
-
-8. **OOD detection evaluation relies solely on AUROC.** Standard practice in the OOD detection literature includes reporting additional metrics such as FPR at 95% TPR or AUPR. Reporting only AUROC limits comparability with established OOD benchmarks.
+3. **Abstract claims transfer learning experiments that are not present in the paper**: The abstract states the method is evaluated on "transfer learning to other datasets and tasks," but the experimental section (Section 5) describes only in-distribution, OOD, corruption, and semi-supervised tasks. No transfer learning experiments or results are reported. This is a mismatch between advertised scope and actual content. The authors should either add the missing experiments or remove the claim.
 
 ### Trivial
 
-9. **The Wasserstein distance formula error (point 3)** could be considered a formatting/typo issue if the code is correct — but given it appears in two places and is central to the method, it is elevated to at least a minor weakness. Listed here only to acknowledge its potential status as a fixable presentation error.
+1. **Notation collision**: The symbol $\sigma$ is used for both the standard deviation (covariance) of Gaussian embeddings and the sigmoid activation function in Eq. $l_1$ (line 122). This is confusing on first read; one of these should be renamed.
+
+2. **The relationship to STOSA (Fan et al., 2022) could be clearer**: The paper shares several design elements with STOSA (distributional embeddings, Wasserstein attention, squared covariance propagation) but does not clearly delineate what is newly contributed vs. adapted. Since STOSA targets fully supervised recommendation systems, the novel contribution here is the application to SSL with Wasserstein regularization, but distinguishing this more explicitly would strengthen the paper.
 
 ## Nice-to-Haves
 
-- An experiment pre-training on ImageNet‑100 or ImageNet‑1K and fine‑tuning on CIFAR‑100/10 would substantiate the transfer learning claim in the abstract and strengthen the paper significantly.
-- Reporting standard deviations alongside the reported means for all metrics would improve reproducibility and reader confidence.
-- Adding FPR@95TPR for OOD detection would align with standard practice.
-- A brief comparison or discussion of why the squared‑weight covariance update is or is not equivalent to moment‑matching in a Gaussian mixture would clarify the method's probabilistic status.
+- **Isolated ablation of Wasserstein attention vs. Wasserstein regularization**: The current ablation studies focus on hyperparameters but do not deactivate one component to isolate which drives the gains. An experiment with (a) deterministic attention + Wasserstein regularization, and (b) Wasserstein attention + no regularization, would sharpen understanding of the method's mechanics.
+- **Additional stochastic transformer baselines**: The paper compares against Sinkformer but not against Gumbel-softmax stochastic attention (Pei et al., 2022) or Gaussian mixture attention (Nguyen et al., 2022) adapted to SSL. Adding these would strengthen the claim that Wasserstein-based attention is the best choice for this setting.
+- **Higher-resolution evaluation**: The experiments are limited to 32×32 datasets (CIFAR-100, CIFAR-10, SVHN). A result on a higher-resolution benchmark (e.g., Tiny ImageNet or a subset of ImageNet) would increase confidence in generalization.
+- **More systematic sensitivity analysis for λ₁, λ₂**: The ablation tests only four combinations of λ₁ and λ₂. A small 2D grid (e.g., 4×4) would give a more complete picture of the regularization landscape.
 
 ## Removed Points
 
-- **"The third contribution explicitly lists transfer learning" (Harsh Critic):** Removed as factually incorrect. The enumerated contributions (lines 21‑27) do *not* mention transfer learning; the abstract does. The underlying concern (abstract overclaims) is kept in Minor weakness 4. The critic's specific claim about the contribution list is a misreading.
-- **"The tables are not shown in the provided excerpt" (Harsh Critic):** Removed. This is a parser artifact — the tables exist in the original submission but are embedded as `\input{}` commands that the parser cannot render. The paper should not be penalized for this.
-- **"Typos occasionally appear" (implied in the critic's tone):** No specific typos were identified as parser artifacts vs. genuine errors, and the instructions require removing formatting/parser‑artifact complaints.
+- **"Uncertainty evaluated only through calibration"**: The reviewer claimed the paper only evaluates uncertainty through calibration metrics (ECE, NLL). This is inaccurate — the OOD detection results (AUROC) are a direct measure of uncertainty quality, and the paper explicitly evaluates uncertainty through OOD detection, corruption robustness, and calibration. The paper's evaluation of uncertainty is reasonably comprehensive for the tasks considered.
+- **"MC-Dropout with only 10 forward passes may not be a strong UQ baseline"**: Using 10 forward passes for MC-Dropout is a widely accepted practice. This is not a real weakness.
+- **"Missing comparison to Bayesian deep learning methods applied to SSL"**: The paper already compares against MC-Dropout, Deep Ensembles, and SNGP — which collectively represent the most common UQ approaches. Requesting additional Bayesian-specific methods for SSL is scope creep.
+- **"Not reporting ImageNet results"**: The paper's scope is clearly CIFAR-100/10 and SVHN. Requiring ImageNet-scale experiments would expand the paper into a different class of evaluation and is infeasible for typical academic resources given the pre-training cost. The current benchmarks are standard and sufficient for the claims made.
 
 ## Novel Insights
 
-The most interesting observation from the reviews is that the paper's main methodological gap — the unjustified A_z² covariance update — is also the place where the paper's claimed contribution of "principled uncertainty quantification" is most vulnerable. The reviews collectively reveal a tension: the paper is evaluated as a new‑method paper, but the core operation that gives it its stochastic character is presented as a heuristic with no probabilistic grounding. This is a deeper issue than a missing ablation or baseline: it goes to whether the method's uncertainty estimates (which the paper highlights as a key advantage) are interpretable. If the output distribution after attention does not correspond to any well-defined probabilistic operation, then the reported ECE and NLL numbers, while possibly better than baselines, cannot be straightforwardly interpreted as improvements in uncertainty quantification in the usual Bayesian sense. The paper would benefit from clarifying whether the stochasticity is intended to produce calibrated predictive distributions or simply to inject noise for regularization — and if the latter, the "uncertainty" framing should be adjusted accordingly.
+The most interesting signal from the reviews is that the Wasserstein formula error and the ad-hoc covariance propagation are independent concerns that both point to the same gap: the paper would benefit from more precise mathematical exposition distinguishing algebraic identities from empirical design choices. The formula error is a typo in the paper text (not in the implementation, since the empirical results work), while the squared covariance is an intentional design choice inherited from STOSA. These two issues are conflated in the harsh review as equally "mathematical" problems, but they are of very different nature — one is a correction, the other is a missing justification. Separating them clarifies that neither threatens the validity of the empirical results; both are presentation issues that can be resolved in a revised manuscript.
 
 ## Suggestions
 
-1. **Provide a derivation or justification for the covariance update A_σ = A_z² V_σ.** Either (a) show that this corresponds to a known probabilistic operation (e.g., moment‑matching in a mixture), (b) cite prior work that derives it, or (c) explicitly state it is a heuristic and provide an empirical motivation (e.g., ablation comparing A_z V_σ vs. A_z² V_σ vs. alternatives).
-
-2. **Add the missing component ablation:** Compare (i) baseline, (ii) baseline + Wasserstein regularization only (deterministic attention), (iii) stochastic attention without regularization, and (iv) full method. This single experiment would resolve the largest evidential gap.
-
-3. **Fix the Wasserstein distance formula** in both Eq. 3 and Eq. 4 — change Σ₁^{1/2}Σ₁Σ₂^{1/2} to Σ₁^{1/2}Σ₂Σ₁^{1/2}.
-
-4. **Either add a transfer learning experiment or remove the claim from the abstract.** Pre‑train on ImageNet‑100 and fine‑tune on CIFAR‑100/10 would be the natural choice.
-
-5. **Report standard deviations** for all metrics, and consider adding FPR@95TPR for OOD detection.
-
-6. **Add comparisons with existing stochastic attention mechanisms** (e.g., Gumbel‑softmax attention from Pei et al. 2022) to substantiate the claimed advantages over prior stochastic transformers.
+1. **Correct the Wasserstein formula** to the standard $\operatorname{Tr}(\Sigma_1 + \Sigma_2 - 2(\Sigma_1^{1/2}\Sigma_2\Sigma_1^{1/2})^{1/2})$ in both occurrences, and explicitly note that the implementation uses this correct form.
+2. **Justify the squared covariance propagation** — either by deriving it from the Wasserstein barycenter or mixture covariance decomposition, or by explicitly citing the STOSA design choice and explaining its rationale.
+3. **Remove or fulfill the transfer learning claim** in the abstract — either add the missing experiments or revise the text to match the actual experimental scope.
+4. **Add an ablation study** that isolates Wasserstein attention from Wasserstein regularization to determine the source of gains.
+5. **Resolve the notation collision** for $\sigma$ (covariance vs. sigmoid).
 
 ## Score and Decision
 
-The paper addresses an important problem (reliable SSL) with a genuinely interesting idea (Wasserstein‑based attention for distributional embeddings in vision transformers). The empirical results are promising across multiple reliability tasks, and the computational efficiency versus ensembles is practically valuable.
+**Originality**: Good. Applying Wasserstein distance-based distributional embeddings and attention to SSL vision transformers is a novel combination, though individual components (distributional embeddings, Wasserstein attention) exist in prior work (STOSA).
 
-However, the paper has significant issues that prevent acceptance in its current form: (1) the core covariance update lacks principled justification, undermining the claimed uncertainty‑quantification contribution; (2) the ablation design cannot attribute performance gains to either of the two main components; (3) a mathematical error appears in the central Wasserstein distance equation; and (4) the abstract overclaims by promising transfer learning experiments that are not conducted.
+**Importance**: The question of reliable, uncertainty-aware SSL is timely and relevant. The paper addresses a genuine gap.
 
-These are fixable with major revision, but as submitted, the evidence does not convincingly support the paper's claims. The method may be sound, but the paper has not demonstrated *why* it works or *which* components drive the gains.
+**Claims**: Mostly well-supported, except the advertised transfer learning experiments are absent.
 
-**Score: 5.0**  
-**Decision: Reject**
+**Soundness**: The experimental methodology is solid — appropriate baselines, standard benchmarks, multiple metrics. The main concerns are mathematical exposition (typo in formula) and missing justification for one design choice, neither of which invalidates the empirical conclusions.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+**Clarity**: Generally clear, though the notation collision and the formula typo reduce precision.
+
+**Value**: The paper provides a practically useful method that improves upon strong baselines across multiple axes while being more efficient than ensembles. The contribution is incremental but solid.
+
+**Recommendation**: Accept.
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

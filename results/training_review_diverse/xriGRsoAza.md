@@ -1,81 +1,68 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and can verify each claim. Let me synthesize the final review.
 
 ## Summary
 
-The paper proposes MILLET, a framework that replaces Global Average Pooling (GAP) with Multiple Instance Learning (MIL) pooling in existing deep learning time series classifiers (FCN, ResNet, InceptionTime), yielding models that are inherently interpretable—providing class-conditional time-point attributions in a single forward pass. The paper introduces a novel pooling method (conjunctive/p-additive pooling), evaluates on 85 UCR datasets and a custom synthetic dataset, and shows that the MILLET framework preserves predictive accuracy while producing higher-quality explanations than CAM or SHAP.
+This paper proposes MILLET, a framework that applies Multiple Instance Learning (MIL) to deep learning Time Series Classification (TSC) models to make them inherently interpretable. The key idea is replacing Global Average Pooling (GAP) with MIL pooling methods (attention, instance, additive, and a novel "padditive" method), along with enhancements like positional encodings, replicate padding, and dropout. The framework is evaluated on 85 UCR datasets and a new synthetic dataset, with results showing competitive predictive performance while providing built-in explanations.
 
 ## Strengths
 
-- **Inherent interpretability from a principled framing.** Casting TSC as an MIL problem is well-motivated and yields explanations "for free" without post-hoc methods. The paper demonstrates that all three tested backbones become inherently interpretable after the GAP→MIL pooling replacement, with interpretability quality (AOPCR) improving from 5.71 (GAP) to 6.00 (best MILLET) averaged across UCR datasets.
+- **First general MIL-TSC framework for inherent interpretability.** The paper is the first to systematically apply MIL to TSC in a general, domain-agnostic way, converting three popular DL backbones (FCN, ResNet, InceptionTime) into inherently interpretable models. This is a well-motivated and novel framing of the interpretability problem in TSC (corroborated by the paper's explicit claim at lines 58-59).
 
-- **Novel conjunctive pooling (p-additive) outperforms prior MIL pooling variants on this task.** Across all backbones and both accuracy and interpretability metrics, p-additive pooling consistently outperforms attention, instance, and additive pooling (Section 5.1, Table 2). The method is also conceptually clean—attention and classification heads are trained in parallel, making the model more robust.
+- **Well-designed synthetic dataset for quantitative interpretability evaluation.** The WeeklyAnomalies dataset provides known ground-truth discriminatory regions, enabling rigorous AOPCR and NDCG@n evaluation. The results show MILLET achieves the best average AOPCR (17.531 vs. 15.415 for CAM and -0.692 for SHAP) and best average NDCG@n (0.612 vs. 0.607 for CAM) across backbones (Table 1). This is a clean experimental setup for interpretability assessment.
 
-- **Thorough evaluation baseline with 85 UCR datasets + a custom synthetic dataset that includes ground-truth discriminatory regions.** The synthetic WeeklyAnomalies dataset enables quantitative interpretability evaluation (AOPCR + NDCG@n) that is impossible on UCR datasets. MILLET achieves best AOPCR (17.531) and NDCG (0.612) on this benchmark, and is over 800× faster than SHAP (Table 1).
+- **Plug-and-play design demonstrated across structurally different backbones.** The four MIL pooling methods are shown as drop-in replacements for GAP across FCN, ResNet, and InceptionTime, and the paper includes a credible SOTA comparison (Hydra-MultiRocket, HIVE-COTE 2) showing MILLET is competitive, particularly on balanced accuracy where PADD InceptionTime ranks first (Figure 2, Table 2).
 
-- **Plug-and-play design demonstrated across three diverse backbones.** The same MIL pooling modules are dropped into FCN, ResNet, and InceptionTime without architectural changes, and the improvement pattern is broadly consistent.
+- **Novel padditive pooling with a clear design rationale.** The parallel attention-and-classification design (padditive) is motivated by preventing the classifier from relying on attention-altered embeddings (line 135-136), and it achieves the best average accuracy among pooling variants on UCR (0.846 vs. 0.843 for additive) and the best synthetic dataset accuracy (0.940 for PADD InceptionTime).
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-None. The paper's core claims are supported by the evidence, though some claims need tempering.
+- **The experimental comparison between GAP baselines and MILLET models is confounded by multiple simultaneous changes.** When comparing GAP models to MILLET models, the paper changes pooling (GAP → MIL), padding (zero → replicate), regularization (no dropout → p=0.1 dropout), and adds positional encodings (lines 164-170). The main accuracy results (Section 5.1: 0.841→0.846 on UCR, 0.850→0.874 on synthetic) attribute improvement to the MILLET framework broadly, but it is impossible to determine how much each modification contributes. Since the paper presents the pooling replacement as "plug-and-play" (line 111), the lack of a controlled experiment where only the pooling layer changes (keeping zero padding, no dropout, no positional encoding as in the original backbones) weakens the attribution of improvement to the MIL pooling itself. The comparisons *among* MILLET pooling variants (attn vs. instance vs. additive vs. padditive) are properly controlled, but the core comparison to GAP is not.
+
+- **The interpretability comparison to CAM does not control for model architecture.** CAM is applied to the original GAP models, while MILLET explanations come from the MILLET models (with different padding, dropout, and positional encoding). As the paper acknowledges (line 202), "CAM (applied to the original GAP models)." This conflates model architecture with explanation method — the observed AOPCR/NDCG differences could reflect differences in model sensitivity rather than explanation fidelity. A fairer comparison would be between CAM and MILLET explanations on the *same* model architecture (though CAM's dependence on GAP pooling makes this non-trivial). The paper should at minimum discuss this limitation and consider alternatives such as gradient-based methods that work on non-GAP architectures.
 
 ### Minor
 
-- **The MILLET comparison includes three architectural changes beyond the pooling mechanism (positional encoding, replicate padding, dropout) that are absent from the GAP baselines (Section 3.4, lines 166–170).** This means the observed improvements in both accuracy and interpretability cannot be cleanly attributed to the MIL pooling alone. For example, positional encoding injects temporal ordering information, replicate padding fixes a boundary bias in GAP models, and dropout reduces overfitting—each of which could independently improve results. The paper would be strengthened by an ablation that isolates the marginal effect of MIL pooling from these auxiliary changes. (Note: the paper's primary claim is about the MILLET *framework* as a whole, which includes these enhancements, so the comparison is not "invalid"—but without an ablation, readers cannot tell which component drives the gains.)
+- **The advantage of padditive over additive pooling is marginal and lacks mechanistic analysis.** The improvement on UCR is 0.846 vs. 0.843 (averaged across backbones) — a 0.003 difference. The paper provides a plausible rationale (parallel training prevents the classifier from relying on attention-altered embeddings) but no ablation, analysis of learned attention distributions, or synthetic case study that empirically demonstrates the claimed mechanism. The comparison between additive and padditive is controlled (both use the same padding/dropout/positional encoding), so the small gap is real, but without deeper analysis it is unclear whether this is a reliably meaningful improvement.
 
-- **Predictive accuracy improvements are small (0.841 → 0.846, overlapping error bars) and reported without pairwise statistical significance tests.** The paper states "improving predictive performance" (Abstract, Conclusion), but the mean improvement of 0.005 with overlapping standard deviations (§5.1) would benefit from pairwise significance tests (e.g., Wilcoxon signed-rank) to support the claim. The CD diagram in Figure 2 assesses ranks across all methods but does not directly test the GAP→MILLET change. The language would be more precise as "does not harm predictive performance, with small but consistent improvements on average."
+- **AOPCR's limitations are acknowledged but not fully discussed.** The paper notes that sparsity benefits AOPCR (lines 206-207), but does not discuss that AOPCR measures prediction-sensitivity to removal ordering, which can favor models that are simply more sensitive to any perturbation, without guaranteeing human-interpretable explanations. Since AOPCR is the primary interpretability metric on UCR (where ground truth is unavailable), this limitation deserves more explicit treatment.
 
-- **AOPCR, the sole interpretability metric on UCR, inherently favors sparse explanations, and the paper acknowledges this trade-off on the synthetic dataset (line 206) but cannot address it on UCR due to the absence of ground-truth labels (§5.2).** The paper is transparent about this limitation, but it weakens the UCR interpretability conclusion: MILLET explanations may be sparser rather than more faithful. An insertion-based metric (e.g., inpainting with local mean) would complement AOPCR on UCR even without ground-truth labels.
+- **No statistical significance tests are reported.** The paper reports mean accuracy and ranks but does not perform pairwise comparisons (e.g., Wilcoxon signed-rank) between each MIL method and its GAP counterpart on the same backbone. Given the small accuracy differences (e.g., 0.841→0.846), it is unclear whether these differences are statistically meaningful.
 
-- **The comparison between MILLET-padd-ITime and HC2 is presented prominently despite the paper acknowledging HC2 is a meta-ensemble (§5.1, line 242).** The paper correctly states not to compare HC2 equally, but the CD diagram and Table 2 still include HC2 alongside individual models, which could mislead readers. The presentation is appropriate but careful framing is needed.
-
-- **The analysis of the ResNet case in the Pareto front (Figure 3) is noted but not explored.** MILLET dominates GAP for FCN and InceptionTime but not ResNet; the paper mentions this (§5.2) without investigating why (e.g., architecture depth, ensemble behavior). This limits actionable insight for practitioners choosing a backbone.
+- **Inference cost comparison to CAM is missing.** The paper notes MILLET is "over 800 times faster than SHAP" (line 202) and claims explanations are "for free" (line 71), but does not compare MILLET's inference cost to CAM, which is also a single-pass method. The real advantage over CAM is that explanations are inherent to the model output rather than post-hoc, but this distinction should be stated precisely rather than framed primarily as an efficiency gain.
 
 ### Trivial
 
-- Some figures (e.g., the CD diagram, Figure 3) are in wraparound floats that may render poorly in some formats.
+- The "for free" framing slightly overstates the advantage, since CAM is also single-pass. The paper should emphasize the *inherent* (not post-hoc) nature of MILLET explanations as the primary advantage over CAM, with efficiency being secondary.
 
 ## Nice-to-Haves
 
-- **Ablation study** varying the three enhancements (positional encoding, replicate padding, dropout) to isolate the contribution of MIL pooling itself.
-- **Insertion/faithfulness metric** on UCR to complement the deletion-based AOPCR.
-- **Analysis of when p-additive outperforms additive pooling**—e.g., varying the attention-classification coupling to validate the claimed robustness mechanism.
-- **Computational cost reporting** (model size, training time) for MILLET vs. GAP, since MIL pooling adds parameters.
+- An ablation study isolating the effect of replicate padding, dropout, and positional encoding separately would strengthen the paper by clarifying each component's contribution.
+- A comparison of MILLET explanations to CAM-like explanations on the same MILLET model (if feasible via adapted CAM variants or Grad-CAM) would strengthen the interpretability claims.
+- Reporting pairwise statistical significance tests between GAP and MIL pooling variants on the same backbone would quantify reliability of the observed improvements.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"Related work omits attention-based TSC models"**: Rule states not to mention missing related works.
-- **"SHAP results (negative AOPCR) suggest inadequate approximation"**: The paper already acknowledges SHAP is expensive and struggles with the 1008-length time series (§4.2). The finding is an empirical result, not an error.
-- **"CAM is applied to GAP backbones, not MILLET backbones"**: This is standard practice—comparing MILLET's explanations to existing methods applied to standard models. Not a weakness.
-- **"HC2 comparison is not direct"**: The paper explicitly acknowledges this ("we do not consider it to be an equal comparison," line 242). The critic missed this.
-- **"Introduction claim understates role of convolutional receptive fields"**: This is a high-level motivation; the paper later discusses convolutions' role in feature extraction (§3.2). Minor framing choice, not a weakness.
-- **"p-additive justification not supported by an ablation"**: The paper provides a conceptual justification (lines 135–136). An ablation would strengthen it but the claim is reasonable as-is. Moved from minor to nice-to-have above.
+- **"Positional encoding not needed because CNNs already encode order":** Removed. CNNs have limited local receptive fields and do not provide explicit global position encoding. Adding positional encodings is a standard and well-motivated enhancement in sequence processing, not a weakness.
+- **"Results on synthetic dataset may not generalize":** Removed. This is a generic criticism applicable to any synthetic dataset. The synthetic dataset is designed for controlled interpretability evaluation (where ground truth is needed), a purpose for which it is well-suited.
+- **"Missing related works":** Removed per instructions — I do not have external sources to verify missing references.
+- **"Weakness about appendix/deferred content being missing":** Removed per instructions — the appendix was stripped by the parser; it exists in the original submission.
+- **"85 of 142 UCR datasets concern":** Removed as a weakness. The paper uses 85 univariate datasets from the UCR archive, which is a standard and extensive benchmark. The paper explicitly mentions extending to the full 142 as future work (line 300), which is appropriate scope management.
+- **Strength Finder's "PADD improves predictive accuracy and interpretability over GAP and existing MIL methods":** Downgraded from core strength. While directionally supported, the confounded design means the GAP comparison is not clean, and the margin over additive is very small.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews collectively surface the need for an ablation study to disentangle MIL pooling from the auxiliary enhancements, but this is a downstream experimental request rather than a novel observation about the paper's core idea.
+None beyond the paper's own contributions. The reviews surface a standard methodological concern (confounded design in holistic framework comparisons) and an interpretability evaluation concern (CAM comparison conflating architecture with explanation method), but neither is a novel insight — these are well-known pitfalls in empirical ML evaluation that the authors should address.
 
 ## Suggestions
 
-1. **Run a controlled ablation**: compare GAP baselines with positional encoding + replicate padding + dropout (but still using GAP) against MILLET models with the same enhancements. This cleanly isolates the effect of MIL pooling.
-2. **Add a faithfulness metric to the UCR interpretability evaluation** that does not favor sparsity (e.g., insertion with inpainting).
-3. **Report pairwise Wilcoxon signed-rank tests** comparing each MILLET model to its GAP counterpart across the 85 UCR datasets, to substantiate the "improves accuracy" claim.
-4. **Tone down the accuracy claim** from "improves predictive performance" to "maintains or modestly improves predictive performance."
+1. **Run a controlled ablation** where the only change from GAP is the pooling layer (keep zero padding, no dropout, no positional encoding) to isolate the effect of MIL pooling alone. Then add each enhancement separately to measure its contribution.
+2. **For the interpretability comparison**, either (a) apply a post-hoc method applicable to non-GAP architectures (e.g., Integrated Gradients, Occlusion) to MILLET models, or (b) clearly discuss why the CAM-to-GAP comparison is asymmetric and how this affects the interpretability conclusions.
+3. **Add a mechanistic analysis of padditive** — e.g., compare attention distributions and classification weights between additive and padditive on a controlled synthetic case to demonstrate the "parallel training" benefit empirically.
+4. **Report pairwise significance tests** (e.g., Wilcoxon signed-rank) between GAP and each MIL pooling method for each backbone.
 
 ## Score and Decision
 
-The paper makes a genuinely useful contribution: a principled framework for making DL TSC models inherently interpretable, a novel pooling method that works well, and extensive evaluation on 85 datasets plus a custom synthetic benchmark. The primary weakness—the confounded comparison due to auxiliary enhancements absent from baselines—is not fatal (the claims are about the framework, not isolated MIL pooling) but requires an ablation for full scientific rigor. The accuracy gains are modest, but interpretability is the core contribution. The paper is clearly written, well-motivated, and the evaluation is thorough.
-
-**Score: 6.5**
-
-**Decision: Accept** (condition: the ablation or a clear discussion of the confound should be added in the final version).
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

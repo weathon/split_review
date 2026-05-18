@@ -1,24 +1,22 @@
-I've thoroughly read the paper and verified all claims. Let me now compose the final consolidated review.
+I've thoroughly read the paper and verified all reviewer claims against the actual content. Let me now produce the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes LLM-Boost, a method that fuses LLM predictions with gradient-boosted decision trees (GBDTs) by using LLM logits (scaled by a tuned parameter) as the initial prediction in a GBDT, after which the GBDT learns the residuals. The method is simple, lightweight (LLM scores are precomputed once), and model-agnostic. Experiments on 16 classification datasets show that LLM-Boost consistently outperforms selection (best of LLM/GBDT on validation) and stacking (LLM scores as additional features) baselines across sample sizes from 10 to full dataset. The paper also extends the same boosting approach to TabPFN, showing strong results on larger datasets.
+This paper proposes LLM-Boost, a simple method for fusing large language models (LLMs) with gradient-boosted decision trees (GBDTs). The idea is to replace the first tree's constant initialization with scaled LLM predictions (logits), then fit the GBDT to learn residuals. This allows tabular models to leverage semantic column headers (via LLMs) while scaling to datasets beyond LLM context limits. Experiments across 16 datasets and 7 sample sizes (10 to full dataset) show consistent average improvements over standalone models, selection (best-of-two), and stacking (LLM scores as features). The approach is also extended to TabPFN + GBDT.
 
 ## Strengths
 
-- **Consistent outperformance over selection and stacking baselines**: Across all tested sample sizes (10, 25, 50, 100, 200, 500, full), LLM-Boost achieves the best average rank and average z-score (based on AUC) compared to the two strong ensembling baselines (selection and stacking) and both standalone models. This is verified in Figures 2 and 3, with results averaged over 5 seeds.
+- **Consistent empirical improvement across all sample sizes.** Figure 2 (Section 5.1) shows that LLM-Boost with XGBoost + Flan-T5-XXL achieves the best average z-score and rank at every tested sample size — 10, 25, 50, 100, 200, 500, and full — against both standalone models and the selection/stacking baselines. Results are averaged over 5 seeds with standard errors reported.
 
-- **Causal evidence that meaningful column headers drive the advantage**: The column-header shuffling ablation on the Adult dataset (Figure 5) shows that LLM-Boost with intact headers significantly outperforms the shuffled version at small sample sizes (~0.73 vs ~0.67 AUC at n=25), while both converge as data grows. This provides direct evidence that the LLM's ability to extract semantic meaning from column headers is the source of the improvement, not prompt artifacts.
+- **Simple, lightweight, and practical.** The method requires only one-time LLM inference (up to 18 hours on 4 GPUs) followed by standard GBDT hyperparameter tuning (up to 4 hours on CPU). As stated in Section 4.3, this is "significantly less resource intensive compared to supervised fine tuning of LLMs."
 
-- **Bridging the gap between LLM-only and GBDT-only regimes**: Figure 2 shows LLM-Boost's AUC lies above both standalone LLM and standalone XGBoost curves at all intermediate sizes (50–500), where neither standalone model dominates. This demonstrates the method's ability to combine complementary strengths.
+- **Model-agnostic framework.** Section 5.3 demonstrates successful combinations across different LLMs (Flan-T5-XXL, Llama-3-8B-Instruct) and GBDTs (XGBoost, LightGBM). Section 5.2 extends the same boosting idea to TabPFN + XGBoost, showing the framework generalizes beyond LLMs to any model producing per-row logits.
 
-- **Lightweight overhead and practical compute**: After precomputing LLM scores (using 4 GPUs for up to 18 hours), the full HPO and boosting runs on CPU in ≤4 hours for the largest datasets (Section 4.3). This is far cheaper than LLM fine-tuning, making the method practical.
+- **Systematic evaluation across dataset sizes.** The experimental design (Section 4.1) spans sample sizes from 10 to full dataset, bridging the few-shot regime where LLMs excel and the large-data regime where GBDTs dominate. This granularity is well-suited to the paper's core claim about adaptive performance across regimes.
 
-- **Generalization to non-LLM in-context learners (TabPFN)**: The same boosting approach works with TabPFN (Figure 3), achieving the best average rank on datasets ≥200 samples. This demonstrates that the boosting idea is not limited to LLMs, which is a nice empirical extension.
-
-- **Well-controlled hyperparameter optimization**: The two-stage tuning (100 Optuna trials for GBDT parameters, 30 for the scaling parameter) is fair — baselines receive the same total budget of 130 trials (line 120), ensuring performance gains are not artifacts of unequal tuning effort.
+- **Ablation on column-header shuffling (Figure 5, Section 5.4).** Degradation under shuffled headers directly confirms that semantic understanding (not just the boosting mechanism) drives gains, particularly at small sample sizes.
 
 ## Weaknesses
 
@@ -27,69 +25,60 @@ None.
 
 ### Major
 
-- **Dataset composition shifts confound cross-size comparisons.** The paper subsamples 16 datasets to sizes 10, 25, 50, 100, 200, 500, and full. Many datasets have <250 total samples, so at sizes ≥500, only a subset of datasets is available. The paper notes this (line 147, line 159) but then proceeds to **average rank, z-score, and AUC across datasets at each sample size as if the set of datasets were constant**. This means the performance at n=500 may reflect a different (easier or harder) subset than at n=100, making it impossible to attribute changes in relative performance to sample size rather than dataset selection. The authors should either (a) restrict analysis to datasets that exist at *all* sample sizes, or (b) present per-dataset curves. The paper's central visual narrative (how relative performance evolves with sample size) is undermined by this confound, even though per-size comparisons are still valid.
+1. **Lack of statistical significance testing.** The paper reports average rank, average z-score, and average AUC with standard errors across 16 datasets, but performs no formal significance test (e.g., Wilcoxon signed-rank, Friedman + Nemenyi) to assess whether LLM-Boost's improvements over selection or stacking are reliable. The paper states "LLM-Boost significantly outperforms each of the stand-alone models" (line 156) without any p-value or statistical test. With 16 datasets and multiple sample sizes, the reader cannot determine whether the observed average improvements reflect a systematic advantage or could arise from chance variation across this particular set of datasets. This is the most important gap because the paper's central claim — that LLM-Boost outperforms baselines — rests entirely on these comparisons. **Fix:** Add pairwise significance tests (e.g., Wilcoxon signed-rank between LLM-Boost and each baseline, at each sample size) and report p-values with appropriate corrections.
 
-- **The "state-of-the-art" claim is unsubstantiated given the narrow baseline set.** The paper only compares against selection (best on validation), stacking (LLM logits as features), and standalone models. Missing baselines that would substantiate "state-of-the-art" include: (a) simple averaging (unweighted or weighted) of LLM and GBDT predictions — a natural ensemble baseline; (b) TabPFN as a standalone baseline in the main Flan-T5 experiments (Figure 2), since TabPFN is known to outperform GBDTs and LLMs on small data. Without these, the paper can claim that LLM-Boost improves over selection and stacking, but not that it achieves state-of-the-art performance. The claim should be scoped to "outperforms selection and stacking baselines."
+2. **Overclaimed "state-of-the-art" language.** The abstract claims "state-of-the-art performance against numerous baselines" and the introduction (line 16) says "LLM-Boost showcases state-of-the-art performance." The baseline set consists of: standalone LLM, standalone GBDT, Selection (best-of-two on validation), and Stacking (LLM scores as additional features). These are sensible baselines for evaluating the specific fusion idea, but they do not support a general SOTA claim. Relevant methods cited in the paper's own related work (e.g., feature generation via LLMs followed by GBDT training in Hollmann et al. 2023b and Nam et al. 2024) are not compared against. The SOTA claim should be removed or sharply qualified to refer only to the specific baselines considered. The contribution is honestly described as "a simple fusion method that outperforms natural baselines (selection, stacking) across a range of dataset sizes" — that is a worthwhile contribution and does not need a SOTA wrapper.
 
 ### Minor
 
-- **The 3-shot design choice limits LLM scalability, but this is framed as a fundamental LLM limitation.** The LLM sees exactly 3 examples regardless of training set size (line 159, line 186). The paper acknowledges this in future work (line 210) and shows in Section 5.5 that more shots improve performance. However, phrases like "LLMs cannot scale" (Introduction) or "capped by context length" overstate the case — what is shown is that *this particular prompting strategy* with *these models* scales poorly. Long-context LLMs or retrieval-augmented selection could use more data. This does not invalidate the results, but the framing should be more precise.
+1. **Under-specified two-stage hyperparameter tuning.** The paper tunes GBDT hyperparameters for 100 Optuna trials, then tunes the scaling parameter s for an additional 30 trials (Section 4.2). It states "We use separate validation folds so that test data is [not] used for HPO trials" (line 118), but does not clarify whether the *same* validation fold is used for both tuning stages. If the same validation set guides both the GBDT hyperparameter search and the subsequent scaling-parameter tuning, there is a risk of optimistic bias. The paper should explicitly describe whether the validation splits are nested/independent across stages (e.g., inner vs. outer cross-validation).
 
-- **AUC computation for multiclass datasets is not specified.** The paper filters to ≤5 classes (line 107) but some datasets still have 3–5 classes. AUC for multiclass problems can be macro-average one-vs-rest, weighted, or other variants, and the paper does not state which is used. This should be clarified, and an additional metric such as log-loss (more natural for boosting) would strengthen the evaluation.
+2. **Column-header shuffling ablation on only one dataset.** The ablation confirming that semantic column headers matter (Figure 5, Section 5.4) is performed on the Adult dataset alone. While the result is illustrative, its generality is unclear. Repeating this on a few additional datasets with meaningful headers would substantially strengthen the point.
 
-- **No statistical significance tests for key comparisons.** The paper reports average ranks and z-scores but does not perform paired tests (e.g., Wilcoxon signed-rank) across datasets at each sample size. Without this, it is unclear whether the average improvements are statistically robust or driven by a few datasets. The authors should report significance for the LLM-Boost vs. stacking and LLM-Boost vs. selection comparisons.
-
-- **Selection of 3-shot examples is not described.** The paper does not state how the 3 in-context examples are chosen: random, class-stratified, fixed? If random, each seed gets different shots, and LLM performance could vary. This should be specified for reproducibility (the tools from Slack & Singh 2023 are referenced, but the selection mechanism should be explicit).
+3. **Missing comparison to simple weighted averaging.** An even simpler baseline — weighted averaging of LLM and GBDT predictions with a tuned weight — would help isolate whether LLM-Boost's advantage comes from the specific boosting mechanism or merely from any convex combination of the two predictors. (Selection, the current baseline, picks one model entirely; it does not test whether a mixture of both is beneficial.)
 
 ### Trivial
-
-- The constant \(C\) in the prediction equation (line 88) is described ("a constant which can be added to make SCORE_LLM centered around 0") but no formula is given (e.g., \(C = -\mu\)). This is easily addressed.
+None.
 
 ## Nice-to-Haves
 
-- **Simple averaging ensemble baseline**: Adding an equally-weighted or validation-weighted average of LLM and GBDT predictions would test whether the boosting mechanism adds value beyond naive fusion.
-- **Per-dataset result table**: Showing AUC for each dataset at a few representative sample sizes (e.g., 25, 100, full) would help readers assess variability and see which datasets drive the aggregate improvements.
-- **Log-loss metric**: Since boosting optimizes a differentiable loss, reporting log-loss alongside AUC would be more natural and revealing.
-- **Demonstration of the scaling parameter \(s\)**: A plot showing performance vs. \(s\) on a few datasets would make the tuning mechanism more concrete.
+- **Analysis of the scaling parameter s.** Showing tuned values of s across datasets and sample sizes (e.g., a histogram or a plot of LLM-Boost performance as a function of s) would make the method more interpretable and help practitioners understand when the LLM is trusted versus downweighted.
+
+- **Additional column-header shuffling ablations** (as noted in Minor 2 above).
+
+- **A diagram or flow chart** explicitly showing how validation data flows through the two-stage tuning process would address the under-specification concern cleanly.
 
 ## Removed Points
 
-These points were flagged by reviewers but are removed because they are either factually incorrect, misunderstand the paper, or reflect scope creep:
+These points are flagged to be removed; treat them with caution.
 
-- **"The constant C is not defined"** — The paper explicitly states that \(C\) centers the LLM scores around 0 for numerical stability (line 91). This criticism is incorrect.
-- **"The paper does not discuss LLM scores for regression"** — The paper is about classification only. Regression is out of scope. Removed.
-- **"Fine-tuned LLMs should be a baseline"** — The paper justifies this exclusion (line 52): fine-tuning is computationally expensive and often underperforms GBDTs on larger datasets. This is a reasonable design choice.
-- **"FT-Transformer, NODE missing as baselines"** — These are deep learning tabular methods, not ensemble or LLM-based baselines. Requiring them is scope creep for a paper about LLM-GBDT fusion. Removed.
-- **"Unfair HPO budget"** — The paper explicitly states baselines get 130 trials total, matching LLM-Boost's 100+30 (line 120). This criticism is factually wrong.
-- **"Error bars not shown"** — The paper states standard errors are shown (line 154). Any visibility issues in the parsed PDF are parser artifacts.
-- **"The paper should show error bars"** — Already addressed above; redundant criticism removed.
+- *"The method's novelty lies entirely in empirical demonstration; needs discussion of why the offset works."* — The paper does discuss this: Section 3.3 explains that s=0 gives the standalone GBDT, large s approximates the LLM, and intermediate s can exceed both. Section 5.2 (lines 163-165) discusses why TabPFN + XGBoost benefits from complementary learning mechanisms. The "other observations" about interpretability are constructive suggestions, not weaknesses of the submission.
+
+- *"Potential overfitting risk" framed as a critical issue* — The paper explicitly states "separate validation folds" are used (line 118). The concern is about under-specification of whether the *same* fold is reused across stages, which is a valid Minor point (included above), not a structural flaw. The critic's framing as a "critical issue" overstates the severity.
+
+- *"TabPFN+GBDT outperforms LLM+GBDT — suggests method more general than title implies"* — This is an observation about generality (a strength), not a weakness. The paper appropriately presents it as a finding.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The key insight — using LLM logits as a scaled initial prediction in a GBDT rather than as additional features — is the paper's own contribution. The reviews do not surface an insight beyond what the authors already present.
+The key insight from reading the reviews together is that the paper's main weakness — lack of statistical testing — is paired with a strength that the harsh critic partially underweights: the method wins at *every* sample size, not just some. This consistent pattern across 16 datasets and 7 sample sizes is unusual and arguably speaks for itself more strongly than isolated improvements would. A Wilcoxon signed-rank test would likely confirm significance. The paper is fundamentally correct but needs one additional push (significance testing + toned-down claims) to go from "suggestive empirical pattern" to "conclusive result." The practical contribution — showing that a single off-the-shelf LLM inference can be fed into a standard GBDT pipeline as an offset — is the kind of simple, reproducible finding that the community can build on immediately.
 
 ## Suggestions
 
-1. **Fix the dataset composition confound**: Restrict the main cross-size analysis to the subset of datasets available at all sample sizes (e.g., those with ≥500 samples). Alternatively, present per-dataset plots for a representative subset. At minimum, clearly separate the "changing composition" effect from the "sample size" effect with a secondary figure.
-2. **Add a simple averaging baseline**: Include unweighted or validation-weighted averaging of LLM and GBDT predictions to demonstrate that the boosting mechanism outperforms naive fusion.
-3. **Tone down "state-of-the-art" claims**: Scope the contribution to outperforming selection and stacking baselines, which is adequately supported by the evidence.
-4. **Clarify AUC variant** used for multiclass datasets and consider reporting log-loss as a secondary metric.
-5. **Add statistical significance tests** (e.g., Wilcoxon signed-rank) for the main comparisons at each sample size.
-6. **Specify shot selection mechanism** (random, stratified, fixed) in the experimental setup.
+1. **Add statistical significance tests.** Run Wilcoxon signed-rank tests (paired by dataset) comparing LLM-Boost to Selection and to Stacking, separately for each sample size. Report p-values and note whether they survive a correction for multiple comparisons (e.g., Bonferroni or Holm). This single addition would substantially increase confidence in the central claim.
+
+2. **Remove or sharply qualify "state-of-the-art" language throughout.** Replace with language like "outperforms the natural ensembling baselines (selection, stacking) across a range of dataset sizes." The paper's contribution is strong enough to stand on its own without overclaiming.
+
+3. **Clarify the validation protocol.** State explicitly whether the validation fold used for tuning the scaling parameter s is independent of (or the same as) the fold used for tuning GBDT hyperparameters. A short paragraph or diagram would suffice.
+
+4. **Add a weighted-averaging baseline.** A simple convex combination of LLM and GBDT predictions (weight tuned on validation) would help isolate whether the boosting mechanism specifically adds value beyond any ensemble of the two models.
 
 ## Score and Decision
 
-**Originality**: The method is simple but novel — using LLM logits as the initialization for boosting rather than as additional features or through stacking is a clean idea not explored in prior work on LLMs for tabular data.
+The paper proposes a clean, practical idea and provides reasonably extensive empirical support across 16 datasets and multiple sample sizes and model combinations. The main weaknesses — absence of significance tests and overclaimed SOTA language — are fixable without changing the method. The contribution is solid but the evaluation falls short of the rigor needed to fully support the paper's strongest claims.
 
-**Importance of research question**: Combining LLMs' semantic understanding with GBDTs' scalability is a timely and practical problem. The question is well-motivated.
+**Score:** 6.0
 
-**Claims supported**: The claim of outperforming selection and stacking baselines is supported. The broader "state-of-the-art" claim is not — the baseline set is too narrow.
+**Decision:** Accept
 
-**Soundness of experiments**: The core experiment design is reasonable but has a notable confound (dataset composition shift across sizes) and would benefit from more baselines and statistical testing.
-
-**Clarity of writing**: Well-written. The method is clearly explained, limitations are honestly discussed, and the figures are well-described.
-
-**Value to the community**: Moderate. The method is practical, easy to implement, and the code is released. It provides a useful technique for practitioners working with small-to-medium tabular datasets with meaningful column headers.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

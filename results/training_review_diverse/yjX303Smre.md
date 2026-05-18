@@ -1,20 +1,18 @@
-Now I have all the evidence I need. Let me produce the final consolidated review.
-
----
+Now I have a thorough understanding of the paper. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes Di-SkilL, a method for learning diverse skills in Contextual Episode-Based Policy Search (CEPS) by combining a non-linear Mixture of Experts (MoE) policy with energy-based per-expert context distributions for automatic curriculum learning. The key ideas are: (i) using deep neural network experts instead of linear ones to improve representational capacity, and (ii) modeling each expert's preferred context region as an energy-based model (EBM) that can represent multi-modal, bounded distributions without requiring hand-tuned penalty terms. Experiments on four simulated robotic tasks (Reacher, Table Tennis, Box Pushing, Minigolf) show that Di-SkilL outperforms BBRL (single-mode non-linear policy) and SVSL (linear MoE with Gaussian context distributions).
+This paper introduces Di-SkilL (Diverse Skill Learning), a contextual reinforcement learning method that trains a Mixture of Experts (MoE) policy to acquire diverse, multi-modal skills. The key technical innovations are: (1) parameterizing per-expert context distributions as energy-based models (EBMs), which can represent multi-modal and discontinuous context distributions without requiring environment-specific knowledge (like context bounds), and (2) using trust-region-constrained deep neural network experts for high-capacity non-linear policies. The method outperforms single-mode baselines (BBRL) on multi-modal robotic tasks (Box Pushing, MiniGolf) and demonstrates that automatic curriculum learning via EBMs is essential for efficient training.
 
 ## Strengths
 
-1. **Consistent empirical improvement over strong CEPS baselines on multiple tasks.** Di-SkilL achieves substantially higher success rates than BBRL on Box Pushing (~85% vs ~65%) and Robot Minigolf (~70% vs ~50%), and outperforms SVSL on Table Tennis (Fig 3b). These are challenging tasks with non-Markovian/sparse rewards where multi-modal solutions are required.
+- **EBM-based per-expert context distributions for automatic curriculum learning without environment knowledge**: Di-SkilL replaces Gaussian context distributions (which require hand-tuned penalty terms for staying within bounds) with EBMs whose normalizing constant is approximated via Monte Carlo from the environment's context distribution p(c). This design eliminates the need for context bounds or forward kinematics knowledge. The ablation (Fig. 3b) confirms this matters: Di-SkilL achieves >90% success on the 4-dim Table Tennis task, while curriculum-free variants plateau below 60%.
 
-2. **Ablation demonstrates that automatic curriculum learning (ACL) is necessary for efficient learning.** The ablation in §4.1 shows that disabling ACL (Di-SkilLwoCurV1, same 50 samples per expert as Di-SkilL) causes the success rate to collapse, while increasing to 260 samples per expert without ACL (V2) still results in much slower convergence. This cleanly validates the core design choice of optimizing per-expert context distributions, with sample count controlled between Di-SkilL and V1.
+- **Outperforms state-of-the-art single-mode baselines on tasks requiring multi-modal solutions**: Di-SkilL achieves substantially higher success rates than BBRL on Box Pushing (~85% vs ~65%), MiniGolf (~70% vs ~50%), and the extended Table Tennis task. These gains are statistically grounded with 24 seeds and IQM with 95% stratified bootstrap confidence intervals.
 
-3. **Principled use of EBMs to handle multi-modal, bounded context distributions without environment-specific engineering.** The paper identifies three challenges (complex distributions, multi-modality, bounded validity) and shows how the EBM formulation with Monte Carlo normalizing-constant approximation circumvents the need for hand-tuned penalty terms that prior work (Celik et al., 2022) requires.
+- **Qualitative demonstration of diverse skill learning**: Figure 5 visualizes multiple distinct box trajectories produced by Di-SkilL for the same context in Box Pushing, confirming the method produces a repertoire of diverse solutions rather than a single mode.
 
-4. **Stable optimization via trust-region updates for the bi-level MoE problem.** The use of trust-region layers (Otto et al., 2021) for the expert update and PPO for the per-expert context distribution provides a coherent optimization framework that converges reliably across all environments.
+- **Principled optimization framework**: The paper derives per-expert lower bounds (Eqs. 6–7) from a KL-regularized maximum entropy RL objective, uses trust-region layers to stabilize deep expert updates, and computes many terms in the EBM update in closed form.
 
 ## Weaknesses
 
@@ -22,49 +20,45 @@ This paper proposes Di-SkilL, a method for learning diverse skills in Contextual
 None.
 
 ### Major
-
-1. **No quantitative evaluation of diversity.** The paper's title and central framing are about "diverse skills" and "multi-modality in the behavior space," yet the only evidence for diversity is a single qualitative figure (Figure 5) showing a few box-pushing trajectories. No diversity metric is reported — not entropy of expert selection for a given context, variation in trajectory outcomes per context, number of distinct solutions discovered, or any other measure. The quantitative results (success rate, return) measure only task performance, not diversity. For a paper whose contribution hinges on multi-modal behavior, this is a fundamental evidential gap. The strength of the diversity claim cannot be assessed without quantification.
-
-2. **Missing component-isolation baselines.** The paper's claimed technical contributions are (i) non-linear (deep) experts and (ii) EBM-based context distributions. The only method that replaces *both* components with simpler alternatives (SVSL: linear experts + Gaussian context distributions) is compared only in the ablation (Fig 3b). No baseline isolates a single component — there is no comparison to a method with non-linear experts + Gaussian context distributions, nor to the method the paper itself proposes (LinDi-SkilL, i.e., linear experts + EBM context distributions). The paper states in §4.2 that "We report the performances of Di-SkilL, Lin-DiSkill and BBRL," but the figure captions (Fig 3c, 4a–c) only describe Di-SkilL and BBRL, while LinDi-SkilL is never discussed quantitatively. This makes it impossible to attribute performance gains to either component individually.
-
-3. **LinDi-SkilL results are promised but not clearly presented.** Section 4.1 states "We therefore propose comparing to BBRL and LinDi-SkilL instead of SVSL," and §4.2 claims "We report the performances of Di-SkilL, Lin-DiSkill and BBRL." However, the figure captions for the main experimental results (Fig 3c, 4a–c) only reference Di-SkilL and BBRL. LinDi-SkilL results are never described or discussed in the text. Since figures are embedded as images, it is possible LinDi-SkilL appears in the plots without being mentioned in the captions, but this confusion itself is a presentation failure. The reader cannot verify the contribution of the EBM component without this baseline being clearly reported and analyzed.
+- **No quantitative evaluation of diversity.** The paper's title, framing, and central claim center on learning "diverse skills" and "multi-modal behavior," yet the experimental evaluation reports only task performance (success rate, return). There is no quantitative diversity metric: no entropy over trajectories, no coverage measure of parameter or trajectory space, no count of distinct solution types per context, no pairwise distance between expert outputs. Figure 5 provides qualitative diversity for one task (Box Pushing), but one visualization cannot substitute for systematic evidence across all environments. Without such metrics, a core claim of the paper — that Di-SkilL actually learns diverse skills rather than simply being a more expressive single-mode policy — remains unvalidated quantitatively.
 
 ### Minor
+- **LinDi-SkilL is mentioned as a baseline but never appears in results.** Sections 4.1–4.2 state that LinDi-SkilL (linear experts with EBM context distributions) will be compared, and Section 4.2 says "We report the performances of Di-SkilL, Lin-DiSkill and BBRL." However, none of the experimental figures (Fig. 3c, Fig. 4a–c) show LinDi-SkilL results. Including this ablative baseline would help isolate the contribution of non-linear experts from the EBM curriculum mechanism. Either show the results or remove the references.
 
-4. **Missing implementation and hyperparameter details.** The paper does not specify network architecture (layers, hidden units), learning rates, batch sizes, trust-region KL constraint epsilon, PPO clipping parameter, number of PPO epochs, or the number of experts used (except "five experts" in the ablation). While CEPS papers often defer such details to a supplementary, their absence in the main text makes it impossible to assess the method's sensitivity to these choices or to reproduce the results without contacting the authors.
+- **Ablation conflates curriculum removal with diversity incentive removal.** Section 4.1 disables automatic curriculum learning by simultaneously removing log̃π(o|c) and setting β to a very high value (2000). This removes both the curriculum mechanism and the entropy/diversity incentive at once, making it impossible to tell which component drives the performance drop. While the ablation demonstrates that the combined system matters, it does not isolate whether the benefit comes from curriculum learning, the diversity incentive, or their interaction. The paper should note this confound explicitly.
 
-5. **No analysis of the EBM approximation quality.** The method approximates the EBM normalizing constant using Monte Carlo samples from the environment's context distribution. The paper states that "a large enough batch" is used but does not discuss how batch size is chosen, how many context samples are used per expert per iteration, or whether this approximation degrades when the context space is high-dimensional or has narrow discontinuities.
-
-6. **The automatic curriculum learning ablation (§4.1) could be cleaner.** While the comparison between Di-SkilL (50 samples, ACL on) and Di-SkilLwoCurV1 (50 samples, ACL off) is fair on sample count, the ACL-disabling procedure simultaneously modifies multiple terms (setting $\log\tilde{\pi}(o|\mathbf{c})=0$ and raising $\beta$ from 0.5 to 2000). A more informative ablation would vary one thing at a time (e.g., only the intrinsic bonus term, or only the entropy scaling). The current design conflates them.
+- **EBM training procedure lacks algorithmic detail.** Section 3.3 states that PPO is used to update the EBM-based π(c|o) (a discrete categorical distribution over a batch from p(c)), but no pseudocode, gradient derivation, or PPO clipping scheme is provided for this non-sequential setting. The description is sufficient for a reader familiar with the general approach to reconstruct it, but the lack of an explicit algorithm box or pseudocode reduces reproducibility and makes the training dynamics harder to assess.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
-
-- A controlled comparison with non-linear experts + Gaussian context distributions would cleanly isolate the benefit of the EBM formulation.
-- The diversity analysis would be strengthened by reporting a quantitative metric such as: (a) entropy of the gating distribution $\pi(o|\mathbf{c})$ for fixed contexts, (b) variance of trajectory outcomes (e.g., final box position/orientation) per context, or (c) number of experts that contribute non-negligible probability for a given context.
-- The paper could mention computational cost (wall-clock time, scaling with number of experts) to help practitioners assess practical feasibility.
+- An ablation on the batch size used for the EBM normalizing constant approximation would help assess sensitivity to this design choice.
+- A brief explanation of how trust-region layers operate when multiple experts are updated simultaneously and the context distribution shifts between iterations.
+- A failure analysis discussing when Di-SkilL might struggle (e.g., very high-dimensional context spaces, tasks requiring precise execution rather than diverse solutions).
 
 ## Removed Points
-
-- **Ablation confounded by sample count (from Critical Issue 1)**: The reviewer claimed "V1 and V2 use different numbers of context-parameter samples, so even that comparison is confounded." The paper explicitly states "For Di-SkilLwoCurV1, we provide the same number of 50 context-parameter samples per expert as in Di-SkilL." Thus V1 vs Di-SkilL is controlled on sample count. Removed as factually incorrect.
-- **"Overlapping CIs on Table Tennis" (from Section 4.2 notes)**: The paper's own language for TT is "Di-SkilL achieves similar performance as BBRL, but eventually surpasses BBRL's success rate slightly" — this is appropriately cautious and does not overclaim. For Minigolf, the 70% vs 50% gap is meaningful even with overlapping CIs. This criticism is downgraded.
-- **"The ablation changes both the objective and the sample count simultaneously"**: Partially removed as the V1 vs Di-SkilL comparison uses the same 50 samples. The remaining point about changing multiple terms simultaneously (log term and beta) is kept in Minor #6 but with reduced severity since these changes are what's minimally required to disable ACL.
+These points were flagged by reviewers but removed following the filtering rules:
+- **"Continuous EBM optimized over a finite set" (Critic's Point 2.i):** The paper explicitly addresses this in Section 3.2 — the normalizing constant is approximated via Monte Carlo using samples from p(c), and "by resampling a large enough batch... the EBM will encounter important parts of the context space." This is a standard Monte Carlo EBM training technique, not an oversight.
+- **"Gradient flow from discrete surrogate" (Critic's Point 2.ii):** Eq. 10 defines the objective; gradients flow through φ_o(c) via the standard log-probability parameterization. This is straightforward.
+- **"PPO for non-sequential decision" as a correctness concern (Critic's Point 2.iii):** PPO is a general policy gradient method applicable to any parametric policy, not just sequential decisions. Using it for context selection is valid, if unusual.
+- **"Paper leans heavily on Celik et al. (2022)":** An observation about presentation, not a substantive weakness. The paper separates its novel contributions (EBM context distributions, deep experts, trust-region updates) from the prior decomposition.
+- **Missing batch size / sensitivity ablation:** A useful addition but not a core weakness; moved to Nice-to-Haves.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews surface the expected tension between a reasonable method-level contribution and an experimental evaluation that is incomplete for the scope of the claims. The key insight from the review process is that the paper would be substantially stronger if it provided (a) a controlled component analysis and (b) a quantitative diversity metric — both of which are standard expectations for a paper whose title and framing center on "diverse skills."
+The most interesting structural observation across reviews is that the paper's strongest empirical evidence (outperformance on multi-modal tasks) indirectly supports the diversity claim through task performance — if Di-SkilL outperforms a single-mode policy specifically on tasks that require multi-modal solutions (Box Pushing with an obstacle, MiniGolf with multiple obstacle configurations), the diversity is *instrumentally* present even if not *directly* measured. The missing step is quantifying this instrumental diversity. This gap is fixable but real.
 
 ## Suggestions
-
-1. Add two controlled baselines to the main experiments: (a) non-linear experts + Gaussian context distributions (to isolate the EBM contribution), and (b) LinDi-SkilL (linear experts + EBM context distributions, already mentioned in the text) clearly plotted and discussed in every figure.
-2. Report at least one quantitative diversity metric — the entropy of the gating distribution $\pi(o|\mathbf{c})$ for a fixed context, or the variance of trajectory outcomes per context — to substantiate the diversity claim beyond qualitative trajectories.
-3. Provide implementation details (network architecture, learning rates, trust-region parameters, PPO settings, number of experts) either in the main text or in an appendix, and discuss the EBM's sensitivity to batch size.
+1. **Add quantitative diversity metrics** to validate the paper's central claim. Suitable options: (a) average pairwise trajectory distance between experts for the same context, (b) entropy of the marginal trajectory distribution, (c) number of distinct solution clusters per context, (d) variance explained by expert assignment. Report these alongside task performance for all environments.
+2. **Either include LinDi-SkilL results in the figures or remove references to it.** This is a quick fix that removes a clear inconsistency.
+3. **Add a brief pseudocode or algorithm block** for the EBM update via PPO, showing how the batch is drawn, how discrete probabilities are computed, and how the surrogate objective updates φ_o.
+4. **Acknowledge the ablation confound explicitly** in the paper — note that removing both the diversity incentive and the curriculum simultaneously means the ablation validates the combined system, not the individual contribution of curriculum learning.
 
 ## Score and Decision
 
-The paper proposes a sensible combination of ideas (MoE + max-entropy RL + EBM context distributions + trust-region updates) and demonstrates consistent empirical improvements over strong baselines on challenging tasks. However, two major weaknesses prevent acceptance: (1) the central claim of "diverse skills" is supported only by qualitative evidence with no quantitative diversity metric, and (2) the experimental evaluation lacks controlled baselines that isolate the two claimed technical contributions, making it impossible to determine which component drives the gains. The LinDi-SkilL results are also unclearly presented despite being promised in the text. These gaps can be addressed with additional experiments, but the paper in its current form does not provide sufficient evidence for its core claims.
+**Originality:** Good — EBM-based per-expert context distributions for automatic curriculum learning in MoE policies are novel in the CEPS setting. **Importance:** Good — learning diverse skills is an important problem in robotics RL. **Claims support:** Mixed — the task performance claims are well-supported; the diversity claim lacks quantitative support. **Soundness:** Adequate — solid experimental methodology (24 seeds, IQM, bootstrap CI) but missing diversity evaluation. **Clarity:** Fair — the method is described but would benefit from algorithmic pseudocode. **Value:** Moderate — a useful contribution that would be strengthened by addressing the quantitative diversity gap.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+This is a borderline paper. The core technical idea (EBM context distributions for automatic curriculum learning in deep MoE policies) is novel and the performance results are credible. However, the central claim about diverse skill learning is only qualitatively supported, and the missing LinDi-SkilL baseline is an inconsistency that weakens the ablation story. These issues are fixable with moderate effort.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

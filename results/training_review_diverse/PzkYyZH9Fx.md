@@ -1,119 +1,90 @@
-Now I have all the information needed. Let me construct the final consolidated review.
+I have thoroughly analyzed the paper and cross-checked every claim against the actual text. Let me now produce the consolidated review.
 
 ---
 
 ## Summary
 
-This paper introduces NARCISSUS, an unsupervised anomaly detection method built on the insight that models trained on a mix of normal and sparse anomalous data converge on normal data first. The method uses a tailored "Very Early Stopping" (VES) scheme with a robust ensemble variant (RVES) to halt training precisely when normal data has been fit but anomalous data has not, turning any semi-supervised model into an unsupervised one. Evaluations are conducted primarily on multivariate time series (6 datasets, 7 base models), with additional experiments on images (MVTec2D, MNIST) and graphs (UCI Message, Digg).
-
----
+NARCISSUS proposes an unsupervised anomaly detection method that exploits the empirical observation that models converge faster on normal data than on anomalous data during training. By combining a tailored early stopping scheme (VES) that identifies when the model has converged on normal data, with an ensemble method (RVES) that handles epistemic uncertainty, the paper shows that semi-supervised backbones can be converted to unsupervised operation while maintaining near-identical accuracy. The main evidence is Table 2, where NARCISSUS achieves F1 scores within 0.02 of semi-supervised baselines across 6 time-series datasets.
 
 ## Strengths
 
-- **Novel and practically useful insight.** The observation that models converge on normal data before anomalous data when trained on mixed unlabeled data is clearly motivated, empirically supported (Figure 1), and leveraged in a principled way. This is the paper's most original contribution.
+- **Convincing core empirical finding**: The observation that training on mixed normal+anomalous data yields convergence on normal data first (Figure 1) is well-motivated and supported by the ablation study, where bootstrapping (training to convergence without VES) produces highly unstable F1 scores ranging from 0.43 to 0.97 (Figure 3). This controlled experiment directly validates the paper's central design choice.
 
-- **Extensive time-series evaluation.** Across 6 multivariate time-series datasets and 7 base semi-supervised models (TranAD, GDN, NPSR, LSTM-NDT, OmniAnomaly, USAD, MTAD-GAT), NARCISSUS consistently matches or approaches the F1 scores of the same models trained on clean normal data (differences within 0.02 in most cases). On SMAP with GDN, it even outperforms the semi-supervised version (F1 0.93 vs. 0.86). The breadth of this evaluation (42 data points) is the paper's strongest evidence.
+- **Broad backbone generality**: NARCISSUS is demonstrated across 7 different semi-supervised backbones (LSTM-NDT, OmniAnomaly, USAD, MTAD-GAT, GDN, TranAD, NPSR) without architectural modification, which credibly supports the model-agnostic claim for time series.
 
-- **VES + RVES design is well-motivated and ablated.** The ablation (Figure 3, Tables 6–7, Appendix) convincingly shows that (a) pure bootstrapping (randomly sampling training data) is highly unstable (F1 ranging 0.43–0.97 on MBA), (b) VES alone substantially improves stability, and (c) RVES (the ensemble variant) further reduces worst-case degradation. This step-by-step validation supports the design choices.
+- **Strong empirical results on the primary (time series) benchmark**: Table 2 shows that across 6 time-series datasets and numerous backbone/model combinations, NARCISSUS (unsupervised) produces F1 scores within 0.02 of the fully supervised versions trained on clean normal data. In several cases (e.g., SMAP), NARCISSUS exceeds the semi-supervised baseline. This is the paper's main evidence and it is compelling.
 
-- **Model-agnostic framework demonstrated across 10 architectures.** NARCISSUS is applied to fundamentally different model types — reconstruction-based (TranAD, PatchCore), prediction-based (GDN, NPSR), generation-based (AnoGAN), and graph-based (AddGraph) — supporting the claim that the early-convergence phenomenon is not model-specific.
+- **Ablation cleanly isolates the contribution of each component**: The paper separately shows (i) that bootstrapping without VES is unstable (Figure 3, §5.4), and (ii) that removing RVES degrades performance (Table 7). This demonstrates that both components are necessary.
 
----
+- **Honest limitation discussion**: Section 6 openly acknowledges the constraints of NARCISSUS (requires sparse anomalies, well-bounded data, sufficiently large datasets), which helps practitioners understand when the method will and will not work.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-**1. Theorem 4.2 does not provide a rigorous theoretical foundation for the method, despite being presented as a core contribution.**  
-The theorem states that if $N_n \cdot \delta_n \gg N_a \cdot \delta_a$ (cumulative gradient magnitude from normal data dominates anomalous data), then SGD converges toward fitting normal data with a bounded difference from anomaly-free training. The "proof" merely observes that under this condition, parameter updates are dominated by normal data. The claimed bound on the difference from anomaly-free training is asserted without derivation — the proof simply invokes "convergence properties of SGD with bounded noise" without making the argument concrete.  
+- **RVES is underspecified for reproduction**: The paper does not specify the number of ensemble members, the aggregation rule for combining outputs ("take the joint set in the ensemble" is ambiguous between intersection vs. union), or the procedure for setting detection thresholds. Training dynamics (§5.2) and runtime are not compared to baselines to substantiate the "lightweight" claim. This makes the ensemble component difficult to reproduce and its claimed robustness unverifiable from the current description.
 
-More critically, the paper does not empirically verify that the condition $N_n \cdot \delta_n \gg N_a \cdot \delta_a$ actually holds in practice for the tested anomaly detection problems. The paper argues it follows from sparsity ($N_n/N_a$ large) and well-bounded data ($\delta_a$ not exceeding $\delta_n$ by orders of magnitude). But in reconstruction/prediction-based AD, anomalous points can produce very large losses (and therefore large gradients) early in training, potentially violating the condition. The paper provides no gradient measurements to confirm the condition.  
+- **No sensitivity analysis for the critical hyperparameter η**: The VES algorithm's effectiveness depends on η (the percentile of validation subsets filtered out), which the paper calls "the upper bound of the portion of anomalous data." In an unsupervised setting, η is unknown. The paper says "empirically we can choose a large η to be safe" but provides no analysis of how performance varies with η across datasets. Without this, it is unclear whether the method requires dataset-specific tuning that would require labels to perform.
 
-The theorem is presented as a theoretical centerpiece (in a section titled "Stochastic Gradient Descent Learns to Fit Normal Data First"), but it functions as a restatement of the method's intuition rather than a testable or verifiable theoretical guarantee. This is a structural issue: the paper claims a theoretical foundation that does not bear scrutiny.
-
-**2. Main empirical results lack variance estimates, which is critical for a method whose central selling point is robustness.**  
-Tables 1 and 2 report only point estimates (precision, AUC, F1) without standard deviations, confidence intervals, or any measure of variability across independent runs. This is a significant evidential gap because:
-
-- NARCISSUS involves multiple sources of randomness (random validation subset selection in each VES run, multiple training runs in the RVES ensemble, random initialization).
-- The ablation (Figure 3) shows that the alternative approach (bootstrapping) produces F1 scores ranging from 0.43 to 0.97 — a massive spread. The paper argues NARCISSUS is more robust, but without reporting NARCISSUS's own variance across independent runs, the reader cannot assess whether the claimed superiority over bootstrapping is statistically meaningful.
-- The phrase "differences in F1 score are within 0.02" is based on point estimates with no associated uncertainty. A difference of 0.02 could be within the noise of the method.
-
-This is the most consequential weakness because it directly undermines the paper's central claim about achieving semi-supervised-level accuracy reliably.
+- **Image and graph experiments use a transductive (merged train+test) setup that limits comparability**: For the image and graph extensions (§5.3), the paper explicitly states it merges original training and test data. While this is acknowledged, it means NARCISSUS and bootstrapping are evaluated in-sample on data that includes test instances, while the semi-supervised baselines train only on the clean training set and are evaluated on held-out test data. The evaluation conditions differ, so the "comparable performance" claim for these domains is on weaker footing. The paper correctly flags this as a limitation but does not fully address the implications for generalization claims beyond time series.
 
 ### Minor
 
-**3. VES convergence criterion is under-specified for reproducibility.**  
-Algorithm 1 states that "conventional early stopping is applied" on the intersection of filtered validation subsets, but does not specify the exact metric being monitored, the patience threshold, the delta for improvement, or any early-stopping hyperparameters. The statement "empirically we can choose a large $\eta$" provides no practical guidance. Since VES is the core algorithmic contribution, the early-stopping criterion needs to be fully specified.
+- **Theorem 4.2 restates the assumption rather than establishing a non-trivial guarantee**: The theorem shows that if $N_n \cdot \delta_n \gg N_a \cdot \delta_a$, then SGD updates are dominated by normal data. This is essentially a restatement of the conditioning assumption — it derives directly from the gradient bound and the sparsity condition. The paper does not verify empirically that this gradient-dominance condition actually holds for the models and datasets used in experiments, nor does it provide a tighter link between the assumed data characteristics (sparsity, boundedness) and the observed loss-separation behavior. The theoretical framing is therefore decorative rather than predictive. This does not invalidate the empirical results but means the theory does not carry independent weight.
 
-**4. Generalization beyond time series is not convincingly demonstrated.**  
-For images, only one dataset per method is used (MVTec2D for PatchCore, MNIST for AnoGAN). For graphs, two small datasets (UCI Message, Digg) are tested. No comparison to unsupervised methods designed specifically for images/graphs (e.g., DeepSVDD, f-AnoGAN, OC-GNN) is provided. The paper acknowledges this limitation in the Discussion, but the claim of "domain-agnostic applicability" is not well-supported by the evidence presented.
+- **VES algorithm's filtering rationale is not empirically validated**: The algorithm filters out high-loss validation subsets, assuming the remainder reflects normal data. While the intuition is consistent with the core insight, the paper does not analyze whether the filtering actually succeeds (e.g., what fraction of retained subsets are actually anomaly-free, or how this changes over training epochs). A simple validation of the filtering quality would strengthen confidence in the mechanism.
 
-**5. Self-supervised methods are excluded from comparison with a reasonable but limiting rationale.**  
-The paper states that self-supervised methods "would need a method like NARCISSUS as a module" and are thus excluded. This is a defensible design choice, but it means the comparison is against a restricted set of baselines. The paper would benefit from at least one self-supervised baseline (e.g., the cited Zhang et al., 2023) to calibrate NARCISSUS's relative performance against the full landscape of unsupervised AD approaches.
+- **Ablation study does not report variance of NARCISSUS itself**: Figure 3 shows bootstrapping variance, and Table 7 shows the effect of removing RVES. But the paper does not report the run-to-run variance of the full NARCISSUS method (VES + RVES) across different random seeds. This would complete the picture of whether the ensemble actually stabilizes performance as claimed.
 
 ### Trivial
 
-- Equation (2) notation: "$p(x \in \mathbb{U} | \mathcal{L}(x) > \sigma) < \epsilon$" mixes a set membership with a conditional probability in a way that lacks a well-defined probability space. This does not affect the method but is mathematically imprecise.
-
----
+- The connection between Eq. 3 (the optimization problem) and the VES algorithm is mentioned only in passing ("constraint E[(E(f̃)-E(f))|U] < ε in Eq. 3 is met"). Making this link more explicit would help the reader see the formalism as more than decorative.
 
 ## Nice-to-Haves
 
-- **Gradient norm measurements.** Rather than a non-rigorous theorem, the paper would be strengthened by empirically measuring cumulative gradient contributions from normal vs. anomalous data across training epochs for several datasets, showing that the condition $N_n \cdot g_n \gg N_a \cdot g_a$ (with actual gradient magnitudes) holds.
-- **Additional unsupervised baselines for time series** (e.g., Isolation Forest, LOF, DeepSVDD adapted for time series) would broaden the comparison scope.
-- **Computational cost analysis.** The paper claims "comparable computational overhead" but provides no runtime or epoch-count comparisons. A brief table showing training wall-clock time for NARCISSUS vs. standard semi-supervised training vs. bootstrapping would be informative.
-- **Sensitivity to RVES ensemble size.** The ablation does not characterize how performance varies with the number of VES repeats.
-- **Discussion of limitations with long-term dependencies.** The paper assumes data is "well-bounded." For time series with trends or seasonality, normal points far from the current model's predictions may also produce large gradients, potentially causing misclassification.
-
----
+- Provide the anomaly contamination ratio for each dataset, to help readers assess whether the sparsity condition is satisfied.
+- Include a plot of ensemble performance vs. number of models to show convergence and justify the computational cost.
+- Analyze filtering quality of VES: what fraction of retained validation subsets are actually anomaly-free?
 
 ## Removed Points
 
-These points were flagged by reviewers but are removed for the following reasons (treat with caution if referenced elsewhere):
+These points were raised by reviewers but are either factually incorrect, based on misreading, or do not survive cross-checking against the paper:
 
-1. **Strength: "Theorem 4.2 derives a precise condition and provides a theoretical foundation."** — Conflicts with the verified weakness that the theorem is not rigorous and does not provide meaningful theoretical support. Moved here per the conflict rule (weakness wins).
+1. **"Evaluation protocol is not standard and likely inflates results — this issue alone is decisive"**: The reviewer conflates the image/graph experiments (where merge of train/test is explicitly stated in §5.3) with the time series experiments (where no such merging is stated, and the paper follows standard protocols from prior works). For the main time series results (Tables 1, 2), there is no indication that train and test are merged. The reviewer's claim that "all quantitative comparisons (Tables 1 and 2) are suspect" is not supported by the paper text — the merging is only done for the secondary image/graph experiments, and is explicitly stated there.
 
-2. **Strength: "Demonstrated generalization to image and graph anomaly detection."** — Conflicts with the verified weakness that generalization is not convincingly demonstrated due to limited scope. Moved here per the conflict rule.
+2. **"VES has a circular dependency"**: The reviewer argues that VES requires a reliable loss estimate before convergence to determine convergence. This misunderstands the algorithm: VES tracks *relative* losses across different validation subsets as training progresses. The losses are computed from the current model state at each epoch — no "pre-convergence" estimate is needed. The signal naturally emerges from the differential convergence rate the paper identifies (normal data losses decrease faster). VES never claims to identify anomalies upfront; it uses the evolving loss signal dynamically.
 
-3. **Criticism: "Not applicable to anomaly detection" claim (after Theorem 4.2) is unsubstantiated.** — The paper references Theorem A.2 in the appendix for this claim. Since the appendix was stripped by the parser, this criticism cannot be verified and is removed per the rule on missing appendix content.
+3. **"Self-supervised methods not considered is a weakness"**: The paper explicitly justifies this exclusion in §5.1: self-supervised methods would need NARCISSUS as a module, and since NARCISSUS already matches semi-supervised performance, the additional complexity is unnecessary. This is a reasonable scope decision.
 
-4. **Notation error: "$\sum_{y\in\mathbb{N}}$" should be "$\sum_{y\in\mathbb{Y}}$".** — Minor typographical/notation issue. Removed per the rule on typos and formatting nits.
+4. **"Results tables not present in extracted text"**: This is a parser artifact, not a paper problem.
 
-5. **Missing related works (InterFusion, DeepSVDD for time series, etc.)** — Removed per the rule that missing related works should not be mentioned, as external sources cannot confirm their existence in the context.
-
----
+5. **"The optimization problem in Eq. 3 is decorative / not connected to the algorithm"**: The paper explicitly states that the VES stopping criterion ensures the constraint in Eq. 3 is met (line 149). The connection exists, though it could be elaborated.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
-
----
+None beyond the paper's own contributions. The reviews do not surface a substantially novel framing, method, or connection that the paper itself does not already articulate.
 
 ## Suggestions
 
-1. **Report variance across multiple independent runs of the full NARCISSUS pipeline** (different random seeds, validation splits, retraining). Provide confidence intervals or error bars for F1, AUC, and precision in Tables 1 and 2. This single addition would address the most significant weakness.
+1. **Specify the time series evaluation protocol explicitly.** State clearly that for all time series experiments, standard train/test splits are used (training data = mixed normal+anomalous, test data = held-out), and that the semi-supervised baselines train on the clean normal portion of the training set only. This would preempt the evaluation-protocol concern entirely.
 
-2. **Clarify the VES convergence criterion.** Specify the exact metric monitored on the intersection of filtered subsets, the patience value, the improvement delta, and how $\eta$ is set in practice. This is necessary for reproducibility.
+2. **Fully specify RVES:** State the number of ensemble members used in experiments, the aggregation rule (e.g., average anomaly scores? majority vote of detected anomalies? how is "joint set" computed?), and the threshold selection procedure. Report total training time vs. a single semi-supervised run to substantiate the "lightweight" claim.
 
-3. **Either strengthen Theorem 4.2 or reposition it as intuition.** The theorem as presented is not a rigorous result and gives a false sense of theoretical grounding. Either provide a proper bound on the difference from anomaly-free training (non-trivial), or move the current content to the Discussion/Intuition section and replace it with empirical gradient measurements.
+3. **Provide η sensitivity analysis.** Show how performance varies with η (e.g., η ∈ {1%, 5%, 10%, 20%, 30%}) on at least 3 datasets, and give practical guidance for setting η without labels (e.g., using a held-out set, or setting η to a conservatively high value and showing robustness).
 
-4. **Expand image/graph experiments** to at least one additional dataset per modality to strengthen the generalization claim, or explicitly scope the contribution to time series.
+4. **Report NARCISSUS run-to-run variance.** Complement the bootstrapping variance plot (Figure 3) with the distribution of NARCISSUS F1 scores across multiple seeds, to directly demonstrate that the ensemble stabilizes performance.
 
----
+5. **Strengthen the theory or downplay it.** If Theorem 4.2 is to remain, explicitly acknowledge that it assumes the gradient-dominance condition rather than deriving it from more primitive properties, and focus theoretical effort on connecting the data characteristics (sparsity, boundedness) more tightly to the observed loss dynamics. Alternatively, frame the theory as a formalization of intuition rather than a predictive guarantee.
+
+6. **Validate VES filtering quality.** As a sanity check, report the precision of the filtering step: what fraction of the retained validation subsets are actually anomaly-free (using ground-truth labels) on a few datasets.
 
 ## Score and Decision
 
-**Originality:** High — the early-training-dynamics insight for unsupervised AD is novel.  
-**Importance of research question:** High — achieving semi-supervised-level accuracy without labels is practically important.  
-**Claims supported:** Moderate — time-series results are extensive but missing variance estimates; cross-modal generalization claims are weakly supported.  
-**Soundness of experiments:** Moderate — good range of baselines and datasets, but the lack of variance estimates is a significant gap for a robustness-oriented method.  
-**Clarity of writing:** Good — the paper is well-structured and the core idea is clearly communicated.  
-**Value to community:** Moderate — the method is practical and model-agnostic, but the current evidential standard is below what is needed to trust the claimed robustness.
+The paper presents a genuine and practically valuable insight — that early training dynamics can substitute for clean training data in anomaly detection — and supports it with reasonably strong empirical evidence on time-series benchmarks (7 backbones, 6 datasets). The main weaknesses (underspecified ensemble, missing hyperparameter sensitivity, limited domain generalization) are addressable and do not undermine the core time-series claim. The paper would benefit from clarifications and additional analysis but the central contribution is solid.
 
-The paper identifies a genuinely interesting phenomenon and proposes a pragmatic framework to exploit it. The time-series experiments, though lacking variance estimates, suggest the method has real potential. However, the gap between the claimed robustness and the evidence provided (no variance estimates, non-rigorous theory, weakly supported modality generalization) is too large for acceptance at this stage.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

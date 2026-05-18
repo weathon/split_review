@@ -1,85 +1,104 @@
-Now I have thoroughly verified all claims against the paper. Let me produce the consolidated review.
+Now I have all the information needed. Let me construct the final meta-review.
 
 ## Summary
 
-**MotionFlow** proposes a video generation framework that achieves camera-trajectory control by learning implicit pixel-level motion flows. It uses a secondary stable-diffusion network (reference motion network) to jointly encode camera trajectories and reference images into motion maps, which are then injected into an AnimateDiff-based video generation network via reference attention. A ViT-based semantic extractor further provides object-aware priors. The paper reports improved camera-trajectory alignment and visual quality over CameraCtrl and MotionCtrl on RealEstate10K and DL3DV-10k.
+MotionFlow proposes a camera-trajectory-guided video generation framework. The core idea is to use a pretrained image stable diffusion model (the "reference motion network") to convert camera trajectories (encoded as Plücker embeddings) into pixel-level reference motion maps, which are then injected into an AnimateDiff-based video generation network via cross-attention. A separate ViT-based semantic encoder (initialized from DINO) extracts foreground object features used for object attention, improving visual quality of salient objects. On RealEstate10K, the method achieves state-of-the-art rotation/translation errors and visual quality metrics against CameraCtrl and MotionCtrl.
+
+---
 
 ## Strengths
 
-- **Consistent camera-trajectory alignment across multiple pose estimators and trajectory difficulties (Table 1).** MotionFlow achieves lower rotation and translation errors than CameraCtrl and MotionCtrl for both basic and difficult trajectories using ParticleSfM, Dust3R, and VggSfM. For example, rotation error with ParticleSfM on basic trajectories: MotionFlow 0.096 vs. CameraCtrl 0.115 vs. MotionCtrl 0.142. The consistency across three different SfM methods strengthens confidence in the result.
-- **Higher visual quality on both in-domain and out-of-domain scenes (Tables 2 and 3).** On RealEstate10K (indoor), MotionFlow outperforms baselines on FID, SSIM, PSNR, LPIPS, and FVD. On the held-out outdoor DL3DV-10k dataset, it maintains superior quality (FID 13.78 vs. CameraCtrl 18.15 vs. AnimateDiff 20.31), demonstrating generalization beyond the training distribution.
-- **Ablation study validates both major components (Table 4).** Removing the reference motion network or the semantic extractor leads to clear degradation across all metrics (e.g., FVD 527 → 590 without semantic extractor, 527 → 642 without reference motion network), confirming the contribution of both modules.
-- **Interpretability experiment linking reference motion maps to optical flow (Figure 6).** The toy experiment showing that a lightweight network trained on only 12 pairs can translate RMMs to optical flow provides concrete evidence that the learned maps encode meaningful pixel-level motion, not just unstructured features.
+1. **State-of-the-art quantitative results on camera trajectory control.** On RealEstate10K, MotionFlow achieves the lowest rotation and translation errors across three different SfM methods (Dust3R, VggSfM, ParticleSfM) for both basic and difficult trajectory settings (Table 1). It also achieves the best FID (15.50), SSIM (0.746), PSNR (20.81), LPIPS (0.201), and FVD (83.90) against CameraCtrl and MotionCtrl (Table 2). These results are produced under a fair comparison setup where all methods are trained on the same data with the same baseline (SD1.5).
+
+2. **Unified pixel-level motion representation validated by ablation.** The ablation study (Table 4) confirms that removing the reference motion network causes significant drops across all metrics, and that using pretrained SD1.5 weights for it is beneficial. This directly supports the central claim that learning pixel-level motion priors via a separate diffusion network is an effective strategy for camera-guided generation.
+
+3. **Semantic extractor with object attention improves generation quality.** The ablation also shows that adding the semantic extractor improves all metrics (e.g., FVD drops from 91.2 to 83.90, FID from 18.53 to 15.50), confirming that object-aware conditioning contributes to video quality beyond what camera-only guidance provides.
+
+4. **Thorough geometric evaluation with multiple SfM methods and trajectory difficulties.** Using three SfM pipelines (ParticleSfM, Dust3R, VggSfM) and testing on both basic and difficult trajectories strengthens the evidence for trajectory alignment by reducing dependence on any single estimation method.
+
+5. **Practical downstream application demonstrated.** Section 4.4 shows that videos generated with a panoramic trajectory can be used for explicit 3D scene reconstruction, illustrating real-world utility beyond the video generation task itself.
+
+---
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None. The paper's core claims are supported by evidence and no verified weakness invalidates them.
+
+1. **Missing camera-control baselines in the generalizability evaluation (Table 3).** The paper evaluates generalizability on DL3DV-10k (outdoor scenes) by comparing with DynamicCrafter, SVD, and AnimateDiff — none of which are camera-controlled methods. Since the paper's core claim is about camera trajectory control, the generalizability comparison should include CameraCtrl and MotionCtrl (the primary competitors, which are also trained on indoor RealEstate10K). Without this comparison, Table 3 only shows that MotionFlow generalizes better than general I2V models on visual quality, not that its camera-control capability generalizes better. This undermines the quantitative evidence for the paper's generalizability claim.
+
+2. **Ambiguous term and training signal in stage one (Section 3.6).** The phrase "motion extractor" appears exactly once in the entire paper ("we train the Trajectory Encoder and motion extractor") and is never defined, explained, or referenced elsewhere. It is unclear whether this is a separate module, a different name for the reference motion network, or part of the trajectory encoder. Moreover, if the reference motion network is kept fixed in stage one, it is not explained what training signal is used to supervise the Trajectory Encoder — the standard diffusion loss (Eq. 2) requires the video generation network to be active, yet that network is also frozen. This is a genuine gap in the method description that makes the training procedure ambiguous.
 
 ### Minor
 
-- **The adaptation of baseline methods (CameraCtrl, MotionCtrl) to accept image prompts is underspecified.** The paper states (line 136) that all methods were "tested them using the same camera trajectories and **image prompts**," but does not describe *how* the baselines — originally designed for text conditioning — were modified to accept image inputs (e.g., whether CLIP text features were replaced with CLIP image features, or whether some other mechanism was used). While this does *not* constitute a "structural flaw" (the paper explicitly claims equal conditioning), the missing detail makes it hard for readers to assess whether the comparison fully isolates the motion-flow architecture from the choice of conditioning modality. This is a clarity gap, not an invalidation of results.
+1. **Overclaimed "object motion integration" framing.** The abstract and introduction state that the method "integrates both camera and object motions by converting them into the motion of corresponding pixels." In reality, the method does not take any object motion trajectories as input; the semantic encoder identifies salient objects from the reference image and improves their generated appearance, but there is no explicit conditioning on object dynamics. The conclusion (Section 5) acknowledges this — "it lacks explicit guidance for object motion control" — which partially mitigates the issue. However, the abstract's phrasing is still likely to mislead readers about what the method delivers. This should be rephrased to accurately reflect that the model handles both camera-induced and object-induced motion implicitly through a unified pixel-level representation, not through explicit object motion conditioning.
 
-- **The reference attention mechanism is ambiguously described and likely insufficient for reproduction.** Section 3.5 describes concatenating feature maps $p_i$ and $m_i$ along the width dimension, performing cross-attention, then extracting the first half. It is not specified what serves as queries, keys, and values in this cross-attention, nor how the spatial concatenation interacts with attention computation. The phrase "perform cross-attention" without specifying the Q/K/V sources leaves the mechanism under-defined.
+2. **The toy experiment on reference motion maps and optical flow is unconvincing (Section 4.3).** The experiment uses 12 training pairs from a single generated video and tests on 2 frames from the same video. Training a small network on such a tiny, non-independent sample is trivial overfitting and does not provide evidence that RMMs encode optical flow in a generalizable way. The paper then argues that RMMs "have more abundant information than OFs" — a claim this experiment cannot support. Either the experiment should be expanded to multiple videos with held-out scenes, or the argument should be tempered.
 
-- **The object attention mechanism is similarly vague.** The paper states "compute an attention map as a semantic mask between the semantic feature map and the output of reference attention" without specifying the attention operation (queries, keys, values, softmax). The subsequent description of "pointwise multiplied with the semantic mask" suggests the attention map is used as a gating signal, but how the attention map itself is computed is not clear.
+3. **Incomplete reporting of trajectory error computation (Section 4.1).** The evaluation pipeline estimates camera trajectories from both generated and real videos using the same SfM method and compares them. However, the paper does not specify the alignment procedure (e.g., Procrustes alignment for scale/rotation) between the estimated trajectories and the ground truth, nor how frame correspondence is established. While this protocol follows the general approach of CameraCtrl and MotionCtrl, the missing detail still hampers reproducibility. The paper should describe: (a) the alignment method used, (b) which frame serves as the reference, and (c) whether the error is averaged over views or frames.
 
-- **SfM-based evaluation on generated videos lacks validation.** The paper uses ParticleSfM, Dust3R, and VggSfM to estimate camera poses from generated videos. While using multiple SfM methods mitigates concerns, the paper provides no validation that these learned pose estimators produce reliable trajectories on synthetic video outputs (which may contain artifacts like temporal flickering or object deformation). A controlled study on synthetic data with known ground-truth poses would strengthen this evaluation.
+4. **Missing standard training details.** The paper reports GPU count (8× A800), batch size (1 per GPU), optimizer (Adam), learning rates (1e-4 and 1e-5), and duration ("one day" / "three days"), but omits: input video resolution, number of training frames, exact number of training steps, and learning rate schedule. These are standard reporting details needed for reproducibility.
 
-- **"Motion extractor" appears as an undefined term.** The training strategy section (3.6) introduces "motion extractor" for the first time without clarifying whether this refers to the reference motion network or a different component. Earlier sections consistently use "reference motion network." This naming inconsistency harms readability.
+5. **No ablation isolating the semantic encoder's effect on foreground vs. background.** Table 4 shows overall metric improvements from the semantic extractor, but since the object attention mechanism specifically targets foreground objects, an ablation measuring foreground object quality (e.g., segmentation-aware FID or LPIPS on object regions) would be more informative. As presented, it is unclear whether the improvement comes from better foreground rendering or from general feature enrichment.
 
-- **Toy experiment on RMM-to-optical-flow is too limited to support general claims.** The experiment uses 12 training pairs from a single video and tests on 2 pairs. While the paper is appropriately modest about this analysis ("we hypothesize," "toy experiment"), the sample size is too small for the results to be more than suggestive.
-
-- **No quantitative evaluation of joint camera + object motion.** The paper motivates joint modeling of camera and object motions, but quantitative evaluation is on RealEstate10K (mostly static indoor) and DL3DV-10k (mostly static outdoor). No quantitative results demonstrate performance on dynamic scenes with simultaneous camera and object motion. The paper acknowledges this as a limitation, but it narrows the scope of the claimed contribution.
-
-- **No confidence intervals or multiple-run statistics.** Reported metrics are single-run, which is common in this field but worth noting given the "large margin" claim.
+6. **No analysis of failure cases or limitations.** The paper contains a single sentence about lacking object motion control (Section 5) but otherwise presents no discussion of trajectory complexity sensitivity, occlusion handling, texture-less regions, or scenarios where the method fails. For a camera-control method, understanding the failure modes is important for assessing practical applicability.
 
 ### Trivial
 
-- Line 120: "objection attention" appears to be a typo for "object attention."
-- Line 172: Table 3 caption has "IC" abbreviation without expansion in the caption body (though it appears to mean "image condition," which is clear from context).
+- The paper states "CameraCtrl and MotionCtrl are three baseline methods" (line 136) — a minor wording issue.
+- The phrase "motion extractor" in Section 3.6 is undefined; this should be clarified or replaced.
+
+---
 
 ## Nice-to-Haves
 
-- A clearer specification of how CameraCtrl and MotionCtrl were adapted to accept image prompts (e.g., replacing CLIP text encoder with CLIP image encoder), which would put the comparison on fully transparent footing.
-- A controlled validation experiment on synthetic data (e.g., Kubric or rendered scenes) where ground-truth camera poses are known, to establish the accuracy of SfM-based evaluation on generated videos.
-- Quantitative results on a dynamic-object dataset (e.g., with moving foregrounds) to support the claim of joint camera+object motion handling.
-- A more detailed training recipe: number of optimization steps, learning rate schedule details (warmup, decay), and how overfitting was monitored during the two-stage training.
+- Evaluation of temporal consistency beyond FVD (e.g., warping error, temporal flickering) would strengthen the video quality assessment.
+- An analysis of what the semantic encoder actually learns (e.g., attention map visualizations across different scenes) would improve interpretability.
+- Reporting results on DL3DV-10k separately for each SfM estimation method (as done for RealEstate10K) would strengthen the generalizability evaluation.
+
+---
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were flagged by reviewers but are removed or downgraded after verification:
 
-- **Unfair baseline comparisons as a "structural flaw."** The paper explicitly states (line 136) that all methods were tested using "the same camera trajectories and **image prompts**." The harsh critic assumes baselines were "still using text prompts," contrary to the paper's claim. The real issue is insufficient detail about *how* baselines were adapted, which is a clarity concern, not a structural flaw. Moved to Minor (above) with appropriate framing.
+- **"No description of tensor shapes for reference motion maps" (Critic 2a):** REMOVED — the paper explicitly gives the shape p_i ∈ ℝ^{f×c×h×w} in Section 3.5 (line 120). The critic's claim that tensor shapes are absent is factually wrong.
+- **"No information on whether the semantic encoder is fine-tuned" (Critic 2c):** REMOVED — Section 3.6 states "subsequently, we train all parts for three days," which includes the semantic encoder. The critic overlooked this.
+- **"The paper does not state whether the trajectory encoder and reference motion network are trained jointly in stage two" (from Missing Parts):** REMOVED — Section 3.6 explicitly says "train all parts" in stage two. This is stated.
+- **"CLIP text encoder as LM" / "LLM generating images" style impossible asks:** Not present in this review.
+- **"The camera trajectory alignment evaluation is uninterpretable" / "ranking inconsistent across SfM methods":** DOWNGRADED to minor — the evaluation follows standard protocol used in CameraCtrl and MotionCtrl (as the paper states). The critic's questions about alignment details are reasonable, but the evaluation is not "uninterpretable" and the paper does note which SfM methods are used.
+- **Strength Finder's claim about the toy experiment being a strength (#5):** DOWNGRADED — the experiment is too small (12 training pairs, single video) to support the claims made, so it cannot count as a genuine strength.
 
-- **ControlNet critique.** The critic claims Section 3.4's argument about ControlNet is "hand-wavy" and the real challenge is data availability. The paper makes a specific architectural argument about domain mismatch between camera space and image space; this is a substantive design choice, not a weakness.
-
-- **Missing baselines (Direct-a-video, CamCo).** The paper quantitatively compares against the two most relevant camera-control methods (CameraCtrl, MotionCtrl). Comparing against every method in related work is scope creep.
-
-- **"three baseline methods" grammar issue.** Per hard rules, removed as a formatting/style nitpick.
-
-- **Section 3.4 framing about data availability.** The critic says the paper "later admits this" about data availability, but the paper's framing is not misleading — it simply identifies one of the challenges.
+---
 
 ## Novel Insights
 
-The reviews surface a tension that the paper itself does not fully grapple with: the core architectural claim is that jointly encoding camera trajectories and images through a secondary diffusion network yields better motion understanding than separate modules, yet the quantitative evidence for this advantage is partially confounded by the underspecified adaptation of baselines to image conditioning. The strongest evidence for the method's value is actually the trajectory alignment results (Table 1), where the advantage holds across three different SfM estimators — this is harder to attribute to conditioning asymmetry and more directly supports the motion-flow learning claim. The toy optical-flow experiment, while limited, is a genuinely clever sanity check that most papers in this area do not provide, and it gives concrete interpretability evidence that goes beyond typical qualitative visualizations.
+None beyond the paper's own contributions. The reviews do not surface any observation about the method's implications that the authors themselves do not already articulate.
 
-None beyond the paper's own contributions.
+---
 
 ## Suggestions
 
-- **Clarify baseline adaptation.** Add a sentence or footnote describing how CameraCtrl and MotionCtrl were adapted to accept image prompts (e.g., "We replaced the CLIP text encoder with a CLIP image encoder for all baselines, following Chen et al. (2023)").
-- **Specify the attention operations.** Provide a clear equation or figure specifying what Q, K, V are in both the reference attention and object attention mechanisms. The current concatenation-then-cross-attention-then-slice description is ambiguous without specifying the attention inputs.
-- **Validate SfM on synthetic data.** Add a controlled experiment on a synthetic dataset (e.g., Kubric) with known ground-truth camera poses to confirm that the SfM-based evaluation is reliable on generated videos.
-- **Replace "motion extractor" with "reference motion network"** throughout Section 3.6 for consistency, or define the term at first use.
-- **Add a dynamic-scene benchmark** (e.g., on a dataset with moving objects and known camera poses) to quantitatively support the claim of joint camera-object motion handling.
+1. **Re-evaluate on DL3DV-10k including CameraCtrl and MotionCtrl as baselines.** This is the single most important fix — without it, the generalizability claim is incomplete. The authors can either run those models on the outdoor dataset or provide a principled explanation (e.g., architectural incompatibility) for why they cannot.
+
+2. **Clarify the "motion extractor" term and the stage-one training signal.** Define what the motion extractor is, how it differs from the reference motion network, and what loss supervises stage-one training when the video generation network is frozen.
+
+3. **Tone down or clarify the "object motion integration" narrative in the abstract.** Replace phrasing that implies explicit object motion control with language about implicit pixel-level motion handling and object-aware semantic conditioning.
+
+4. **Expand or remove the toy experiment.** Either validate RMM-to-OF mapping on multiple videos with held-out scenes, or drop the claim that RMMs encode optical flow in a generalizable way.
+
+5. **Add trajectory error alignment details.** Describe the Procrustes or similarity alignment used between estimated and ground-truth trajectories, the reference frame, and the error aggregation method.
+
+6. **Report input resolution, number of frames per training video, and total training steps.** These are minimal reproducibility requirements.
+
+---
 
 ## Score and Decision
 
-The paper introduces a well-motivated framework with a clear architectural contribution (learning pixel-level motion flows via a secondary diffusion network) and provides substantial quantitative evidence across multiple metrics and datasets. The main concerns are about clarity of method description and evaluation details rather than structural flaws. The weaknesses identified are addressable in revision.
+The paper addresses an important problem (camera trajectory control in video generation) with a technically sound approach that achieves state-of-the-art results on the primary benchmark (RealEstate10K). The core contributions — the reference motion network design, the unified pixel-level motion representation, and the semantic encoder — are validated by ablations and produce clear gains. However, the paper is weakened by: (1) a missing baseline comparison in the generalizability evaluation that undermines a key claim, (2) an undefined "motion extractor" that creates ambiguity in the training procedure, and (3) several presentation and evaluation detail gaps that reduce reproducibility. These issues are addressable with revisions but are not so severe as to invalidate the core contribution. The paper would benefit from a minor revision cycle to address the major weakness and clarify the method description.
 
 MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL DECISION: <orange>Reject</orange>

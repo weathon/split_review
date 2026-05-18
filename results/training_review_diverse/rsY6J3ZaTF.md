@@ -1,22 +1,22 @@
-Now I have all the information needed to verify the reviewer's claims against the paper. Let me produce the final consolidated review.
+Now I have all the information needed. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes DistillSpec, a white-box knowledge distillation method that improves speculative decoding (SD) by aligning the draft model's distribution with the target model. The key design choices are (1) using on-policy data generated from the draft model itself and (2) tailoring the divergence function to the task and decoding strategy. Experiments across decoder-only and encoder-decoder models (33M–11B parameters) show 10–46% speedup improvements over standard SD, with extensions to lossy SD and multi-model "model garden" deployments. The paper also provides a theoretical connection (Theorem 1) linking on-policy TVD loss to sequence-level acceptance rate.
+This paper proposes DistillSpec, a white-box knowledge distillation method for improving speculative decoding by better aligning the draft model with the target model. The method makes two key design choices — on-policy data generation from the draft model and tailoring the divergence function to the task/decoding strategy — and demonstrates 10–45% wall-clock speedups over standard SD across multiple benchmarks (LM1B, XSum, CNN/DM, GSM8K) under both greedy and temperature sampling, using two model families (decoder-only GPT-like and encoder-decoder T5). The paper also explores extensions to lossy SD and a multi-model (model garden) setting, where combining distillation and SD achieves 6–10× latency reduction.
 
 ## Strengths
 
-1. **Systematic study identifies crucial design choices for draft‑model alignment.** The paper conducts a thorough investigation of two key KD ingredients — training data source (on-policy draft vs. teacher vs. ground truth) and divergence function (FKL, RKL, JSD, TVD) — and shows that on‑policy data from the draft model is both cost‑effective and yields strong acceptance‑rate improvements, while the optimal divergence depends on the task and decoding strategy (Figures 4, 5; Section 5.2). This goes beyond prior black‑box KD approaches that ignore teacher logits.
+- **Principled connection between KD objectives and SD efficiency metrics.** The paper explicitly ties the total variation distance (TVD) between draft and target distributions to the acceptance rate (Eq.~3), grounding the distillation objective in a theoretically motivated efficiency measure rather than using generic KD losses. This is a conceptually clean framing that distinguishes DistillSpec from prior KD-for-SD work.
 
-2. **Significant and consistent latency speedups over standard SD.** DistillSpec achieves 10–46% speedup over standard speculative decoding across five diverse benchmarks (LM1B, XSum, CNN/DM, GSM8K, BigBenchHard) under both greedy and non‑greedy sampling (Figure 1, Section 5.1). The speedup is attributed to improved acceptance rate and block efficiency (Figures 2, 3).
+- **Theoretical guarantee supporting on-policy distillation.** Theorem~1 provides a bound showing that minimizing on-policy (draft-generated) TVD loss guarantees a lower bound on the sequence-level acceptance rate. This directly justifies using the computationally cheaper draft model (rather than the expensive target model) for data generation.
 
-3. **Theoretical connection between on‑policy KD and acceptance rate.** Theorem 1 proves that if the on‑policy TVD loss between draft and target is small (≤ ε), then the sequence‑level acceptance rate is at least 1 – Tε (for fixed length T). This provides a principled justification for using student‑generated (on‑policy) data during distillation, a key novelty of DistillSpec.
+- **Consistent 10–45% speedup over standard SD across diverse tasks and decoding strategies.** Speedups are demonstrated on LM1B (decoder-only), XSum, CNN/DM, and GSM8K (encoder-decoder) under both greedy and temperature sampling, with the core result robust across two model families.
 
-4. **Practical guidance for combining KD and SD in a “model garden” scenario.** When multiple model sizes are available (T5 family), the paper shows that the optimal pipeline is: first distill a large model into a smaller target, then apply DistillSpec to train an even smaller draft. This yields 6–10× latency reduction with negligible performance degradation (Rouge2 drop from 23.1 to 23.0 on XSum; accuracy actually improving from 33.1 to 34.8 on GSM8K — Figure 8, Section 5.3). This insight directly addresses a realistic deployment constraint.
+- **Demonstrated transferability to unseen tasks.** A draft model distilled on GSM8K yields speedup improvements from 1.93× to 2.21× (greedy) and 1.78× to 2.02× (temperature) when applied zero-shot to 23 BigBenchHard reasoning tasks, showing that the learned alignment generalizes beyond the training distribution.
 
-5. **Transferability across tasks.** A draft model distilled on GSM8K transfers to 23 unseen reasoning tasks (BigBenchHard), improving average speedup from 1.93× to 2.21× (greedy) and 1.78× to 2.02× (non‑greedy) over standard SD (Section 5.1).
+- **Systematic ablation of the distillation recipe.** The paper compares four data generation strategies (ground-truth, draft-generated, target-generated, mixed) and four divergence functions (FKL, RKL, JSD, TVD) across two tasks and two decoding strategies. This provides nuanced, actionable guidance (model-generated data is crucial; optimal divergence is task- and decoding-dependent).
 
-6. **Comprehensive empirical evaluation across model families and decoding strategies.** Experiments cover both decoder‑only (GPT‑like) and encoder‑decoder (T5) models, at multiple scales (77M to 11B), and include both greedy decoding and temperature sampling.
+- **Model garden study with 6–10× latency reduction.** By first distilling a large target model into a smaller one and then applying DistillSpec to train an even smaller draft, the paper achieves 6.4× speedup on XSum and 10.7× on GSM8K with negligible performance drop — a practically impressive pipeline.
 
 ## Weaknesses
 
@@ -24,57 +24,54 @@ This paper proposes DistillSpec, a white-box knowledge distillation method that 
 None.
 
 ### Major
-None.
+
+- **Unresolved internal author notes in the manuscript.** Line~80 contains `\jfknote{This is approximately correct only for large gamma.}\kfnote{Hmmmm I think it is always correct now}\asrnote{...}` — unmistakable editing comments that were not removed before submission. These notes reveal that the authors were still debating the correctness of a technical claim (the relationship between acceptance rate and rejected tokens) in a background section. While this does not invalidate the experimental results, which stand independently, it signals that the manuscript has not undergone a final review, and a reader cannot be certain that all claims in the paper have been vetted by all authors. This must be cleaned up and the underlying ambiguity resolved before the paper can be accepted.
 
 ### Minor
 
-1. **Theorem 1 bound is loose and not contextualized.** The simplified bound states that the expected acceptance rate ≥ 1 – Tε. For realistic generation lengths (e.g., T=128 for translation, T=512 for summarization) and plausible on-policy TVD values, this bound can be negative (and thus vacuous). The paper presents this theorem as motivation for on-policy distillation but does not discuss its looseness, report empirical ε values, or compare the bound to the actual acceptance rates achieved (which are plausibly much higher). The empirical results are strong enough to stand alone, but the theoretical framing overpromises. The authors should either qualify the bound's practical weakness or show empirical ε to demonstrate when it is non-vacuous.
+- **Theorem~1 bound has limited practical force.** The bound on the acceptance rate is linear in the sequence length $T$ and the on-policy TVD loss $\epsilon$: $\mathbb{E}[\alpha(x)] \ge 1 - T\epsilon$. For moderately large $T$ (e.g., 1024), even a small $\epsilon$ (e.g., 0.001) makes the bound vacuous. The paper does not discuss how tight this bound is in practice or provide empirical estimates of $\epsilon$ for trained models. The theorem is used to motivate the on-policy design choice, which is empirically well-supported anyway, so this does not threaten the paper's contributions, but the limitation should be acknowledged.
 
-2. **Main speedup results are reported only as percentage improvements over baseline SD, without absolute baseline speedup factors.** The paper reports "10–46% speedup over standard SD" for the main results in Figure 1, but does not state what the baseline SD absolute speedup factors are (e.g., "2.1× → 2.8×"). Without this, it is impossible to assess practical significance: a 45% improvement over a 1.1× baseline is very different from the same percentage over a 2.5× baseline. Absolute speedup factors *are* reported for the transfer experiment (1.93× → 2.21×) and the model garden experiment (6.4×, 10.7×), so the omission in the primary Figure 1 results is inconsistent and should be remedied.
+- **Lossy SD evaluation is thin.** The analysis of lossy SD (Section~5.3) tests three lenience functions on only a single dataset (GSM8K) with one draft model. The paper's own text notes that "the power of interpolation can be limited," which somewhat undercuts the claimed "fine-grained control" over the quality-latency trade-off. The lossy SD contribution (claim~iii) would benefit from at least one additional dataset and a discussion of when lenience is most useful.
 
-3. **Recipe analysis covers only 2 tasks (XSum and GSM8K).** While the paper claims a "systematic study" of distillation recipes, the investigation of 4 data sources × 4 divergences is tested on only 2 tasks. The conclusion — "task-dependent and decoding-strategy-dependent" — is honest but disappointingly weak for such an extensive claim. The authors do provide a practical recommendation (use draft model for data generation), but whether the observed patterns hold on the other T5 tasks (WMT, CNN/DM) or the LM1B decoder-only setup remains unknown. Expanding to at least the full task suite from Section 5.1 would strengthen the contribution.
+- **All T5 experiments use a fixed size ratio (T5-Small as draft, T5-XL as target).** While the model garden study (Section~5.3) explores other sizes, the main distillation recipe analysis is confined to a single size ratio. At least one configuration with a different draft/target size combination would strengthen confidence that the findings generalize.
 
-4. **No variance or error bars reported for main metrics.** None of the key results (block efficiency, acceptance rate, speedup improvement) are reported with standard deviations, confidence intervals, or number of independent runs. Given that SD involves stochasticity (even in greedy mode due to resampling), single-run reporting is a methodological gap. The authors should add variance information at least for the headline speedup and block efficiency results.
+- **Block efficiency results use a single block size ($\gamma=7$).** The paper mentions that block efficiency saturates with larger $\gamma$ but does not show how the relative ranking of distillation methods changes with block size. Practitioners may choose different block sizes depending on latency targets, making this a relevant unexplored dimension.
 
-5. **Distillation training cost is not quantified.** The paper recommends using the draft model for data generation as "much lower cost" but never reports the GPU-hours or FLOPs required for distillation. This is a practical concern: if distillation takes days, the inference speedup must be weighed against this upfront cost. A brief discussion or scaling estimate would be valuable.
+- **Missing statistical significance and variance.** Speedup numbers are reported as single values without error bars, confidence intervals, or multiple-seed runs. Given that SD speed can vary with input length and token-level acceptance rates, reporting mean and standard deviation would increase confidence.
 
-6. **Hardware and relative cost c not specified for latency measurements.** The paper does not state the GPU type(s) used for latency measurements or report the relative cost c (target/draft forward-pass time ratio) for each model pair — a parameter on which SD speedup critically depends. For reproducibility, these should be provided.
-
-7. **Unexplained accuracy improvement on GSM8K.** The model garden experiment shows that DistillSpec improves GSM8K accuracy from 33.1 to 34.8 compared to the raw target model — which is surprising since SD preserves the target model's distribution. This could be due to the KD-plus-distillation pipeline changing the effective decoding distribution, but the paper offers no discussion. A brief explanation or caveat is warranted.
+- **Computational cost of distillation not reported.** The paper does not report how many GPU-hours the distillation training requires. Since the method is intended for practical deployment, knowing the one-time training overhead relative to the per-inference speedup would help readers assess the method's practicality.
 
 ### Trivial
-- The notation for the expectation in Eq. (1) is slightly ambiguous (expectation over what randomness — the SD process, the draft sampling, or the target distribution?). This is a minor clarity issue.
+- The use of `\revise{}` markup in the paper text (lines 119, 121, 149, 156, 158, 162) suggests the paper uses revision-tracking notation that should have been cleaned for the final version.
 
 ## Nice-to-Haves
-- Compare DistillSpec against a draft model explicitly trained to maximize acceptance rate (e.g., via a loss directly targeting TVD or using an adversarial objective).
-- Expand the recipe study to cover the full task suite from Section 5.1 to determine whether the "it depends" conclusion holds more broadly.
-- Test the claim that DistillSpec "does not require any changes to serving infrastructures already implementing SD" with at least one recent SD variant (SpecTr, Medusa). The claim is plausible by design but currently unsupported.
+
+- A clean ablation where only the data source varies (draft-generated vs. teacher-generated vs. mixed) while keeping divergence and training procedure identical would more directly isolate the benefit of on-policy data. (The paper's existing Figure~3 partially covers this, but the data source and divergence are both varied simultaneously.)
+- A small-scale "divergence selection" procedure (e.g., a short distillation sweep on a validation set) would turn the negative finding (no universal best divergence) into a practical design principle.
+- Testing zero-shot transfer on tasks more different from GSM8K (e.g., summarization or translation) would strengthen the generalization claim.
+- A direct plot of block efficiency vs. wall-clock speedup for different cost ratios $c$ would help readers understand the mapping between the efficiency metric and actual latency.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"Proof deferred to appendix — cannot verify tighter constants"**: The parser strips appendix content from all submissions; the proof exists in the original paper. Not a valid weakness.
-- **"Infrastructure compatibility claim not tested with SpecTr/Medusa"**: DistillSpec modifies only the draft model's weights, not the SD algorithm — compatibility with any SD infrastructure that accepts an arbitrary draft model is inherent by design. Testing every SD variant is outside the paper's scope.
-- **"Eq. (1) notation slightly ambiguous"**: This is a trivial clarity point that does not affect the paper's contribution. Moved to Trivial.
+- **"Missing comparison to concurrent KD-for-SD works (Liu et al. 2023)."** — Removed because the paper *does* discuss this work on line~53: "Concurrently, ~\citet{liu2023online} propose to improve SD using KD, but they assume an online setup with a changing query distribution, and focus on improving the acceptance rate rather than reducing the actual latency." The reviewer's claim that this comparison is missing is factually incorrect.
+- **"The recommendation to use draft-model data is stated more strongly than evidence warrants."** — Removed because the paper's actual recommendation (line~179) is nuanced: "using the draft model for data generation as it can achieve similar or superior performance compared to the target model, but at a much lower cost." The paper also explicitly acknowledges (line~173) the case where teacher-generated data with RKL is best (GSM8K, temperature sampling). The reviewer's criticism overstates the paper's claim.
+- **Strength Finder strengths that were generic.** — None found; the identified strengths are all backed by specific content in the paper.
 
 ## Novel Insights
 
-The reviews surface a genuine tension in the paper's presentation: Theorem 1 is positioned as a key theoretical justification, yet the bound is too loose to be practically informative (it can be negative for realistic settings). This does not undermine the paper's empirical contribution — the experiments convincingly show that on-policy KD improves SD — but it does mean the theoretical framing should be either tightened, discarded, or explicitly caveated. The harsh critic's observation that the speedup results are reported only as relative improvements (not absolute factors) is also a meaningful clarity gap that the strength finder's enthusiasm does not address. Beyond these, no novel insight emerges beyond what the paper itself contributions: that on-policy KD with tailored divergences substantially improves SD speedups, and that the optimal recipe is task-dependent.
+The most interesting finding from the review process is that the paper's core recommendation ("use on-policy data") is supported by strong empirical evidence but its theoretical justification (Theorem~1) is surprisingly weak — the linear-in-$T$ bound is essentially vacuous for realistic generation lengths. This creates an interesting tension: the practical guidance is correct, but the theory doesn't fully capture why. The anti-correlation between draft model task accuracy and SD alignment (Figure~3, compatibility plots) is a genuinely non-obvious finding that challenges the instinct to maximize standalone draft quality. The model garden result (6–10× speedup) is particularly compelling: combining distillation-for-quality with distillation-for-alignment yields more than additive gains.
 
 ## Suggestions
 
-1. In Figure 1 (or an accompanying table), report both the baseline SD absolute speedup factor and the DistillSpec absolute speedup factor alongside the percentage improvement. This lets readers assess practical significance directly.
-2. Add a brief paragraph discussing Theorem 1's looseness — state the bound, note that for large T it becomes vacuous, and report the empirical on-policy TVD (ε) achieved by DistillSpec so readers can see when the bound would be non-vacuous.
-3. Add error bars (or at minimum, range over 3+ runs) for the headline block efficiency and speedup results. Report the number of independent runs.
-4. State the GPU type, the relative cost c for each (draft, target) pair, and a rough estimate of distillation training cost (GPU-hours).
-5. Briefly explain or caveat the surprising GSM8K accuracy improvement (33.1 → 34.8) in the model garden experiment.
+1. Remove all internal author notes (\jfknote, \kfnote, \asrnote) and resolve the ambiguity about the acceptance-rate formula before resubmission.
+2. Add at least one additional dataset to the lossy SD evaluation to strengthen contribution~(iii).
+3. Report GPU-hours for distillation training and include variance across multiple runs for speedup numbers.
+4. Explicitly note the limitation of Theorem~1's linear-in-$T$ bound and provide empirical estimates of $\epsilon$ if possible.
+5. Add a brief discussion of how the relative ranking of distillation methods might change with different block sizes.
 
 ## Score and Decision
 
-The paper makes a clear, practical contribution: it demonstrates that knowledge distillation can substantially improve speculative decoding speedups across model families, tasks, and decoding strategies. The experiments are broad and the results are consistent. The weaknesses identified — a loose theoretical bound, underspecified speedup reporting, limited recipe scope, and missing experimental details — are real but addressable and do not undermine the core empirical contribution. On the evaluation axes: originality is good (new application of KD for SD alignment); the research question is important; the claims are largely well-supported by experiments; the experiments are generally sound though missing some details; the writing is clear; and the value to the LLM inference community is clear.
+This is a solid paper with a clear, practically relevant contribution. The empirical study is thorough, the speedup numbers are convincing, and the recipe analysis provides genuinely useful guidance. The main concerns are the presence of internal author notes (which must be cleaned), the thin lossy SD evaluation, and some missing implementation details (computational cost, variance). These are all addressable in a revision.
 
-**Overall Assessment**: The contribution largely stands. The paper requires clarifications and minor additional reporting but does not need a different set of experiments.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

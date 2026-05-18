@@ -1,78 +1,77 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the consolidated review.
 
 ## Summary
 
-The paper introduces DPPN (Defense through Perturbing Privacy Neurons), a method that (1) identifies a small subset of embedding dimensions ("privacy neurons") correlated with a sensitive token via differentiable mask learning, and (2) perturbs only those dimensions using a one-sided (neuron-suppressing) directional noise. The goal is to defend against embedding inversion attacks while preserving downstream utility. Experiments across six datasets, multiple attack models, and embedding models show improved privacy-utility tradeoffs compared to isotropic noise baselines.
+This paper introduces DPPN (Defense through Perturbing Privacy Neurons), a method that identifies a small subset of embedding dimensions ("privacy neurons") correlated with a sensitive token and perturbs only those dimensions using directional noise, rather than perturbing all dimensions uniformly. The approach uses a differentiable HardConcrete-based mask learning framework to detect privacy neurons in a black-box setting, and a neuron-suppressing perturbation function that pushes embeddings toward the negative direction to increase indistinguishability. Experiments across multiple datasets, attack models, and embedding architectures show that DPPN achieves substantially lower privacy leakage than baselines (LapMech, PurMech) while maintaining higher downstream task utility.
 
 ## Strengths
 
-1. **Differentiable neuron mask learning for targeted privacy-neuron identification.** Unlike prior work that adds uniform noise to all embedding dimensions, DPPN learns a binary mask per sensitive token via a HardConcrete distribution, enabling selection of only the top-k privacy-sensitive dimensions. Figure 2 validates that these top neurons have significantly higher sensitivity (avg. 0.04) than tail neurons (near zero), with a Wilcoxon p-value of 1.30e−21.
+- **Targeted perturbation of privacy neurons, supported by clear evidence**: The core idea — identifying and selectively perturbing only privacy-sensitive dimensions rather than all dimensions — is well-motivated and validated. On STS12 at ε=2, DPPN reduces leakage from 60% (unprotected) to 13%, while LapMech and PurMech only achieve 22% (Section 4.2). The preliminary analysis (Figure 2) confirms that top privacy neurons have significantly higher sensitivity than tail neurons (p=1.30e−21).
 
-2. **Neuron-suppressing perturbation demonstrably outperforms isotropic noise on the same dimensions.** Table 2 is the critical ablation: when LapMech and PurMech are applied *only to the same top-k privacy neurons* detected by DPPN, they produce negligible leakage reduction (even slight increases). In contrast, DPPN's suppress perturbation applied to the same neurons reduces leakage by 15.44% and improves downstream performance by 45.12% at r=10%. This cleanly isolates the benefit of the suppress direction from the benefit of selective targeting — directly addressing the confounded-comparison concern.
+- **Black-box neuron detection approaches white-box performance**: The differentiable mask learning framework (Section 3.2) enables privacy neuron detection without access to the attack model. At ε=2, DPPN shows only 3–6% absolute difference in leakage and <5% relative difference in downstream performance compared to the white-box DPPN-Oracle (Figure 4), and identifies 32–51% of the same top neurons as the white-box method (Figure 5).
 
-3. **State-of-the-art privacy-utility tradeoff across datasets.** On STS12 at ε=2, DPPN reduces Leakage from 60% (unprotected) to 13%, while baselines only reach 22% (Table 1). This pattern holds across FIQA, PII-Masking300K, and MIMIC-III datasets.
+- **Neuron-suppressing directional perturbation vs. isotropic noise**: The suppress function (Eq. 6) injects one-sided noise in the negative direction, making data points more indistinguishable than isotropic perturbations (Figure 3). At r=10%, suppress reduces leakage by 15.44% and improves downstream performance by 45.12% relative to full-dimension perturbation, while isotropic methods applied to the same neurons show negligible change (Table 2, Section 5.2).
 
-4. **Black-box defense approaches white-box performance.** The black-box detection method (DPPN) performs within 3–6% absolute Leakage difference of the white-box Oracle (FGSM-based) at ε=2 (Figure 4) and achieves 32–51% neuron overlap with the Oracle for top 10–20% neurons (Figure 5). This demonstrates the learned mask effectively approximates ground-truth neurons without access to the attack model.
+- **Comprehensive evaluation across attacks, models, and real-world data**: DPPN is tested against three attack models (Vec2text, GEIA, MLC), three embedding models (GTR-base, Sentence-T5, SBERT), and two real-world privacy datasets (PII-Masking300K, MIMIC-III). On MIMIC-III, DPPN reduces sex information leakage to 17% vs. 43% for baselines (Table 4). A case study (Table 6) shows DPPN preserves 62% semantic similarity when baselines degrade to 11%.
 
-5. **Robust across multiple attack models and embedding models.** Table 3 shows consistent gains against Vec2text, GEIA, and MLC (e.g., 88% relative leakage reduction under Vec2text at ε=1). Table 5 confirms similar gains on GTR-base, Sentence-T5, and SBERT.
-
-6. **Effectiveness on real-world sensitive data.** On MIMIC-III clinical notes, DPPN lowers sex information leakage from 88% (unprotected) to 17%, whereas baselines only reach 43% (Table 4). The case study (Table 6) shows DPPN preserves 62% semantic similarity while protecting sensitive tokens, compared to 11% for baselines at the same perturbation level.
+- **Interpretable and semantically meaningful neuron selection**: Qualitative analysis (Figure 6) shows that semantically similar words (e.g., weekdays, countries) cluster on the same top-5 neuron indices, and DPPN provides implicit protection to related tokens with 36–46% leakage mitigation (Section 5.3).
 
 ## Weaknesses
 
-### Fatal
+### Major
 None.
 
-### Major
-None. The reviewer's primary concern (confounded comparison) is substantially addressed by the existing ablation in Table 2, which shows LapMech and PurMech applied to the same top-k privacy neurons produce negligible benefit while the suppress method produces large gains. The remaining issues are at the minor/trivial level.
-
 ### Minor
+- **Downstream utility metric is not explicitly defined**: The paper states it reports "dataset-specific downstream performance" (line 139) but never specifies what metric is used for STS12 or FIQA (e.g., Spearman correlation? accuracy on a derived task?). While a reader familiar with STS benchmarks may infer the metric, the omission makes the utility numbers harder to interpret and the experiments harder to reproduce. This is the most significant clarity gap in the paper.
 
-1. **Privacy metrics lack full operational precision.** "Leakage" is defined as "the attack model's accuracy in predicting sensitive tokens" and "Confidence" as "the attack model's maximum probability of predicting sensitive tokens." For sentence-level attacks (Vec2text, GEIA) that reconstruct full sentences, it is unclear how token-level accuracy is computed — exact match, substring match, or position-independent detection. The paper should specify the exact protocol for extracting and evaluating predicted sensitive tokens from reconstructed sentences. While the relative comparisons are internally valid, absolute numbers are difficult to reproduce without this detail.
+- **Leakage metric protocol for sentence-level attacks is underspecified**: The paper defines "Leakage" as "the attack model's accuracy in predicting sensitive tokens" (line 139). For sentence-level attacks like Vec2text that generate free text, it is unclear whether accuracy is computed by scanning the generated text for the token, using a separate classifier head, or some other method. The same concern applies to "Confidence." This is a reproducibility issue.
 
-2. **Architecture of the classifier Pθ is underspecified.** The paper mentions "a multi-layer neural network parameterized by θ" (line 102) but provides no details on the number of layers, hidden dimensions, activation functions, optimizer, or training hyperparameters. This affects reproducibility of the mask learning component.
+- **Noise variance scaling has a ≈√2 discrepancy**: The paper states that scaling ε by √(k/d) "ensures consistent noise variance with full-dimension methods" (line 137). However, the suppress perturbation (Eq. 6) uses one-sided (half-Laplace) noise whose per-dimension variance is b², while the symmetric Laplace used by LapMech has variance 2b². Matching total noise variance would require scaling by √(k/(2d)) rather than √(k/d). This does not invalidate the overall comparison (DPPN still adds less noise to non-sensitive dimensions) but the formal claim about variance matching is imprecise.
 
-3. **Scaling of ε in Table 2 is not explicitly clarified.** The caption states "ε=2" but does not say whether the √(k/d) scaling (described in Section 4.1 for DPPN) is also applied when LapMech and PurMech perturb only the top-r% neurons in Table 2. Since the interpretation of the ablation depends on whether total noise variance is held constant, this needs explicit clarification.
+- **Full-perturbation baseline values not shown in Table 2**: Table 2 reports "relative improvement compared to the full perturbation" as percentages, but the absolute values for the r=100% case are not displayed. The reader cannot verify the claimed relative improvements.
 
-4. **The external embedding model used for semantic similarity (Section 7) is not named.** The paper assesses reconstructed sentence fidelity "using cosine similarity from an external embedding model" (line 243) but does not identify which model. This should be specified for reproducibility.
+- **Sparsity regularization constants (γ, ξ) are not specified numerically**: Equations 3 and 5 use γ and ξ without giving their values or a reference to standard defaults in the HardConcrete literature. This makes the sparsity behavior of the learned mask partly unspecified.
 
-5. **Variance/standard deviations are not reported for all experiments.** While Tables 1 and 5 mention standard deviations over 5 runs, Tables 2, 3, 4, and 6 do not include variance information. Given the method involves multiple stochastic components (concrete distribution sampling, noise injection), confidence intervals would strengthen reliability claims.
-
-6. **The method's token-specific nature and scaling receive limited discussion.** The defender must pre-specify sensitive tokens T, construct D⁺/D⁻ for each, and learn a separate mask per token. The paper acknowledges this scope (Goal 1 in Section 2.2) and provides partial evidence for implicit generalization to semantically similar words (Section 5.3, Figure 6). However, practical questions about scaling to many tokens and generalization to unknown sensitive tokens are not discussed. This limits the applicability discussion but does not invalidate the core contribution.
+- **Multi-token scenario not discussed**: The paper evaluates on one sensitive token at a time. Real deployments would need to protect multiple sensitive tokens that may co-occur (e.g., a name and a disease in the same sentence). The paper does not discuss how masks would combine or interact when multiple tokens are protected simultaneously. This is noted as a practical limitation; the paper does scope its method to protecting a "set of sensitive tokens" (Goal 1, line 42), so this is a limitation rather than a flaw.
 
 ### Trivial
-
-- The claimed ranges in the abstract ("5-78% privacy leakage reduction, 14-40% downstream improvement") are wide and presented without immediate context. While the full paper contextualizes them, including a median or representative setting in the abstract would improve communication.
-- Figure 5 shows 51% top-20% neuron overlap between black-box and white-box detectors, meaning nearly half the selected neurons differ. The paper notes DPPN's performance remains competitive despite this, but the observation warrants a brief explanation (e.g., whether mismatched neurons are functionally similar).
+None
 
 ## Nice-to-Haves
-
-- A formal or geometric argument for why one-sided suppression outperforms isotropic noise would strengthen the paper beyond the intuitive 2D visualization (Figure 3). Showing, for example, that the suppress direction reduces the expected distance between D⁺ and D⁻ embedding means more than isotropic noise at equal variance.
-- An ablation of k (the number of perturbed neurons) to justify the default choice of 20% and show sensitivity.
-- A comparison with a simple adversarial training baseline (e.g., Coavoux et al. 2018) would broaden the evaluation, though the paper's focus on perturbation-based methods makes this optional.
+- An ablation experiment that applies isotropic noise solely to selected privacy neurons (not all dimensions) would more clearly isolate whether the benefit of DPPN comes from the directional perturbation, the neuron selection, or both. (Table 2 partially addresses this but the "relative improvement" framing without absolute baselines makes comparison difficult.)
+- Reporting the number of sentences needed per token (|D⁺|) to learn a stable mask would help practitioners assess feasibility.
+- A brief discussion of how to handle sentences containing multiple sensitive tokens with potentially overlapping privacy neurons.
 
 ## Removed Points
 
-- **"Confounded comparison as a fatal structural issue"** — This overstates the problem. Table 2 in the paper already provides the controlled ablation the reviewer demands, applying LapMech and PurMech to only the top-k privacy neurons (with the same detection method). The results show these baselines produce negligible effect while DPPN's suppress method produces large gains. The reviewer's concern about ε scaling clarity in Table 2 is valid (kept in minor), but the claim that the evaluation "confounds two design choices" without separation is inaccurate given the existing Table 2.
-- **"Missing adversarial training comparison"** — The paper scopes itself to noisy embedding methods and explicitly discusses adversarial training as a separate line of work in Section 8. Criticizing its absence evaluates the paper against a standard it never set.
-- **"Missing code availability"** — While listed by the reviewer, code availability is not a standard requirement for conference submissions and does not weaken the paper's claims.
+The following points from the harsh critic are removed with justifications:
+
+1. **Criticism that Eq. 4 pushes optimization in the wrong direction**: REMOVED — the reviewer's algebraic interpretation is incorrect. Minimizing ℒ = −Σ log P(x⁺) − Σ(1 − log P(x⁻)) correctly pushes P(x⁺) → 1 (token present) and P(x⁻) → 0 (token absent). The reviewer's derivation conflates the direction of optimization.
+
+2. **Claim that "DPPN achieves higher downstream performance than the non-protected baseline" as a red flag**: The paper's text explicitly says DPPN "maintains or enhances the downstream performance relative to **baseline methods**" (LapMech, PurMech), not relative to the no-defense baseline (line 152). The specific numerical comparison cited by the reviewer (84.21% vs. 65.47%) does not appear in the extracted text and cannot be verified. The paper's central comparison is against LapMech/PurMech, and DPPN's advantage over those methods is clearly established. The downstream metric definition is indeed underspecified (kept in Minor above), but the specific claim about "exceeding no-defense" is a reviewer misreading.
+
+3. **"Title overclaims generality"**: REMOVED — the paper clearly scopes its approach within Section 2.2 (Goal 1: "the data owner defines a set of sensitive tokens T"), and the title accurately reflects the paper's content.
+
+4. **Criticism that the method is "concept-specific" rather than a general defense**: REMOVED — the paper's stated goals explicitly define the defense as protecting a predefined set of sensitive tokens. Evaluating it against the wrong class of expectations (a general, all-purpose defense) is out of scope.
+
+5. **Perturbation scaling critique framed as fatal apples-to-oranges comparison**: DOWNGRADED from fatal to minor. The reviewer correctly identifies that the one-sided noise has different variance (b² vs. 2b²), creating a √2 factor discrepancy in the claimed variance matching. However, this is an imprecision in the formal claim, not a fatal flaw. The paper's core comparison — showing DPPN outperforms LapMech/PurMech at the same ε — remains valid since the discrepancy equally applies across all DPPN experiments and doesn't affect the relative ranking.
 
 ## Novel Insights
 
-The reviews surface one genuinely useful observation: the paper's core contribution is the *combination* of selective neuron detection and one-sided noise injection, and the existing Table 2 already separates these factors reasonably well. The main gap is not in the evaluation design but in the clarity of reporting (scaling, metric definition, architecture details). The semantic grouping of privacy neurons (Figure 6: semantically similar words share neuron indices, providing implicit protection for related tokens) is an interesting qualitative finding that the paper could develop further — it partially mitigates the token-specificity concern.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. Clarify whether the √(k/d) scaling is applied to *all* methods in Table 2 (LapMech, PurMech, and Suppress) when they operate on only the top-k neurons, or only to DPPN's suppress method. State this explicitly in the caption.
-2. Provide the exact operational definition of Leakage for sentence-level attacks (Vec2text, GEIA): how is the predicted sensitive token extracted from the reconstructed sentence, and what constitutes a "correct" prediction?
-3. Specify the architecture, training hyperparameters, and optimizer for Pθ in Section 3.2.
-4. Name the external embedding model used for semantic similarity in the case study (Section 7).
-5. Add standard deviations or confidence intervals to Tables 2, 3, 4, and 6 for completeness.
-6. Add a brief discussion of practical considerations when protecting many tokens (e.g., computational cost, shared neurons between related tokens), leveraging the semantic grouping finding from Figure 6.
+1. Explicitly state the downstream metric for each dataset (e.g., "Spearman correlation for STS12, NDCG@k for FIQA"). This is the most important fix for the camera-ready version.
+2. Describe the exact protocol for computing Leakage and Confidence from free-text attack outputs like Vec2text.
+3. Correct the noise variance scaling claim to reflect the one-sided vs. symmetric Laplace difference.
+4. Add the absolute r=100% baseline values to Table 2 alongside the relative improvements.
+5. Provide the numerical values or literature defaults for γ and ξ in the sparsity regularization.
+6. Add a brief discussion of the multi-token scenario — even a paragraph acknowledging the challenge and sketching a solution (e.g., union of masks) would strengthen the practical framing.
 
 ## Score and Decision
 
-The paper presents a well-motivated idea with a clean two-component design (neuron detection + directional perturbation) and provides reasonably thorough experimental validation. The primary concern raised by the harsh critic — that the evaluation confounds two design choices — is addressed by the existing Table 2, which separates them and clearly demonstrates the advantage of the suppress perturbation. The remaining weaknesses are in clarity and completeness of reporting, not in the soundness of the core claims. The paper makes a genuine contribution to privacy-preserving text embeddings.
+The paper proposes a genuinely novel and well-motivated approach (targeted privacy neuron perturbation instead of uniform noise injection), validates it across a comprehensive set of experiments, and achieves convincing results. The main weaknesses are presentation/definition issues rather than flaws in the methodology or evidence. The paper makes a clear contribution to the privacy-preserving embedding literature.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

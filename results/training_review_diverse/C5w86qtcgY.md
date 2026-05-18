@@ -1,16 +1,26 @@
-Now I have all the evidence I need. Let me compile the final review.
+Now I have all the necessary information to verify each claim against the paper. Let me construct the final review.
+
+---
 
 ## Summary
 
-This paper studies decentralized finite-sum optimization over time-varying networks. Its contributions are threefold: (1) ADOM+VR, the first variance-reduced algorithm for time-varying networks in the strongly convex setting; (2) GT-PAGE, a method for the nonconvex setting that is claimed to be optimal; and (3) lower bounds for both settings. The paper identifies a gap between the strongly-convex lower bound (using per-node constants) and ADOM+VR's analysis (using global constants), which it honestly acknowledges.
+This paper studies decentralized finite-sum optimization over time-varying networks, covering both strongly convex and nonconvex objectives. Its main contributions are (1) **GT-PAGE**, an optimal variance-reduced method for the nonconvex case whose oracle and communication complexities match the derived lower bounds; (2) **ADOM+VR**, the first primal variance-reduced method for the strongly convex case over time-varying networks; and (3) **lower bounds** for both settings. The nonconvex results (GT-PAGE + matching lower bound) form a clean, complete story. The strongly convex part presents a new algorithm (ADOM+VR) and a separate lower bound under a different (non-uniform-parameter) setting, with the gap clearly acknowledged.
+
+---
 
 ## Strengths
 
-- **First variance-reduced decentralized methods for time-varying networks.** The paper proposes ADOM+VR (Algorithm 1) and GT-PAGE (Algorithm 2), which the related-work discussion credibly establishes as the first decentralized algorithms to combine variance reduction with time-varying communication graphs. Prior methods (GT-SAGA, DESTRESS, DEAREST) only handle static networks (Tables 1 and 2).
+1. **First variance-reduced methods and lower bounds for time-varying networks.** The abstract and related work correctly identify that "variance reduced schemes and lower bounds for time-varying graphs have not been studied in the literature." The paper fills this gap by providing both algorithms (ADOM+VR, GT-PAGE) and lower bounds for both convex and nonconvex settings.
 
-- **Novel lower bounds extending the decentralized counterexample technique to time-varying graphs.** Section 4 constructs "bad" problems for strongly convex and nonconvex cases, adapting proof ideas from static-network settings. The nonconvex lower bound (Theorem 2) gives separate, clean rates for communications (Ω(χLΔ/ε²)) and oracle calls (Ω(n + √n L̂Δ/ε²)).
+2. **Optimal GT-PAGE algorithm for nonconvex objectives with matching lower bound.** Corollary 2 (lines 289–300) gives GT-PAGE complexities of \(O(n + \sqrt{n}\hat{L}\Delta/\epsilon^2)\) oracle calls per node and \(O(\chi L\Delta/\epsilon^2)\) communications. Theorem 5/Corollary 6 (lines 379–398) gives matching lower bounds of \(\Omega(n + \sqrt{n}\hat{L}\Delta/\epsilon^2)\) and \(\Omega(\chi L\Delta/\epsilon^2)\). Table 2 clearly shows GT-PAGE is the first method achieving these rates over time-varying networks.
 
-- **Multi-stage consensus discussion.** Section 3.1 clearly explains how multi-stage consensus reduces the effective graph condition number χ to O(1) at a cost of ⌈χ⌉ communications per iteration, which helps practitioners understand how the complexity results translate to different network topologies.
+3. **Lower bounds for the strongly convex case under heterogeneous local condition numbers.** Theorem 3 (lines 350–362) proves lower bounds \(\Omega(\chi\sqrt{\kappa_b}\log(1/\epsilon))\) for communications and \(\Omega(n + \sqrt{n\kappa_s}\log(1/\epsilon))\) for oracle calls under the more general setting where each node may have its own smoothness and strong convexity parameters (Assumptions 8–9). This is a meaningful extension beyond the standard uniform-parameter case.
+
+4. **Comprehensive comparison tables.** Tables 1 and 2 list competing algorithms, their assumptions (static vs. time-varying, primal vs. dual), and their complexities, allowing immediate assessment of where ADOM+VR and GT-PAGE improve the state of the art.
+
+5. **Honest identification of the remaining gap.** The paper explicitly states (lines 310, 374) that the strongly convex lower bound uses different assumptions than ADOM+VR's analysis, and that matching them remains open. This transparency correctly scopes the contribution.
+
+---
 
 ## Weaknesses
 
@@ -18,51 +28,63 @@ This paper studies decentralized finite-sum optimization over time-varying netwo
 None.
 
 ### Major
+None.
 
-1. **Inconsistency between Theorem 2 and Corollary 2 for GT-PAGE.** Theorem 2 (line 285) states the number of GT-PAGE iterations is  
-   \( N = \mathcal{O}(\chi^3 L\Delta(1 + \sqrt{(1-p)\hat{L}^2/(bpL^2)})/\varepsilon^2) \).  
-   With the optimal choices \( b = \sqrt{n}\hat{L}/L,~ p = b/(n+b) \), the square-root term simplifies to 1, giving \( N = \mathcal{O}(\chi^3 L\Delta/\varepsilon^2) \).  
-   The corollary claims that with the same parameter choices and "number of communications per iteration χ," GT-PAGE requires \( \mathcal{O}(\chi L\Delta/\varepsilon^2) \) **communications**. If each iteration uses χ communication rounds (multi-stage consensus), total communications = \( N \times \chi = \mathcal{O}(\chi^4 L\Delta/\varepsilon^2) \). If each iteration uses 1 communication round (no multi-stage consensus), total communications = \( N = \mathcal{O}(\chi^3 L\Delta/\varepsilon^2) \). Neither interpretation yields the claimed \( \mathcal{O}(\chi L\Delta/\varepsilon^2) \).  
-
-   This is **not** a minor arithmetic slip: it directly undermines the paper's central claim that GT-PAGE is optimal and matches the lower bound (which is \( \Omega(\chi L\Delta/\varepsilon^2) \)). The paper provides no reasoning in the main text to bridge this gap, and the proof is deferred to a (parser-stripped) appendix. As published in the main text, the claimed communication complexity does not follow from the stated theorem.
+The paper's core claim — optimality of GT-PAGE for nonconvex problems — is well-supported, and the acknowledged gap in the strongly convex case does not undermine the nonconvex contribution.
 
 ### Minor
 
-2. **Assumption mismatch between the strongly-convex lower bound and ADOM+VR.** The lower bound (Theorem 4, Corollary 4) uses per-node constants \( L_i, \mu_i \) (with condition numbers \( \kappa_b = \max_i L_i/\mu_i, \kappa_s \)), while ADOM+VR is analyzed under global constants \( L, \mu \). The paper acknowledges this gap (line 374) but does not discuss whether the lower bound could be tightened or the algorithm's complexity could be expressed in per-node constants. The claim "ADOM+VR is optimal in terms of communication iterations" (Table 1) is therefore only valid modulo this gap. The paper frames this as an open question, which is honest, but the implications for the optimality claim could be stated more explicitly.
+1. **Non-standard formulation of gradient tracking in GT-PAGE is not adequately explained.** The paper describes gradient tracking in the standard form (line 251: \(x^{k+1} = W^k x^k - \eta y^k\)) but Algorithm 2 (lines 267, 275) uses \(((I_m - \mathbf{W}(k))\otimes I_d)\) instead of \(\mathbf{W}(k)\). This is because Assumption 4 (lines 130–142) defines \(\mathbf{W}(k)\) as a *Laplacian-like* matrix (kernel contains the consensus subspace, range is the mean-subtracted subspace) rather than the standard doubly stochastic gossip matrix. With this definition, \((I - \mathbf{W}(k))\) is a contraction on \(\mathcal{L}^\perp\) and the identity on \(\mathcal{L}\) — i.e., it *is* the gossip/consensus operator. The algorithm is therefore correct and equivalent to standard gradient tracking. **However**, the paper never explains this translation, leaving readers unfamiliar with this specific convention (used in prior ADOM+ work) to doubt the algorithm's correctness. A one-paragraph clarification connecting the two conventions would resolve this.
 
-3. **Ambiguity about multi-stage consensus usage for GT-PAGE.** Multi-stage consensus is presented in Section 3.1 as a general technique, but the nonconvex section (Section 3.3) never explicitly states whether GT-PAGE's analysis assumes multi-stage consensus. The corollary's phrase "number of communications per iteration χ" strongly suggests it does, but neither the theorem statement nor the surrounding text clarifies this. A clear statement would resolve confusion and help readers understand how the iteration bound relates to the communication bound.
+2. **The reduction from \(\chi^3\) in Theorem 2 to \(\chi\) in Corollary 2 is not explained.** Theorem 2 (line 285) gives iteration complexity \(O(\chi^3 \cdots)\), while Corollary 2 (line 297) gives communication complexity \(O(\chi L\Delta/\epsilon^2)\) with the note "number of communications per iteration \(\chi\)." The mechanism is multi-stage consensus (Section 3.1, lines 156–168): performing \(T = \lceil\chi\rceil\) consensus steps per iteration reduces the effective graph condition number to \(O(1)\) while multiplying per-iteration communication cost by \(\chi\). The \(\chi^3\) in the raw bound contains one factor from the condition number (eliminated by multi-stage consensus) and two from other sources; the net result is \(O(1\cdot\chi) = O(\chi)\). This is standard in the line of work following Kovalev et al. (2021), but the paper does not explicitly walk through the arithmetic, which would help readers.
+
+3. **ADOM+VR (Algorithm 1) is presented without high-level intuition.** The algorithm spans 21 lines with many variables (\(x_f, y_g, z_g, m\), multiple momentum parameters \(\tau_1,\tau_2,\sigma_1,\sigma_2\), etc.) and no explanation of how they relate to the saddle-point reformulation or the Katyusha momentum. Readers unfamiliar with ADOM+ (Kovalev et al. 2021) will struggle to parse it. A brief diagram or table mapping variables to their roles would significantly improve accessibility.
+
+4. **Strongly convex lower bound assumes \(\chi > 24\) (Theorem 3).** The paper does not explain whether this is a technical artifact of the proof construction or a substantive restriction. A brief remark would clarify.
 
 ### Trivial
 
-None.
+1. **The notation \(W^k\) in the gradient tracking description (line 251) differs from \(\mathbf{W}(k)\) in Assumption 4 and Algorithm 2.** While it is clear from context that \(W^k\) in line 251 is a generic gossip matrix (the standard form from Nedic et al. 2017), the mismatch with the formal \(\mathbf{W}(k)\) notation is momentarily confusing.
+
+2. **Tables 1–2 report complexities "without \(O(\cdot)\) notation and \(\log(1/\epsilon)\) factor," while Corollaries include the log factor.** This is standard and consistent, but a brief cross-reference in the captions would prevent confusion.
+
+---
 
 ## Nice-to-Haves
 
-- **A simple experimental validation** (e.g., on a synthetic finite-sum problem over a time-varying network). While the paper is primarily theoretical and should not be penalized for lacking experiments, even a single numerical figure confirming the predicted rates would increase confidence, especially given the inconsistency in the nonconvex analysis.
+- Add a short proof sketch for the lower bounds (Theorems 3 and 5) in the main text: the function class (e.g., composition of a "hard" function with a network that forces \(\chi\)-dependent information bottleneck), the network construction, and how the \(\chi\) and \(n\) dependencies arise. This is appendix-level material, but a paragraph would increase evaluability.
+- Explain whether the \(\chi > 24\) requirement in Theorem 3 is a technical artifact or fundamental.
+- Add a paragraph explaining how multi-stage consensus transforms the raw \(\chi^3\) bound into the final \(\chi\) dependence.
+
+---
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **"GT-PAGE update may be incorrect."** Removed because it reflects a misreading of Assumption 4. The paper defines \(\mathbf{W}(k)\) as a Laplacian-like matrix (not a standard doubly stochastic gossip matrix). With this definition, \((I - \mathbf{W}(k))\) is the consensus operator, making Algorithm 2's update *correct and equivalent* to standard gradient tracking. The formulation is internally consistent; the only issue is lack of explanatory text (captured in Minor weakness 1 above).
+- **"Lower bound proofs are absent from the main text."** Removed per policy: proofs deferred to the appendix are standard practice, and the parser strips appendix content.
+- **"\(\kappa_b\) and \(\kappa_s\) are not defined."** Factually wrong — they are defined in Assumption 8 (lines 345–347).
+- **"Table labeling inconsistent about log factors."** The tables explicitly say they omit the log factor; the corollaries include it. This is consistent, not an error.
+- **"Pure formatting/style nitpicks"** and **"typos/grammar"** removed per policy (these are parser artifacts, not author errors).
 
-- *"Missing appendix / proofs"* (from Harsh Critic). The parser strips appendix sections from all submissions; they exist in the original. Removed per instruction.
-- *"No experimental validation — for a methods paper, this is a significant omission"* (from Harsh Critic). A theoretical paper analyzing complexity bounds and lower bounds should not be faulted for lacking empirical validation. Moved to Nice-to-Haves.
-- *"The paper would benefit from a remark on whether the χ dependence cannot be better than linear"* (from Harsh Critic). This is scope creep; the paper's construction gives linear χ dependence as stated, and asking whether it could be "better" is asking for a different paper.
-- *"GT-PAGE matches the lower bounds and is optimal"* (from Strength Finder, point 2). This conflicts with the verified major weakness #1. When a strength and a verified weakness disagree, the weakness wins.
-- *"Pure formatting/style nitpicks"* and *"typos/spelling/grammar"* from the Harsh Critic's section-by-section notes — removed per instruction.
+---
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the key insight from the reviews is that the paper's central optimality claim for GT-PAGE is unsupported by the theorem/corollary pair as presented in the main text. This is not a minor presentational issue but a mathematical inconsistency that must be resolved before the paper's main result can be accepted. The strongly-convex contribution (ADOM+VR + lower bounds) is cleaner and honestly framed, but the nonconvex analysis needs correction.
+None beyond the paper's own contributions. The reviewer analyses surface no contradictions or surprising patterns that the paper itself does not discuss.
+
+---
 
 ## Suggestions
 
-1. **Resolve the χ³ vs χ discrepancy.** The authors should either correct the iteration bound in Theorem 2 (if χ³ is a typo for χ), or show clearly how the corollary's communication complexity follows — e.g., by stating whether multi-stage consensus is assumed, deriving the effective iteration count with effective condition number \( O(1) \), and computing total communications as \( \chi \times \text{iterations} \). If the χ³ factor is correct, the corollary's claim must be revised and the optimality claim withdrawn.
-2. **Explicitly state whether multi-stage consensus is used for GT-PAGE.** Add a sentence in Section 3.3 or in the corollary statement.
-3. **Discuss the strongly-convex assumption gap more concretely.** Even a short paragraph explaining whether matching lower bounds under global constants is possible, or whether the gap is inherent, would strengthen this part of the paper.
+1. Add a brief paragraph (2–4 sentences) in Section 3.3 explaining that with \(\mathbf{W}(k)\) as defined in Assumption 4 (Laplacian-like), the operator \((I - \mathbf{W}(k))\) plays the role of a standard gossip matrix — contracting disagreement to zero while preserving consensus — so the GT-PAGE update is standard gradient tracking in this convention.
+2. In Corollary 2, explicitly state: "The raw \(\chi^3\) bound in Theorem 2 reduces to \(\chi\) via multi-stage consensus (Section 3.1): each iteration performs \(O(\chi)\) communications, reducing the effective condition number to \(O(1)\), yielding the final \(O(\chi)\) communication dependence."
+3. Add a short intuition paragraph for Algorithm 1 mapping its variables to the saddle-point reformulation.
+
+---
 
 ## Score and Decision
 
-The paper addresses an important problem and contains valuable ideas (first VR methods for time-varying networks, novel lower bounds). However, the verified inconsistency between Theorem 2 and Corollary 2 is a structural flaw that undermines the paper's main claim of optimality for GT-PAGE. In its current form, the paper cannot be accepted. The strongly-convex part is not affected by this issue and represents a solid contribution, but the nonconvex part is the paper's headline result. A major revision is needed.
+The paper presents a clean, optimal algorithm (GT-PAGE) for the nonconvex case with matching lower bounds, and makes a credible first step on the strongly convex side with transparent acknowledgment of the remaining gap. The main issues are presentation/clarity rather than correctness. The paper is solid and ready for publication with minor revisions.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

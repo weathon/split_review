@@ -1,80 +1,80 @@
-Now I have a thorough understanding of the paper. Let me compile the final consolidated review.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes CDIM (Constrained Diffusion Implicit Models), an extension of DDIM that enforces linear measurement constraints during accelerated sampling to solve noisy linear inverse problems using pretrained diffusion models. The method modifies DDIM updates by projecting Tweedie estimates of the denoised image to match observations (via L² or KL-divergence constraints), enabling 10–50× speedup over methods like DPS and FPS-SMC while maintaining competitive quality. It also handles non-Gaussian noise through distributional divergence minimization.
+This paper proposes Constrained Diffusion Implicit Models (CDIM), which extend DDIM to solve noisy linear inverse problems by modifying the diffusion updates to enforce constraints on the Tweedie estimate $\hat{\mathbf{x}}_0$. The core ideas are: (1) using gradient-based optimization to push the Tweedie estimate toward constraint satisfaction at each accelerated DDIM step, (2) handling non-Gaussian noise via KL divergence minimization between empirical residuals and a known noise distribution, and (3) an early-stopping heuristic for the noisy case. Experiments on FFHQ and ImageNet show competitive or better image quality than DPS, MCG, and FPS-SMC while using far fewer network evaluations, and qualitative demos on time-travel rephotography and sparse point cloud reconstruction illustrate the method's versatility.
 
 ## Strengths
 
-- **Substantial inference acceleration with competitive quality**: Table 1 shows CDIM variants achieve runtimes of 2.4–10.2 seconds on FFHQ versus 70.42s (DPS) and 116.9s (FPS-SMC), while matching or exceeding their FID/LPIPS on several tasks (e.g., FID 29.68 on Gaussian deblur, best among all methods). This directly supports the claimed speed–quality Pareto improvement.
+- **Large practical speedup over prior diffusion inverse solvers while maintaining quality.** Table 1 shows CDIM fast variants run in 2.4–2.6 seconds per image on FFHQ tasks, versus 70–117 seconds for DPS, FPS-SMC, and MCG, with competitive or better LPIPS/FID scores. This is a genuine practical contribution — bringing diffusion-based inverse problem solving from minutes to seconds on a single GPU.
 
-- **Principled handling of non-Gaussian noise**: The discrete KL formulation (Section 4.2) and Pearson-residual-based Gaussian KL for Poisson noise provide a principled mechanism for arbitrary noise models. Figure 3 (bimodal inpainting) and the Poisson denoising example (Figure 1/Teaser) show CDIM reconstructs images under noise types that DPS cannot handle.
+- **Clean theoretical framework for enforcing constraints via the Tweedie estimate.** The formulation of projecting the DDIM update so that $\mathbf{A}\hat{\mathbf{x}}_0 = \mathbf{y}$ (Eq. 7) is well-motivated, and the connection to a tractable Lagrangian (Eq. 8) is clearly explained. The observation that as $t \to 0$ the objective becomes a convex quadratic (line 120) provides a principled foundation for why constraint satisfaction is achievable.
 
-- **Noise-agnostic early stopping**: Algorithm 2 stops optimization when the empirical residual variance falls below the known noise variance, preventing overfitting to noise. Figure 4 demonstrates this prevents fitting out-of-distribution noisy observations.
+- **Systematic ablation of the denoising–optimization trade-off.** Figure 5 (T' vs K analysis) fixes the total inference budget at 200 network evaluations and shows that FID favors more denoising steps while LPIPS/PSNR benefit from a balanced mix. This gives practical deployment guidance and shows the authors understand the method's operating characteristics.
 
-- **Theoretical motivation for exact recovery**: Section 4.1 formally argues that as \(t \to 0\), \(\|\mathbf{y} - \mathbf{A}\hat{\mathbf{x}}_0\|^2\) becomes a convex quadratic that can be minimized to arbitrary accuracy, providing a theoretical guarantee for exact constraint satisfaction in the noiseless case that methods like DPS lack.
+- **Conceptual extension to non-Gaussian noise via distributional divergence minimization.** The idea of optimizing the KL divergence between empirical residuals and a known noise distribution (Section 4.2), with explicit formulations for Gaussian, Poisson (Pearson residuals), and general discrete noise, is a principled generalization beyond the standard Gaussian assumption.
+
+- **Demonstration on diverse applications without task-specific training.** The time-travel rephotography and sparse point cloud reconstruction examples show the method generalizes to realistic, non-synthetic inverse problems using only a pretrained FFHQ model.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None. The paper's core claims are supported; no single weakness invalidates the main contributions.
+
+- **Unqualified "exact recovery" claim in the abstract and contributions list overstates what the actual algorithm delivers.** The abstract states "CDIM exactly satisfies the constraints" and the contributions list claims "exact recovery of noiseless observations." However, the actual implementation (Algorithms 1 and 2) uses a Lagrangian relaxation (Eq. 8) with a fixed, small number of gradient steps ($K=1$ or $K=3$), not the hard projection (Eq. 7). The paper itself acknowledges at line 124–128 that the Lagrangian is a relaxation of the projection and that for large $t$ the constraint may be infeasible. The theoretical claim (line 120) that exact recovery is possible "by taking sufficiently many gradient steps" as $t\to 0$ is technically correct but does not match the unqualified "exactly satisfies" language in the abstract, nor the $K$ values actually used in experiments. This misrepresents the method's practical capability. The claim should be qualified to reflect what the algorithm with finite $K$ achieves, e.g., "can approximately satisfy the constraints to arbitrary accuracy in the limit" or provide quantitative evidence (e.g., $\|\mathbf{y} - \mathbf{A}\mathbf{x}_0\|$ on noiseless tasks) that the practical implementation indeed achieves near-exact satisfaction.
+
+- **Missing baseline details (number of function evaluations) undermine the acceleration claims.** The 10–50× speedup claim (abstract) is a headline contribution, but Table 1 reports only wall-clock time for baselines — not the number of diffusion steps or NFEs. Without knowing whether DPS uses 1000 DDPM steps while CDIM uses 25 DDIM steps, readers cannot decouple whether the speedup comes from the method's projection procedure or simply from using fewer denoising steps. Further, DDRM runs in 2.0s (faster than CDIM-fast's 2.4s), which undercuts the "10–50× faster" scope — the paper should specify which methods/families the speedup claim applies to and report NFEs for all methods.
 
 ### Minor
 
-1. **"Exact recovery" claim for noiseless observations is not experimentally validated.** Section 4.1 argues that as \(t\to0\) the projection can satisfy the constraint exactly. However, all main experiments (Table 1) use Gaussian noise with \(\sigma=0.05\). The paper includes no noiseless version of any task (e.g., super-resolution or inpainting without added noise) to verify that \(\|\mathbf{y} - \mathbf{A}\mathbf{x}_0\| = 0\) is actually achieved after the diffusion process. The central claim of exact recovery is argued theoretically but unsupported by direct experimental evidence.
+- **Non-Gaussian noise handling lacks quantitative evaluation.** The bimodal noise demonstration (Figure 4) and Poisson noise example (Figure 1) are only qualitative. There are no FID/LPIPS numbers for any non-Gaussian noise task, and no comparison to any baseline (even one that handles such noise poorly). While the conceptual contribution is clear, the claim of "effectiveness given non-Gaussian noise" (contribution 3) needs at least one quantitative benchmark to be substantiated.
 
-2. **The KL divergence formula appears to have its direction reversed.** Equation (2) in Section 4.2 writes \(\infdiv{R(\mathbf{A}\hat{\mathbf{x}}_0,\mathbf{y})}{r_L} = \sum_{b=1}^B r_B(b)\log\left(\frac{r_B(b)}{[R(\mathbf{A}\hat{\mathbf{x}}_0,\mathbf{y})]_B}\right)\). This computes \(D_{\text{KL}}(r_B \parallel \text{empirical})\), not \(D_{\text{KL}}(\text{empirical} \parallel r_B)\) as the notation \(\infdiv{R}{r_L}\) would suggest. The direction is ambiguous. While both directions would drive the distributions to match during optimization, the formula as written does not match the stated intent.
+- **Step-size schedule via expected gradient norm is validated only qualitatively.** Figure 7 shows a qualitative comparison of three $\eta$ schedules on one task, but no quantitative metrics (FID/LPIPS) across tasks or noise levels. The claim that the expected gradient norm computed on FFHQ training data generalizes to ImageNet is asserted (line 284) without evidence. Cross-dataset transfer of this hyperparameter should be validated or discussed.
 
-3. **The step-size heuristic lacks quantitative evaluation and specification.** Section 4.4 proposes \(\eta \propto 1 / \mathbb{E}_{\mathbf{x}\sim\mathcal{X}_{\text{train}}}\|\nabla_{\mathbf{x}_{t-\delta}}\|\) estimated from "FFHQ training data" without specifying: number of samples used, resolution, noise schedule details, or the estimated magnitudes as a function of \(t\). The only evaluation is a single qualitative comparison (Figure 5). Given that this heuristic is used in all CDIM experiments, the lack of quantitative analysis (e.g., FID/LPIPS sensitivity to normalization strategy) weakens reproducibility.
+- **The "noise-agnostic" label is misleading.** Section 4.3 calls Algorithm 2 "noise-agnostic" but the early-stopping condition (Algorithm 2 line 246) requires knowledge of $\text{Var}(r)$. The method is agnostic to the *distributional form* of the noise but not to its variance. The term should be clarified (e.g., "distribution-agnostic" or "variance-aware").
 
-4. **Backpropagation cost through the denoising model is not discussed.** Each projection step (Eq. 7) requires computing \(\nabla_{\mathbf{x}_{t-1}}\|\mathbf{y} - \mathbf{A}\hat{\mathbf{x}}_0\|^2\), which involves gradients through \(\epsilon_\theta\). The paper describes "total network passes" as \(T'(K+1)\) but does not clarify whether this counts forward passes only or includes backward passes, nor whether reported runtimes include backward pass time. This matters for accurately assessing the method's computational cost and for fair comparison with baselines that do not require backpropagation through the denoising model.
+- **Implementation details for the discrete KL approach are underspecified.** The paper describes discretizing residuals into $B$ buckets (line 160–163) but does not specify how $B$ is chosen, the bin width, or the range. This matters for reproducibility of the bimodal noise experiment.
 
-5. **Missing confidence intervals in Table 1.** The main quantitative results report FID and LPIPS without variance or standard deviations across seeds. Some baselines show large score variation across tasks (e.g., DDRM's FID ranges from 29.26 to 74.92). Without uncertainty estimates, it is difficult to assess whether CDIM's advantages are statistically robust.
-
-6. **ImageNet results are referenced but absent from the main paper.** Section 5.1 states evaluation on both FFHQ-1k and ImageNet-1k, but Table 1 only shows FFHQ. ImageNet results likely appear in the appendix (which is not included in the main text). The main paper should at least summarize these results or state that trends are similar to FFHQ.
+- **Sensitivity of the Lagrangian weight $\lambda$ is not analyzed.** The paper states $\lambda$ is "achieved implicitly by early stopping after $k=K$ steps" (line 127–128), but does not examine how results depend on $\lambda$ or the stopping criterion. A brief analysis would strengthen the paper.
 
 ### Trivial
-- **The "10–50× faster" claim includes DDRM (2.0s) as a baseline**, which is faster than some CDIM variants (2.4–2.57s for fast variants). The claim is accurate for comparisons against DPS and FPS-SMC, but could be more precisely qualified.
+
+- None.
 
 ## Nice-to-Haves
-- A brief discussion of how \(\text{Var}(r)\) is estimated or inferred for the noise-agnostic early-stopping in practical settings where the noise variance is not known in advance.
-- The \(T'\) vs \(K\) trade-off ablation (Figure 9) uses only random inpainting; extending to one additional task (e.g., super-resolution) would strengthen the generality of the conclusions.
-- A plot or statement confirming that the pretrained checkpoints (trained for specific noise schedules) remain reliable under the large DDIM step sizes used for acceleration.
+
+- Report $\|\mathbf{y} - \mathbf{A}\mathbf{x}_0\|$ reconstruction error for noiseless tasks to quantitatively verify the exact recovery claim.
+- Validate the Gaussian assumption for Pearson residuals (Poisson noise) with a Q-Q plot or normality test at the noise levels used.
+- An adaptive mechanism for setting $K$ (e.g., early stopping based on gradient norm or constraint satisfaction) would be a natural improvement.
+- A Pareto analysis of the $T'$ vs $K$ trade-off across multiple computational budgets (rather than a single fixed budget of 200 steps) would be more informative.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
-- **"The claim of 'exactly optimize' the KL constraint is overstated"**: The paper's phrasing "propose to exactly optimize the Kullback-Leibler divergence" refers to optimizing the KL divergence as the *objective*, not achieving exactly zero KL. Gradient-based optimization of a KL objective is standard practice. The criticism reads too literally into the wording.
-- **"Ablation study limited to one task"**: The paper explicitly acknowledges the single-task setting for the \(T'\) vs \(K\) trade-off. Most ablation studies in this literature use a single representative task. This is a scope choice, not a weakness.
-- **"Additional applications lack metrics"**: These are explicitly presented as demonstrations of versatility, not rigorous validation. The paper correctly avoids over-claiming here.
-- **"Pretrained model compatibility with large DDIM steps"**: The paper's strong quantitative results (Table 1) empirically confirm that pretrained models work with the accelerated schedule. The concern is addressed by the experiments themselves.
-- **"Speed-up claim should be qualified against all baselines"**: The claim "10 to 50 times faster than previous conditional diffusion methods" is accurate against the most competitive baselines (DPS, FPS-SMC). DDRM is 2.0s but has much worse quality (e.g., FID 62.15 on super-resolution vs 33.87 for CDIM-fast). Criticizing the claim based on an inferior baseline is not substantive.
+
+- *"Backprop through the diffusion model is computationally expensive"* — This is a characteristic of how the method works, not a weakness. The memory/scaling trade-off is inherent to gradient-based approaches and the fast variants ($K=1$) mitigate it. Not a valid criticism.
+- *"Time-travel rephotography and 3D point cloud examples lack evaluation"* — These are presented as qualitative demonstrations of versatility, not as core evidence. Criticizing them for lacking metrics holds them to the wrong standard.
+- *"The Lagrangian is only an approximation of the constrained problem"* — The paper explicitly acknowledges this (lines 124–128) and explains why the relaxation is necessary. The criticism restates what the paper already says without adding insight; the core issue is the *unqualified* claim, not that a relaxation is used.
+- *"T' vs K analysis should show Pareto frontier across budget levels"* — The paper shows useful analysis for one budget. Suggesting additional analyses is a nice-to-have, not a weakness.
 
 ## Novel Insights
-None beyond the paper's own contributions.
+
+None beyond the paper's own contributions. The reviews surface no perspective that the paper itself does not already provide.
 
 ## Suggestions
-1. Add a small table showing, for noiseless super-resolution and inpainting on FFHQ, the final \(\|\mathbf{y} - \mathbf{A}\mathbf{x}_0\|\) (or PSNR relative to the clean observation) to directly validate the "exact recovery" claim.
-2. Clarify whether reported runtimes include backward passes through \(\epsilon_\theta\); add a sentence noting that each projection step requires a gradient through the denoising model.
-3. Correct the KL divergence formula direction or explicitly state which direction of KL is being used and why.
-4. Provide quantitative sensitivity analysis for the step-size heuristic (e.g., FID/LPIPS across three normalization strategies) and specify the estimation procedure (number of samples, schedule).
-5. Add standard deviations or bootstrapped confidence intervals to the main results table.
+
+1. **Tone down the exact recovery claim** in the abstract and contributions to match the actual procedure: "enables exact recovery of noiseless observations in the limit of many inner iterations, and in practice achieves near-exact constraint satisfaction with few iterations."
+2. **Add a column to Table 1** reporting the number of diffusion steps / NFEs for every baseline method, or at minimum cite the canonical NFE values from the original papers.
+3. **Add one quantitative non-Gaussian noise experiment** — e.g., FID/LPIPS on FFHQ with bimodal noise or Poisson corruption — even if no baseline handles such noise, to substantiate Contribution 3.
+4. **Quantitatively validate the expected-gradient-norm step-size schedule** by reporting FID/LPIPS across tasks for the three $\eta$ schedules, and test whether the FFHQ-computed schedule transfers to ImageNet.
+5. **Specify bucket parameters** ($B$, bin width, range) for the discrete KL approach to ensure reproducibility.
 
 ## Score and Decision
 
-**Originality**: 6/10 — Extension of DDIM with constraint projection is novel but builds on well-known components (DDIM, Tweedie, projection, KL divergence).
+**Overall assessment:** The paper presents a practically useful method with solid conceptual foundations and compelling speed-quality results on standard benchmarks. However, the unqualified "exact recovery" claim in the abstract overstates what the algorithm delivers with the hyperparameters actually used, and the missing baseline details (NFEs) make the acceleration claims difficult to fully evaluate. These issues are fixable with careful revisions. The non-Gaussian noise contribution, while conceptually novel, needs at least one quantitative result to be convincing. The paper would benefit from a round of revision that aligns its claims with its evidence.
 
-**Importance**: 8/10 — Fast and high-quality solutions to inverse problems with diffusion models are practically important and actively sought.
-
-**Claims support**: 7/10 — Core claims (speed, quality, noise handling) are well-supported. The "exact recovery" claim is theoretically motivated but not experimentally validated.
-
-**Soundness**: 7/10 — Method is sound; the primary concern is the KL formula direction issue (minor technical error) and the missing experimental validation of the noiseless claim.
-
-**Clarity**: 7/10 — Generally well-written, though the backpropagation cost and KL formula direction could be clearer.
-
-**Value**: 7/10 — The speed–quality trade-off demonstrated is practically valuable; the noise-handling capability is a genuine advance.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

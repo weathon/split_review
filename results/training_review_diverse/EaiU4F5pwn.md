@@ -1,22 +1,22 @@
-Now I have a thorough understanding of the paper. Let me write the final consolidated review, carefully verifying each claim against the actual paper text.
+I now have all the information needed. Let me construct the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper studies the problem of reconstructing high-fidelity CFD flow fields from solver-generated low-fidelity data (coarser discretization grids) rather than the standard assumption of artificially downsampled data. It proposes PG-Diff, a diffusion model combining an Importance Weight during training (using DWT to focus on high-frequency regions) and a training-free Residual Correction during inference (minimizing PDE residuals via gradient descent). Experiments on four 2D turbulent flow datasets with 4× and 8× upsampling show consistent improvements over CNN, GAN, and diffusion baselines.
+This paper studies reconstructing high-fidelity CFD flow fields from solver-generated low-fidelity data (coarser-grid solver output), which differs from the common but unrealistic assumption that low-fidelity data comes from downsampling high-fidelity data. The authors propose PG-Diff, a diffusion-based framework combining (1) a DWT-based Importance Weight during training that emphasizes high-frequency regions, and (2) a training-free Residual Correction module during inference that uses gradient descent on PDE residuals to enforce physical consistency. Experiments on four 2D turbulent flow datasets (Taylor-Green Vortex, Decaying Turbulence, Kolmogorov Flow, McWilliams Flow) show consistent improvements in L2 error and PDE residual over baselines.
 
 ## Strengths
 
-1. **Novel problem formulation grounded in real CFD practice.** The paper clearly identifies a gap between the common training assumption (artificially downsampled low-fidelity data) and real-world CFD practice (solver-generated low-fidelity data on coarser grids), formalized as "integrate then downsample" vs. "downsample then integrate" (Section 1, Figure 1). This reframes the task in a practically relevant direction that prior work (Shu et al., 2023; Fukami et al., 2019) did not address.
+- **Realistic problem formulation that exposes a practical gap.** The paper clearly identifies and demonstrates (Figure 1, Sec. 1) that prior work assumes low-fidelity data is artificially downsampled from high-fidelity data, whereas in practice solvers generate low-fidelity data from coarser grids, inducing a distribution shift that causes existing methods to fail. This is a well-motivated and practically relevant problem.
 
-2. **Consistent empirical improvements across multiple datasets and settings.** PG-Diff achieves the best L2 error and PDE residual across all four datasets (Taylor Green Vortex, Decaying Turbulence, Kolmogorov Flow, McWilliams Flow) at both 4× and 8× upsampling (Table 1), with 3.5%–7.7% gains in the 4× setting. The gap is largest on the most challenging dataset (McWilliams Flow), which is dominated by fine-grained multi-scale vortex interactions — exactly where the method's design should help most.
+- **Novel dual-module framework (Importance Weight + Residual Correction).** The DWT-based importance weighting (Sec. 3.1) is an efficient way to focus the model on high-frequency structures without the overhead of attention mechanisms. The training-free residual correction (Sec. 3.2) injects physics at inference time via gradient descent on PDE residuals, with flexible scheduling. Both modules are original in their combination and distinct from prior conditional diffusion approaches.
 
-3. **Ablation and scheduling analyses support the design choices.** The paper ablates both components (Importance Weight and Residual Correction) and shows degradation when either is removed (Table 1). Section 4.5 provides a systematic study of scheduling policies (Uniform, Start+End, Start+Spacing, End+Spacing) and the number of correction steps N, identifying Start 2 + End 2 as the optimal trade-off between L2 error and PDE residual. This demonstrates principled design rather than ad-hoc tuning.
+- **State-of-the-art performance supported by ablation.** PG-Diff consistently achieves the lowest L2 error and PDE residual across four turbulent flow datasets at both 4× and 8× upsampling (Table 1). The ablations (PG-Diff w/o IW, PG-Diff w/o Cor) confirm that both modules contribute meaningfully to performance.
 
-4. **Demonstrated generalization to out-of-distribution conditions.** PG-Diff trained on original Kolmogorov Flow configurations performs comparably to models trained directly on new configurations (different time step, spatial domain size, Reynolds number) without fine-tuning (Table 3). This is practically significant and supports the claim that the residual correction module provides useful physics-based inductive bias independent of training data.
+- **Strong generalization demonstrated.** Without retraining, PG-Diff performs comparably to models trained directly on different solver timesteps, spatial domain sizes, and Reynolds numbers (Table 3, Sec. 4.6), showing robustness beyond the training distribution.
 
-5. **Multi-scale DWT evaluation.** The DWT-based evaluation decomposing reconstructions into LL, LH, HL, and HH subdomains (Section 4.3) provides a finer-grained view of where the model excels (large-scale structures and high-frequency details) rather than relying solely on aggregate L2.
+- **Systematic study of correction scheduling.** The paper investigates multiple residual correction schedules (Uniform, Start N, End N, etc.) on Kolmogorov Flow (Sec. 4.5, Table 2, Figure 4) and identifies Start2/End2 as the best balance between L2 error and PDE residual.
 
 ## Weaknesses
 
@@ -24,59 +24,56 @@ This paper studies the problem of reconstructing high-fidelity CFD flow fields f
 None.
 
 ### Major
-None.
+
+- **The PDE residual computation is underspecified, which affects both the method and the evaluation.** The Residual Correction module (Sec. 3.2) and the primary physics metric (Sec. 4.2) both rely on the residual of the governing PDE (Eqn. 7), which involves a time derivative ∂ω/∂t. The paper models single-frame reconstruction (mapping one low-fidelity frame to one high-fidelity frame, Sec. 2), yet never specifies how the time derivative is evaluated for a single snapshot — whether it is dropped (steady-state approximation), approximated from adjacent timesteps in the trajectory, computed solely from spatial terms, or handled some other way. Without this specification, the residual correction procedure is not reproducible and the PDE residual metric is uninterpretable. This is the most significant gap in the paper: it affects both what the method does and how its results are measured.
 
 ### Minor
 
-1. **Absence of empirical validation for the core motivating claim.** The paper motivates the problem by arguing that solver-generated low-fidelity data causes distribution shift relative to downsampled data, making reconstruction harder. However, no experiment directly demonstrates this gap: all evaluations use solver-generated inputs only. A simple experiment training a baseline (e.g., Cond Diff) on downsampled vs. solver-generated data and comparing performance on both input types would directly support the paper's framing. Without it, the reader cannot tell whether baselines simply underperform on this task in general, or whether the distribution shift is specifically responsible. (Harsh Critic #2, verified against paper: no such experiment exists.)
+- **Correction schedule hyperparameters tuned on only one dataset.** The ablation in Sec. 4.5 selects N=2 and the Start2/End2 schedule based on Kolmogorov Flow experiments, then applies these settings to all four datasets without testing their suitability for Taylor-Green Vortex, Decaying Turbulence, or McWilliams Flow. Different flow regimes may have different sensitivity to gradient descent on PDE residuals, so some validation across datasets would strengthen the claim.
 
-2. **"State-of-the-art" claim is not fully supported by the baseline set.** The paper cites several related physics-informed diffusion guidance methods (Chung et al., 2023; Huang et al., 2024; Zhu et al., 2023; Shysheya et al., 2024) in Section 3.2 and distinguishes its approach from them, but does not include any as experimental baselines. While these methods are general-purpose (not specifically designed for CFD super-resolution) and would require non-trivial adaptation, their absence weakens the "state-of-the-art" claim relative to the most technically adjacent approaches. The claim should be tempered or the comparison scope should be expanded. (Harsh Critic #1 and #4, verified against paper: line 120 names these methods; Table 1 lists only CNN, GAN, Diff, Cond Diff.)
+- **No sensitivity analysis for Importance Weight hyperparameters (α, β, θ).** The importance weight (Sec. 3.1, Eqn. 5) introduces α (minimum weight), β (maximum weight), and θ (quantile threshold). The paper does not study how these choices affect performance or whether the selected values generalize across datasets.
 
-3. **Claim about "training-free" in Section 4.6 is imprecise.** The paper states (line 235): "both our importance weight mechanism and residual correction modules are trainingfree." This is misleading: the importance weight modifies the training loss function (Section 3.1) and therefore affects the trained model weights — it is not training-free. Only the residual correction module is genuinely training-free. This is a minor inconsistency in terminology. (Harsh Critic §4.6 note, verified: line 235 matches.)
+- **Multi-scale evaluation is silent on HH subdomain performance.** The multi-scale DWT evaluation (Sec. 4.3) reports superiority in LL, LH, and HL subdomains but the text cuts off at "While" when discussing HH (diagonal high-frequency details). If PG-Diff underperforms or matches baselines on HH, this should be stated and discussed, since HH captures the finest details the Importance Weight is designed to target.
 
-4. **Rationale for applying guidance to denoised samples (vs. noisy samples) is not explained.** The paper notes (line 120–121) that its residual correction differs from prior work by applying guidance to denoised samples rather than noisy samples, and by using multiple gradient steps. However, no reasoning is given for why correcting the denoised prediction is preferable. Since this is a key design distinction, the lack of justification (theoretical or empirical) is a gap. (Harsh Critic §3.2 note, verified: paper states the difference but does not justify it.)
+- **Generalization results lack quantitative detail in the main text.** Table 3 is embedded as an image in the extracted text; the surrounding text (Sec. 4.6) only states performance is "comparable" without specific numerical comparisons, making it difficult for the reader to assess the strength of the generalization claims.
 
-5. **Computational overhead of residual correction is not reported.** The residual correction module requires multiple Adam gradient descent steps per selected diffusion step, each involving a PDE residual evaluation. The paper studies the impact of N on accuracy (Figure 4) but provides no runtime or FLOPs comparison to baselines. This is a practical limitation that should be acknowledged and quantified. (Harsh Critic §3.2 and §4.5 notes, verified: paper does not discuss computational cost.)
+- **Dataset pairing procedure could be clearer.** The paper states (Sec. 4.1) that high-fidelity data is generated at 2048² resolution and low-fidelity at coarser grids, but does not explicitly state whether low- and high-fidelity snapshots are paired at the same physical time step from the same initial condition. While this is the natural reading (given the problem setup), explicit confirmation would remove ambiguity.
 
 ### Trivial
 
-- **Notation typo in §2 (line 34).** The high-fidelity distribution is incorrectly written as $p_{\mathcal{X}}^{\mathrm{test}}$ where it should be $p_{\mathcal{Y}}^{\mathrm{test}}$, and a superscript "test1" appears to be a formatting artifact. (Harsh Critic §2 note, verified.)
+- **Notation error in Sec. 2 (line 34).** The high-fidelity test distribution is typed as $p_{\mathcal{X}}^{\mathrm{test}}$ instead of $p_{\mathcal{Y}}^{\mathrm{test}}$, and "$\mathcal{V}^{\mathrm{test1}}$" appears where $\mathcal{Y}^{\mathrm{test}}$ is intended.
 
 ## Nice-to-Haves
 
-- The missing empirical validation of the distribution-shift claim (Minor #1) could be added as a small experiment comparing baseline performance on downsampled vs. solver-generated inputs.
-- Adding one or two of the most directly relevant physics-informed diffusion methods (e.g., a method from Zhu et al., 2023 or Huang et al., 2024, adapted to this task) as additional baselines would strengthen the comparison.
-- Reporting inference wall-clock time or PDE evaluations per reconstruction would help practitioners assess the practical cost of the residual correction module.
+- A diagram or explicit algorithm showing how low- and high-fidelity snapshot pairs are temporally aligned during dataset generation.
+- Sensitivity analysis for α, β, θ on at least one additional dataset.
+- Quantitative reporting of HH subdomain performance from the DWT evaluation.
+- Reporting generalization numbers in the text rather than only in a figure.
 
 ## Removed Points
 
-These points from the harsh critique are flagged for removal; treat them with caution:
-
-- **"Insufficient experimental detail for reproducibility" — hyperparameters missing (Harsh Critic #3).** The paper references Ho et al. (2020) for U-net architecture and diffusion schedule, and Song et al. (2020) for DDIM acceleration, which is standard practice. Demands for learning rate, batch size, optimizer, etc. go beyond what is typically required for a conference-length paper when the architecture and training framework are established by citation. Removed per the rule against nitpicks about reproducibility (undisclosed hyperparameters and trivial implementation details).
-
-- **"Algorithm 1 is not fully presented" and "tables/figures are not visible."** These are parser artifacts; the original submission contains the full algorithm and tables. Removed per the rule about parser-stripped content.
-
-- **"§1 Introduction — text should stand without Figure 1."** This is a presentation nitpick. Figures supporting textual arguments are standard. Removed.
-
-- **"§2.2 — parser artifact '˙√'."** Parser artifact, not an author error. Removed per formatting/style rules.
-
-- **"The reported improvements of 3.5%–7.7% are modest."** The improvements are modest in absolute terms but consistent across all datasets and both upsampling factors. The paper's claim is supported by the data it presents, even within its limited baseline scope. This is not a structural weakness — it becomes a weakness only in the context of the missing baselines (already captured in Minor #2).
+- **Criticism about temporal alignment making the task "ill-posed":** The reviewer argues that coarse-grid solver errors could make low- and high-fidelity fields not correspond to the same state. However, this is precisely the distribution shift the paper studies — the paper's motivation is that solver-generated low-fidelity data differs from high-fidelity data due to coarser discretization. The task is not ill-posed; it is the real-world problem being addressed.
+- **Criticism about Figure 12 / Figure 3 confusion:** This is a parser artifact (figure renumbering during extraction), not a paper error.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews reinforce the paper's stated strengths (novel problem framing, ablation-supported design, generalization) and identify gaps that are orthogonal to the core method rather than reinterpreting the results.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. Add a direct experiment comparing baseline performance on downsampled vs. solver-generated inputs to empirically validate the distribution-shift motivation.
-2. Include at least one physics-informed diffusion guidance baseline (adapted from the cited methods in Section 3.2) or explicitly justify why such comparison is infeasible.
-3. Correct the imprecise "training-free" claim in Section 4.6 to refer only to the residual correction module.
-4. Provide a brief rationale or ablation for why correcting denoised samples (rather than noisy ones) is advantageous.
-5. Report inference runtime or PDE evaluation cost to help practitioners assess the practical trade-off.
+1. **Specify the PDE residual computation in full detail.** State which terms of Eqn. 7 are included, how the time derivative is handled (e.g., finite-difference approximation from adjacent trajectory timesteps, or omitted with justification), what discretization scheme is used (pseudo-spectral, finite difference, etc.), and whether the same residual definition is used for both correction and evaluation. This single clarification would resolve the paper's most serious ambiguity.
+
+2. **Validate the correction schedule on at least one additional dataset.** A brief experiment showing that Start2/End2 also performs well (or reporting a different optimal schedule) for, e.g., McWilliams Flow or Decaying Turbulence would substantially strengthen the generality claims.
+
+3. **Report HH subdomain numbers explicitly** and discuss whether PG-Diff's performance on diagonal high-frequency details is competitive, and if not, why.
+
+4. **Fix the notation error** in Sec. 2 ($p_{\mathcal{X}}^{\mathrm{test}}$ → $p_{\mathcal{Y}}^{\mathrm{test}}$ for the high-fidelity test distribution).
 
 ## Score and Decision
 
-The paper addresses a well-motivated, practical problem in CFD reconstruction. PG-Diff's two-component design (DWT-based importance weighting + PDE residual correction) is clean and the ablation studies confirm both components contribute. The systematic scheduling analysis in Section 4.5 is a strength. The main limitations are (a) the "state-of-the-art" claim is not benchmarked against the most technically related diffusion guidance methods, (b) the central motivating claim is not empirically validated, and (c) the computational cost is unquantified. These are addressable weaknesses, not fatal flaws. The paper represents a solid contribution to the CFD super-resolution literature.
+The paper addresses a real and well-motivated gap, proposes a novel and plausible dual-module framework, and provides strong empirical results across multiple turbulent flow datasets. The primary weakness is the underspecification of the PDE residual computation — a gap that undermines reproducibility and interpretability of both the method and its main physics metric. This is a Major issue but not Fatal: it can be resolved with a clear specification in a revision, and it does not invalidate the L2-based results or the core contribution of identifying the solver-generated data gap. The remaining weaknesses (limited hyperparameter validation, incomplete HH reporting, minor notation errors) are addressable.
+
+Overall, this is a solid paper with a clearly scoped contribution and well-executed experiments, held back from being stronger by one significant ambiguity. The paper should be conditionally accepted, subject to a satisfactory clarification of the PDE residual computation.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

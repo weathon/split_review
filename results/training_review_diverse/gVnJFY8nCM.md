@@ -1,34 +1,18 @@
-Now I have a thorough understanding of the paper and the reviews. Let me synthesize my findings.
-
-## Analysis of Reviewer Claims vs. Paper
-
-**Key verification results:**
-
-1. **Initialization control (Critical Issue 2b):** The paper explicitly states "The samples are obtained from the same prior policy used in Residual-MPPI" (line 236). Both Guided-MPPI and Residual-MPPI use prior-policy initialization as shown in Algorithm 1 (lines 106-109). The reviewer's claim that initialization is not controlled is **factually wrong** — the comparison does isolate the evaluation function.
-
-2. **Theoretical derivation (Critical Issue 1):** The paper's Theorem 1 shows the equivalence between max-entropy action distributions and MPPI optimal distributions. The text says "It suggests that MPPI can well approximate the maximum-entropy optimal policy... We can then derive Residual-MPPI straightforwardly by defining the evaluation function S^aug." This is plausible as a motivation/heuristic but is presented as a stronger theoretical justification than it truly provides. This is a **valid minor weakness** but not structural.
-
-3. **Algorithm/Eq. discrepancy:** The reviewer notes that the -λ û^T Σ^{-1} ε term appears in Algorithm 1 but not in Eq. (6). This term is the control prior from the MPPI importance weight formula (Eq. 5) — the constant part gets absorbed by normalization. This is **standard MPPI implementation** and a minor clarity issue at most.
-
-4. **GTS planning baseline (Critical Issue 3):** Valid point — a vanilla MPPI/MPC with a hand-crafted cost would strengthen the GTS experiment.
-
-5. **Full-MPPI tuning:** The reviewer raises concerns about Full-MPPI's catastrophic failure suggesting poor tuning. This is a reasonable concern but the paper's main comparison is Guided-MPPI vs. Residual-MPPI, both of which use the same sampling infrastructure. Minor weakness.
-
-Now producing the final consolidated review.
+Now I have a thorough understanding of the paper and both reviews. Let me produce the consolidated review.
 
 ## Summary
 
-This paper proposes Residual-MPPI, an online planning algorithm for customizing pre-trained continuous-control policies toward new objectives without retraining. The core idea is to use the prior policy's log-probability as a surrogate for the unknown original task reward inside an MPPI sampling-based MPC loop, augmented with an add-on reward. Experiments on MuJoCo benchmarks and on the champion-level GT Sophy 1.0 racing agent in Gran Turismo Sport demonstrate that the method can reduce undesired behaviors (e.g., off-course driving) with modest performance trade-offs, using orders-of-magnitude less data than RL-based alternatives.
+This paper proposes Residual-MPPI, an online planning algorithm that combines Residual Q-Learning (RQL) with Model Predictive Path Integral (MPPI) to customize continuous-control policies at execution time without retraining. The method uses the prior policy's log-likelihood as a proxy for the unknown original reward during MPPI's trajectory evaluation, enabling zero-shot and few-shot policy customization. Experiments in MuJoCo show consistent improvements over baselines, and the paper demonstrates customization of the champion-level GT Sophy 1.0 racing agent in Gran Turismo Sport, reducing off-course steps by ~60% while maintaining competitive lap times with dramatically less data than RL-based alternatives.
 
 ## Strengths
 
-- **Novel integration of RQL with MPPI for online continuous-control customization**: The paper is the first to propose an *online* (training-free) policy customization method for continuous action spaces. Prior RQL work required SAC-based training for continuous control or was limited to discretized actions (Residual-MCTS). Residual-MPPI plans entirely at execution time (Algorithm 1), directly addressing a significant practical bottleneck (Sec. 1, lines 29–31).
+- **Novel and practically motivated algorithmic integration**: Residual-MPPI bridges RQL (previously limited to discrete actions or requiring additional training) with MPPI's sampling-based MPC, enabling online continuous-control policy customization. The approach requires only access to the prior policy's action distribution and a dynamics model — no knowledge of the original reward, training data, or policy parameters. This is a clean and practical formulation.
 
-- **Theorem 1 establishes a formal connection between MPPI and maximum-entropy optimal policies**: The paper proves that the MPPI optimal action-sequence distribution and the max-entropy policy's action distribution share the same functional form under appropriate assumptions (γ≈1, large noise variance). This provides a theoretical grounding for incorporating the prior policy's log-likelihood into the MPPI evaluation function, going beyond a purely heuristic approach (Sec. 3.1, Theorem 1 and surrounding text).
+- **Strong empirical results on a champion-level real-world agent**: The GTS experiments show Few-shot Residual-MPPI reduces GT Sophy 1.0's off-course steps from 93.13 to 36.60 per lap (a ~60% reduction) with only a 3-second lap time increase (117.77s → 120.75s), using only ~2,100 laps total. This is contrasted with Residual-SAC which required 80,000 laps and produced an overly conservative policy (130s lap time). The data efficiency advantage (40× less data) is a practically significant result.
 
-- **Consistent empirical advantage over Guided-MPPI across all four MuJoCo environments**: In Table 1, Residual-MPPI outperforms Guided-MPPI (which uses the true ground-truth reward with the same prior-policy-guided sampling) on every task — Total Reward, Basic Reward, and Add-on Reward. In HalfCheetah: 1948.14 vs. 1821.19 (total reward); in Swimmer: −61.00 vs. −147.77; in Hopper: 7398.29 vs. 6146.35; in Ant: 6808.38 vs. 5485.85. This comparison controls for initialization and sampling distribution.
+- **Consistent zero-shot performance across diverse MuJoCo environments**: Table 1 shows Residual-MPPI outperforms both Guided-MPPI (which has full ground-truth reward) and Full-MPPI across all four environments (HalfCheetah, Swimmer, Hopper, Ant) on total reward and add-on task metrics, while maintaining similar basic reward levels to the prior policy. These results are computed over 500 episodes with standard errors reported.
 
-- **Real-world validation on champion-level GT Sophy 1.0 with dramatic sample efficiency**: Residual-MPPI reduces off-course steps of the champion GT Sophy agent by over 50% (from 93.13 to 36.60 after few-shot fine-tuning) with only ~3% lap time increase (from 117.77 to 120.75). The dynamics model required only ~2,000 laps of data vs. 80,000 laps for Residual-SAC — a 40× improvement in sample efficiency (Sec. 5, Table 2). The 60Hz real-time constraint on PS5 hardware makes this a particularly strong practical demonstration.
+- **Honest discussion of limitations**: Section 7 explicitly identifies that the method is bottlenecked by prior policy quality and dynamics model accuracy, and discusses directions for improvement (diffusion policies, world models, learned residual Q-functions). This appropriate scoping lends credibility to the contribution.
 
 ## Weaknesses
 
@@ -37,62 +21,48 @@ None.
 
 ### Major
 
-- **The GTS experiment lacks a planning-only baseline**: The GTS evaluation compares against GT Sophy 1.0 (prior policy) and Residual-SAC (RL), but not against a vanilla MPPI or simple MPC that uses a hand-crafted cost for being off-course (e.g., distance to track center). Without such a baseline, the reader cannot distinguish whether the improvement comes from the proposed log π surrogate or simply from the use of any model-based planner. This gap is notable because the MuJoCo experiments already demonstrate that the log π term outperforms ground-truth reward, so the GTS experiment is the place to show this holds in a complex real-world setting. A baseline that uses MPPI with a cost defined as `c_offcourse + λ·||a||` (without log π) would resolve this.
+1. **Missing specification of the critical hyperparameter \(\omega'\).** The weight \(\omega'\) on the log-prior term appears in both the algorithm (line 114) and the evaluation function (Eq. 7), controlling the balance between maintaining prior behavior and satisfying the add-on objective. The paper never defines, discusses, or explains how \(\omega'\) is set — whether it is derived from the prior policy's temperature \(\alpha\), tuned as a hyperparameter, or has a principled relationship to any known quantity. This is not a trivial omission: without this information, the experimental results cannot be properly interpreted (they could reflect carefully hand-tuned weights rather than a robust method). This must be addressed for the paper to be evaluable.
+
+2. **Theoretical gap between the RQL framework and the proposed Residual-MPPI evaluation function.** In the maximum-entropy RL framework, the optimal policy satisfies \(\pi(a|s) \propto \exp(Q(s,a)/\alpha)\), so \(Q(s,a) = \alpha \log \pi(a|s) + \alpha \log Z(s)\), where \(Z(s)\) is the state-dependent partition function. The paper's evaluation function \(S^{\text{aug}}(U) = \sum \gamma^t (r_R + \omega' \log \pi)\) uses only the \(\log \pi\) term without accounting for the state-dependent constant \(\alpha \log Z(x_t)\). Since different action sequences \(U\) produce different trajectories \(\{x_t\}\), these missing constants differ across sequences and can affect their relative ranking. The paper claims to "derive Residual-MPPI straightforwardly" from RQL, but the connection is incomplete: the evaluation function is a heuristic rather than a principled instantiation of the RQL framework. A formal statement with clear assumptions about when (or whether) the state-dependent constants cancel or can be absorbed would transform the current heuristic into a principled method.
 
 ### Minor
 
-- **The theoretical justification is overstated**: The paper frames Residual-MPPI as being "derived" from Theorem 1 (Sec. 3.1, line 148: "We can then derive Residual-MPPI straightforwardly"). In reality, Theorem 1 establishes an equivalence between two distributional forms, but no formal steps connect this to replacing the unknown reward with log π. The actual contribution is a well-motivated heuristic: use log π as a proxy for the original task's long-term value within MPPI. This is a reasonable algorithmic innovation, but presenting it as having a theoretical derivation from Theorem 1 overclaims. Reframing as "theoretically motivated" rather than "derived" would be more accurate.
+1. **The MuJoCo Guided-MPPI baseline comparison conflates two differences.** Guided-MPPI has access to the full ground-truth reward but is limited to a finite planning horizon, while Residual-MPPI replaces the unknown reward with \(\log \pi\) which encodes long-horizon value information from the trained prior policy. The paper attributes Guided-MPPI's worse performance to the finite-horizon limitation, but the comparison simultaneously varies both the evaluation function (true reward vs. \(\log \pi\)) and the source of long-horizon information. A cleaner ablation would augment Guided-MPPI with a learned terminal value function to isolate whether the advantage comes from the log-prior proxy specifically, or simply from having any long-horizon signal. This does not invalidate the results — the paper's explanation is plausible — but it weakens the strength of the causal claim.
 
-- **Full-MPPI's catastrophic failure raises tuning concerns**: Full-MPPI achieves negative total rewards in HalfCheetah (−3590.68) and near-zero in Hopper (21.09), suggesting the MPPI implementation (horizon, samples, covariance, temperature) is not well-tuned for these domains. While the paper's main comparison is between Guided-MPPI and Residual-MPPI (both using the same sampling infrastructure), the poor Full-MPPI results mean we lack a reference point for whether the MPPI parameters are generally reasonable. This would be less concerning if the paper reported a tuning procedure or a sensitivity analysis.
-
-- **Hyperparameter specification is insufficient for reproducibility**: The paper does not state how key MPPI hyperparameters (K, T, Σ, λ, ω') were chosen — whether they were tuned per environment, held constant, or selected via grid search. Without this information, a reader cannot determine whether the advantage of Residual-MPPI over Guided-MPPI might simply reflect better-tuned parameters for the proposed method. This is particularly important because MPPI is known to be sensitive to these settings. (The paper defers to the appendix — line 223 — which is stripped from the submission.)
-
-- **No ablation separating the effect of the log π term alone**: While the comparison with Guided-MPPI controls for initialization and sampling, the paper does not include an ablation that uses only the add-on reward r_R with prior-policy initialization (i.e., Residual-MPPI minus the log π term). Such an ablation would directly quantify how much the log π component contributes over a method that simply adds the add-on reward to the prior policy's nominal trajectory.
+2. **The dynamics training loss uses a discounted multi-step error \(\sum \gamma^t (s_t - \hat{s}_t)^2\), which weights near-term accuracy more heavily than long-term accuracy.** The paper states this is to "ensure accuracy over the long term," but discounting actually has the opposite priority. While prioritizing near-term accuracy is defensible in a receding-horizon planner (errors can be corrected at the next step), the mismatch between stated intent and actual design should be clarified or corrected.
 
 ### Trivial
 
-- **Task-specific metrics in Table 1 are not defined in the main text**: The symbols |θ̄| (HalfCheetah/Swimmer), z̄ (Hopper), and v̄_y (Ant) are used in Table 1 but never explained in the main body. The reader must infer from context what these represent.
-- **No statistical significance testing for GTS results**: With only 30 laps, the reported differences (e.g., zero-shot 121.99 vs. few-shot 120.75 lap time) would benefit from confidence intervals or effect sizes.
-- **The relationship between S^aug (Eq. 6) and S(E^k) in Algorithm 1 could be clarified**: Eq. (6) defines S^aug as Σ γ^t(r_R + ω' log π), but Algorithm 1 accumulates an additional term (−λ û^T Σ^{-1} ε) on line 114. While this term is the control prior penalty from the standard MPPI importance weight formula (Eq. 5), the paper does not explicitly reconcile why it appears in the algorithm but not in S^aug.
+- The algorithm initializes the nominal action sequence with \(\arg\max \pi(\cdot|x_t)\) and then uses this same sequence as a candidate for evaluation. This is equivalent to importance sampling with zero noise, which could benefit from a brief formal note in the weight calculation, though it does not affect the results.
 
 ## Nice-to-Haves
 
-- Report dynamics model prediction error (e.g., validation MSE) for GTS, and show how it evolves during online fine-tuning.
-- Provide a sensitivity analysis for at least one MuJoCo environment showing how K, T, λ, and ω' affect performance.
-- Extend the GTS experiment with a planning baseline (MPPI with a hand-crafted off-course cost) as discussed in Major weaknesses.
+- **Sensitivity analysis for \(\omega'\).** Once \(\omega'\) is defined, reporting sensitivity over a range of values would demonstrate robustness.
+- **Ablation with a degraded prior policy** (e.g., partially trained SAC) to quantify how inaccurate the prior can be before Residual-MPPI breaks down — especially given Section 7's acknowledgment that accuracy requirements are a bottleneck.
+- **Planning horizon sensitivity analysis** for all MuJoCo methods to directly test the paper's claim that finite horizon limits Guided-MPPI.
+- **Off-course distance distributions** for the GTS experiment (beyond the means and max values already reported on lines 293) would better characterize the safety improvement.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-- **"No control experiment isolates the evaluation function from the initialization"** (Harsh Critic Critical Issue 2b): Factually incorrect. The paper states "The samples are obtained from the same prior policy used in Residual-MPPI" (line 236), and Algorithm 1 (lines 106–109) shows prior-policy initialization. Both Guided-MPPI and Residual-MPPI use the same initialization and sampling distribution. The comparison does isolate the evaluation function.
-- **"The MPPI derivation includes a term absent from S^aug... the paper does not explain this discrepancy"**: The term −λ û^T Σ^{-1} ε is the noise-dependent part of the MPPI control prior (Eq. 5). The noise-independent constant (−(λ/2)û^T Σ^{-1} û) is absorbed by normalization (β and η in Algorithm 1). This is standard MPPI. A minor clarity improvement at most, not a substantive discrepancy.
-- **"No details such as network architecture, learning rate"**: The paper defers implementation details to appendices (line 223), which are stripped by the review system. Not a paper error.
-- **"The claim that Residual-SAC yields a very conservative customized policy... dismissed without discussing tuning the weight"**: The paper acknowledges the trade-off explicitly (line 295–296) and notes the 80k laps required. Discussing weight tuning is a reasonable suggestion but not a weakness of the presented results.
-- **"Zero-shot caveat"** (about needing a pre-trained dynamics model): The paper is transparent about this — the intro (line 31) says "zero-shot policy customization with a provided offline trained dynamics model." No overclaiming.
-- Generic strengths from Strength Finder that are redundant with core claims: several strengths already listed above subsume them.
+- **Criticism about add-on task definitions being in the appendix**: Removed because the parser strips appendix content from all papers; these definitions exist in the original submission.
+- **Claim that GTS safety improvement is "overstated"**: Removed. The paper reports a ~60% reduction in off-course steps (93→37) and quantifies reduced off-course distance severity (0.69m→0.37m avg, 3.21m→1.13m max). The critic's comparison to Residual-SAC ignores the 40× data efficiency advantage (80,000 vs 2,100 laps) which is a central part of the paper's contribution. The claim is well-supported.
+- **Criticism about the "infinite variance" condition for Theorem 1 being a non-sequitur**: Removed. The paper hedges with "suggests" and "can well approximate" — it does not claim formal equivalence for finite variance. The framing is reasonable for a heuristic theoretical motivation.
+- **Mischaracterization that the paper "claims to derive Residual-MPPI" from RQL**: The paper says "integrate RQL into the MPPI framework" (line 31), not "derive," and "derive straightforwardly" (line 148) refers to defining the evaluation function given the MPPI-max-entropy connection, not a formal derivation of the algorithm from first principles.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews largely converge on the paper's stated contributions (online customization via log π + MPPI) and the identified weaknesses (GTS missing baseline, theory overstatement, tuning transparency) are standard areas for improvement rather than novel observations.
+The most interesting observation emerging from cross-referencing the reviews is that the paper's practical strength (demonstrated effectiveness on a champion-level real-world system) and its theoretical weakness (incomplete justification of the log-prior-as-reward proxy) are two sides of the same coin. The method works empirically despite the theoretical gap — and understanding *why* it works despite the missing state-dependent constants could itself be a valuable contribution. One hypothesis is that in MPPI's trajectory evaluation setting, the missing \(\log Z(x_t)\) terms are dominated by the add-on reward signal and the prior policy's own log-likelihood differences, making the approximation empirically tight. Another is that \(\omega'\) implicitly absorbs the missing constant when tuned. Either way, the gap between theory and practice here is not a bug to be fixed but a phenomenon worth investigating in future work.
 
 ## Suggestions
 
-1. **Reframe the theoretical connection** as a motivation/heuristic rather than a derivation. Keep Theorem 1 (it genuinely shows the distributional equivalence) but change "derive Residual-MPPI straightforwardly" to "motivate Residual-MPPI by defining..." This is a one-paragraph fix that removes the overclaim.
-
-2. **Add a planning baseline in the GTS experiment** — even a simple MPC with a distance-to-track-center cost and the same dynamics model — to validate that the log π term (not just model-based planning) drives the improvement.
-
-3. **Add an ablation in MuJoCo** that removes the log π term from Residual-MPPI (keeping only the add-on reward r_R with prior-policy initialization). This directly quantifies the log π contribution.
-
-4. **Report hyperparameter choices** (K, T, Σ, λ, ω') in the main text, along with a brief statement of how they were selected (e.g., "tuned on a single seed per environment, then held fixed").
-
-5. **Define the task-specific metrics** (|θ̄|, z̄, v̄_y) explicitly in the experiment setup section, and add confidence intervals or bootstrap estimates for the GTS results.
+1. **Define \(\omega'\) explicitly.** Clarify whether \(\omega' = \alpha\) (the prior policy's entropy temperature), whether it is a tuned hyperparameter (report its value and sensitivity), or whether it can be derived. This is the single most important revision needed.
+2. **Address the state-dependent constant issue.** Either provide a formal argument (Lemma/Proposition) showing that the missing \(\log Z(x_t)\) terms cancel or can be absorbed under MPPI's trajectory-level evaluation, or explicitly characterize the method as a heuristic approximation of RQL (which the experiments validate).
+3. **Augment the Guided-MPPI baseline with a learned terminal value function** in MuJoCo to isolate the source of Residual-MPPI's advantage.
+4. **Clarify the dynamics loss justification.** Either explain why discounted multi-step error is appropriate for a receding-horizon planner, or switch to undiscounted multi-step MSE.
 
 ## Score and Decision
 
-The paper proposes a clean, well-motivated algorithm for a practically important problem (online policy customization) and validates it on both standard benchmarks and a challenging real-time racing environment with a champion-level policy. The core contribution — using log π as a reward surrogate in MPPI — is novel and demonstrably effective. The weaknesses are addressable: the theory overstatement is a framing issue, the missing GTS planning baseline is a single-experiment gap, and the hyperparameter transparency is a reporting issue. None of these invalidate the central claim that Residual-MPPI enables effective zero-shot/few-shot customization.
+This paper addresses a genuinely important problem — customizing continuous-control policies at execution time without retraining — and provides compelling experimental evidence, especially the GTS results with a champion-level agent. The method is novel, the problem is well-motivated, and the practical advantages (data efficiency, zero-shot capability, no access to original reward) are clearly demonstrated. However, the paper has two significant gaps that prevent it from being fully evaluable: the critical hyperparameter \(\omega'\) is never defined, and the theoretical connection to RQL is asserted without addressing the missing state-dependent constant in the log-prior-as-reward proxy. The remaining concerns (Guided-MPPI comparison, dynamics loss) are addressable. The core empirical contribution is real and worth publishing, but the paper must first be brought to a state where its claims can be properly assessed. I recommend acceptance contingent on addressing the major issues (especially \(\omega'\) and the theoretical gap) in a revised version.
 
-The paper is ready for acceptance with minor-to-moderate revisions. The contribution is solid, the real-world GTS experiment is compelling, and the improvements over Guided-MPPI (which uses full ground-truth reward) are consistent and meaningful.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

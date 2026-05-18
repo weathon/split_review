@@ -1,89 +1,84 @@
-Now I have a thorough understanding of the paper. Let me write the consolidated review.
+Now I have a thorough understanding of the paper and can verify all claims against the actual content. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes DIV-SE and IDIV-SE, two methods that use LLM-generated diverse reasoning "approaches" and "personas" to construct multiple prompts, then ensemble the outputs via majority voting. The core idea is to introduce diversity at the level of reasoning strategies (rather than relying on stochastic decoding) to improve accuracy without modifying the decoding process. The paper evaluates on arithmetic reasoning (AQuA, GSM8K), planning (Blocksworld), and commonsense QA using GPT-3.5, GPT-4, and LLaMA-2 70B, reporting consistent gains and Pareto-optimal cost–accuracy trade-offs.
+This paper proposes DIV-SE and IDIV-SE, prompting methods that use the LLM itself to generate diverse high-level reasoning approaches (e.g., "work backwards," "method of elimination") and personas (e.g., "think like Alan Turing"), then ensemble the resulting outputs. DIV-SE runs each approach in a separate inference call; IDIV-SE chains multiple approaches in a single call for lower cost. The core idea — varying the prompt at the reasoning-strategy level rather than relying solely on decoding stochasticity — is novel. Experiments on arithmetic (AQUA-RAT, GSM8K), planning (Blocksworld), and commonsense (CommonsenseQA) benchmarks using GPT-3.5, GPT-4, and LLaMA-2 70B show that DIV-SE/IDIV-SE achieve better accuracy-cost trade-offs than CoT and self-consistency baselines in most settings.
 
 ## Strengths
 
-1. **Large, demonstrable gains on challenging planning benchmarks**: On Blocksworld 4/5 with GPT-4, DIV-SE achieves 69.6% accuracy, substantially exceeding the zero-shot-CoT baseline of 40% and SC-10's 41.2%. On Blocksworld 3, DIV-SE reaches 94%, a 24-point improvement over the zero-shot-CoT baseline (Section 3.1.3). These are impressive results on a benchmark where prior methods have struggled.
+- **Novel prompt-level diversity mechanism with clear empirical advantage over decoding-based diversity.** The paper proposes using the LLM to generate high-level reasoning approaches, which is distinct from varying few-shot examples (Li et al., 2023) or decoding temperature (Wang et al., 2023). Evidence: On AQUA-RAT with GPT-3.5, DIV-SE achieves gains of 14.2–16.5 p.p. over CoT baselines using greedy decoding (T=0) (Fig. 4, §3.1.1). This shows the diversity is coming from the prompts themselves, not decoding stochasticity.
 
-2. **Pareto-optimal cost–accuracy trade-offs across multiple settings**: The paper systematically compares DIV-SE/IDIV-SE against CoT and self-consistency at varying ensemble sizes, showing that both proposed methods lie on the Pareto frontier in nearly every setting (Figs. 1, 3). For example, on Blocksworld 3 with GPT-4, zero-shot DIV-SE substantially outperforms few-shot SC-10 at roughly 4× lower cost. This provides concrete evidence that prompt-level diversity can be more efficient than scaling decoding stochasticity.
+- **Pareto-dominant cost-accuracy trade-off across multiple benchmarks.** Both DIV-SE and IDIV-SE consistently lie on or near the Pareto frontier relative to CoT and SC. Evidence: Figures 1 and 3 show the proposed methods dominate baselines in cost-adjusted accuracy. On Blocksworld 3 with GPT-4, zero-shot-CoT IDIV-SE outperforms few-shot-CoT SC-10 at roughly 4× lower cost (§3.1.3). On AQUA-RAT, IDIV-SE achieves comparable accuracy to DIV-SE at significantly reduced cost (Fig. 1 left).
 
-3. **Practical mechanism that works with T=0**: Unlike self-consistency, which requires stochastic decoding (T>0), DIV-SE and IDIV-SE operate at T=0 (Section 3, paragraph on temperature). This makes them applicable to black-box APIs and deployments where decoding parameters cannot be altered — a genuine practical advantage over methods like SC.
+- **Substantial gains on a challenging planning benchmark.** DIV-SE achieves 69.6% accuracy on Blocksworld 4/5 and 94% on Blocksworld 3 (GPT-4, zero-shot-CoT), improving over the paper's own CoT baseline by 29.6 p.p. and 24 p.p. respectively (§3.1.3). Planning is a domain where prior prompting methods have struggled, making these results notable even when considered against the paper's own baselines.
 
-4. **Broad applicability across models and domains**: The methods show gains on GPT-3.5, GPT-4, and LLaMA-2 70B across arithmetic, planning, and commonsense benchmarks (Figs. 4, 5, Tables 1, 2). While gains vary, the consistent positive trend across model families and reasoning types supports the generality of the approach.
+- **Diverse prompts improve zero-shot reasoning independently of ensembling.** Table 3 shows that using a single diverse prompt (without ensembling) outperforms standard zero-shot-CoT, confirming that the generated approaches and personas add value on their own, not just through voting.
+
+- **Generalizes across multiple models and settings.** The method works on GPT-3.5, GPT-4, and LLaMA-2 70B (Table 2), in both few-shot and zero-shot CoT settings, and across arithmetic, planning, and commonsense tasks.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **IDIV-SE mechanism is underspecified, hampering reproducibility**: The paper states that IDIV-SE "combines n approaches within the same prompt and aggregates the n resulting outputs" (Section 2.2) and visualizes this in Fig. 2, but never explains the crucial details: how does a single prompt with multiple demonstrations produce *n* distinct outputs? Is the LLM instructed to generate solutions for each approach sequentially within one response (and then the output is parsed)? Or is the same prompt called n times (which would defeat the "in-call" purpose)? The error propagation analysis (Section 3.3.1) mentions "generations of earlier approaches" and "subsequent approaches," suggesting the LLM autoregressively produces answers for each approach in a single generation — but this is never explicitly stated, the prompt template is not shown, and the parsing procedure is not specified. Without this information, IDIV-SE's results cannot be reliably reproduced or interpreted. The DIV-SE method (multiple separate calls with different prompts) is clearer, but IDIV-SE is claimed as a contribution.
-
-2. **No ablation isolating diversity from demonstration count**: The paper's central claim is that *diversity of thought* (different reasoning approaches) drives improvement. However, the comparison is against standard CoT (single demonstration set) and SC (same prompt, stochastic decoding). There is no control where the prompt includes the *same number of demonstrations* but all following the *same approach*. The observed gains could therefore stem from having more in-context examples, better phrasing from style transfer, or other artifacts — not necessarily from diversity of approaches. This is a fundamental evidential gap for the paper's main thesis. A simple ablation (e.g., multiple copies of the same demonstration vs. diverse demonstrations) would directly address this.
-
-3. **Blocksworld state-of-the-art claim is not properly substantiated**: The abstract and Section 3.1.3 claim that DIV-SE "exceed[s] the highest previously reported accuracy by at least 29.6 percentage points" and achieves "state-of-the-art accuracy." The paper reports its own baselines (CoT at 40%, SC-10 at 41.2%) and shows a 29.6-point improvement to 69.6%, but it does not cite what the "highest previously reported accuracy" was in the prior literature (e.g., Valmeekam et al., 2022, 2023, or any subsequent work). Without explicit comparison to specific published numbers, the SOTA claim is unverifiable. The paper should either cite prior results with exact numbers or remove the SOTA framing.
+- **Unsubstantiated state-of-the-art claim for Blocksworld.** The abstract and §3.1.3 claim that DIV-SE "exceeds the highest previously reported accuracy by at least 29.6 percentage points" on Blocksworld 4/5 and produces "state-of-the-art accuracy." However, the paper never cites a specific prior accuracy number or prior work that establishes what that "highest previously reported accuracy" is. The 29.6 p.p. figure in §3.1.3 is computed against the authors' own zero-shot-CoT baseline (40%), not against any published prior result. Comparisons to the SC-10 baseline (41.2%) yield a 28.4 p.p. gap. Without citing the actual prior SOTA from Valmeekam et al. (2022) or follow-up work, the reader cannot verify the SOTA claim. This claim should either be substantiated with explicit prior numbers and citations, or retracted in favor of a claim about improvement over the paper's own baselines.
 
 ### Minor
 
-4. **Diversity is asserted but not measured**: The paper claims that DIV-SE/IDIV-SE produce more diverse reasoning paths than SC, but never quantifies diversity (e.g., via n-gram overlap, embedding similarity, or any other diversity metric). This makes it impossible to verify whether the methods actually differ from SC in the intended way, or whether the improvements come from an entirely different mechanism.
+- **The held-out set for prompt selection is not specified.** In Step 2 (§2.1), the paper evaluates (persona, approach) pairs on "a held-out set" and selects the best performers, but never describes this set's size, composition, or whether it overlaps with the test sets reported later. If the held-out set is drawn from the same benchmarks, the selected prompts could be overfit to that split, producing optimistically biased test results. The authors should describe the held-out set and ideally validate selection stability across different splits.
 
-5. **No statistical significance or variance reporting**: All accuracy values are reported as point estimates without standard deviations or confidence intervals. Given the modest ensemble sizes (3 or 5) and the observed variability across settings, some form of variance reporting would improve the reliability of the conclusions.
+- **Error propagation analysis methodology is inconclusive.** The analysis in §3.3.1 reruns the last two approaches of IDIV-SE in a separate session and attributes answer changes to error propagation from earlier chained approaches. However, this design cannot distinguish genuine error propagation from ordinary model output variation (even at T=0, the paper uses "within 3 attempts," implying non-determinism). The reported 5–6% rates could partially reflect model inconsistency rather than propagation of errors from earlier approaches. A more direct analysis (e.g., manually inspecting cases where earlier approaches produce factually wrong intermediate results and checking whether later approaches copy them) would be more convincing. That said, even if some of the measured effect is model variance, the actual propagation rate is likely low, so this does not threaten the core method.
 
-6. **Key experimental details not reported**: The held-out set size used for selecting (persona, approach) pairs is not reported, nor is the number of candidate combinations evaluated (Section 2.1, Step 2). The paper states this selection is performed once (for GPT-3.5) and reused across all models, but the sensitivity of results to this selection is not explored, raising mild overfitting concerns.
+- **No statistical significance or confidence intervals.** None of the reported accuracy differences are accompanied by error bars or significance tests. This is especially relevant for the smaller gains on GSM8K with GPT-4 (96.3% vs. 94-95% baselines, a 1.3-2.3 p.p. improvement) and CommonsenseQA, where without confidence intervals the reader cannot assess whether these improvements are meaningful. While large-scale significance testing is not universal in LLM prompting papers, it would substantially strengthen the empirical claims given the modest margins on some benchmarks.
 
-7. **Cost estimation is approximate**: The paper uses an assumed conversion rate (1000 tokens ≈ 750 words) rather than reporting actual token usage (Section 3). While this is unlikely to change the qualitative conclusions, it makes the cost-accuracy comparisons less precise than they could be.
+- **The DIVERSEPROMPTING process for extracting approaches lacks reproducibility detail.** Step 1 (§2.1) generates *m·n* candidate approaches and selects the top 5 "based on frequency of occurrence" via a word cloud. The paper does not specify how semantically similar phrasings (e.g., "work backwards" vs. "working backward") are handled, whether deduplication/normalization is applied, or what parameters *m* and *n* are. While the frequency-based criterion is algorithmic in principle, the missing details make exact reproduction difficult.
 
-8. **LLaMA-2 experiments use 8-bit quantization**: The paper notes using "8-bit quantization" for LLaMA-2 70B (Table 2 caption) without discussing how quantization might affect the results, especially in the zero-shot setting where gains are negligible.
-
-9. **Error propagation methodology has clarity issues**: The error propagation analysis (Section 3.3.1) is described as "if the LLM generates the same outcomes as in the original session within 3 attempts." Since all methods (except SC) use T=0, "within 3 attempts" is confusing — with a fixed prompt and T=0, all attempts would be identical. The paper should clarify the temperature setting used in this test and why multiple attempts are relevant.
+- **No ablation of the number of approaches.** The paper fixes the number of approaches at n=5 across nearly all experiments (n=3 for planning/commonsense) but never varies this parameter to study its effect. Since "approach diversity" is the core design variable, understanding how performance varies with the number of approaches would strengthen the contribution.
 
 ### Trivial
-None.
+
+- **Pareto frontier claims are based on a small number of evaluated points** (ensemble sizes 3 and 5 for the proposed methods, plus s=1,3,5,10 for SC). The claim of Pareto optimality should acknowledge this granularity limitation — it means the proposed points dominate the measured points, not all possible trade-offs.
 
 ## Nice-to-Haves
 
-- An ablation that controls for demonstration count while varying diversity (as described in Major weakness 2) would directly support the paper's core claim.
-- Explicit comparison to published Blocksworld results from Valmeekam et al. or other follow-up work.
-- A quantitative diversity analysis (e.g., embedding similarity of generated reasoning chains across methods).
-- Reporting standard deviations for the main accuracy results.
+- An ablation isolating the contribution of personas vs. approaches for all benchmarks (Table 3 only partially covers this).
+- Results on additional open-source models beyond LLaMA-2 70B to further validate cross-model generality.
+- A fully automated approach extraction pipeline (e.g., using LLM-based clustering/summarization of generated approach names) to eliminate any subjectivity in Step 1.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
+These points were found, on verification against the paper, to be invalid, overblown, or based on a misunderstanding:
 
-1. **Criticism that the error propagation test is logically flawed due to T=0 determinism** (Harsh Critic, Section-by-Section, item on Section 3.3.1): The reviewer wrote "With T=0, runs are deterministic, so the test… should always yield the same result. The fact that it sometimes does not suggests either non-determinism or a misunderstanding." This misunderstands the test: the comparison is between *different prompts* (the chained IDIV-SE prompt vs. separate per-approach prompts), which would produce different deterministic outputs. The "3 attempts" is indeed confusing, but the core logic of the test is sound. The criticism is removed as a misunderstanding.
+1. **"Selection of (persona, approach) pairs assumes model-independence — no empirical justification"** (from Critic Point 2): This criticism is refuted by the paper's own experimental design. The selection is done on GPT-3.5 and reused on GPT-4 and LLaMA-2. The fact that the method *still works* on GPT-4 and LLaMA-2 with prompts chosen for GPT-3.5 actually validates the robustness of the approach rather than undermining it. If the selection were truly overfit, we would expect poor performance on other models, which is not the case.
 
-2. **Criticism that the paper does not test whether baseline prompt alterations affect performance on Blocksworld** (Harsh Critic, Section-by-Section, item on Section 3.1.3): The paper states "For the baseline runs, we introduce minor alterations to the prompt" (Section 3.1.3), indicating the baselines used the same modified prompt. The concern about unfair confounding is inflated since both baselines and proposed methods share the same prompt modifications.
+2. **"Word-cloud selection is ad-hoc manual curation"** (Critic Point 3): The paper states the selection is "based on frequency of occurrence," which is an algorithmic, reproducible criterion. The use of a word cloud is a visualization aid, not a subjective clustering step. The critic's characterization as "ad-hoc manual curation" overstates the issue; the remaining concern about semantic deduplication is real but minor, as noted above.
 
-3. **Criticism that temperature choice (T=0 for proposed methods) is not discussed** (Harsh Critic, Section-by-Section, item on Section 3): The paper explicitly states this design choice ("For all other approaches, we set T=0") and the rationale for operating without modifying decoding is stated in the introduction. The reviewer's suggestion to try T>0 is a reasonable extension question but not a weakness of the current paper.
+3. **"GSM8K GPT-4 gain is small and may not be statistically significant" as a structural weakness**: The paper explicitly acknowledges that "accuracy on GSM8K have nearly plateaued" and that the improvement is "modest" (§3.1.2). The paper is transparent about this limitation. This is a data point, not a weakness of the method — the method works well where there is room for improvement and yields smaller gains on saturated benchmarks, which is expected behavior.
 
-4. **Strength Finder's claim about "consistent gains across multiple models and reasoning domains"**: This is inflated — gains on CommonsenseQA are modest, and Blocksworld on GPT-3.5 shows zero improvement. The strength is demoted to a qualified observation.
+4. **"LLaMA-2 evaluation is limited" as a structural weakness**: The paper explicitly notes the limited computational budget and the negligible zero-shot improvement, and attributes it to the model's instruction-following capability. This is appropriately scoped.
 
-5. **Strength Finder's claim about error propagation analysis "validating that chaining diverse prompts does not significantly harm output quality"**: The error propagation methodology has clarity issues (Minor weakness 9), so this claimed strength is overstated and has been removed.
+5. **Various formatting/style nitpicks** from the critic's original text: These are parser artifacts, not author errors.
 
 ## Novel Insights
 
-The reviews surface two key points beyond the paper's own contributions. First, the inability to isolate whether diversity of *approaches* versus simply having *more demonstrations* drives the gains points to a broader methodological challenge in the prompting literature: many proposed "novel" prompting strategies may derive gains from increased example count or prompt length rather than their claimed mechanism. Second, the IDIV-SE underspecification issue illustrates that even simple-seeming "in-call ensembling" ideas require precise specification — does the model generate one merged output or multiple parallel outputs within one response? This distinction matters for both interpretation and reproducibility, and many prompting papers are similarly vague on such procedural details.
+The reviews do not surface any genuinely novel insight beyond the paper's own contributions. The critics' methodological concerns (held-out set specification, error propagation measurement, SOTA substantiation) are standard review points that the authors can address in revision.
 
 ## Suggestions
 
-1. **Clarify the IDIV-SE mechanism**: Provide the exact prompt template and an example output with parsing logic. Show how n answers are extracted from a single generation. This is a prerequisite for reproducibility.
+1. **Substantiate or retract the Blocksworld SOTA claim.** Either cite the specific prior best accuracy (with paper and page) and show that DIV-SE exceeds it, or rephrase to "improves over CoT and SC baselines by 29.6 p.p." — the improvement over baselines is already impressive and does not need the unsubstantiated SOTA framing.
 
-2. **Run a control ablation**: Include an experiment where the prompt includes multiple copies of the *same* demonstration (or demonstrations following the same approach) at the same count as DIV-SE. If the diverse approaches still outperform this control, the diversity claim is supported; if not, the gains are attributable to demonstration count.
+2. **Describe the held-out set used for prompt selection** (size, source, whether it overlaps with test sets). If possible, show that the selected (persona, approach) pairs are stable across different held-out splits and across models.
 
-3. **Provide explicit SOTA comparisons**: Cite the specific accuracy numbers from prior Blocksworld work (Valmeekam et al., 2022, 2023, or subsequent methods) alongside DIV-SE results to substantiate the SOTA claim, or remove the claim.
+3. **Add confidence intervals or error bars** for key results, especially where gains are modest (GSM8K GPT-4, CommonsenseQA). This is a standard expectation for empirical papers and would substantially strengthen the claims.
 
-4. **Quantify diversity**: Report a simple diversity metric (e.g., embedding similarity of reasoning chains) for DIV-SE, IDIV-SE, and SC to verify that the methods introduce reasoning-level diversity beyond stochastic decoding.
+4. **Provide a cleaner error propagation analysis.** Instead of the current reproducibility-based test, manually inspect a sample of cases where early approaches generate factually wrong intermediate results and check whether later approaches propagate those errors. This would directly validate or refute the propagation mechanism.
 
-5. **Add variance estimates**: Include standard deviations or confidence intervals for the main accuracy results, particularly for smaller ensemble sizes.
+5. **Include an ablation varying the number of approaches** (e.g., n=1, 3, 5, 7) to study its effect on accuracy and cost.
+
+6. **Document the DIVERSEPROMPTING parameters** (*m* and *n*) and any deduplication/normalization applied to approach names before frequency counting, to ensure full reproducibility.
 
 ## Score and Decision
 
-This paper tackles a well-motivated problem — introducing diversity at the prompt level rather than relying solely on decoding stochasticity — and demonstrates practically meaningful gains on challenging benchmarks, especially Blocksworld. The Pareto-frontier analysis is thorough and supports the claim that prompt-level diversity can improve the cost-accuracy trade-off. However, the paper has three significant gaps: (i) the IDIV-SE mechanism is underspecified to the point of being hard to reproduce, (ii) the core claim about "diversity of thought" is not isolated from alternative explanations (more demonstrations, better phrasing), and (iii) the SOTA claim on Blocksworld is not properly benchmarked against published prior work. These are all addressable with clarifications and additional controls. The overall contributions — the DIVERSEPROMPTING approach, the empirical results, and the cost-accuracy analysis — are valuable and likely to be of interest to the community.
+This paper presents a novel and well-motivated approach to improving LLM reasoning through prompt diversity, with generally strong empirical results across multiple benchmarks and models. The main weakness — an unsubstantiated SOTA claim — is fixable in revision and does not undermine the core contribution, which stands on the clear improvements over standard CoT and SC baselines. The remaining issues (missing held-out specification, error propagation analysis, lack of confidence intervals) are standard revision items. I recommend acceptance conditional on addressing the substantiation of the Blocksworld claim and adding the held-out set description.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,81 +1,76 @@
-Now I have all the evidence needed to produce the consolidated review.
+Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
 
-## Final Consolidated Review
+---
 
 ## Summary
 
-This paper proposes Task-Aware Learngene (TAL), a graph-hypernetwork-based method for predicting model initialization parameters conditioned on both desired model scale and task-specific characteristics. TAL introduces a task-specific layer (TSL) with FiLM-style modulation into the encoder of a GHN, enabling the hypernetwork to generate different parameter initializations for different downstream tasks at flexible model sizes. Experiments on ImageNet-1K, the Visual Domain Decathlon, and three unseen tasks show that TAL-initialized models consistently outperform prior GHN-based initialization methods (LoGAH variants) and random initialization, often by large margins.
+This paper proposes Task-Aware Learngene (TAL), a graph hypernetwork-based method for predicting model initialization parameters conditioned on both desired model scale and task-specific characteristics. TAL builds on the LoGAH framework by adding (1) knowledge distillation from a ViT-Base ancestry model via KL-divergence loss, (2) a task-specific layer (TSL) that injects task embeddings into the model computational graph, and (3) multi-task tuning across Decathlon tasks. The goal is to enable flexible, task-customized initialization of downstream models (descendant models) at varying scales. Experiments on ImageNet-1K, the Visual Decathlon Challenge, and three unseen tasks show consistent improvements over LoGAH baselines and random initialization.
 
 ## Strengths
 
-- **Large and consistent performance gains across multiple settings.** TAL improves over LoGAH v1 by 24.39% on average across Decathlon tasks for untrained descendant models (Table 2), and by 18.89% over LoGAH v3 (multi-task trained, Table 5). These gains hold across architectures of varying sizes (3–12 layers, ViT-Tiny and ViT-Small), supporting the claim of effective scale-conditional parameter prediction.
+1. **Novel integration of task-awareness into hypernetwork-based parameter prediction.** TAL introduces a task hypernet and task-specific layer that dynamically conditions parameter predictions on task identity, going beyond prior GHN/LoGAH methods that ignore task information. The ablation in Table 7 confirms that the TSL contributes meaningfully (removing it reduces average accuracy by 12.66% on Decathlon), demonstrating that task conditioning adds value.
 
-- **Strong ablation evidence for both task-awareness and ancestry guidance.** The ablation study (Table 7) shows that removing the task-specific layer (TSL) drops average accuracy by 12.66%, and removing ancestry-model guidance drops accuracy by 6.57%. This demonstrates that both components contribute meaningfully to the overall performance, and that the TSL mechanism is not redundant.
+2. **Flexible scale initialization for unseen model architectures.** TAL supports descendant models of varying depths (3, 6, 12 layers) that were not in the ViTs-1K training set. Tables 2 and 5 show TAL outperforms LoGAH variants at every scale, including LoGAH v4 (multi-task tuned) by an average of 2.81%+ on several Decathlon tasks. This demonstrates genuine architectural flexibility.
 
-- **Convincing visualization of task-aware representations.** PCA visualization of learngene outputs (Figure 5) shows clear clustering by task across different model scales, providing direct evidence that the TSL module injects task information into the computational graph representation.
+3. **Consistent improvements across diverse settings.** TAL outperforms baselines on ImageNet-1K (Table 1), ten Decathlon tasks (Tables 2, 3, 5), and three unseen tasks (Table 4), across both untrained and trained descendant model evaluations. The ablation study (Table 7) dissects the contributions of the TSL and ancestry-guidance components, showing both are independently beneficial.
 
-- **Demonstrated transfer to unseen tasks.** TAL provides effective initializations for three datasets (Fashion MNIST, FER2013, HAM10000) not seen during multi-task tuning (Table 4), indicating that the task-conditioning mechanism generalizes beyond the training task distribution.
-
-- **Practical significance of initialization quality.** Untrained TAL-initialized models outperform trained models initialized with RandInit (200 epochs) and LoGAH v1/v2 (100 epochs) on the Decathlon benchmark (Table 3 comparison across tables). Since TAL receives zero descendant-model training, this supports the paper's motivation of reducing serving costs through better initialization.
+4. **Transfer to unseen tasks is demonstrated.** TAL shows positive transfer to Fashion-MNIST, FER2013, and HAM10000 — datasets not seen during multi-task tuning — with improvements over LoGAH v1 and random initialization (Table 4), suggesting the task-aware mechanism generalizes beyond training tasks.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **The knowledge distillation signal is uncontrolled across baselines, confounding the mechanism attribution.** TAL uses a KL-divergence distillation loss (Eq. 4–5) during initial training on ImageNet-1K, transferring feature distributions from the ancestry model (ViT-Base) to the hypernetwork. None of the LoGAH baselines (v1–v4) use this distillation. While the ablation TAL(w/o ans-net) removes ancestry guidance and drops accuracy by 6.57%, it still uses TSL and does not directly compare to a "LoGAH + distillation" control. The 18.89% gap between TAL and LoGAH v4 (Table 5) could therefore be partially or substantially explained by the additional distillation signal rather than the task-awareness mechanism itself. The paper's central claim about "task-aware" parameter prediction requires isolating this variable to be fully convincing.
+1. **Uncontrolled distillation confound in primary comparisons.** This is the most significant weakness. TAL trains on ImageNet-1K using a KL-divergence loss that distills knowledge from a pretrained ViT-Base ancestry model (Section 3.2, Equation for L_aux). LoGAH v1–v4 baselines are trained without any such distillation signal. The headline improvements in Tables 1–5 (e.g., +24.39% on untrained Decathlon models over LoGAH v1) therefore conflate the effect of the proposed task-aware mechanism with the straightforward benefit of inheriting a strong pretrained model's feature representations. The ablation in Table 7 confirms that removing ancestry-model guidance ("w/o ans-net") reduces performance by 6.57%, establishing that a non-trivial portion of the gain is attributable to distillation alone. The paper does not provide a controlled baseline — e.g., LoGAH trained with the same KL-divergence loss — that would allow the reader to attribute improvements to the TSL or multi-task design versus distillation. This confound runs through all main experimental tables and weakens the paper's central claim of superiority.
+
+2. **Task-embedding generation is underspecified for reproducibility.** The paper states that task embeddings "are generated by the ancestry model through the average feature extraction of the task images" (line 68) citing Vu et al. (2020), but does not specify which layer's features are used, how many images are averaged, whether the ancestry model is frozen during this extraction, or how the resulting vector is normalized. The dimensions \(h\) and \(t\) for the task hypernet's weight matrices \(W^\gamma \in \mathbb{R}^{h \times t}\) and \(W^\beta \in \mathbb{R}^{h \times t}\) (lines 76–77) are never defined. Furthermore, it is unclear how the element-wise affine transformation \(f_\tau^G = \gamma_\tau \times f^G + \beta_\tau\) (line 81) is applied when \(f^G\) represents a computational graph of variable size and structure. These gaps prevent independent reproduction and full understanding of the method.
 
 ### Minor
 
-- **The TSL modulation mechanism is underspecified.** Equation (3) defines modulation as \( f_\tau^G = \gamma_\tau \times f^G + \beta_\tau \), but the paper never clarifies what \( f^G \) concretely refers to at the point of modulation. In the GHN encoder (a graph transformer), \( f^G \) could denote node features at a specific layer, the input node embeddings, or a pooled graph representation. The paper should specify: (a) at which layer(s) of the graph encoder TSL is applied, (b) whether \( \gamma_\tau, \beta_\tau \) apply element-wise to each node's feature vector or globally, and (c) the exact dimensions. This is a reproducibility gap.
+1. **Unseen tasks experiment is confounded by multi-task training advantage.** TAL was tuned on nine Decathlon tasks before being evaluated on Fashion-MNIST, FER2013, and HAM10000 (Table 4). The reported baseline, LoGAH v1, was trained only on ImageNet-1K. The advantage may stem from broader multi-task pre-training rather than from the task-aware mechanism itself. A fairer comparison would include LoGAH v4 (IN-1K → Decathlon multi-task) as a baseline on these unseen tasks, especially since LoGAH v4 exists elsewhere in the paper (Tables 5, 6). The current design does not convincingly separate multi-task exposure from task-awareness as the cause of the improvement.
 
-- **Missing variance estimates.** All main results (Tables 1–5) are reported without standard deviations or confidence intervals. Given that hypernetwork training involves stochasticity in both model-architecture sampling and task sampling, the lack of multi-seed results makes it difficult to assess whether the observed improvements are statistically significant.
+2. **No analysis of computational overhead.** The paper motivates TAL with "diminishing deployment expenses" (abstract, introduction) but provides no comparison of training time, inference cost, or parameter count of the TAL hypernetwork relative to LoGAH. This information would help practitioners assess the practical trade-offs of the proposed method.
 
-- **No direct fine-tuning baseline.** The paper does not compare against the simplest practical baseline: directly fine-tuning a small ViT (Tiny/Small) on each task from ImageNet-22K or ImageNet-1K pretrained weights. Since the stated motivation is resource-constrained deployment, this comparison would ground the claimed practical advantages relative to a well-known standard.
+3. **GHN-3 baseline mentioned but results not clearly shown.** Section 4.1 states that TAL is compared with GHN-3, but no GHN-3 results appear in any visible table caption. If GHN-3 results are inside the image-only tables, this should be noted in the text; otherwise this baseline comparison is missing.
 
-- **No computational cost analysis.** The paper motivates TAL as reducing serving costs and training time, but never measures: (a) the total computational cost of training the TAL hypernetwork (which requires running many descendant models forward/backward), (b) the inference FLOPs of generated descendant models at each scale, or (c) the end-to-end time savings from using TAL initialization vs. standard training. These measurements are needed to support the quality-cost trade-off claims.
+4. **PCA visualization (Figure 5) shows clustering but not causation.** The observation that task-specific computational graphs cluster by task in PCA space is consistent with the method's design but does not directly demonstrate that clustering leads to better parameter prediction. A correlation analysis between cluster separation and task performance would be more informative.
 
 ### Trivial
 
-- The notation in Eq. (6) uses \( M \in \mathbb{R}^{d \times d'} \) as a learned transformation matrix, but the paper does not clarify whether this matrix's parameters are predicted by the TAL decoder or learned directly — line 99 states "the transformation matrix's parameters are predicted directly by TAL model," which conflates two different components.
+- The notation in Equation (8) shows "$\underset{\theta}{\mathrm{argmin}}\frac{1}{T M}{\sum_{\tau=1}^{T}}{\sum_{a=1}^{M}}{\sum_{(x_{\tau}^{j},y_{\tau}^{j})\in\mathcal{D}_{\tau}}}w_{\tau}\mathcal{L}(...)$" but the paper does not state whether \(w_\tau\) is learned or fixed; the temperature-based task sampling described in Section 4.1 suggests an interpretation but the connection could be clarified.
 
 ## Nice-to-Haves
 
-- **Including LoGAH v4 in the unseen-task comparison (Table 4).** LoGAH v4 (multi-task trained after ImageNet) would provide a stronger baseline for the transfer setting.
-- **Ablation of task hypernetwork complexity.** The task hypernet is a single linear layer (\( W^\gamma, W^\beta \)). It would be useful to know whether a deeper MLP improves or overfits.
-- **Analysis of task embedding quality** for datasets far from ImageNet (e.g., Omniglot, medical images), where the ancestry-model-based embeddings may be less informative.
+- A controlled baseline: LoGAH trained with the same KL-divergence distillation loss from ViT-Base. This would cleanly isolate the gain from the TSL and multi-task training.
+- An ablation comparing TAL(w/o ans-net) directly against LoGAH variants to show the TSL's contribution in a distillation-free setting.
+- Per-task results from the ablation study (Table 7) reported alongside the Decathlon average, to show whether the TSL and distillation components help uniformly or only on certain tasks.
+- Results on the full Decathlon challenge metric (e.g., geometric mean or official score) to complement per-dataset accuracy.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **Asymmetric training epochs (Harsh Critic #2).** The reviewer claims the "untrained beats trained" claim is invalid due to different training budgets. However, the asymmetry *favors the baselines*: RandInit gets 200 epochs, LoGAH gets 100 epochs, TAL untrained gets 0. If anything, this understates TAL's advantage. This is not a weakness; it is a strength. *Reason: Rule — asymmetry favoring baselines.*
-
-- **"Learngene framing not supported" (Harsh Critic #4).** The paper explicitly acknowledges the departure from prior learngene work: "learngene is no longer a sub block of the ancestry model, the encoder part of TAL model is regarded as learngene" (Section 5.2). The authors transparently position their extension of the concept. *Reason: Rule — not a technical flaw; paper acknowledges the difference.*
-
-- **Missing related works.** The reviewer attempts to criticize novelty relative to unspecified prior work (Mahabadi et al. 2021). *Reason: Rule — missing related works cannot be confirmed without external sources.*
-
-- **The "first to explore dual customization" claim being too narrow.** This is a minor overstatement but does not affect the technical contribution or experimental findings. *Reason: Soft rule — does not affect core claims.*
+- **"ImageNet-1K results are misleading for the same reason"** — This is a restatement of the distillation confound (Major weakness #1), already covered. The specific 1.20% number (75-epoch trained comparison) is a less severe instance of the same problem.
+- **"Scale of improvement is suspicious and likely driven by distillation"** — Same underlying issue as Major weakness #1. No separate new criticism.
+- **"TSL is a minor architectural addition"** — This is a subjective opinion about novelty, not a weakness. The paper demonstrates the TSL's independent value via ablation (12.66% drop when removed).
+- **"Would be informative to see correlation between cluster separation and task performance"** — This is a reasonable suggestion but not a weakness; it belongs in Nice-to-Haves.
+- Generic strength claims from Strength Finder (e.g., "the paper addressed an important problem") — dropped as they add no concrete evidence beyond what is already captured.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface one genuine oversight (the distillation confound) but do not add a new analytical perspective beyond what the paper's ablation and comparison design already enable.
+None beyond the paper's own contributions. The key tension — that the headline gains are inflated by an uncontrolled distillation signal — is correctly identified by the harsh critic but does not invalidate the paper's core technical contribution. The ablation study partially redeems the paper by showing that the TSL independently contributes more (12.66%) than the distillation (6.57%), but the missing controlled baseline (LoGAH + distillation) remains a significant gap.
 
 ## Suggestions
 
-1. **Control for distillation.** Add a version of LoGAH v4 that also uses the KL-divergence distillation loss against the ancestry model during its initial ImageNet-1K training phase. This would directly isolate the effect of the task-specific layer from the effect of the distillation signal and cleanly answer whether task-awareness on its own provides the claimed benefit.
-2. **Specify the TSL mechanism precisely.** Clarify at which layer(s) of the graph encoder the FiLM-style modulation is applied, whether it operates on per-node features or a pooled representation, and provide pseudocode or a detailed diagram.
-3. **Add variance estimates.** Report results across at least 3 random seeds for the main comparisons (Tables 2, 3, 5).
-4. **Measure and report computational costs.** Include training FLOPs of the hypernetwork, inference FLOPs of descendant models at each scale, and wall-clock time comparisons to standard fine-tuning.
+1. **Add a LoGAH+distillation baseline.** The single most impactful addition would be to train LoGAH v1 with the same KL-divergence loss from ViT-Base that TAL uses during ImageNet-1K training. This would allow readers to cleanly attribute improvements to the task-specific layer and multi-task tuning versus the distillation signal.
+2. **Report TAL(w/o ans-net) vs. LoGAH directly.** If the paper presents a comparison of TAL without ancestry guidance (distillation removed, but TSL and multi-task tuning retained) against LoGAH v3/v4, it would demonstrate the TSL's contribution without the distillation confound.
+3. **Specify task-embedding details.** Clarify which layer(s) of the ancestry model produce the task embeddings, how many images are used per task, whether the ancestry model is frozen, and how the resulting embeddings are normalized. Define the dimensions \(h\) and \(t\) explicitly.
+4. **Add LoGAH v4 to the unseen tasks comparison** (Table 4) to control for multi-task exposure.
+5. **Report computational cost.** Include hypernetwork parameter counts, training time, and inference latency for TAL vs. LoGAH to support the claimed practical benefit of "diminishing deployment expenses."
 
 ## Score and Decision
 
-This paper addresses a legitimate problem and proposes a plausible architecture with strong empirical results across diverse settings. The distillation confound is a genuine gap that prevents clean attribution of the improvements to the task-awareness mechanism, but it does not invalidate the system-level results. The ablations confirm both main components independently contribute. The paper's contributions — scale-conditional GHN-based initialization with task conditioning — are novel and practically meaningful.
+This paper addresses a relevant problem — task-conditioned parameter prediction for flexible model initialization — and proposes a reasonable architecture combining task-specific layers with multi-task training and distillation. However, the experimental evaluation contains a significant confound: the primary comparisons against LoGAH baselines conflate the effect of the proposed task-aware mechanism with an uncontrolled distillation signal. The central claim of superiority over existing methods is not adequately supported by the current evidence. While the ablation study partially separates the contributions, the missing controlled baseline (LoGAH + distillation) prevents the reader from attributing the reported large gains (e.g., +24.39%) to the paper's novel components. The task-embedding generation is also underspecified for reproducibility. A major revision with properly controlled baselines is needed before the work can be fairly evaluated. I recommend **rejection** with a clear path to improvement via the suggestions above.
 
-However, the primary claim about "task-aware" parameter prediction is weakened by the uncontrolled distillation variable, and several other gaps (underspecified TSL mechanism, no variance estimates, missing cost analysis) reduce the paper's rigor. These are addressable but require concrete changes to the experimental design, not just writing improvements.
-
-**Score:** 6.0
-
-**Decision:** Weak Accept — the paper has real contributions and strong results, but the distillation confound and underspecified mechanism prevent full confidence in the core claim about task-awareness. The paper would be significantly strengthened by addressing the confound and the reproducibility gaps.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

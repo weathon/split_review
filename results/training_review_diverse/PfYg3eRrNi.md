@@ -1,24 +1,20 @@
-Now I have all the information needed. Let me compile the consolidated review.
+Now I have all the information I need. Let me construct the final review.
 
 ## Summary
 
-This paper introduces Agent Workflow Memory (AWM), a method that induces reusable, abstract sub-routines ("workflows") from agent trajectories and integrates them into agent memory to guide future task-solving. AWM operates in both offline (inducing workflows from training examples) and online (streaming test queries with an LM-based success evaluator) settings. Evaluated on WebArena and Mind2Web, AWM reports 51.1% and 24.6% relative improvements over strong baselines, with demonstrated cross-task, cross-website, and cross-domain generalization.
+The paper introduces Agent Workflow Memory (AWM), a method that induces reusable, abstracted sub-routines ("workflows") from successful agent trajectories and integrates them into agent memory to guide future web navigation tasks. AWM operates in both offline (using annotated training examples) and online (supervision-free streaming) scenarios. On WebArena, AWM improves over the top published autonomous method (BrowserGym) by 51.1% relative success rate; on Mind2Web, it achieves a 24.6% relative improvement in step success rate over MindAct. The method also demonstrates cross-task, cross-website, and cross-domain generalization.
 
 ## Strengths
 
-- **Large and consistent performance gains on two major web benchmarks**: The paper reports a 51.1% relative success-rate improvement over BrowserGym on WebArena and a 24.6% relative gain over MindAct on Mind2Web (abstract, §4), using the same backbone (GPT-4) and without human-crafted workflows. These are meaningful margins over competitive, static baselines.
+1. **Novel workflow induction with explicit abstraction for reusability**: The LM-based induction method extracts sub-routines (not full trajectories) and replaces example-specific values with placeholders (e.g., `{product-name}`). This design is shown to outperform rule-based induction that preserves concrete contexts: on Mind2Web, LM-based induction yields +2.8 step success rate (from 43.4% to 45.1%) and +2.8 task success rate (from 2.0% to 4.8%) over the rule-based variant (Table tab:mind2web-rule-lm).
 
-- **Robust generalization across tasks, websites, and domains**: On Mind2Web, AWM surpasses baselines by 8.9–14.0 absolute points on cross-website and cross-domain splits, with margins growing as the train-test distribution gap widens (abstract, §4.2). On WebArena, AWM consistently outperforms baselines on a cross-template subset (§4.1).
+2. **Substantial and consistent empirical gains across two major benchmarks**: On WebArena, AWM improves over BrowserGym by 51.1% relative success rate and outperforms SteP (which uses human-expert-written workflows) by 7.9% (Section 4.1). On Mind2Web cross-task, AWM achieves a 24.6% relative improvement in step success rate over MindAct (Section 4.2). These gains are on execution-based (WebArena) and step-wise (Mind2Web) evaluations.
 
-- **Flexible operation in both offline and online (supervision-free) scenarios**: AWM works when canonical training examples are available (offline, §3.3) and when only test queries are streamed (online, §3.3), using an automatic evaluator to judge success. This design flexibility is a genuine contribution.
+3. **Robust generalization across tasks, websites, and domains**: On Mind2Web cross-website and cross-domain splits, AWM surpasses baselines by 8.9–14.0 absolute points, with larger margins as the train-test distribution gap widens (Section 4.2). On WebArena, AWM consistently outperforms baselines on a cross-template subset (Section 4.1).
 
-- **Abstract, sub-routine workflow representation provides clear benefits on Mind2Web**: The LM-based induction (with abstraction + sub-routines) outperforms rule-based induction (concrete, full trajectories) by 2.8 points in step success rate on Mind2Web (Table in §6.1), validating the paper's rationale that abstraction helps generalization.
+4. **Flexible operation in both offline and online scenarios**: AWM works when high-quality annotated examples exist (offline) and also in a fully supervision-free streaming setting (online) where only test queries are available (Section 3.3). This versatility contrasts with methods that require fixed curated examples.
 
-- **Outperforms human-crafted workflows without human effort**: On WebArena, AWM achieves 7.9% higher success rate than SteP, which uses 14 human-expert-written workflows (§1, §4.1). This is a practically significant result.
-
-- **Useful ablation studies**: The paper systematically ablates workflow representation (text vs. code, §6.2), environment abstraction level (§6.3), and induction method (rule vs. LM, §6.1), providing insight into design choices.
-
-- **Continual learning snowball effect demonstrated**: Figure 1 shows the performance gap between AWM and a non-adapting baseline widening over time on WebArena, directly supporting the claim that accumulated workflows yield increasing benefits.
+5. **Systematic ablation of design choices**: The paper examines workflow sub-routine abstraction (rule vs. LM induction, Section 6.1), text vs. code representation (Section 6.2), environment state representation (Section 6.3), and workflow use in action space (Section 7). These analyses provide concrete guidance for future workflow design.
 
 ## Weaknesses
 
@@ -27,51 +23,71 @@ None.
 
 ### Major
 
-- **Unvalidated online success evaluator**: The online AWM setting (§3.3) relies on an LM-based evaluator (citing Pan et al., 2024) to judge whether each trajectory is successful before inducing workflows from it. The paper reports **no accuracy, precision, recall, or any analysis** of this evaluator on either benchmark. WebArena provides ground-truth success signals that could be used for validation. Without knowing the evaluator's reliability, the online results could be affected by false positives (inducing workflows from failed trajectories) or false negatives (discarding successful ones). This gap matters because the online setting on WebArena is the only setting where the largest gains (51.1% relative) are reported. The authors should at minimum report evaluator agreement with ground truth and ideally run a sensitivity analysis or an oracle-evaluator upper bound.
+1. **The online scenario's evaluator module is a crucial but unexamined component.** The online setup uses an LM-based evaluator (citing Pan et al.) to judge whether a trajectory succeeded before inducing workflows from it (Section 3.3, line 109). The paper provides no analysis of this evaluator's accuracy on either WebArena or Mind2Web, nor any discussion of how label noise from evaluator errors might affect the quality of induced workflows. This is not a minor gap: if the evaluator makes systematic errors (e.g., false positives on partially correct trajectories), the agent could internalize flawed workflows that degrade future performance. The evaluator is adopted from prior work, but its reliability is never validated for the specific tasks and environments used here. The comparison to rule-based induction (Section 6.1) does not address this, since rule-based induction does not use an evaluator. The paper's claim of strong online results rests on an unverified foundation.
 
 ### Minor
 
-- **No variance or significance estimates**: All results are reported as single-run point estimates. While GPT-4 at temperature 0.0 provides near-deterministic action generation, the workflow induction step involves additional LM calls that may have some variability, and task ordering in the online setting could affect which workflows are learned. Multiple runs (or bootstrapped intervals) would strengthen confidence, especially for the claimed 51.1% relative gain. This is a minor issue because single-run evaluation at temperature 0 is standard in web agent papers, but addressing it would meaningfully raise confidence.
+2. **Workflow quality is asserted but not systematically measured.** The paper describes how workflows are induced via LM prompting and shows that LM-based induction outperforms rule-based induction. However, there is no quantitative evaluation of workflow quality in the main text — e.g., what fraction of induced workflows are actually correct, how often they are used, whether the abstraction process sometimes removes essential context. The paper references a human examination in the appendix (Section 3.3, line 83), but this is not quantified in the main text. Since the entire method depends on the quality of induced workflows, providing at least a small-scale audit (e.g., human annotation of 50–100 workflows) in the main paper would substantially strengthen the contribution.
 
-- **The abstraction mechanism is not fully isolated in ablations**: The LM-based vs. rule-based comparison (§6.1) simultaneously varies both granularity (sub-routines vs. full trajectories) and abstraction (placeholders vs. concrete values). A cleaner ablation—LM-based induction with abstraction vs. without abstraction (keeping concrete values)—would directly test whether placeholder abstraction drives generalization. On WebArena the two methods perform nearly identically (35.6 vs. 35.5), so it is unclear how much of the benefit on Mind2Web comes from abstraction vs. sub-routine extraction.
+3. **The claim that the online margin grows as distribution gap widens is not fully substantiated in the available text.** Section 4.2 reports that on Mind2Web cross-task/cross-website splits, AWM scores "8.9–14.0 absolute points higher" with larger margins for wider distribution gaps. The underlying breakdown by specific cross-task/cross-website/cross-domain split or a visual showing this trend is not present in the available text. The main results tables appear to have been in \input files that the parser stripped; if those tables contain the breakdown, this point is moot, but as presented in the available text the trend is asserted without per-split numbers.
 
-- **No discussion of limitations or failure cases for the core AWM method**: The paper presents uniformly positive results. The only failure analysis (§6, flight booking with pop-up airports) concerns the action-space variant, not the main memory-augmented AWM. The paper would be stronger if it analyzed cases where AWM fails (e.g., tasks requiring novel combinations of workflows, or workflows that overspecify action patterns and mislead the agent).
+4. **Workflow count and memory growth are not reported.** The paper never reports how many workflows are induced per website or in total. Without this, the reader cannot gauge whether the method is adding a handful of highly reusable workflows or hundreds of niche ones. This is important for both the offline and online settings, as it affects context length and the risk of memory bloat.
 
-- **Task ordering sensitivity not discussed**: In the online setting, tasks are processed in a fixed order that could affect which workflows are induced early and thus influence downstream performance. The paper does not discuss this or test with different orderings.
-
-- **Workflow induction cost not reported**: Inducing workflows requires additional LM calls beyond action generation. A brief discussion of overhead (token count, number of LM calls per task) would help practitioners evaluate the practical trade-off.
+5. **Statistical significance is not reported.** The absolute improvements are large, but the paper does not report confidence intervals, standard deviations, or number of runs. Especially for Mind2Web (where baseline task success rates are very low, e.g., 2.0%), small numbers of successes could be noisy. This is common practice in LLM agent evaluations but is worth flagging.
 
 ### Trivial
-- The abstract emphasizes relative improvements (24.6%, 51.1%) without their corresponding absolute baseline rates, though the paper does include absolute numbers elsewhere (e.g., "8.9–14.0 absolute points" on line 10) and in the results tables.
-- The description of how the reasoning trace is produced during induction could be clarified—whether it is extracted from the original agent's chain-of-thought or generated post hoc.
+None.
 
 ## Nice-to-Haves
-- A comparison to a simple "retrieve and reuse full trajectories" k-NN baseline within the AWM framework (replacing induced workflows with retrieved full trajectories) would more directly isolate the benefit of the abstraction and sub-routine extraction steps.
-- A small human evaluation of workflow quality (e.g., how often does the LM correctly abstract example-specific values?) would strengthen the qualitative claims.
-- Discussion of how the approach might extend beyond web navigation to other digital environments (mobile, desktop).
+
+- Provide a human-annotated sample of trajectories on each benchmark comparing evaluator judgments to ground truth, to validate the online pipeline's reliance on the LM evaluator.
+- Add an ablation that retrieves raw (non-abstracted) successful trajectories instead of inducing workflows, to isolate the benefit of abstraction over simple instance-based memory.
+- Report how often induced workflows are actually used across test tasks, and whether performance correlates with the presence of a relevant workflow in memory.
+- A figure or table showing the breakdown of the 8.9–14.0 point margin by specific cross-task/cross-website/cross-domain split would clarify the generalization trend.
 
 ## Removed Points
-These points are flagged to be removed — treat them with caution.
 
-- **Missing comparison to Voyager/Trove (Harsh Critic #3)**: Voyager targets Minecraft (3D interactive code-writing), and Trove targets code-generation tasks. Adapting these methods to web navigation would require substantial re-engineering. The paper's baselines (BrowserGym, MindAct, Synapse, SteP) are the correct web navigation SOTA. The criticism demands comparison against a different class of methods in a different domain — scope creep.
-- **"Online setting only tested on WebArena"**: The paper explicitly states (§4.2) that both offline and online settings are explored for Mind2Web. The results are in an imported table (`\input{sections/results/mind2web}`) stripped by the parser; they exist in the original submission.
-- **Abstract uses misleading relative numbers (Harsh Critic's "Abstract/Introduction" note)**: The abstract also includes absolute point gains (line 10: "8.9–14.0 absolute points"), and the paper provides absolute numbers in the results section. Presenting relative improvements alongside absolute numbers is standard practice.
-- **"Online AWM success may depend on lucky task ordering"**: This is speculative and not presented with evidence that any specific ordering would change results. The more general version is kept under Minor as "task ordering sensitivity not discussed."
+- **Synapse comparison missing from tables**: The reviewer criticized that Synapse results are not shown in the available tables. The paper explicitly states it compares to both MindAct and Synapse (line 142), and the main result tables are in `\input` files (`sections/results/mind2web`) that were stripped by the parser. These likely exist in the original submission. Removed per the rule that parser-stripped content is assumed to exist.
+
+- **"Supervision-free" claim misleading**: The reviewer argued that "supervision-free" is misleading because the LM evaluator requires supervision. The term "supervision-free" in context refers to the AWM pipeline not requiring human-annotated training examples or human-written workflows. Using a pre-trained LM as an evaluator is not the same kind of supervision. This is a reasonable usage of the term and the criticism is a strawman.
+
+- **Cross-site transfer limitation on WebArena**: The reviewer noted that cross-site transfer is not evaluated on WebArena. The paper explicitly states that it groups examples by website (line 120), making this a design choice, not a weakness.
+
+- **HTML vs. description drop "may not be statistically reliable"**: The 1.7-point drop is modest, but this is a standard ablation with no statistical claims being made. This is a nitpick that does not affect the paper's core claims.
+
+- **Generic/superficial strengths from Strength Finder**: None serious enough to remove.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The review surface does not reveal any insight that the paper itself does not already articulate — the reviewers largely affirmed the paper's framing (snowball effect of accumulated workflows, the value of abstract sub-routines over concrete examples) while pointing to specific evidential gaps.
+None beyond the paper's own contributions. The reviewers' comments largely converge on the same gap: the online evaluator's reliability is unexamined, and workflow quality lacks systematic measurement. No reviewer identified a flaw the authors had not anticipated or a direction the paper had not already scoped.
 
 ## Suggestions
 
-1. **Validate the online evaluator**: Using WebArena's ground-truth success signals, report the evaluator's accuracy, precision, and recall on a held-out set. Report how many trajectories are classified as success/failure during online AWM, and optionally run an oracle-evaluator upper bound.
-2. **Add a cleaner abstraction ablation**: Compare LM-based induction with abstraction vs. LM-based induction without abstraction (keeping concrete values). This would directly test whether the placeholder mechanism drives generalization.
-3. **Report variance**: Run the online AWM at least 2–3 times (with different random seeds or task orderings) and report mean and standard deviation of the success rate.
-4. **Discuss limitations explicitly**: Add a limitations paragraph analyzing cases where AWM's workflows mislead the agent or fail to transfer.
+1. **Validate the LM evaluator.** Provide a human-annotated sample of trajectories (50–100 per benchmark) comparing evaluator judgments to ground truth, and report precision/recall. Show that induced workflows from evaluator-labeled successes are comparable in quality to those from ground-truth successes. This is the single most impactful fix.
+
+2. **Report workflow statistics.** Include the number of workflows induced per website/total, their usage frequency across test tasks, and a small-scale human quality audit (e.g., what fraction are judged correct, usable, appropriately abstracted).
+
+3. **Clarify the Synapse comparison.** Make explicit whether Synapse numbers are used as a baseline or whether Synapse is used as a framework for ablation. If Synapse results exist in the stripped tables, reference them clearly in the main text.
+
+4. **Strengthen the generalization trend evidence.** Provide a table or figure showing the per-split breakdown for the 8.9–14.0 point margin claim, ideally with a measure of distribution shift on the x-axis.
+
+5. **Add standard deviations or confidence intervals** where feasible, especially for low-base-rate metrics like task success rate on Mind2Web.
 
 ## Score and Decision
 
-The paper presents a well-motivated, clean method with substantial gains on two major benchmarks and thoughtful ablations. The core contribution—inducing abstract, reusable sub-routines into agent memory—is solid and the results are striking. The main evidential weakness (unvalidated online evaluator) is real but fixable; it does not undermine the offline results or the overall architecture. The remaining issues are minor. The paper is a solid contribution to web agent research.
+**Originality**: Good — inducing reusable, abstracted sub-routines from agent trajectories and using them as in-context memory is a well-motivated and relatively underexplored direction.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+**Importance**: High — improving web agent generalization across tasks, websites, and domains is a central challenge in the field.
+
+**Claims**: Partially supported — the core empirical gains are large and compelling, but the online scenario rests on an unvalidated evaluator, and workflow quality is not directly measured.
+
+**Soundness**: Adequate — the experimental setup is generally sound and the ablations are informative, but the lack of evaluator validation and workflow quality metrics weakens the online results.
+
+**Clarity**: Good — the method is clearly described, and the pipeline figures are helpful.
+
+**Value to community**: Potentially high — the workflow induction approach is practical and could be adopted by other web agent systems.
+
+**Overall assessment**: The paper presents a novel and well-motivated method with impressive empirical gains on challenging benchmarks. The central weakness is that the online scenario depends on an unvalidated LM evaluator whose accuracy is never analyzed. This does not invalidate the contribution — the offline results stand on their own, and the online results are plausible — but it prevents full confidence in the online claims. The paper also lacks a systematic quality audit of the induced workflows, which would strengthen the core mechanism's credibility. With additional evaluator analysis and workflow quality metrics, this would be a strong paper.
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

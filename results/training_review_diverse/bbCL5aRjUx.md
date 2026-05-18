@@ -1,94 +1,74 @@
-Now I have thoroughly verified all claims against the paper. Here is my consolidated review.
-
----
+Now I have all the information needed. Let me write the final consolidated review.
 
 ## Summary
 
-This paper introduces Multilinear Operator Networks (MONet), a polynomial network whose core Poly-MLP layer uses only linear projections and elementwise products (no activation functions) to capture multiplicative interactions between token elements. The key empirical contribution is that MONet closes the large performance gap between prior polynomial networks and modern architectures on ImageNet (81.3% top-1 for MONet-S vs. 65.2% for Π-Nets, a ~16% improvement), while also demonstrating strong robustness to corruptions and an interpretable application to neural ODE recovery.
+This paper introduces MONet (Multilinear Operator Networks), a polynomial network architecture whose core Poly-MLP layer captures multiplicative interactions via elementwise products of linear projections, without requiring standard activation functions (ReLU, GELU, etc.). The paper demonstrates that MONet closes a long-standing gap: prior polynomial networks without activation functions topped out at ~70% on ImageNet, while MONet achieves 81.3% (Multi-stage Small variant), matching MLP-based and transformer models of comparable size. Additional contributions include strong robustness on ImageNet-C (best mCE of 49.7 among all compared models) and a demonstration of symbolic recovery for the Lotka-Volterra ODE.
 
 ## Strengths
 
-- **Closes the performance gap between polynomial networks and modern architectures.** Multi-stage MONet-S achieves 81.3% top-1 accuracy on ImageNet with 32.9M parameters and *no activation functions*, while the previous best pure polynomial network (Π-Nets) reaches only 65.2% with 12.3M parameters (Table 2). This ~16% improvement is the paper's strongest result and convincingly demonstrates that activation-free polynomial networks can now compete in large-scale image recognition.
+- **First polynomial network to close the performance gap on ImageNet.** Prior polynomial networks without activation functions (Π-Nets at 65.2%, Regularized Π-Nets at 70.2%) fell far short of modern architectures. MONet achieves 81.3% top-1 accuracy, a ~11% absolute improvement, matching MLP-Mixer variants and DeiT-S of comparable parameter count. This is a genuine empirical advance (Table 1).
 
-- **Superior robustness across all corruption categories on ImageNet-C.** MONet achieves a mean Corruption Error of 49.7, the lowest among all compared models including CycleMLP (53.7), HireMLP (51.9), and DeiT (54.6) (Table 4). It outperforms every competitor in the "Weather" and "Digital" corruption groups, which is a genuine empirical finding.
+- **State-of-the-art robustness on ImageNet-C.** MONet achieves the lowest mean corruption error (mCE=49.7) among all compared models, substantially outperforming CycleMLP (53.7), HireMLP (51.9), and prior polynomial networks (Π-Net at 73.8). It ranks first across all four corruption categories (Noise, Blur, Weather, Digital), often by a large margin (Table 3).
 
-- **Comprehensive ablation study validates each design choice.** Table 5 shows that replacing the Poly-MLP layer with a standard MLP layer drops top-1 accuracy from 82.94% to 67.61%, while removing only the spatial shift still gives 81.50%. Tables 6–9 (hidden size, depth, shrinkage ratio, patch embedding) further isolate contributions, giving strong empirical support for each architectural decision.
+- **Ablation confirms the Poly-MLP layer is the primary driver of performance.** Replacing the Poly-MLP layer with a standard MLP layer causes accuracy to drop from 82.94% to 67.61% on ImageNet-100; removing it entirely (linear-only block) yields only 55.11%. This cleanly isolates the contribution of the multiplicative interactions (Table: Module ablation).
 
-- **Competitive performance on small and fine-grained datasets.** On Oxford Flower, MONet achieves 95.0% top-1, outperforming S²MLP-Deep-S (93.0%) and all previous polynomial networks (Table 3). This shows the model generalizes beyond ImageNet and works in data-limited regimes.
-
-- **Scientific computing application with interpretable ODE recovery.** In the Lotka-Volterra experiment, the learned coefficients match ground truth to five decimal places (e.g., β: 1.12 vs. 1.12001, γ: 1.21 vs. 1.21001) in under 20 epochs (Section 4.3, Figure 2). This provides a concrete demonstration that activation-free polynomial models can recover exact symbolic dynamics—an advantage unique to this approach.
+- **Competitive performance on small and fine-grained datasets.** MONet achieves best or tied-best accuracy on CIFAR10 (94.8%), SVHN (97.6%), and Oxford Flower (95.0%), outperforming prior polynomial networks and CNNs, demonstrating generalization beyond large-scale ImageNet (Table 2).
 
 ## Weaknesses
 
 ### Fatal
-None.
+
+None. The paper's core empirical contribution is valid and reproducible in principle.
 
 ### Major
-None that cannot be addressed.
+
+- **The paper's central claim of "solely multilinear operations" is contradicted by the use of layer normalization.** The abstract states the model "relies *solely* on multilinear operators"; the introduction states it is "based solely on multilinear operations"; the conclusion states it "leverages *solely* linear and multilinear operations." However, the architecture includes layer normalization (explicitly shown in Figure 1 and described in Section 3.2, line 114), which involves computing means, variances, division, and square roots — operations that are not multilinear and cannot be expressed as addition/multiplication. The FHE motivation (Section 1) specifically requires that only addition and multiplication be supported, making layer normalization equally problematic as any activation function for that use case. This does *not* invalidate the empirical results, but it means the paper overstates its architectural constraints. The authors must either remove layer norm, justify a class of permissible nonlinearities, or honestly reframe the claim to "no standard activation functions" rather than "solely multilinear."
+
+- **The ODE symbolic recovery claim is unsubstantiated.** The paper states that MONet "can recover the equations behind the dynamic system and explicitly restore the symbolic representation" and displays learned coefficients nearly identical to the ground truth (e.g., 1.12001 vs 1.12). However, it never explains *how* the symbolic form is extracted from the trained network parameters. If the architecture's weights directly encode polynomial coefficients because the functional form matches, this mapping must be explicitly described. If the coefficients are read from specific weight matrices, which ones correspond to which terms? Without this explanation, the claim amounts to "the network fits the trajectory well and the coefficients happen to match" — which is weaker and potentially misleading. This section requires an explicit description of the extraction procedure and a discussion of what conditions (known degree, known structure) enable it.
 
 ### Minor
 
-- **Imprecise claim about "solely multilinear operators."** The abstract and conclusion state that MONet "relies *solely* on multilinear operators" / "leverages *solely* linear and multilinear operations," yet the architecture uses layer normalization between Poly-MLP blocks (line 93, 114). Layer normalization in its standard form involves mean, variance, and division—operations beyond addition and multiplication. While this does *not* invalidate the core contribution (the paper's primary motivation is eliminating activation functions, and LayerNorm contains no activations), the wording is technically overclaimed. The paper would be more accurate stating that the *core computation* is multilinear and the architecture avoids activation functions.
+- **The 4^N degree claim is stated without qualification.** The paper asserts each block captures "up to 4th degree interactions" and that stacking N blocks yields "up to 4^N interactions, with N>10 in practice." While mathematically correct as a worst-case combinatorial bound, this implies degrees on the order of 4^10 ≈ 1 million without accounting for rank constraints (shrinkage ratio), bottleneck dimensions, or residual connections that limit expressivity. The paper acknowledges this as future work in a footnote and limitation section, but the unqualified claim in the main text is misleading about the model's effective capacity. An empirical analysis (e.g., testing response to input scaling) would strengthen this claim considerably.
 
-- **ImageNet comparisons use published numbers without controlling for training recipe.** In Table 2, MONet is compared with baselines from prior papers using different training setups. The paper's training recipe (AdamW, batch size 448, 300 epochs, label smoothing, CutMix, Mixup, auto-augment—line 157) is more aggressive than what some baselines used (e.g., ResMLP-12). While this is standard practice in the vision literature and the paper's main claim (outperforming prior polynomial nets by ~10%) is unaffected, the claim of being "on par with modern architectures" would be strengthened by re-implementing a few key baselines with the same training pipeline.
+- **The multi-stage architecture is used for ImageNet results but not described in the method section.** Table 1 presents Multi-stage variants with stage-specific hidden sizes and block counts, and these are the models that achieve the best ImageNet results (81.3%). However, Section 3.2 (Network Architecture) describes only a homogeneous stack of blocks and does not explain how stages are formed, what downsampling/pooling operation connects them, or how the pyramid patch embedding interacts with the staged design. This is a reproducibility gap.
 
-- **MONet-B configuration used in robustness experiments is not specified.** The model labeled `\modelnamePMB{}` in Table 4 (achieving best mCE of 49.7) does not appear in Table 1's configuration specifications. Its parameter count, FLOPs, depth, and hidden size are unknown, making it difficult to compare fairly with the listed baselines.
+- **The pyramid patch embedding is described too briefly for reproducibility.** The method section devotes only a few sentences (Section 3.2, lines 121) to this component, yet the ablation shows it provides meaningful gains. How are the two levels (sizes 7 and 14) combined? Are features pooled, then concatenated or summed? Is there a separate embedding for each level? The current description is insufficient to reproduce the method.
 
-- **Pyramid patch embedding is underspecified.** The description (line 121) says the scheme "operates by considering embeddings at smaller scales and subsequently extracting new patch embeddings on top" but does not explain how the scales are combined (concatenation? averaging? separate Poly-MLP?). This is a claimed contribution (line 27) but is not reproducible from the current description.
-
-- **Neural ODE experiment is a single proof-of-concept.** The Lotka-Volterra recovery (Section 4.3) is a convincing demonstration for a 2-variable polynomial ODE with 100 training points, but the paper does not explore non-polynomial dynamics (e.g., trigonometric/exponential terms) or compare with other polynomial baselines (e.g., Pi-Nets) on this task. The paper frames this as an "illustration," but the scope is very limited relative to the claim of "interpretable" scientific computing.
-
-- **No runtime/throughput comparison.** The paper reports FLOPs but not actual inference time. Given that multiplicative interactions can be computationally expensive, a wall-clock comparison with MLP-Mixer or ResMLP would help practitioners assess practical trade-offs.
+- **The novelty relative to prior polynomial networks (Π-Nets, PDC) is under-articulated.** The paper cites Π-Nets and PDC as closely related but does not clearly contrast the design assumptions or explain *why* the specific form of Eq. (1) — a low-rank factorization with two branches at different ranks, an elementwise product, and a residual — is effective. The reader is left to guess whether gains come from the multiplicative block, the token-based framework, the pyramid embedding, or scaling.
 
 ### Trivial
 
-- The "Limitation" section (line 436) focuses solely on theoretical characterization and does not mention the LayerNorm overclaim or the preliminary nature of the ODE experiment.
+- The conclusion states that MONet "outperforms modern transformers models" — this is overbroad; MONet is on par with but does not uniformly outperform ViT/DeiT variants across all model sizes.
 
 ## Nice-to-Haves
 
-- An analysis of the effective polynomial degree used in practice (e.g., via perturbation or rank analysis of learned weights) would strengthen the theoretical motivation about capturing high-degree interactions.
-- Extending the ODE experiment to a non-polynomial system (e.g., damped harmonic oscillator with linear+sine terms) to explicitly test the limits of the approach.
+- An analysis of effective polynomial degree via input scaling experiments (e.g., measuring how output changes when all input entries are scaled by a scalar).
+- Extending the controlled ablation (Poly-MLP vs. standard MLP) from ImageNet-100 to the full ImageNet, to confirm the pattern holds at scale.
+- A comparison against a simple linear-only MLP-Mixer baseline (no activations) on a small dataset, though the ablation already covers this direction on ImageNet-100.
 
 ## Removed Points
 
-These points were flagged by reviewers but are excluded from the main assessment with justification:
-
-- **"The 'solely multilinear' claim is a structural issue that undermines the primary motivation"** — The critic framed this as fatal. The paper's primary motivation (FHE compatibility through avoiding *activation functions*) is not invalidated by LayerNorm, which does not contain activation functions and can be handled via polynomial approximations in FHE contexts. The wording is imprecise but not structurally fatal. Moved from Fatal to Minor.
-
-- **"Proposition 1 is trivial"** — The critic called Proposition 1 trivial. Proposition 1 states that the layer captures multiplicative interactions. While simple, it formalizes the claim and is standard for architecture papers. This is not a genuine weakness.
-
-- **"The 4^N claim is stated without derivation"** — The paper states the proof is deferred to the appendix (line 106: "the proof of which is in \cref{sec:poly_mixer_app_proof_proposition}"). The appendix was stripped by the parser. Per Hard Rules, missing appendix content should not be flagged.
-
-- **Missing related works** — The critic did not raise this, but per instructions, I do not add missing related works.
-
-- Strength Finder strength about "enables interpretable recovery of symbolic ODE equations" — Retained; it is well-evidenced by the paper.
+- **"The proposition and proof can be omitted"** — This is an editorial opinion, not a weakness of the paper. The proposition is a simple formal statement that clarifies what the layer does; its inclusion is a matter of presentation taste.
+- **"The paper should compare against an MLP-Mixer with only linear layers (no activations) on ImageNet-100 or a small dataset"** — The ablation study already performs this comparison on ImageNet-100 (Linear Block at 55.11% vs. MONet at 82.94%). The suggestion to repeat on full ImageNet is a nice-to-have, not a weakness.
+- **"Paper should provide a controlled comparison on ImageNet with the same token-based architecture but replacing the Poly-MLP with standard MLP"** — Already done on ImageNet-100. Extending to full ImageNet is expensive and the pattern is already clear.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The key insight—that polynomial networks can close the gap with modern architectures through careful design using rank-factorized multiplicative interactions—is well articulated by the paper itself.
+The juxtaposition of reviewer criticisms reveals an interesting tension: the harsh critic's most damning point (layer normalization violates "solely multilinear") is structurally separate from the paper's strongest empirical result (closing the ImageNet gap). This means the paper's scientific contribution and its framing are decoupled — the contribution is real (competitive polynomial network without activation functions), but the framing is overstated. The practical implication is that the paper could be substantially improved by simply reframing its claims more carefully, without any additional experiments. This is a rare case where the fix is primarily in writing, not in experimentation.
 
 ## Suggestions
 
-1. **Correct the "solely multilinear" overclaim** in the abstract and conclusion. Replace with language like "the core computation uses only linear and multilinear operations" or "the architecture avoids all activation functions."
+1. **Honestly reframe the core claim.** Replace "solely multilinear" with "no standard activation functions (ReLU, GELU, etc.)" or clearly disclose that layer normalization is a nonlinear component and discuss whether it poses practical issues for the FHE motivation. This single change would resolve the most serious weakness.
 
-2. **Specify the MONet-B configuration** used in the robustness experiments (Table 4) in a new row of Table 1 or in the caption.
+2. **Explain the symbolic extraction procedure for the ODE experiment.** Describe exactly how the displayed coefficients are read from the trained network's parameters. Without this, the interpretability claim is not reproducible.
 
-3. **Provide a more detailed description of the pyramid patch embedding** sufficient for reproduction: explain how the two scales interact (concatenation, separate processing, etc.).
+3. **Add a description of the multi-stage architecture to Section 3.2.** Explain how downsampling/transition between stages works, how hidden sizes change, and how the pyramid patch embedding feeds into the staged design.
 
-4. **Re-implement 1–2 MLP baselines** (e.g., ResMLP-12, CycleMLP-T) with the same training recipe and report the results side-by-side, to verify whether the "on par with modern architectures" claim holds under controlled conditions.
+4. **Qualify the 4^N degree claim** with a discussion of rank and width limitations, or provide an empirical measurement of effective degree.
 
-5. **Report inference throughput** (images/sec) for the main model configurations alongside FLOPs.
+5. **Expand the pyramid patch embedding description** to make it reproducible.
 
 ## Score and Decision
 
-The paper makes a clear empirical contribution: it introduces a polynomial network architecture that significantly outperforms all prior polynomial networks (~16% on ImageNet) and achieves accuracy competitive with modern MLP/transformer models using *no activation functions*. The ablations convincingly attribute gains to the multiplicative interactions. The robustness results are genuinely impressive. The weaknesses are real but addressable—the most serious is an imprecise claim in the abstract, not a flaw in the method itself.
-
-**Originality**: Good — the rank-factorized multiplicative interaction design is a principled contribution.
-**Importance**: High — demonstrating that activation-free polynomial networks can compete closes an open gap.
-**Claims support**: Mostly good, though the "solely multilinear" phrasing is overclaimed and the "on par with modern architectures" claim is slightly weakened by uncontrolled training recipes.
-**Soundness**: Solid — the ablations and robustness experiments are thorough.
-**Clarity**: Adequate but could be improved on the pyramid patch embedding and MONet-B specification.
-**Value**: The paper will likely spur further work on polynomial networks and activation-free architectures.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

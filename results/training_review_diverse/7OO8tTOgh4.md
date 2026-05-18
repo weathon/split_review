@@ -1,88 +1,80 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have all the information needed to produce the consolidated review. Let me write it.
 
 ## Summary
 
-This paper proposes MIE (Maximizing Information Entropy), a non-targeted white-box adversarial attack on vision-language models (VLMs). The method maximizes entropy at three levels of the Transformer decoder—logits, attention weights, and hidden states—to induce the model to generate incoherent or factually incorrect image descriptions without requiring ground-truth captions. Experiments on five open-source VLMs (BLIP, BLIP2, InstructBLIP, MiniGPT-4, LLaVA) using 1000 ImageNet images show that MIE reduces CLIP scores from ~30 to ~20 and achieves a claimed 96.88% manual attack success rate, outperforming three prior attack baselines.
+This paper proposes Maximizing Information Entropy (MIE), a non-targeted white-box adversarial attack on vision-language models (VLMs). Unlike prior methods that require ground-truth captions, MIE maximizes entropy across three decoder components — logits, attention weights, and hidden states — to degrade the model's image understanding. Experiments on five VLMs (BLIP, BLIP2, InstructBLIP, MiniGPT-4, LLaVA) show CLIP score drops from ~30 to ~20 and a 96.88% average attack success rate.
 
 ## Strengths
 
-1. **First non-targeted white-box attack on VLMs without ground-truth captions.** Prior non-targeted work (Schlarmann & Hein, 2023) requires authentic image descriptions as supervision; MIE operates without them, making it applicable in open-world scenarios where reference captions are unavailable. The paper correctly identifies and fills this gap.
+1. **First non-targeted attack operating without ground-truth captions**: The paper is the first to show that a VLM can be attacked in a non-targeted manner using only the model's own outputs, without requiring authentic image descriptions (Section 2.2, Section 3). Prior work (Schlarmann & Hein, 2023) required ground-truth captions as supervisory signals. This is a meaningful practical difference for open-world scenarios.
 
-2. **Consistently outperforms three prior attack methods across five diverse VLM architectures.** In Table 1, MIE achieves lower CLIP scores than Carlini et al. (2023) (targeted with random targets), Schlarmann & Hein (2023) (ground-truth captions), and Aafaq et al. (2023) (GAN-based) on all five tested models—BLIP, BLIP2, InstructBLIP, MiniGPT-4, and LLaVA. This spans both "Image as Key-Value" and "Image as Token" architectural families, demonstrating broad applicability.
+2. **High effectiveness across diverse VLM architectures**: MIE achieves consistent results across both "Image as Key-Value" models (BLIP) and "Image as Token" models (LLaVA, MiniGPT-4), with CLIP score reductions substantially exceeding comparison methods (Carlini et al., Schlarmann & Hein, Aafaq et al.) by more than 2 points on multiple models (Table 1). The method is architecture-agnostic by design.
 
-3. **Multi-component design is clearly motivated and ablated.** The paper decomposes the attack into logits, attention, and hidden-states entropy maximization, provides a clean motivation (high entropy = loss of focus), and validates through ablation (Figure 3) that the joint attack outperforms any single component. The identified optimal coefficient ratio (~8:1:1) is a useful practical finding.
+3. **Mechanistic insight via internal state visualization**: Figure 4 directly validates the entropy maximization rationale by showing attention heatmaps and hidden state distributions transitioning from concentrated to dispersed as the attack progresses. This goes beyond reporting aggregate metrics and provides evidence that the attack works as intended.
 
-4. **Qualitative visualizations support the mechanistic story.** Figure 4 shows attention heatmaps and hidden states transitioning from concentrated to dispersed distributions as the attack progresses, directly illustrating how entropy maximization disrupts internal representations.
+4. **Systematic ablation study**: Figure 3 investigates loss coefficients, perturbation size, and iteration count, identifying an optimal λ₁:λ₂:λ₃ ratio of ~8:1:1 and showing that attack effectiveness plateaus at ε ≥ 8. These results offer practical guidance for applying the method.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
+- **Ablation only on one model (BLIP)**: The ablation study (Figure 3) is conducted exclusively on BLIP. Given the architectural differences across models (Image-as-Key-Value vs. Image-as-Token), the optimal coefficients and component contributions may vary. The paper acknowledges this briefly ("For different models, additional coefficient settings may generate better results") but does not provide ablation data for any second model. This limits the generality of the design choices.
 
-1. **Manual evaluation (96.88% success rate) is severely underspecified.** This headline result rests on an evaluation whose methodology is opaque: the paper does not state who performed the evaluation (authors? external annotators?), how many annotators were involved, what inter-rater reliability was, or whether the rubric was applied systematically (lines 200–201, 219). The criterion—"factual inaccuracies in the generated descriptions and images, including but not limited to color discrepancies or incorrect object categorizations"—is subjective and open to interpretation. Without a transparent protocol, the central success-rate claim is not verifiable.
-
-2. **No variance or statistical significance reported for CLIP scores (Table 1).** All quantitative results are reported as point estimates with no standard deviations, confidence intervals, or significance tests, even though the 1000-image sample would easily support such reporting. It is impossible to assess whether the claimed 2+ point improvements over baselines are statistically meaningful or within noise.
-
-3. **Claimed "theoretical explanation" (Contribution 1) is not delivered.** The paper lists as a contribution: "We analyze the differences between targeted and non-targeted attacks and provide a theoretical explanation for the inability of targeted attacks to efficiently implement non-targeted attacks." The actual content is a single paragraph in the introduction (lines 23–24) containing an intuitive argument—not a formal analysis, proof, or theoretical framework. This is a significant overclaim relative to what the paper provides.
-
-4. **100% success rate on several models (Table 2) is suspicious and undermines confidence.** Reporting that every single perturbed image produced a "factually inaccurate" caption on four out of five models suggests either an extremely lenient success criterion or potential confirmation bias in the evaluation. Realistic adversarial evaluations typically exhibit at least some failures, even for strong attacks.
+- **Logit-only baseline absent from main results table**: The ablation shows that the logit term dominates (optimal λ₁:λ₂:λ₃ ≈ 8:1:1), but the main comparison table (Table 1) does not include a logit-only ablation baseline. Without seeing whether the full joint attack significantly outperforms λ₁-only across multiple models, the paper's central claim that all three components are necessary is incompletely supported. The current evidence only shows this on BLIP (Figure 3a).
 
 ### Minor
+- **Manual evaluation details underspecified**: The paper reports a 96.88% attack success rate from "manual evaluation" (Table 2 caption, line 219) but does not state the sample size used for human inspection, the number of annotators, or inter-annotator agreement. If all 1000 images were manually judged, that should be explicit; if only a subset, the sampling procedure is needed. This does not invalidate the results but weakens reproducibility.
 
-1. **Evaluation uses only one dataset (ImageNet) with only CLIP score as the automatic metric.** While ImageNet is a reasonable choice given that MIE does not require ground-truth captions, the lack of a standard captioning dataset (e.g., COCO, Flickr30k) with reference-based metrics (CIDEr, SPICE) limits the evaluation's breadth. CLIP score measures alignment but not all aspects of caption quality.
+- **Attack success rate metric lacks granularity**: The binary "factually inaccurate" criterion (line 200) counts both fluent-but-wrong outputs and incoherent gibberish as successful attacks. The paper acknowledges that outputs can be "illogical and incoherent" (Figure 5). Reporting auxiliary metrics (e.g., perplexity of outputs, proportion of outputs that are fluent-yet-false, BLEU against plausible descriptions) would better distinguish meaningful degradation from trivial gibberish and strengthen the claim of practical security risk.
 
-2. **Ablation study conducted only on BLIP.** The optimal coefficient ratio (~8:1:1) is derived from experiments on a single model (line 212: "For the BLIP model, we conduct ablation experiments"). Whether this ratio generalizes to the other four architectures is not verified.
+- **Gradient flow through autoregressive generation underspecified**: The paper states that "gradients of the target can be obtained through backpropagation" (line 121) but does not clarify how the autoregressive generation loop handles the discrete token selection. In standard implementations this is straightforward — the entropy is computed on differentiable probability distributions (softmax of logits), and the argmax-selected tokens from previous steps are treated as constants (detached) during backpropagation, so gradients flow to the image via cross-attention. However, the paper should state this explicitly for reproducibility. (This is a clarity issue, not a foundational flaw; the approach is standard and implementable.)
 
-3. **Prompting strategy not specified per model.** The paper notes that VQA models can be adapted for caption generation "by applying specific prompts" (line 88) but does not state what prompts were used for each of the five models. This is a reproducibility gap.
+- **No computational cost analysis**: The attack requires 100 PGD iterations, each involving a full autoregressive forward pass through the decoder. Reporting average GPU time per image would help readers assess practicality (Table 2 caption mentions "considerable cost associated with human resources" but the computational cost of the attack itself is not discussed).
 
-4. **No comparison against a simpler uniform-distribution baseline.** The logits-level entropy objective is equivalent to maximizing cross-entropy with a uniform distribution over the vocabulary. The paper does not compare against this simpler variant, making it unclear whether the multi-component design (attention + hidden states) provides additional value beyond what a single logit-level uniform-target baseline would achieve.
-
-5. **The claim that targeted attacks are "insufficient for image description tasks" (line 23) is stated without experimental evidence.** This claim is not tested or revisited in the experiments, weakening its role as motivation.
+- **No discussion of perturbation perceptibility**: The paper uses L∞ ε=8, which is standard, but does not provide qualitative examples showing whether the resulting perturbations are visible to humans. For captioning tasks, human perceptibility matters more than for classification since the output is used by end users.
 
 ### Trivial
-
-- The paper mentions Algorithm 1 (line 170) but the appendix containing it was stripped by the parser; this is not the authors' fault.
-- The hidden-states entropy requires a softmax normalization (Equation 5) with brief justification (line 155: "$\mathcal{F}$ is the softmax function as $h_i$ is not a normalized probability")—this is reasonable but could be expanded.
+None.
 
 ## Nice-to-Haves
-
-- Evaluating transferability of MIE-generated adversarial examples to black-box VLMs would increase practical relevance.
-- Reporting wall-clock time per image and analyzing the computational cost of iterative caption regeneration would help users assess scalability.
-- A brief discussion of potential defenses (adversarial training, input preprocessing) would contextualize the significance of the attack even if defense is deferred to future work.
-- Standard captioning metrics (CIDEr, SPICE) on a dataset with reference captions (e.g., COCO) would complement the CLIP score evaluation.
+- Include the logit-only (λ₁) and the two individual component baselines (λ₂-only, λ₃-only) in Table 1 to directly demonstrate the value of the joint attack.
+- Run the ablation study on at least one additional architecture (e.g., LLaVA as an Image-as-Token model).
+- Report perplexity, coherent prefix length, or proportion of fluent-yet-wrong outputs alongside the attack success rate.
+- Provide examples showing whether the L∞ ε=8 perturbations are visually perceptible.
+- Report per-image GPU time for the 100-step PGD attack.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+- **"Missing specification of how gradients are computed through autoregressive generation (foundational flaw)"**: This criticism misunderstands the gradient computation. The entropy objective (Eq. 2–4) is computed on differentiable probability distributions (softmax of logits), not on the discrete token outputs. The token selection (argmax) determines which context is fed to the next step, but those tokens are treated as constants during backprop — the gradient flows to the image through the differentiable cross-attention and language model paths. This is standard practice in white-box attacks on autoregressive models and does not require Gumbel-Softmax or straight-through estimators. The approach is reproducible and the gradient flow is correct. The paper could be more explicit about this, but it is not a fatal or even major flaw — it is at most a minor clarity gap.
 
-- **"Algorithm 1 is mentioned but not in main text"** — REMOVED per hard rules: the parser strips appendices; they exist in the original submission.
-- **"No code or reproducibility details... exact model versions not provided"** — REMOVED per hard rules: nitpicks about undisclosed implementation details that are impractical to include (complete training logs, minor versioning) are excluded. The paper provides epsilon, PGD steps, loss coefficients, and model names—substantial reproducibility information for a white-box attack.
-- **"Missing black-box attack experiments"** — REMOVED as scope creep per soft rules: this is a white-box attack paper; demanding black-box transfer is a different evaluation paradigm.
-- **"Missing defense discussion"** — REMOVED per soft rules: the paper explicitly defers defense to future work (line 253); criticizing its absence is scope creep.
-- **"The paper does not specify prompting strategy"** — Actually KEPT as Minor (see above); it is a specific, addressable reproducibility gap.
-- **Strength Finder strengths about "comprehensive ablation" and "method generalizes"** — These are partially retained but caveated (ablation only on BLIP, generalization is across architectures but only one dataset).
-- **"The method is straightforward / trivial"** — REMOVED: this is a subjective judgment, not a weakness. Many effective attack methods are conceptually simple. Simplicity is not a flaw.
-- **"Section 2.3 is brief"** — REMOVED: it is a related-work subsection; the substantive connection to the method is in Section 3. Criticizing a related-work section for not containing the paper's own contribution is a strawman.
-- **Strength Finder's "provides visual evidence"** — Kept but marked as qualitative/illustrative, not evidence sufficient on its own.
+- **"Overclaimed novelty"**: The paper's claim of being "the first to evaluate the non-targeted adversarial robustness of VLMs without real supervisory signals" (line 21) is appropriately scoped. The acknowledged closest work (Schlarmann & Hein, 2023) uses ground-truth captions, which is a real supervisory signal. The reviewer's suggested alternatives (maximizing cross-entropy with a random caption, minimizing likelihood of the model's own clean caption) either reduce to targeted attacks with random targets (which the paper compares against via Carlini et al.) or still require some form of signal. The novelty claim is reasonable and measured.
+
+- **"Non-targeted attack vs specific instantiation"**: Entropy maximization is a well-motivated choice for non-targeted attacks because it makes no assumptions about what constitutes a "wrong" output. The paper clearly explains this motivation (Section 2.3, Section 3). The fact that other instantiations exist does not weaken the paper's contribution.
+
+- **Pure formatting/style nitpicks and missing appendix content**: Removed per hard rules.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the expected tension between the paper's ambitious claims and its execution gaps, but do not identify novel patterns or insights that the paper itself missed.
+None beyond the paper's own contributions.
 
 ## Suggestions
-
-1. **Fix the manual evaluation.** Conduct it with at least 2–3 independent annotators, a detailed rubric (object presence, attribute correctness, fluency, coherence), report inter-annotator agreement (e.g., Fleiss' kappa), and report per-model success rates alongside aggregate numbers. If resources are limited, report on a 100-image subset with full transparency.
-2. **Add standard deviations or confidence intervals to all quantitative results (Tables 1, 2).** Also run a statistical test (e.g., paired bootstrap) comparing MIE against each baseline.
-3. **Either deliver the promised "theoretical explanation" or remove that claim from the contributions.** A rigorous analysis would at minimum formalize why a targeted attack's gradient direction (toward a specific text) is suboptimal for the untargeted goal of maximizing caption error.
-4. **Add a uniform-distribution baseline.** Compare MIE against maximizing cross-entropy with a uniform distribution over the vocabulary for logits; if the full MIE does not clearly outperform this simpler baseline, the multi-component design is not justified.
-5. **Run the ablation study on at least one additional model** (e.g., LLaVA, which uses a different architecture) to verify that the ≈8:1:1 coefficient ratio is not specific to BLIP.
-6. **Specify the exact prompts used for each model in the experimental setup** to improve reproducibility.
-7. **Tone down the "theoretical explanation" claim** and be more measured about what the paper contributes at the conceptual level.
+1. Clarify the gradient computation procedure in Section 3.5: state that during the autoregressive forward pass, the previously generated tokens are detached from the computation graph (treated as constants), and the entropy loss is computed on the differentiable output probability distributions. This will address the main reproducibility concern.
+2. Add logit-only and single-component baselines to Table 1, or add a supplementary table showing per-component results across all models.
+3. Extend the ablation study to at least one additional VLM architecture (e.g., LLaVA) to support the claim that the λ ratio generalizes.
+4. Report the sample size and number of annotators for the manual evaluation of attack success rate (Table 2).
 
 ## Score and Decision
 
-This paper addresses a genuine gap (non-targeted VL M attacks without ground-truth captions) and proposes a clean, intuitive method backed by preliminary experiments across diverse architectures. However, the evaluation has several significant weaknesses that prevent full confidence in the claimed results: the headline 96.88% success rate rests on an underspecified manual evaluation, no variance is reported for any quantitative metric, and a promised theoretical contribution is absent. These issues are addressable but would require meaningful additional work (proper human evaluation, statistical reporting, additional baselines) beyond a simple rebuttal.
+The paper proposes a well-motivated, novel attack method for VLMs that is the first to operate without ground-truth captions. The experimental results demonstrate clear effectiveness across diverse architectures. The weaknesses are primarily about presentation completeness (underspecified manual evaluation, ablation on one model only, missing individual-component baselines in the main table) rather than fundamental methodological flaws. The gradient concern raised by the reviewer is based on a misunderstanding and does not threaten the paper's validity. The paper would benefit from addressing the listed minor and major issues, but in its current form it represents a solid contribution to the field of VLM robustness evaluation.
 
-**Score: 5.0**
+**Originality**: Good — first non-targeted attack without ground-truth captions.  
+**Importance**: Good — VLMs are widely deployed and their robustness is a timely concern.  
+**Claims support**: Adequate — main results are clear but some evaluation details are underspecified.  
+**Soundness**: Adequate — methodology is sound but would benefit from stronger ablation evidence across models.  
+**Clarity**: Adequate — generally clear but could better specify implementation details (gradient handling, manual eval).  
+**Value**: Moderate to good — provides a practical benchmark for evaluating VLM robustness.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

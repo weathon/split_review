@@ -1,81 +1,90 @@
-Now I have a thorough understanding of the paper. Let me write the consolidated review.
+Now I have all the information I need. Let me synthesize the final review.
 
 ## Summary
 
-This paper proposes several techniques for improving machine learning reliability in healthcare: Uncertainty-Receptive Fusion (URF) for multi-modal ensemble learning, an image acquisition model with Monte Carlo simulation for test-time augmentation, Entropy-based Uncertainty Assessment (EUA), and Gnostic Uncertainty Estimation (GUE). The paper claims an end-to-end system for fracture classification using musculoskeletal radiographs (MURA dataset).
+This paper proposes a framework combining three components for uncertainty estimation in medical image analysis: Uncertainty-Receptive Fusion (URF), an ensemble method that uses predicted uncertainty to reweight the loss during sequential boosting; an image acquisition model incorporating spatial transformations and noise through Monte Carlo simulation for test-time augmentation; and Entropy-based Uncertainty Assessment (EUA) with Gnostic Uncertainty Estimation (GUE, i.e., MC dropout) for pixel- and structure-level uncertainty quantification. The framework is motivated by fracture detection in musculoskeletal radiographs using the MURA dataset.
 
 ## Strengths
 
-- **Formal image acquisition model for test-time uncertainty**: The paper provides a probabilistic framework (Section 2.2) that models the image formation process with latent variables, noise, and spatial transformations. It derives a Monte Carlo approximation for the expected prediction (Equations 5–9), offering a principled mathematical treatment of test-time augmentation that goes beyond ad-hoc techniques. This formalism is clearly presented and could serve as a foundation for uncertainty-aware inference.
+- **URF's use of uncertainty estimates (rather than prediction errors) to reweight the loss during sequential boosting** is a novel conceptual departure from conventional boosting (Sec 2.1). Unlike typical ensemble methods that weight by residual error, URF adjusts training of the (j+1)-th base learner using the predicted uncertainty σ_{h_j} from the j-th learner, aiming to focus capacity on high-uncertainty regions. This mechanism is explicitly contrasted with prior boosting methods (Chen & Guestrin, 2016).
 
-- **Structure-level uncertainty via Volume Variation Coefficient (VVC)**: The paper extends prior work by defining VVC as the coefficient of variation of segmented volumes across Monte Carlo samples (Equation 16), producing a size-independent metric for lesion/organ-level uncertainty quantification (Section 2.2.3).
+- **The image acquisition model provides a principled probabilistic justification for test-time augmentation** (Sec 2.2, Eqs. 4–11). By modeling the observed image as a noisy, spatially transformed version of a latent image I₀, and marginalizing over transformations and noise via Monte Carlo simulation, the method extends standard test-time augmentation beyond ad-hoc practice to a formally grounded inference procedure.
+
+- **EUA's entropy-based uncertainty at both pixel and structure levels** (Sec 2.2.2) targets the practical problem of overconfident but wrong predictions that arise when relying solely on model-based (epistemic) uncertainty. The Volume Variation Coefficient (VVC, Eq. 17) offers a scale-invariant structural uncertainty measure that is more interpretable across patients than raw volume variance.
+
+- **Practical guidance on Monte Carlo sample size** (Sec 2.4): the paper provides an empirically motivated range (N=20–60) and recommends tuning on a validation set, a useful deployment insight.
 
 ## Weaknesses
 
 ### Fatal
 
-**1. Fundamental task confusion invalidates the paper's core claims.** The paper simultaneously and inconsistently claims to address regression (Section 2.1: "For the purposes of regression"), fracture *classification* (abstract, introduction, Section 2.3: MURA dataset), and image *segmentation* (Section 2.4: Dice scores, W-Net, pixel-level annotations; Conclusion: "CNN-driven medical image segmentation"). These are fundamentally different tasks requiring different architectures, loss functions, and evaluation metrics. The paper never resolves which task it actually addresses. The abstract and introduction build a case for fracture classification on MURA, but Section 2.4 evaluates EUA using Dice scores (a segmentation metric) and datasets like PASCAL VOC, COCO — datasets unrelated to fracture detection. The Conclusion (line 208) states "our research examined a variety of aspects of uncertainty in CNN-driven medical image segmentation," contradicting the title's "Multi-Modal Learning" and the introduction's fracture classification framing. **This is not a presentation issue; it means the paper's claims are unverifiable because the method, dataset, and evaluation are not aligned.**
-
-**2. URF — the paper's core methodological contribution — is never evaluated.** URF is presented as "especially successful for multi-modal learning tasks" (abstract) and as a key contribution, yet Section 2.4 (the only section discussing results) exclusively describes EUA and test-time dropout performance on segmentation tasks. URF and URF_w are never mentioned in the results discussion. The reader cannot assess whether URF works at all, let alone whether it outperforms alternatives. A new-method paper that does not evaluate its central claimed contribution cannot establish its value.
-
-**3. Mismatch between multi-modal method and single-modal application.** URF is explicitly designed for multi-modal learning — it assumes multiple input modalities each with a dedicated base learner (Section 2.1). However, the paper applies it to the MURA dataset of musculoskeletal radiographs, which is single-modal (X-ray only). The paper never explains how URF's multi-modal framework is adapted to a single-modal setting, or what the "modalities" are. This is a fundamental disconnect between the proposed method and its claimed application.
+None. The paper has major weaknesses but does not contain an error that definitively invalidates its entire framework in principle.
 
 ### Major
 
-**1. No experimental methodology section.** There is no dedicated Experiments or Evaluation section. Section 2.4 ("Summary") is an informal discussion that alludes to results in figures and tables (Figures 5, 6; Tables 4, 5) — likely present in the original submission but with no textual description of experimental setup. The paper provides: (a) no description of the base learner architecture used, (b) no training hyperparameters, (c) no train/validation/test splits, (d) no baseline configurations, (e) no preprocessing details, (f) no numerical results reported in text. A paper cannot be accepted without the reader being able to understand what was actually done in the experiments.
+- **Fundamental task ambiguity: the paper frames the problem as classification but evaluates using segmentation metrics, with no reconciliation.** The introduction (Sec 1) and abstract frame the contribution around fracture *classification* from X-rays using MURA (a study-level normal/abnormal classification benchmark with 40,561 images labeled per-study, not per-pixel). However, all method details that involve evaluation — pixel-level entropy (Sec 2.2.2, Eq. 14), Dice scores, IoU/Jaccard loss (Sec 2.1), structure/lesion-level VVC (Sec 2.2.3), and "segmentation accuracy" (Sec 2.4, Conclusion) — belong to *semantic segmentation*. The paper states "We used the setting of image segmentation tasks to explain how EUA may be used" (Sec 2.4) but never explains what segmentation dataset was used, how MURA (classification labels) could produce segmentation-ground-truth comparisons, or how the framework transitions from the classification framing to the segmentation evaluation. This is not a mere presentation issue: the reader cannot determine whether the claimed results (Dice scores, segmentation accuracy) were produced on MURA — which would be impossible without pixel-level annotations — or on another unmentioned dataset. This inconsistency undermines all experimental claims.
 
-**2. Disjointed and disconnected contributions.** The paper presents three distinct threads — URF (multi-modal fusion), an image acquisition model with Monte Carlo augmentation, and EUA/GUE (uncertainty estimation) — without explaining how they integrate into a coherent system. The abstract claims an "end-to-end system," but no system architecture is ever described. URF is never connected to EUA or GUE. The image acquisition model (Section 2.2) is presented as a standalone mathematical derivation without linking to URF or to the MURA application. The paper reads as separate research threads stitched together rather than a unified contribution.
+- **URF method is underspecified, with a potential circular dependency not addressed.** The sequential boosting procedure is described only at the high level: "adjusting the weighting of the loss function during training using the predicted uncertainty estimations σ_{h_j}" (Sec 2.1). No pseudocode, precise algorithmic steps, or description of how base learners are trained in order is provided. More critically, the uncertainty estimate σ_{h_j} is defined (Eq. 2) in terms of μ(i_n), the "mode of predictions from all the models in the ensemble," and σ²(i_n), the standard deviation of predictions from the ensemble. But during sequential training of the (j+1)-th learner, only models 1…j have been trained — the full ensemble does not yet exist. The paper does not address whether μ and σ² are computed from only the available subset, whether earlier learners are re-evaluated, or whether this creates circularity. This makes the method irreproducible as written.
 
-**3. URF description is too vague to be reproducible or novel.** The method description (Section 2.1) does not specify: how uncertainty estimates σ_h_j are computed from the base learners during training, how loss weighting is updated from one boosting iteration to the next, how "base learners" are trained for different modalities, or how URF differs algorithmically from standard AdaBoost/reweighting schemes beyond substituting uncertainty for error. The paper states base learners "are not just weak learners" unlike prior boosting (line 61), but does not justify what this means for the algorithm. The uncertainty measure (Equation 2) is described as a "modified version of LLFU Lakara et al. (2021)" without specifying what the modification is. The notation is inconsistent (I_m, I_j, i_n used interchangeably) and the derivation of α, β, γ contains algebraic peculiarities (e.g., β = max(0, log(2πσ²/2)) simplifies to log(πσ²)). Without a precise algorithmic description or pseudocode, URF cannot be reproduced.
+- **No experimental setup section exists.** There is no standalone experimental section describing data splits, model architectures (the paper mentions CNNs and "W-Net" in passing but gives no specifics), training hyperparameters, preprocessing, optimizer, learning rate, or hardware. The results are discussed only in Section 2.4 ("Summary"), which is placed within the Methodology section and provides exclusively comparative phrasing ("did not outperform," "marginally surpassed," "closely linked") without a single numerical value. Even if the parser stripped tables and figures, the textual summary is too thin for a reader to assess the magnitude of reported effects. Combined with the task ambiguity, the evidentiary basis for the claimed contributions is insufficient.
 
-**4. Section 2.4 appears to describe results from a different study.** This section references "W-Net," "TCET," "Grand Challenge 4" — none of which are defined or introduced in the paper. It discusses segmentation on datasets like PASCAL VOC and COCO, which have no connection to the MURA fracture classification task introduced in Section 2.3. The section reads as a summary of prior/separate work on medical image segmentation that was inserted without adaptation to this paper's framing.
+- **GUE (Gnostic Uncertainty Estimation) is standard MC dropout with no novel element.** Section 2.2.3 describes run-time dropout, Bernoulli masking, KL divergence minimization to approximate the posterior, and Monte Carlo sampling — all of which are the standard MC dropout procedure (Gal & Ghahramani, 2016). The paper adds the term "gnostic" but does not explain any technical departure from standard epistemic uncertainty estimation. The contribution of GUE relative to existing practice is therefore unclear.
+
+- **No connection is established between the three main components (URF, image acquisition model, EUA/GUE).** URF (Sec 2.1) is described for multi-modal regression with ensemble averaging. The image acquisition model (Sec 2.2) describes Monte Carlo sampling over transformations and noise for a single network. EUA and GUE (Sec 2.2.2–2.2.3) are uncertainty quantification methods. The paper never explains how these components are integrated into one end-to-end system — e.g., does the acquisition model's Monte Carlo sampling feed into URF's boosting? Are the base learners in URF each run through the acquisition model? Is EUA applied to URF's output or to individual base learners? Without integration details, the "end-to-end system" claim (Sec 1) is unsupported.
 
 ### Minor
 
-- **No dataset splits reported.** Section 2.3 describes MURA's overall size (40,561 images) but provides no details on how the data was partitioned for training, validation, and testing, or how class balance was handled.
-- **Notation inconsistencies.** The paper switches between I_m (input feature set), I_j (subset for j-th modality), and i_n (n-th input image) without clear distinction. The description of μ(i_n) as "the mode of predictions" for continuous predictions is ill-defined.
-- **The paper claims "novelty" for EUA and GUE** (e.g., "present Gnostic Uncertainty Estimation") but EUA is standard entropy estimation from Monte Carlo samples and GUE is standard MC dropout — well-known techniques in the uncertainty estimation literature. The claimed extension (combining EUA and test-time dropout samples for VVC) is described too briefly to assess novelty.
+- **The image acquisition model appears disconnected from the MURA dataset and the experimental evaluation.** The model (Sec 2.2) is presented as a general framework, but it is never stated whether the experiments (Sec 2.4) used this acquisition model, what transformation priors were chosen for MURA, or how the Monte Carlo sampling was configured. It reads as a theoretical detour whose operational role in producing the claimed results is unclear.
+
+- **Non-standard terminology: "impromptu" used to mean "aleatoric" (input-dependent) uncertainty** (Conclusion, Sec 3). The standard term in the uncertainty estimation literature for this concept is "aleatoric uncertainty." Using "impromptu" without definition creates unnecessary confusion and deviates from established terminology.
+
+- **Disorganized paper structure.** Results, discussion, limitations, and practical recommendations are all placed within Section 2.4 ("Summary") under the Methodology heading, rather than in dedicated Experiments and Discussion sections. This makes the paper harder to navigate.
 
 ### Trivial
 
-- Figure 1 caption mentions MURA classes "normal," "fracture," and "arthritis," but the actual MURA dataset (Rajpurkar et al. 2017) uses binary labels (normal/abnormal). This discrepancy should be corrected.
+None.
 
 ## Nice-to-Haves
 
-- A clear statement of which task (regression, classification, or segmentation) the paper addresses, with consistent framing throughout.
-- An ablation study comparing URF with and without uncertainty weighting, and against standard boosting and simple ensembles.
-- Computational cost analysis of the Monte Carlo procedures.
+- A dedicated Related Work section would help position URF/EUA relative to existing uncertainty estimation methods for medical imaging, though the absence is not itself a weakness.
+- The paper could be strengthened by ablation studies isolating the contribution of each component (URF vs. vanilla fusion, EUA vs. no uncertainty, GUE vs. MC dropout), but this rises to a necessary experiment given the current underspecification.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"No related work section"**: The instructions prohibit mentioning missing related work as a weakness, as external sources cannot confirm their absence. The paper does discuss prior work inline (Bayesian methods, ensemble methods, MURA) even without a dedicated section.
-- **"No code or data access statement"**: Reproducibility nitpick about impractical artifacts to include in a submission.
-- **"No discussion of computational cost"**: Downgraded to Nice-to-Have; not standard as a fatal/major weakness.
-- **"No description of base learner architecture"**: Partially addressed in the Major weakness about missing experimental methodology; the specific architecture for the MURA experiments is indeed absent.
-- **Criticism that Figures/Tables 4,5,6 don't exist**: These are likely stripped by the parser; the paper references them, so I assume they exist in the original submission. The weakness is about the *absence of textual experimental description*, not the figures themselves.
-- **Generic formatting/style nitpicks**: Removed per instructions.
+- **"No experimental evidence" (Harsh Critic point 1, first sentence)**: The harsh critic claimed the paper provides no experimental evidence at all because tables/figures are missing from the extracted text. However, the paper repeatedly references Table 4, Table 5, Figure 5, and Figure 6 and describes comparative results. These may have been present in the original submission but stripped by the parser. The core of this criticism is preserved above as the observation that even the textual description of results lacks numerical values and that no experimental setup section exists — but the claim of *no* evidence whatsoever is too strong given likely parser artifacts.
+- **"No related work section"**: Per meta-review instructions, I cannot verify whether a related work discussion existed elsewhere or was stripped; removing.
+- **Formatting and style nitpicks**: Purely editorial observations not relevant to evaluating the submission.
+- **"Should also cover Y / domain Z" demands**: Not included as these constitute scope creep.
+- **Questions about citation existence**: The paper cites Rajpurkar et al. (2017) for MURA and standard references; these exist per instructions.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a fundamental structural problem — the paper attempts to cover multi-modal fusion, test-time augmentation, and uncertainty estimation in the context of fracture classification, but the pieces never cohere into a verifiable contribution. The most striking observation from cross-referencing the reviews with the paper is that even the paper's own "Summary" section evaluates a *different task* (segmentation) using *different datasets* (PASCAL VOC, COCO) than those motivated in the introduction (MURA classification), suggesting the paper was assembled from disparate sources without proper integration.
+None beyond the paper's own contributions. The reviews surface the task ambiguity and URF circularity issue, which are genuine problems, but these are flaws to be addressed rather than novel insights about the research area.
 
 ## Suggestions
 
-1. **Choose and commit to one task.** Decide whether this is a paper about fracture classification, multi-modal regression, or medical image segmentation. Define the task clearly in the first paragraph and ensure the method, dataset, and evaluation are all consistent with that choice.
+1. **Resolve the classification/segmentation ambiguity**: Either clearly commit to one task or explain how the framework applies to both, with separate experimental validation for each. If evaluation was done on a segmentation dataset, name it, describe it, and explain why MURA (classification) is the sole dataset described in Sec 2.3.
+2. **Provide a precise algorithmic specification of URF**: Give pseudocode or a step-by-step description of the sequential training procedure, clarifying how uncertainty estimates propagate between learners and addressing the circularity in Eq. 2 (how μ and σ² are computed during sequential training).
+3. **Write a dedicated Experiments section** including data splits, architectures, hyperparameters, and result tables with confidence intervals. The current text-only summary in Sec 2.4 is insufficient even if tables were present in the original.
+4. **Explain how the three components (URF, image acquisition model, EUA/GUE) are integrated** into a single pipeline, or clarify which are independent contributions.
+5. **Rename or reframe GUE**: If it is standard MC dropout, say so transparently and explain what (if anything) is novel; otherwise, provide a clear technical distinction.
+6. **Restructure the paper**: Move results/discussion/limitations out of the Methodology section into proper Experiments and Discussion sections.
 
-2. **Evaluate URF, or remove it from the paper.** If URF is the core contribution, it must be evaluated experimentally — compared against standard boosting, unweighted ensembles, and simple averaging — on multi-modal data. If no such evaluation exists, the paper should focus on the EUA/image acquisition contributions and drop the URF claims.
+## Overall Assessment
 
-3. **Add a proper Experiments section** with: architecture details, training hyperparameters, data splits, baseline configurations, and full numerical results (not just qualitative summaries referencing figures). Report confidence intervals where possible.
+**Originality**: The core idea of using uncertainty estimates to reweight losses during boosting (URF) has some originality, though it is insufficiently specified. GUE is not novel.
 
-4. **Integrate the contributions.** If the paper truly presents an end-to-end system, describe the system architecture and show how URF, EUA, and GUE work together. Alternatively, split into separate papers for each contribution.
+**Importance of research question**: Uncertainty estimation in medical image analysis is an important and active area.
 
-5. **Provide pseudocode** for URF and clearly specify how the uncertainty estimates are computed during training (not just at test time) and how they modulate the loss function.
+**Claims supported**: No. The task ambiguity (classification vs. segmentation), underspecified URF algorithm with unresolved circularity, lack of detailed experimental setup, and absence of numerical results in the text mean the central claims are not adequately supported.
 
-## Score and Decision
+**Soundness of experiments**: Cannot be assessed. The experimental description is too thin — no architectures, splits, hyperparameters, confidence intervals, or numerical results are reported in the available text. The evaluation metric (Dice) is inconsistent with the stated dataset (MURA classification).
 
-The paper has fatal flaws that cannot be fixed in a revision: the task confusion (regression/classification/segmentation) means the core claim is unverifiable, the central contribution (URF) is never evaluated, and the multi-modal method does not match the single-modal dataset. Additionally, the lack of any proper experimental methodology section makes the paper effectively incomplete. These issues are structural, not cosmetic.
+**Clarity of writing**: Below the bar for a conference paper. The task is ambiguous throughout, terminology is non-standard ("impromptu"), the structure is disorganized (results within Methodology), and the technical descriptions lack precision.
 
-MY FINAL SCORE: <pineapple>2.0</pineapple>
+**Value to community**: Potentially positive if the issues are resolved, but in its current form the paper does not provide a reproducible method or verified results.
+
+### Score and Decision
+
+MY FINAL SCORE: <pineapple>3.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

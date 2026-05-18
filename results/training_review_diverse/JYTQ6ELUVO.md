@@ -1,20 +1,22 @@
-Now I have sufficient verification of all claims against the paper. Let me write the consolidated review.
+Now I have a thorough understanding of the paper and can verify each reviewer claim against the text. Let me synthesize the final review.
 
 ---
 
 ## Summary
 
-This paper conducts an empirical study across three specialized domains (genomics, satellite imaging, time series), comparing 25+ foundation models against supervised learning workflows across 50+ tasks. The authors introduce two automated pipelines — DASHA (NAS-based CNN architecture search) and Auto-AR (tuned linear auto-regression) — and find that supervised methods remain competitive with or outperform specialized FMs in most settings. The core message — that strong supervised baselines matter and are often neglected — is important and largely supported by the evidence.
+This paper investigates whether specialized foundation models (FMs) in genomics, satellite imaging, and time series actually outperform traditional supervised learning. Across 25+ FMs and 50+ tasks, the authors find that well-tuned supervised baselines—a CNN with architecture search (DASHA) in genomics/satellite, and tuned linear auto-regression (Auto-AR) in time series—consistently match or outperform most specialized FMs. The paper also contributes two open-source automated workflows for building strong baselines.
 
 ## Strengths
 
-1. **Broad, multi-domain empirical investigation with extensive coverage.** The paper evaluates 25+ FMs across 50+ tasks in three distinct specialized domains. Table 1 (genomics) shows DASHA (0.761 avg. score) clearly outperforming all 10 FMs; Table 2 (satellite) shows DASHA matching CROMA-Large (77.85 vs. 78.03, tied at rank 3.33); Table 3 (time series) shows Auto-AR competitive with most open-source FMs with only 513 parameters. This breadth makes the findings representative and hard to dismiss as domain-specific.
+- **Systematic multi-domain evaluation with a clear, timely research question.** The paper evaluates 25+ FMs across three specialized domains on the same benchmarks used to validate the FMs themselves, providing the most comprehensive independent comparison to date. The central question—whether specialized FMs have delivered the same transformative gains seen in NLP/vision—is well-motivated and important to the community.
 
-2. **Introduction of DASHA and Auto-AR as practical, open-source automated baselines.** DASHA (Algorithm 1) combines DASH architecture search with ASHA hyperparameter tuning to automate CNN model development. Auto-AR (Section 3.2) rescues classical linear auto-regression by enabling long lookbacks (up to 512) via GPU training, yielding a 513-parameter model competitive with FMs that have millions of parameters. These are genuine tools the community can adopt.
+- **Genomics evidence is clean and decisive.** Using published FM numbers directly from the original papers (rather than their own reproductions), DASHA achieves a mean improvement of 46.33% over baseline vs. 42.63% for the best FM (Caduceus-PH) and an average score of 0.761 vs. 0.725 for the best FM—on the very same NT benchmark. This is unambiguous counter-evidence to claims that genomics FMs dominate supervised learning.
 
-3. **Demonstrates that tuning kernel sizes and dilation rates (via DASHA) is an effective surrogate for human model development.** Figure 4 shows architecture embeddings cluster by task across multiple random seeds, confirming that DASHA discovers task-consistent architectural patterns. This supports the claim that NAS serves as a reasonable proxy for manual model development.
+- **The surprising competitiveness of tuned linear auto-regression is a concrete discovery.** Auto-AR (513 parameters, no pretraining) achieves 0.551 RMSE, outperforming all zero-shot and most fine-tuned time series FMs, while TTM(A)'s best is 0.538. The finding that a century-old model with GPU-accelerated tuning and lookback >5 is competitive with 200M+ parameter FMs is well-supported and has practical value for practitioners.
 
-4. **Uncovers the surprising effectiveness of long-lookback linear auto-regression.** The paper shows that a simple AR model (513 parameters), when tuned with lookback windows up to 512, outperforms most open-source time series FMs on 7 forecasting tasks (Table 3). This challenges the assumption that modern deep learning methods are always superior for forecasting and identifies a specific reason (limited lookback in prior Auto-ARIMA implementations) why this baseline was previously dismissed.
+- **DASHA and Auto-AR are useful open-source contributions.** These workflows provide a standardized, reusable way for future FM papers to compare against tuned supervised baselines—addressing the "echo chamber" problem identified in Section 2.1. The PCA analysis (Figure 4) shows that DASHA discovers task-consistent kernel size/dilation rate patterns, supporting its validity as a proxy for human-driven model development.
+
+- **Clear visualization of the data-to-performance gap.** Figure 1 effectively communicates the paper's central finding: specialized FMs use two to five orders of magnitude more data than supervised methods while delivering minimal to no improvement, in sharp contrast to BERT's impact on NLP.
 
 ## Weaknesses
 
@@ -23,51 +25,50 @@ None.
 
 ### Major
 
-1. **Satellite FM reproduction gap is acknowledged but unaddressed, weakening the comparison.** The paper states (line 248) that "even with the original code and extra tuning our reproductions on previous benchmarks systematically underperformed results reported in the original works." This means the satellite FM numbers in Table 2 may be lower than what these models can achieve with optimal fine-tuning. The paper does not (a) quantify how much worse the reproductions were, (b) report the original published numbers alongside the reproductions, or (c) discuss why the discrepancy exists. While the overall conclusion that DASHA is competitive in satellite imaging would likely survive even if FM numbers improved slightly (the gap to CROMA-Large is only 0.18 points), the lack of transparency on this issue undermines reader trust in the satellite results specifically. This issue is also conspicuously absent from the Limitations section (lines 415–420), which focuses on scope limitations rather than methodological concerns with the evidence.
-
-2. **The abstract's time series claim is inconsistent with the paper's own data.** The abstract states that "tuned linear auto-regression (AR) matches or outperforms every open-source time series FM on a standard suite of seven forecasting tasks" (line 48). However, Table 3 shows TTM(A) outperforming Auto-AR on 3 of 4 aggregate metrics: Avg RMSE (0.538 vs. 0.551), Avg Rank (2.21 vs. 5.45), and Mean % Improvement (33.38 vs. 31.91). Auto-AR only ties with TTM(B) on Median % Improvement (both 25.36). The paper's own discussion (line 365) acknowledges that "TTM surpasses all other methods across three aggregated metrics." The abstract's framing is therefore an overstatement — "matches" is a stretch when the rank gap is 2.21 vs. 5.45. This is a presentational issue rather than a data fabrication, but it misleads readers about the time series results and invites justified pushback that distracts from the paper's real contribution.
+- **Satellite FM evaluation methodology is a confound for one of the three domains.** The paper openly states (line 248) that "even with the original code and extra tuning our reproductions on previous benchmarks systematically underperformed results reported in the original works." Because the satellite evaluation relies on the authors' own fine-tuning of FMs (unlike genomics, where published numbers are used), the satellite FM results could be lower than what the original FM creators could achieve. This introduces an uncontrolled confound: the comparison pits potentially undertuned FMs against carefully tuned DASHA baselines. While the paper acknowledges this, the satellite domain's evidence for the "FM struggle" thesis is weaker than claimed. The genomics and time series results are not affected by this issue, but the paper should either (a) provide evidence that their fine-tuning recovers published numbers on at least a subset of tasks, or (b) treat satellite as less conclusive.
 
 ### Minor
 
-1. **No uncertainty quantification or variance reporting for any result.** Tables 1–3 report only point estimates. Given that several comparisons are close (satellite: 78.03 vs. 77.85; time series: 0.538 vs. 0.551 RMSE), it is impossible to assess whether these differences are reliable or within noise. This is a common limitation in large benchmark evaluations, but it weakens the force of the aggregate comparisons.
+- **Time series mixes zero-shot and fine-tuned FMs in the same aggregate comparison without clear separation.** TEMPO and TimesFM are evaluated zero-shot (line 322–323) yet appear in the same summary table and contribute to the same aggregate ranks and percentages as fully supervised methods. The paper acknowledges this (line 343: "our evaluation of ZS models will be in a less challenging setting") and discusses it, but the table presentation itself does not visually separate the two regimes. A reader scanning the table sees all FMs compared as a single block. This conflates two fundamentally different evaluation settings and weakens the "FM struggle" narrative for the zero-shot column.
 
-2. **Time series evaluation uses only linear supervised baselines, while the paper's title and framing reference "Supervised Baselines" broadly.** The time series evaluation includes DLinear, AR, Auto-ARIMA, and Auto-AR — all linear or classical statistical models. Well-established deep learning supervised methods (e.g., N-BEATS, N-HiTS, DeepAR, TFT) are not included. The paper acknowledges DASHA was tried and not competitive (line 158), but the absence of these methods means the claim is essentially about "tuned linear models" in time series, not "supervised learning" broadly. The paper should either include representative deep learning baselines or more carefully scope the time series claim to linear models.
+- **No uncertainty estimates or variability measures for aggregate metrics.** The aggregate scores, ranks, and mean % improvements are reported as point estimates across a modest number of tasks (7–18 per domain). Without confidence intervals, bootstrap estimates, or even per-seed variability, it is impossible to assess whether differences like DASHA (77.85) vs. CROMA-Large (78.03) are meaningful or noise. This is especially important given the paper's comparative claims.
 
-3. **Exclusion of three time series FMs (Moirai, LLM4TS, Toto) is handled defensively.** The paper states these are excluded because they "evaluate on only a subset of the seven tasks or are closed-source (or both)" (line 351). The subsequent discussion acknowledges Toto has "strong aggregate metrics" and that LLM4TS "performs roughly on par with TTM(A)" (lines 354–355). The rationale that they "do not affect our conclusions" (line 356) is stated after seeing their results, which risks being circular. Including them and explicitly handling the partial coverage would be cleaner.
+- **No concrete compute cost comparison between DASHA and FM fine-tuning.** The paper claims (line 155) that DASHA is "never substantially more computationally expensive than fine-tuning an FM" but provides no GPU-hours, wall-clock time, or any quantitative evidence. Given the paper's emphasis on efficiency (Section 5.2), this is a gap that could be filled easily.
+
+- **The framing slightly overstates the case in two of three domains.** The title asserts that specialized FMs "struggle to beat" supervised baselines. In genomics this is unambiguously true. But in satellite imaging, CROMA-Large achieves a higher average score (78.03 vs. 77.85), higher mean % improvement (6.90 vs. 6.67), and ties DASHA in rank. In time series, TTM(A) beats Auto-AR on average RMSE (0.538 vs. 0.551). While the paper does acknowledge these exceptions (lines 295, 365), the overall messaging leans harder negative than the data in two domains warrants. A more precise framing would be: "Specialized FMs have not yet achieved the decisive dominance seen in NLP/vision—they match or narrowly outperform tuned supervised baselines at best, and typically at far greater cost."
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
 
-- **Per-task breakdowns in the main text.** The paper references several appendix tables/figures for per-task results. A single per-task comparison figure in the main text, especially for time series, would help readers verify whether aggregate rankings are driven by a few tasks.
-- **Confidence intervals on aggregate metrics** (e.g., bootstrap) would strengthen the comparison, though this is not standard practice in all benchmark evaluations.
-- **Inclusion of the original published FM numbers alongside the satellite reproduction numbers** to help readers calibrate the reproduction gap.
+- Reporting bootstrap confidence intervals around aggregate metrics would significantly strengthen the paper's comparative claims.
+- A brief analysis of whether FMs' pretraining data overlaps with evaluation tasks would clarify whether the evaluation setting favors or disadvantages FMs.
+- Adding silhouette scores or another quantitative measure to the PCA analysis (Figure 4) would strengthen the claim that DASHA discovers task-specific architectures.
+- Providing concrete GPU-hour comparisons between DASHA and FM fine-tuning would support the efficiency narrative.
+- A separate sub-table for zero-shot time series FMs would cleanly separate evaluation regimes.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **"The paper should include stronger deep learning time series baselines"** — included as Minor weakness #2 above, with the nuance that the paper's contribution is showing even simple linear models are competitive. Demanding N-BEATS/N-HiTS would change the paper's direction.
-- **"Comparison to BERT in Figure 1 is misleading because NLP baselines were themselves pretrained"** — this is a rhetorical observation about a figure that is clearly labeled as an illustrative comparison, not a rigorous experimental setup. The paper's own comparison methodology is separate and sound.
-- **"Code license not mentioned"** — a formatting/trivial nitpick.
-- **"Missing per-task analysis in main text"** — moved to Nice-to-Haves; the appendix likely contains this.
-- **"PCA caption claim about 'utility of diverse baselines' not supported"** — technically correct but pertains to a single sentence in a caption; does not affect any core result.
-- **"No statistical significance testing"** — kept as Minor weakness #1 (legitimate but common gap in benchmark papers).
-- **"Paper should add user studies"** — not applicable to this type of paper; not raised by any reviewer.
+- **Harsh Critic Point 2 (overstated claim):** Partially retained as a Minor weakness. The reviewer's claim that the paper "dramatically understates" FM wins is too strong—the paper does acknowledge CROMA-Large's and TTM's leads (lines 295, 365). The framing criticism has merit but is not as severe as the reviewer suggests. Retained in downgraded form.
+- **"Toto exclusion deserves more scrutiny":** The paper provides a clear justification for Toto's exclusion (dominant on one task only, line 355). The reviewer's concern is reasonable but ultimately about a model the paper explicitly discusses and explains. Moved to Removed Points as it is addressed.
+- **"No discussion of few-shot settings":** The paper's Limitations section (line 417–418) explicitly acknowledges that zero-shot and few-shot settings are not studied. The paper scopes itself to supervised settings, and asking it to also cover few-shot is scope creep. Moved to Removed Points.
 
 ## Novel Insights
 
-The most interesting observation that emerges from the reviews — beyond the paper's own contributions — is the asymmetry in adoption standards across domains. The paper shows that in genomics, FMs are routinely compared against other FMs but not against tuned CNNs (which outperform them). In satellite imaging, FMs are compared against naive ImageNet-initialized backbones (which they beat) but not against domain-aware CNN tuning (which matches them). In time series, a century-old linear model with larger lookback windows beats most recent FMs. This pattern — that FM creators select baselines that make their models look best, whether by omission or weak tuning — is a structural problem in specialized-domain ML that the paper's methodology is designed to address.
+The most interesting insight emerging from this review is that the paper's own evidence creates a more nuanced picture than its title suggests: in satellite imaging, the best FM (CROMA-Large) *does* beat the best supervised method, and in time series TTM beats Auto-AR—but in both cases by margins so small they may not be practically meaningful given the computational cost. This suggests specialized FMs may not be failing so much as experiencing diminishing returns: the low-hanging fruit of pretraining (learning generalizable features) may already be captured by well-designed supervised architectures, and the remaining gains require orders of magnitude more compute. The paper would be stronger by embracing this "marginal gains at massive cost" narrative rather than framing it as a failure of FMs to "beat" supervised learning.
 
 ## Suggestions
 
-1. **Tone down the abstract and title claims for time series.** Replace "matches or outperforms every open-source time series FM" with something like "is competitive with all open-source time series FMs and outperforms most" — this matches the actual data and avoids giving reviewers an easy point of attack.
-2. **Acknowledge and address the satellite reproduction gap explicitly.** Report the original published numbers alongside the reproductions in an appendix table, discuss likely causes for the discrepancy, and state clearly whether closing this gap would affect the conclusions.
-3. **Remove the phrase "utility of using diverse models as baselines" from the PCA caption** — the figure supports within-task consistency of architectures, not the utility of diverse baselines (which is demonstrated elsewhere via the ResNet vs. UNet comparison in genomics).
-4. **Either include Moirai/LLM4TS/Toto in the main analysis (handling partial coverage transparently) or move them to a more neutrally-phrased appendix note** without the circular "do not affect our conclusions" reasoning.
+1. **Fix the satellite FM evaluation.** Either demonstrate that your fine-tuning recovers published numbers on benchmarks where those exist (e.g., by showing that your SatMAE fine-tuning on a held-out task matches the original paper's numbers), or run the comparison using only published numbers and note which GeoBench tasks lack such numbers. Transparency alone does not repair the confound.
+2. **Separate zero-shot from fine-tuned models visually** in Table 3, e.g., with a horizontal divider and a clear label, and consider removing zero-shot models from the aggregate rank computation or computing separate aggregates for each regime.
+3. **Add uncertainty estimates** (bootstrap confidence intervals on mean rank and mean score) to all aggregate tables.
+4. **Provide GPU-hour or wall-clock time comparisons** between DASHA and FM fine-tuning to substantiate the efficiency claim.
+5. **Adjust the title and abstract** to more precisely reflect the evidence: "Specialized Foundation Models have not yet surpassed well-tuned Supervised Baselines" or "Specialized Foundation Models deliver marginal gains over Supervised Learning at massive data cost."
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+The paper addresses an important question with a systematic evaluation and contributes useful tools. The genomics evidence is strong and clean. However, the satellite domain has a methodological confound (acknowledged but unresolved), and the overall framing is slightly stronger than the evidence warrants in two of three domains. These issues are addressable in revision.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

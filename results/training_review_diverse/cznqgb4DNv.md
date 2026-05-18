@@ -1,18 +1,16 @@
-Now I have a thorough understanding of the paper. Let me synthesize the final review.
+Now I have all the information needed to verify the reviewer's claims against the paper.
 
 ## Summary
 
-The paper proposes DSpodFL, a decentralized federated learning framework that models both sporadic local SGD computations and sporadic inter-client model aggregations via indicator random variables. This subsumes several existing DFL methods (DGD, DFedAvg, RG) as special cases. The authors provide convergence analysis for strongly-convex and non-convex settings under constant and diminishing learning rates, and conduct experiments on FMNIST and CIFAR10 showing accuracy-delay improvements.
+The paper proposes **DSpodFL**, a decentralized federated learning framework that models both local SGD steps and inter-client model aggregations as binary indicator random variables, capturing heterogeneous and time-varying computation/communication resources. The framework subsumes DGD, DFedAvg, and Randomized Gossip as special cases. The authors provide convergence analysis for strongly convex and non-convex settings under mild assumptions (loose data heterogeneity, asymptotic graph connectivity) with constant learning rates, and note that diminishing-step-size results appear in the appendix. Experiments on FMNIST and CIFAR10 demonstrate consistent accuracy-vs-delay improvements over baselines.
 
 ## Strengths
 
-- **Unified framework with clear generality**: DSpodFL models both sporadic SGDs and sporadic aggregations through indicator random variables (Eq. 1), and explicitly demonstrates that DGD, DFedAvg, and RG are special cases (Section 3.2). This unification is a genuine advance over prior work that treats these separately.
+- **Unified algorithmic framework.** DSpodFL models sporadic SGDs and sporadic aggregations simultaneously via indicator variables $v_i^{(k)}$ and $\hat{v}_{ij}^{(k)}$, and explicitly shows (Section 2.2, Fig. 1) that it reduces to DGD, DFedAvg, and Randomized Gossip as special cases. This is a genuine unification — prior work either considered sporadic SGDs or sporadic aggregations, but not both jointly.
 
-- **Convergence analysis that captures the joint effect of both sporadicity types**: Lemmas 1 and 2 characterize how the average model error and consensus error depend on the minimum SGD probability $d_{\min}^{(k)}$ and the expected spectral radius $\tilde{\rho}^{(k)}$, revealing how computation and communication sporadicity each affect convergence and the optimality gap.
+- **Convergence analysis under milder assumptions than prior work.** Theorems 1 and 2 provide convergence guarantees under data heterogeneity assumptions that allow $\zeta > 0$ (gradient diversity can grow with distance from optimum/stationary point), unlike works that require $\zeta = 0$. Graph connectivity is only asymptotic (Assumption 3), weaker than static or $B$-connected assumptions. The bounds recover DGD-like results when $d_{\min}=1$, confirming theoretical consistency. Table 1 clearly summarizes these advantages.
 
-- **Experimental evidence of accuracy-delay improvements**: Under non-IID data distributions, DSpodFL achieves 10–40% accuracy improvements over all baselines at the same delay (Figs. 2c–2d). The ablation studies (Fig. 3) demonstrate robustness across varying data heterogeneity, graph connectivity, number of clients, and resource heterogeneity levels.
-
-- **Milder assumptions on graph connectivity and data heterogeneity than prior DFL work**: Assumption 3 requires only asymptotic graph connectivity (not static or B-connected graphs), and the gradient diversity assumption (Assumptions 1(c), 5(b)) uses two parameters $\delta, \zeta$ rather than a constant gradient norm bound. As summarized in Table 1, DSpodFL satisfies all eight listed desiderata while prior works miss several.
+- **Thorough experimental validation.** Figures 2 and 3 demonstrate consistent 10–40% accuracy improvements over DGD, RG, Sporadic SGD, and DFedAvg across multiple dimensions: FMNIST and CIFAR10, IID/non-IID data splits, varying graph connectivity radius, varying number of clients, and varying resource heterogeneity distributions. The ablation studies (Fig. 3a–d) systematically probe each parameter's effect.
 
 ## Weaknesses
 
@@ -20,64 +18,49 @@ The paper proposes DSpodFL, a decentralized federated learning framework that mo
 None.
 
 ### Major
-
-- **Insufficiently justified consensus bound via expected spectral radius**: Lemma 2 uses $\tilde{\rho}^{(k)}$ — the spectral radius of the *expected* mixing matrix $\mathbb{E}[\mathbf{P}^{(k)}]$ — to bound the one-step consensus error. The coefficients contain a term $\frac{1+\tilde{\rho}^{(k)}}{2}$ that requires relating the second moment $\mathbb{E}[\mathbf{P}^{(k)2}]$ (or $\mathbb{E}[\|\mathbf{P}^{(k)} x\|^2]$) to $\rho(\mathbb{E}[\mathbf{P}^{(k)}])$. This relationship does not hold without additional structural assumptions on the distribution of $\mathbf{P}^{(k)}$ (e.g., conditional independence of $\mathbf{P}^{(k)}$ from the past state $\mathbf{\Theta}^{(k)}$, or specific independence properties of the indicator variables across clients/links). The paper invokes Koloskova et al. (2020), but that work handles random topologies under an independence structure that is not explicitly assumed here. Definition 1 (def:spectralllll) is also incomplete in the main text — it states $\tilde{\rho}^{(k)}$ "can be characterized via" the spectral radius without specifying the actual inequality. Since this gap affects Lemma 2 and cascades into Proposition 1 and both main theorems, the theoretical contribution requires a fix (clarifying the needed assumptions or providing an alternative consensus argument).
-
-- **Theorem 2's non-convex bound is presented with undefined constants in the main text**: The scalars $w_1, \dots, w_5$ in the non-convex convergence bound are never defined in the main text (lines 407–413). The reader cannot assess the structure of the bound or how sporadicity affects it without consulting the appendix. This makes the main text's presentation of the non-convex result effectively uninformative.
+None.
 
 ### Minor
 
-- **Assumption 2(b) (uncorrelatedness of gradient noise and indicators) is not discussed**: The assumption that gradient noise $\epsilon_i^{(k)}$ is uncorrelated with $v_i^{(k)}$ and $\hat{v}_{ij}^{(k)}$ is standard and defensible (resource-availability decisions are typically independent of mini-batch noise), but the paper does not acknowledge this as a limitation or discuss scenarios where it might be violated (e.g., adaptive policies that ask high-variance clients to compute less often).
+- **The uncorrelatedness assumption is not discussed or justified.** Assumption 2(b) states that gradient noise $\epsilon_i^{(k)}$ and indicator variables $v_i^{(k)}$, $\hat{v}_{ij}^{(k)}$ are mutually uncorrelated. In practice, a resource-constrained client that skips SGD may also have higher-variance gradients (e.g., smaller batch size), creating correlation. The paper does not discuss whether this assumption is necessary for the proof, or whether it could be relaxed. While common in the literature, the paper would benefit from acknowledging this limitation.
 
-- **Experiments use static probabilities despite emphasis on time-varying dynamics**: The paper's motivation (Section 1, line 7 of abstract) emphasizes *time-varying* resource availability, and the framework indeed allows for time-varying $d_i^{(k)}, b_{ij}^{(k)}$. However, the experiments hold probabilities constant over training. A time-varying evaluation (e.g., switching between high and low participation regimes) would directly validate this core claim.
-
-- **Experimental delay model advantages are partly by construction**: The delay model defines $\tau_{proc}^{(k)}$ in terms of the same probabilities $d_i$ that control skipping, and $\tau_{trans}^{(k)}$ in terms of $b_{ij}$. DSpodFL's advantage comes from "saving time by skipping" — a valid mechanism, but the comparison would be stronger with (i) a system-level simulation using measured delays independent of algorithm choices, and (ii) sensitivity analysis for baselines like DFedAvg's aggregation period $D$ rather than a single heuristic choice.
-
-- **Limited experimental scope**: Only two datasets (FMNIST, CIFAR10) and two models (SVM, VGG11) are used. While acceptable for a theory+experiments paper, the generality claims would benefit from additional tasks or modalities.
+- **Proposition 1 has a minor incomplete detail.** The learning-rate condition that ensures $\rho(\mathbf{\Phi}^{(k)}) < 1$ is fully stated (lines 355–359), which is the operative content of the proposition. However, the sentence "The exact value of $\rho(\mathbf{\Phi}^{(k)})$ is" (line 360–361) trails off incomplete. This does not affect the verifiability of the convergence condition, but is a small presentation gap.
 
 ### Trivial
 
-- The definition of $\tilde{\rho}^{(k)}$ (Definition 1) is syntactically incomplete in the main text — it says "as" and trails off. The formal inequality is presumably in the appendix, but the main text should at least state the defining relationship.
+- The definition of $\tilde{\rho}^{(k)}$ (Definition 1, line 287) is given as "the spectral radius of the expected mixing matrix" but does not expand into an explicit formula in terms of $b_{ij}^{(k)}$. While the meaning is clear from context (it is used directly in Lemma 2 and Theorem 1), a slightly more explicit statement would improve readability.
 
-- Proposition 1's spectral radius expression is cut off (line 360–362 says "The exact value of $\rho{(\mathbf{\Phi}^{(k)})}$ is" without providing it).
+- Line 391 mentions a diminishing-learning-rate result ($\mathcal{O}(\log K / \sqrt{K})$) in one sentence without a theorem statement in the main text. This is a small presentational gap; the theorem details reside in the appendix.
 
 ## Nice-to-Haves
 
-- A practical guideline for how clients should set $d_i^{(k)}$ and $b_{ij}^{(k)}$ in real systems. The paper treats these as given, but guidance on adapting to resource availability would increase practical impact.
-- Direct comparison of Theorem 1's bound to known DGD bounds (e.g., Koloskova et al. 2020, Nedic et al. 2009) with explicit constant matching.
-- Statistical significance testing or effect sizes for experimental results.
+- **Formal bridging of theory and experiments.** The theory bounds per-iteration convergence in terms of $d_{\min}$ and $\tilde{\rho}$, while the experiments measure accuracy against wall-clock delay. The paper qualitatively discusses this tension (lines 394–396: "choosing $d_i$ and $b_{ij}$ solely based on the convergence rate can result in longer iteration lengths"), but incorporating delay into the theoretical model (e.g., analyzing convergence in terms of expected delay rather than iterations) would elegantly close the loop. This is not a flaw in the current paper — the theoretical and empirical contributions each stand on their own — but would strengthen future work.
 
 ## Removed Points
 
-These points are flagged to be removed — treat them with caution:
+These points are flagged to be removed; treat them with caution:
 
-- **Criticism that the consensus analysis requires full independence across time steps and that this invalidates the paper**: The critic claims independence across time is needed, but Lemma 2 bounds only a *single-step* conditional expectation. The required assumption is about the conditional distribution of $\mathbf{P}^{(k)}$ given the past, not full independence across all time. The severity of "structural flaw" is overstated — this is a gap in justification, not a known impossibility. Bumped down from Fatal to Major.
+- **Criticism about diminishing-learning-rate theorem being absent from main text.** The paper mentions this result in the contributions (line 104) and in Section 4.4 (line 391). The full theorem statement was in the appendix, which is standard formatting for many conference papers. This is not a weakness of the paper — the parser strips appendix content from all papers.
 
-- **Criticism about Assumption 2(b) being "strong and not discussed" (as originally phrased by the critic)** : The critic's examples conflate gradient *norms* (deterministic functions of the model) with gradient *noise* (the random sampling error). The assumption that resource-availability decisions are uncorrelated with mini-batch noise is standard and well-motivated. Kept as Minor but with corrected reasoning.
+- **Criticism that "the paper does not attempt to bridge" theory and experiments.** The paper explicitly addresses this in lines 394–396: "However, this is not always desirable since choosing $d_i$ and $b_{ij}$ solely based on the convergence rate can result in longer iteration lengths, due to resource-limited clients." The reviewer's stronger claim is factually incorrect; the paper does acknowledge the gap.
 
-- **Criticism about "no sensitivity analysis for DFedAvg's $D$"**: Valid as a minor point but the critic frames it as if it substantially inflates DSpodFL's advantage. This is a routine concern for any baseline comparison. Kept as Minor.
+- **Claim that the learning-rate condition in Proposition 1 "cannot be interpreted or checked" without the spectral radius expression.** The condition (the inequality in lines 355–359) is fully stated in terms of $\alpha^{(k)}$, $\mu$, $d_{\max}^{(k)}$, $\tilde{\rho}^{(k)}$, $\zeta$, $\beta$, $d_{\min}^{(k)}$. The trailing incomplete sentence about "the exact value of $\rho$" is supplementary; the sufficient condition itself is complete and verifiable.
 
-- **Criticism about missing related works**: Removed per hard rules — no external sources to confirm.
+- **Complaints about the definition of $\tilde{\rho}^{(k)}$ being insufficient.** Definition 1 defines $\tilde{\rho}^{(k)}$ as "the spectral radius of the expected mixing matrix," which is a clear definition. The expected mixing matrix $\mathbb{E}[\mathbf{P}^{(k)}]$ can be derived from Eq. (5) and Definition 2 (line 294), so the connection to $b_{ij}^{(k)}$ is implicit.
 
-- **Formatting/style nitpicks and "missing appendix" complaints**: Removed per hard rules.
+- **Formatting nitpicks and style notes** (trailing fragments, "as" at end of Definition 1) — these are parser artifacts or minor LaTeX issues from the PDF extraction.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+None beyond the paper's own contributions. The reviews largely corroborate the paper's claimed strengths (unified framework, mild assumptions, strong experiments) and raise one genuine limitation (uncorrelatedness assumption) that is worth the authors' attention but does not undermine the core contribution.
 
 ## Suggestions
 
-1. **(Critical) Fix the consensus analysis**: Either (a) explicitly state the needed conditional independence/uncorrelatedness assumptions on $\mathbf{P}^{(k)}$ given the past state, and justify why $\tilde{\rho}^{(k)} = \rho(\mathbb{E}[\mathbf{P}^{(k)}])$ controls the one-step consensus error via $\mathbb{E}[\|\mathbf{P}^{(k)}x\|^2] \le \frac{1+\tilde{\rho}^{(k)}}{2}\|x\|^2$ for $x \perp \mathbf{1}$, or (b) replace the reliance on $\tilde{\rho}^{(k)}$ with a different consensus argument that is fully justified under the stated assumptions. This is essential for the theoretical contribution to be credible.
-
-2. Define the scalars $w_1,\dots,w_5$ in Theorem 2's statement in the main text, or at least state their structural dependence on $d_{\min}, \tilde{\rho}, \alpha, \beta, \mu$ so the reader can interpret the non-convex result without consulting the appendix.
-
-3. Complete the definition of $\tilde{\rho}^{(k)}$ in Definition 1 with the precise inequality it satisfies.
-
-4. Add at least one time-varying experiment where probabilities change during training, to directly validate the paper's stated motivation.
-
-5. Include a brief discussion of Assumption 2(b)'s limitations and when it could be violated in practice.
+- Add a brief discussion of Assumption 2(b) — acknowledge that the uncorrelatedness of gradient noise and participation indicators may not hold in all practical scenarios, explain whether it is necessary for the proof or can be relaxed, and note the practical implications.
+- Fix the trailing incomplete sentence in Proposition 1 (line 360–361). Either complete it or remove it.
+- Expand Definition 1 slightly to explicitly note that $\tilde{\rho}^{(k)} = \rho(\mathbb{E}[\mathbf{P}^{(k)}])$ where $\mathbf{P}^{(k)}$ is defined in Eq. (5), for added clarity.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>8.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

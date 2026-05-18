@@ -1,92 +1,73 @@
-Now I have thoroughly verified the claims against the paper. Let me produce the final review.
+Now I have a thorough understanding of the paper. Let me produce the consolidated final review after carefully cross-referencing all claims.
 
 ## Summary
 
-This paper introduces normalized variants of EF21 and EF21-SGDM for distributed optimization under (L₀,L₁)-generalized smoothness. The authors prove that normalized EF21 achieves O(1/√K) convergence in gradient norm for deterministic nonconvex problems (matching EF21 under standard smoothness) and O(1/K^{1/4}) for the stochastic momentum variant, all without requiring data heterogeneity assumptions or knowledge of smoothness constants for the stepsize rule. Experiments on polynomial minimization, logistic regression, and ResNet-20/CIFAR-10 show normalized EF21 outperforming EF21 in convergence speed and accuracy.
+This paper provides the first convergence guarantees for normalized error feedback algorithms (normalized EF21 and normalized EF21-SGDM) under generalized smoothness assumptions. The authors prove an O(1/√K) convergence rate for deterministic settings and O(1/K^{1/4}) for stochastic settings, matching the rates of the original EF21/EF21-SGDM under traditional smoothness but without requiring knowledge of smoothness constants (deterministic case), data heterogeneity bounds, or almost-sure variance bounds. Experiments on polynomial minimization, logistic regression, and ResNet-20 training show that normalized EF21 outperforms EF21 due to larger allowable stepsizes.
 
 ## Strengths
 
-- **First convergence analysis of normalized error feedback under generalized smoothness.** The paper provides the first theoretical treatment of normalized EF21 and EF21-SGDM under (L₀,L₁)-smoothness, extending error feedback theory to a practically relevant regime where standard L-smoothness fails. Prior analyses of EF21, EF21-SGDM, and EControl exclusively relied on traditional smoothness (Section 2; Theorem 1; Theorem 2).
+- **First convergence guarantees for normalized error feedback under generalized smoothness.** Theorem 1 (deterministic) and Theorem 2 (stochastic) fill a gap where prior analyses either focused on single-node settings (Zhang et al., 2020b; Koloskova et al., 2023) or required restrictive assumptions like data heterogeneity and bounded variance bounds (Crawshaw et al., 2024; Liu et al., 2022). The paper explicitly contrasts its assumptions with these prior works.
 
-- **O(1/√K) rate without data heterogeneity or smoothness-dependent stepsizes.** Theorem 1 establishes an O(1/√K) bound for normalized EF21 that holds for any data heterogeneity degree, and the stepsize rule γ_k = γ₀/√(K+1) does not require knowledge of L₀ or L₁. This contrasts with prior distributed generalized-smoothness works (Crawshaw et al., 2024; Liu et al., 2022) that require data heterogeneity conditions, and with original EF21 (Richtarik et al., 2021) whose stepsize depends on the unknown L (Section 1.1; Theorem 1; Section 4).
+- **Matches prior rates under weaker assumptions.** Normalized EF21 achieves O(1/√K) (Theorem 1), and normalized EF21-SGDM achieves O(1/K^{1/4}) (Theorem 2), matching EF21 and EF21-SGDM under traditional smoothness. These rates are proven without data heterogeneity conditions or almost-sure variance bounds, as summarized in Table 1.
 
-- **Stochastic extension matches EF21-SGDM rate.** Theorem 2 proves normalized EF21-SGDM achieves O(1/K^{1/4}) under generalized smoothness — the same rate as EF21-SGDM under traditional smoothness (Fatkhullin et al., 2024) — and also recovers single-node NSGD-M rates (Hubler et al., 2024) as a special case (Theorem 2; Section 5).
+- **Deterministic stepsize is genuinely parameter-free.** For deterministic normalized EF21, the stepsize γ_k = γ_0/√(K+1) works for any positive γ_0 without knowledge of L_0 or L_1. This contrasts with Richtarik et al. (2021) where the stepsize depends on the smoothness constant L, and with prior generalized-smooth distributed works that also require such knowledge.
 
-- **Theoretical comparison showing only a constant-factor slowdown under L-smoothness.** The paper derives that normalized EF21 is only a factor 2√2 slower than original EF21 when L₁=0 (standard smoothness), confirming that normalization does not significantly degrade rates while adding robustness to generalized smoothness (Section 4).
+- **Experimental validation confirms practical benefits.** Experiments on polynomial minimization, logistic regression with nonconvex regularizer (3 datasets), and ResNet-20 on CIFAR-10 show normalized EF21 converges faster and achieves up to 10% higher accuracy than EF21, attributed to larger allowable stepsizes (Figures 1–3). The ResNet-20 experiment uses the same stepsize for both algorithms, providing a controlled comparison.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **The ResNet-20 experiment does not follow the paper's own theoretical prescription for normalized EF21, weakening the link between theory and empirical claims.** The paper claims normalized EF21 outperforms EF21 "due to its larger allowable stepsizes" (abstract, conclusion), but the ResNet-20 experiment (Section 6.2) uses a *constant* stepsize γ=5 for *both* algorithms. Normalized EF21's theory (Theorem 1) prescribes a *decreasing* schedule γ_k = γ₀/√(K+1), which would give much smaller stepsizes for most iterations. Meanwhile, EF21's theoretical stepsize under smoothness is ≈ 1/(L + L̃√(β/θ)) — orders of magnitude smaller than 5. Neither algorithm operates under its theoretical regime, so the 10% accuracy gap cannot be cleanly attributed to normalized EF21's theoretical advantage. The experiment is still informative as a heuristic robustness comparison, but it does not validate the paper's theoretical claims about larger allowable stepsizes. This is the paper's most significant weakness.
-
-- **The polynomial function experiments (Figure 1) — central to the paper's motivation — lack any experimental setup description.** The abstract and introduction highlight these results, but Section 6 contains no subsection describing them. No function definition, dimension, initialization, compressor choice, or EF21 stepsize selection is reported. This makes the evidence in Figure 1 unreproducible and anecdotal.
+None. The paper's core claims are well-supported by the theory and experiments. The weaknesses below are about presentation nuance and scope, not structural flaws.
 
 ### Minor
 
-- **The convergence bound of Theorem 1 contains exponential factors that are not discussed.** The bound includes exp(8c₁L₁ exp(L₁γ₀)γ₀²), and the constants c₀, c₁ are not defined in the main text (they arise from the proof in the appendix). Even for modest parameters (e.g., γ₀=1, L₁=1), this exponential can be enormous. The paper does not discuss the practical magnitude of this constant or illustrate whether the bound is non-vacuous for realistic K. While this is common in generalized-smoothness analyses and does not invalidate the asymptotic rate, it weakens the practical implications of the claimed O(1/√K) convergence.
+- **The "parameter-free" claim in the abstract is overbroad.** The abstract states stepsize tuning is "independent of problem parameters," but this only cleanly applies to the **deterministic** case (Theorem 1). For the **stochastic** case (Theorem 2), the stepsize condition is γ_0 exp(γ_0 L_1/2) ≤ 1/(8L_1√(1+√(1-α))/α), which explicitly depends on L_1 and α. The paper acknowledges this in Section 5 (line 181: "Notice that the stepsize γ_0 for normalized EF21-SGDM, unlike in the case of normalized EF21, depends on the generalized smoothness constant L_1, and the compression parameter α"), but the abstract and the beginning of Section 1.1 do not distinguish the two cases. This could mislead readers about the scope of the claim.
 
-- **Logistic regression comparison is asymmetric in stepsize tuning.** For normalized EF21, K (and hence the stepsize schedule γ_k = γ₀/√(K+1)) is selected via grid search "as the smallest number of iterations required to achieve the desired accuracy" (Section 6.1). For EF21, a fixed theoretical stepsize is used without analogous tuning. Since K directly determines the stepsize magnitude, this conflates hyperparameter tuning with algorithm quality, making the comparison less clean than claimed.
+- **No experimental evaluation of normalized EF21-SGDM.** The paper presents convergence theory for both deterministic (normalized EF21) and stochastic (normalized EF21-SGDM) variants, but experiments only cover the deterministic variant. While the deterministic experiments are the paper's main empirical contribution, including even a simple synthetic stochastic experiment would substantially strengthen the practical credibility of Theorem 2.
 
-- **No error bars or multiple runs for the ResNet-20 experiment.** The stochastic ResNet-20 training (mini-batch 128, 5 clients) reports only single-run results. Given mini-batch noise, the 10% accuracy gap lacks statistical reliability without variance reporting.
+- **The logistic regression comparison uses different stepsize selection philosophies.** EF21's stepsize is set according to the conservative theoretical formula from Richtarik et al. (2021), while normalized EF21 uses an empirically chosen γ_0=1. This makes the head-to-head comparison in Figure 2 somewhat apples-to-oranges — the observed speedup could partly reflect an unfavorable theoretical stepsize for EF21 rather than an inherent advantage of normalization. The ResNet-20 experiment (same stepsize γ=5 for both) partially addresses this concern, but the issue should be acknowledged for the logistic regression experiments.
 
-- **The nonconvexity condition λ > λ_min(A^T A)/(2n) is stated but not verified for the real LIBSVM datasets (Breast Cancer, ala).** The paper asserts this ensures nonconvexity but provides no evidence that the condition actually holds for these datasets.
+- **The deterministic convergence bound contains an exponential factor** exp(8c_1 L_1 exp(L_1 γ_0) γ_0^2) that can become vacuous unless γ_0 is chosen small relative to 1/L_1. While the paper notes that choosing γ_0 = 1/(8c L_1) yields a clean O(1/√K) bound, the "parameter-free" claim (any γ_0 > 0 works) comes with the caveat that bound quality degrades rapidly for large L_1γ_0. The paper should explicitly acknowledge this trade-off between parameter independence and bound sharpness, as it currently reads as claiming both simultaneously without tension.
 
-- **Mini-batch size requirement B_init = √(K+1) for the stochastic algorithm (Theorem 2) is non-standard.** It requires the first iteration to use a batch size determined by the total iteration count K, which may not be known in advance. The paper acknowledges this in the conclusion as future work, but the limitation is significant for practitioners.
+- **Fixed-horizon nature of the stochastic result.** Theorem 2 requires advance knowledge of the total iteration count K for both the stepsize schedule (γ_k = γ_0/(K+1)^{3/4}, η_k = 1/√(K+1)) and the initial mini-batch size (B_init = √(K+1)). This is not an anytime guarantee. The paper acknowledges this and suggests decreasing stepsizes as future work, but the limitation is significant enough that the practical applicability of the stochastic result is currently tied to a prespecified budget.
 
 ### Trivial
 
-- **Inconsistency in the top‑k sparsifier parameter:** The ResNet-20 text (line 223) states k = 0.01d, while the Figure 3 caption states k = 0.1d. These differ by a factor of 10 and need correction.
-
-- **The abstract's claim of "first proof of convergence for normalized error feedback algorithms across a wide range of machine learning problems"** is somewhat vague. The contribution is better scoped to "first proof for normalized EF21 under generalized smoothness."
+None.
 
 ## Nice-to-Haves
 
-- Include clipped SGD and normalized SGD as additional baselines in the experiments, since these are established methods for generalized smoothness and would strengthen the positioning relative to prior work.
-- Show a direct comparison where EF21 diverges under generalized smoothness (with a small constant stepsize) to dramatize the necessity of normalization.
-- Provide a numerical illustration of the Theorem 1 bound for a concrete problem (e.g., the polynomial from Figure 1), showing whether it gives a non-vacuous gradient norm guarantee for realistic K.
+- A discussion of the gap between the theoretical bound (which can be astronomically large due to the exponential factor) and the strong empirical performance (e.g., γ_0=1 with L_1=8 in the polynomial example) would strengthen the paper's narrative. Acknowledging that the exponential factor is likely a proof artifact would set realistic expectations for the theory.
+
+- An anytime version of the stochastic result (e.g., γ_k = γ_0/(k+1)^{3/4}, η_k = 1/√(k+1)) that does not require committing to K in advance would greatly increase the practical utility of Theorem 2. A discussion of feasibility would suffice if a full proof is beyond scope.
 
 ## Removed Points
 
-These points are flagged to be removed — treat them with caution.
+These points are flagged to be removed; treat them with caution.
 
-- **Criticism about c₀, c₁ not being defined in the main text.** The definitions appear in the proof appendix, which was stripped by the parser. The original submission contains these definitions.
-- **Criticism about the algorithm description being missing ("10: end for" appears).** This is a parser artifact — the full algorithm pseudocode exists in the original submission.
-- **Criticism that the Section 4 comparison with EF21 under L-smoothness is "tangential."** This comparison is informative: it quantifies the cost of normalization (only 2√2 slowdown) and shows that normalized EF21 gracefully reduces to the known case, which is standard practice in optimization theory papers.
-- **Criticism that the stepsize-independence claim is "misleading" for the deterministic case.** The paper correctly states that the stepsize *rule* γ_k = γ₀/√(K+1) does not require L₀ or L₁ (Theorem 1 holds for any γ₀ > 0). The clean-bound special case γ₀ = 1/(8cL₁) is presented as an illustrative choice, not as a requirement. The paper also transparently acknowledges that the stochastic (EF21-SGDM) case does require L₁ (line 181). No dishonesty here.
-- **Complaint that the experiments lack comparison with "EF14, EControl" and other error feedback methods.** The paper scopes its empirical comparison to EF21 vs. normalized EF21, which is naturally the most direct baseline. Demanding a broader survey of error feedback methods under generalized smoothness is scope creep.
+- **"The constants c₀, c₁ appear in the bound of Theorem 1 but are not defined in the main text."** — The parser strips the appendix where these constants are defined. The weakness stems from a PDF parsing artifact, not an author omission. **(Rule: REMOVE weaknesses about missing appendix)**
+
+- **"The comparison between normalized EF21 and original EF21 under traditional smoothness...should state the initialization assumption explicitly."** — The paper states this assumption explicitly in line 142: "We prove this by assuming ∇f_i(x^0) = v_i^0 for all i." **(Rule: REMOVE factually wrong criticisms)**
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviewers' observations largely corroborate the paper's stated strengths (first analysis under generalized smoothness, rate matching, no data heterogeneity requirement) and surface real but fixable experimental issues.
+None beyond the paper's own contributions. The reviews surface mostly presentation-level concerns and do not identify structural issues the authors missed.
 
 ## Suggestions
 
-1. **Fix the ResNet-20 experiment.** Either (a) run normalized EF21 with its theoretically prescribed decreasing stepsize γ_k = γ₀/√(K+1) and compare against EF21 with a similarly tuned constant stepsize, or (b) acknowledge that the constant-stepsize setting is a heuristic robustness test rather than a validation of the theory. In either case, clarify what the experiment is designed to show.
-
-2. **Add the polynomial function experiment setup to Section 6** (function form, dimension, initialization, compressor, EF21 stepsize selection) so that Figure 1 is reproducible.
-
-3. **Add error bars / multiple seeds** to the stochastic ResNet-20 experiment.
-
-4. **Discuss the exponential factor** in Theorem 1 — provide a concrete numerical illustration showing whether the bound is non-vacuous for realistic K, or acknowledge that the practical bound quality is limited.
-
-5. **Verify the nonconvexity condition** λ > λ_min(A^T A)/(2n) for the real datasets, or note if it was assumed without verification.
-
-6. **Resolve the k=0.01d vs. k=0.1d inconsistency** in the ResNet-20 description.
+1. Qualify the "parameter-free" language in the abstract and introduction to clearly distinguish the deterministic case (truly parameter-free) from the stochastic case (depends on L₁ and α).
+2. Add a paragraph in Section 4 or the conclusion explicitly discussing the trade-off between the generality of the stepsize (any γ₀ > 0 works) and the sharpness of the resulting bound (best when γ₀ is small relative to 1/L₁).
+3. Include even a small-scale synthetic experiment for normalized EF21-SGDM to validate the stochastic theory, or explain why it is omitted.
+4. Acknowledge the asymmetric comparison in the logistic regression experiments — the EF21 baseline uses a theoretically prescribed (conservative) stepsize while normalized EF21 uses an empirically chosen one — and clarify what conclusions can be drawn from this comparison.
 
 ## Score and Decision
 
-The paper makes a solid theoretical contribution by providing the first convergence analysis of normalized error feedback algorithms under generalized smoothness, with rates matching those of their unnormalized counterparts under standard smoothness and without restrictive data heterogeneity assumptions. The main weaknesses are in the experimental validation, where the link between theory and practice is not as clean as claimed. The theoretical results are novel and significant enough to warrant publication, but the experimental section needs substantial revision to properly support the empirical claims.
+The paper makes a solid theoretical contribution: it is the first to provide convergence guarantees for normalized error feedback algorithms under generalized smoothness, achieving rates that match those under traditional smoothness while removing restrictive assumptions. The deterministic experiments are convincing. The main weaknesses — an overbroad "parameter-free" claim, missing stochastic experiments, and the fixed-horizon stochastic result — are addressable through rewriting and do not undermine the core contribution. The paper's claims about rates, assumptions, and the benefit of normalization are well-supported.
 
-**Originality:** High (first analysis of normalized error feedback under generalized smoothness).  
-**Importance of research question:** High (communication-efficient distributed optimization under realistic non-smoothness assumptions).  
-**Claims support:** Moderate (theory well-supported; experiments only partially).  
-**Soundness of experiments:** Weak (protocol issues, missing details, no error bars).  
-**Clarity:** Moderate (theorem statements somewhat opaque without appendix constants).  
-**Value to community:** Good (theory is useful; experiments need improvement).
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

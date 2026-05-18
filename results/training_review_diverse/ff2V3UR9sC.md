@@ -1,86 +1,76 @@
-Now I have all the information needed. Let me construct the final consolidated review.
+Now I have all the information I need. Let me compose the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes training vision-language models (VLMs) to predict receiver behavior (likes, comments, replay graphs) from Reddit and YouTube as a training signal to improve general content understanding. The authors collect BLIFT, a 730k-sample instruction fine-tuning dataset pairing images/videos with user engagement data, fine-tune LLaMA-Vid on behavior-prediction tasks, and evaluate across 46 tasks on 26 benchmarks. The core claim is that behavior data provides a "free lunch" for content understanding, supported by consistent improvements over the base model and a control (Ad-LLaVA) trained on the same data without behavior labels.
+This paper proposes that training VLMs on receiver behavior (likes, comments, replay graphs) improves their content understanding abilities. The authors collect BLIFT (730k images/videos with behavioral annotations from Reddit and YouTube), fine-tune LLaMA-Vid on behavior prediction tasks to produce Behavior-LLaVA, and evaluate across 46 tasks over 26 benchmarks. The core empirical finding — consistent improvement over the base model and the Ad-LLaVA content-only control — is well-supported. The BLIFT dataset itself is a significant resource for the community.
 
 ## Strengths
 
-- **Novel and scalable approach to leveraging natural user engagement data**: The paper identifies an underexplored training signal — naturally occurring receiver behavior (likes, comments, replay graphs) — and demonstrates it can be collected automatically at scale without manual annotation. BLIFT's 730k samples with six behavior types provide a practical infrastructure for future research.
+1. **Large-scale behavioral dataset (BLIFT).** The paper collects and releases 730k images and videos paired with real user behavior (likes, comments, replay graphs, upvotes) from Reddit and YouTube. This is orders of magnitude larger than lab-collected perception datasets (e.g., SALICON's 10k images) and is a valuable community resource (Section 3, Table 1).
 
-- **Extensive and consistent empirical validation**: Behavior-LLaVA outperforms the base model LLaMA-Vid across all 46 tasks on 26 benchmarks spanning image, video, text, and audio modalities. Improvements hold in both zero-shot and fine-tuned settings. The pattern of larger gains on high-level tasks (emotion, persuasion, memorability) and smaller gains on low-level tasks (action/object recognition) is internally coherent and aligns with the paper's hypothesis.
+2. **Ad-LLaVA control disentangles content from behavior.** The paper trains Ad-LLaVA on the same BLIFT videos and images (with scene descriptions) but without behavior labels. Ad-LLaVA performs comparably to the base LLaMA-Vid, while Behavior-LLaVA outperforms both. This controlled ablation (Section 3, line 163) provides meaningful evidence that the improvement is attributable to the behavioral signal, not merely exposure to more video content.
 
-- **Controlled ablation isolating the behavior signal from data quantity**: The Ad-LLaVA baseline — trained on the same BLIFT images/videos with scene descriptions but without behavior labels — performs nearly identically to LLaMA-Vid, while Behavior-LLaVA improves substantially. This shows the gains come from the behavior signal itself, not from additional data exposure.
+3. **Consistent improvements across a broad evaluation suite.** Across 46 tasks spanning image, video, text, and audio (26 benchmarks), Behavior-LLaVA improves over LLaMA-Vid in both zero-shot and fine-tuned settings. Gains are notable on complex high-level tasks: up to 43–87% on video understanding (Table 2), and Behavior-LLaVA matches supervised memorability SOTA while using only 25% of the training data (Table 4). The trend is highly consistent — Behavior-LLaVA improves on nearly every task.
 
-- **Cross-modal transfer demonstration**: Behavior-LLaVA improves on audio summarization and text sentiment analysis (19.5% gain) despite being trained only on image/video behavior data, showing generalization beyond seen modalities.
-
-- **Comparison of perceptual vs. action-level behavior**: The Salicon10k ablation shows that perceptual saliency data (lab-collected, 10k images) yields small or negative gains, while large-scale action behavior (BLIFT) yields consistent improvements — supporting the paper's argument for the scalability advantage of internet behavior data.
+4. **Zero-shot transfer to non-visual modalities.** Behavior-LLaVA, trained only on image/video behavior, shows 19.5% improvement on audio summarization and text sentiment analysis (Section 4, Table 6), indicating that behavioral signals impart modality-agnostic content understanding.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **No error bars, confidence intervals, or significance tests reported across 46 tasks**. This is the most significant methodological gap. Given the large number of comparisons and the strong claims (e.g., "free lunch," up to 150% improvement), the absence of any measure of variance or statistical testing makes it difficult to assess whether improvements are reliable or within noise range. This is especially important for the zero-shot memorability results where base rates are near random (Spearman ρ = 0.02–0.16) and relative improvements are correspondingly large (e.g., 350%), while the absolute gains remain small (e.g., 0.05 → 0.07 on MediaEval). The fine-tuned results show more modest gains (e.g., 0.86%–5.76% on video emotion), which are more consistent with a moderate boost from additional training rather than a transformative new signal. Without error bars, the reader cannot distinguish between reliable improvement and metric variance.
+1. **The causal claim is not fully isolated from the "more text tokens" confound.** The paper argues that behavior *content* drives improvement. Behavior-LLaVA receives behavior strings (comments, likes) as additional text tokens during training. The Ad-LLaVA control removes behavior but still provides scene descriptions — so it controls for exposure to more *video content*, but not for the presence of additional *language tokens* in the training objective. The improvement could partially reflect a richer language modeling objective (more tokens to predict) rather than anything specific about behavior. A control where behavior strings are randomly shuffled (preserving token length and distribution but destroying content signal) would cleanly separate these explanations. Without it, the paper's strongest causal interpretation — "behavior contains signals about content" — remains plausible but incompletely proven. The paper would be strengthened by acknowledging this distinction more explicitly rather than presenting Ad-LLaVA as a complete causal control.
 
-- **The behavior prediction task is confounded with multi-task learning**. Behavior-LLaVA is trained to generate both scene descriptions AND behavior predictions, while the Ad-LLaVA control only generates scene descriptions. The behavior-trained model thus performs a strictly more complex/multi-objective task during training, which could improve representations through multi-task learning effects alone, regardless of whether the behavioral targets carry semantically meaningful content signals. A cleaner ablation would hold task complexity constant (e.g., predict behavior vs. predict an equally structured but semantically meaningless label like a random scalar or frame count). This does not invalidate the results, but it weakens the causal claim that "behavior signals per se" drive the improvement.
+2. **Zero-shot memorability results rest on near-floor absolute numbers.** On memorability (Table 4), Behavior-LLaVA improves from 0.02–0.13 (LLaMA-Vid) to 0.07–0.21, while human consistency is 0.61–0.78. The paper reports 160–350% relative improvements, which are mathematically correct but inflate the apparent practical significance of moving from near-random to still-very-low absolute performance. The paper should be more careful to distinguish relative improvement on these tasks from the fine-tuned results (where 25% data matches full-data SOTA — a genuinely strong result). This does not undermine the paper's contribution but the framing overstates what the zero-shot numbers convey.
 
 ### Minor
 
-- **Zero-shot results on near-random baselines inflate relative gains**. Several zero-shot baselines are very close to random (e.g., LLaMA-Vid at 0.02–0.13 Spearman on memorability, or 29.7% on Video Emotion-8 vs. 12.5% random). Large relative improvements on these floors (e.g., 350%) are expected from any reasonable training signal. The paper reports these prominently (up to 350%) while the fine-tuned gains — where baselines are much stronger — are more modest (single-digit percentages). The paper should contextualize the zero-shot improvements more carefully.
+3. **Perception vs. action ablation is confounded by dataset scale.** The paper compares Behavior-LLaVA trained on BLIFT (730k samples) vs. Salicon10k (10k samples) and finds perception behavior gives smaller gains. The paper briefly acknowledges the scale confound (line 57: "We posit that one reason for this could be due to the scale"), but contribution point 3 (line 57) still draws a conclusion about perception vs. action behavior without sufficiently caveating the 73× difference. A proper ablation would hold dataset size constant (e.g., subsample BLIFT to 10k). As presented, the comparison tells us more about data scale than about inherent utility of perception vs. action signals.
 
-- **Hyperparameters (sampling ratio 1:1, 2.2 epochs) tuned on behavior-prediction metrics (likes/views R² and comment perplexity)** rather than on downstream task performance. Since these metrics are themselves behavior-prediction metrics, tuning to optimize them creates a risk of overfitting to behavior-specific patterns at the expense of generalization. The paper should verify that the same hyperparameters also work well on the final evaluation tasks or, better, report sensitivity analysis.
+4. **No error bars or statistical significance for any result.** Given 46 tasks and evaluation protocols that may have stochastic variation (especially in fine-tuned settings where margins are as small as 0.86% on Ekman-6, Table 3), the absence of confidence intervals or multi-run estimates makes it difficult to assess which improvements are reproducible vs. within noise. This is a standard concern and should be addressed with at least a few representative multi-run experiments.
 
-- **Bias, safety, and representativeness of behavior data are not discussed**. User comments can contain toxic language, political slants, and demographic biases (e.g., YouTube's top-liked comments, which the paper uses, are not representative of all viewers). Training on such data without analysis of propagated biases or filtering limitations is a gap, especially given the paper's framing of behavior as a general signal for content understanding.
+5. **GPT-4V-as-judge for dense captioning is unvalidated.** The paper uses GPT-4V to evaluate dense captions on correctness, detail, and quality (Section 4), but reports no human correlation. Given that Behavior-LLaVA shows a *decrease* in correctness but improvements in detail/quality (line 376), it is unclear whether GPT-4V's preferences align with human judgments or whether the model is trading factual accuracy for more vivid (potentially hallucinated) details learned from comment data. A small-scale human evaluation would substantially strengthen this analysis.
 
-- **Manual filtering steps lack rigor**. Removing gaming, news, music, sports commentary, anime, memes, etc. from YouTube is done via "manual filtering" without inter-annotator agreement or explicit criteria. TF-IDF deduplication thresholds are set by "manual observations" (0.6 for Reddit, 0.7 for YouTube). These subjective choices may introduce hidden biases and are difficult to reproduce precisely.
-
-- **Ad-LLaVA "learns nothing" claim is undersupported**. The paper states Ad-LLaVA "performs very similar to LLaMA-Vid itself," but this is shown on a limited set of tasks. If 730k additional image/video samples truly add nothing, this is a surprising result that warrants explanation (e.g., distribution overlap with the original training set) rather than a one-line dismissal.
+6. **"Free lunch" claim is overstated.** The abstract describes behavior-data improvements as "essentially free-lunch," but the paper describes extensive curation effort: NSFW filtering, TF-IDF deduplication, minimum word counts, >10k view thresholds, manual category exclusion, and more (Section 3). This is not cost-free. The core insight — that behavior data is cheaper to collect at scale than lab-collected perceptual data — is valid and interesting without the "free lunch" rhetoric.
 
 ### Trivial
-None.
+
+- The title says "LLMs" but the paper works with VLMs. The paper correctly frames itself around vision-language models throughout, so this is a minor mismatch.
+- Minor British/American spelling inconsistency ("Behaviour" vs. "Behavior") in a few places (e.g., line 49, line 352, line 378), though the paper predominantly uses "Behavior."
 
 ## Nice-to-Haves
 
-- **Ablation of individual behavior components**: Train on likes/upvotes only, comments only, replay graphs only, and each combination to identify which behavioral signals carry the most useful semantic information.
-
-- **Generalization to a second base VLM** (e.g., Video-LLaMA, InternVideo) to test whether the approach transfers beyond LLaMA-Vid.
-
-- **Analysis of learned representations** via linear probing or representation similarity analysis on behavior-trained vs. non-behavior-trained models to demonstrate that the model genuinely learns about content properties (emotion, persuasion, etc.) rather than just memorizing comment language patterns.
+- A control with shuffled/permitted behavior strings to fully isolate the behavioral content signal from extra language tokens.
+- Error bars for at least the fine-tuned results with small margins (e.g., emotion benchmarks).
+- Small-scale human evaluation to validate the GPT-4V dense captioning judgments.
+- Brief discussion of distributional biases from the heavy filtering pipeline (e.g., >10k view threshold, top-comment selection) and how these might affect generalizability.
+- Ethics/consent discussion around use of public Reddit/YouTube comments, even if brief.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points were flagged by reviewers but are removed as per meta-review guidelines:
 
-- **"The control is inadequate; task format differs fundamentally"** — The paper explicitly describes (line 163) that Ad-LLaVA uses the same instruction format with scene descriptions but without behavior. This is a reasonable control that isolates the behavior signal, even though a multi-task learning confound remains (addressed in Major weaknesses above). The claim that the control is "fundamentally inadequate" is overstated.
-
-- **"Table 2 (HVU) missing LLaMA-Vid baseline"** — The HVU table is in the appendix, which the parser strips. There is no basis to assert the baseline is missing.
-
-- **"Improvement percentages are inconsistent (40.66% vs. 12.82%)"** — These correspond to zero-shot vs. fine-tuned settings respectively, which are correctly labeled in the table. The reviewer confused the two settings.
-
-- **"GPT-3.5 story confusions in Table 3 (LVU)"** — The protocol is clear: the GPT-3.5-generated story is an input appended to the video, applied consistently across compared models. The comparison is fair.
-
-- **"Free-lunch framing ignores manual curation"** — The paper acknowledges filtering steps in detail. "Free lunch" refers to the data being collected by default (no need for human annotation), not to zero effort. Minor rhetorical overreach is common in abstracts.
-
-- **Formatting/style nitpicks, missing appendix content, missing references, and parser-related artifacts** — Removed per instructions.
+- *Reproducibility concern about missing hyperparameters*: The paper discloses the key hyperparameter (1:1 sampling ratio, 2.2 epochs, line 154–158). Removed per rule on trivial reproducibility nitpicks.
+- *Criticism about "not yet released" / unverifiable models/references*: All cited models, datasets, and benchmarks are assumed to exist per guidelines. Removed.
+- *Generic strength about "addressing an important problem" (from Strength Finder)*: Dropped per rule requiring specific, citable content in strengths.
+- *Typos/formatting/style nitpicks not related to scientific content*: Removed per hard rules.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The core insight — that naturally occurring receiver behavior (likes, comments, replay graphs) can serve as a training signal for VLMs and that this signal transfers to diverse content understanding tasks — is the paper's main contribution and is well-articulated. The observation that gains are larger on high-level semantic tasks (emotion, persuasion, memorability) than on low-level tasks (action/object recognition) is a useful empirical finding that could guide future work on which tasks benefit most from behavior-based training.
+The paper's most interesting finding is that *action-level* behavior (likes, comments) — which is cheap, abundant, and noisy — appears to transfer to high-level content understanding tasks (emotion, persuasion, memorability) more effectively than the perception-level signals (saliency) that prior work has relied on. This turns a practical observation (action data scales better) into a structured hypothesis about the nature of behavioral supervision: perhaps the semantic richness of natural language comments carries more content-relevant signal than fixation heatmaps, even at much smaller scale. The paper does not fully prove this (the scale confound prevents it), but it provides enough evidence to be genuinely thought-provoking for the community. The finding that behavior-training transfers to *audio* and *text* tasks despite being trained only on images and videos is a striking emergent property worth deeper investigation.
 
 ## Suggestions
 
-1. **Add error bars or significance tests** for at least the key comparisons (zero-shot vs. fine-tuned on the main benchmarks). This is the single most impactful improvement for credibility.
-2. **Include a control task matched in complexity but semantically unrelated** (e.g., predict frame count, predict a random label) to fully isolate the effect of meaningful behavior signals from multi-task learning effects.
-3. **Ablate individual behavior components** (likes only, comments only, replay graphs only) to identify which signals drive the improvements.
-4. **Add a brief bias/safety discussion** acknowledging the limitations of training on user-generated engagement data and any filtering steps taken.
-5. **Report absolute metric values alongside every relative percentage claim** — the paper already does this in tables but the abstract and text could contextualize the "up to 150%" claim by noting the absolute improvement.
+- Add a control experiment with permuted/shuffled behavior strings (same token length, no content signal) to distinguish the effect of behavioral content from additional language-modeling tokens.
+- Reframe the zero-shot memorability results with clear caveats about absolute performance levels; lead with the fine-tuned results (25% data matching SOTA) which are the stronger contribution.
+- Acknowledge the perception-vs-action scale confound more prominently and either subsample BLIFT to match SALICON size or temper the conclusion.
+- Provide at least 3-run averages with standard deviations for a representative subset of the fine-tuned evaluations (especially the emotion benchmarks where margins are <5%).
+- Validate the GPT-4V captioning evaluation with a small human study on 50–100 samples.
 
 ## Score and Decision
 
-The paper proposes a genuinely novel and well-motivated direction — leveraging naturally occurring digital behavior as a training signal for VLMs — and backs it with a large-scale dataset (BLIFT) and extensive evaluation across 46 tasks. The core empirical finding (consistent improvement over base model and data-matched control) is real and interesting. However, the absence of statistical rigor (no error bars on any result), a confound between behavior prediction and multi-task learning in the control, and inflated presentation of zero-shot results on near-random baselines keep the paper from being fully convincing in its current form. These issues are addressable but nontrivial.
+The paper makes a genuine contribution: a large-scale behavioral dataset and a carefully executed demonstration that training on receiver behavior improves VLM performance across an impressively broad suite of tasks. The Ad-LLaVA control, extensive evaluation, and consistent improvements provide solid evidence for the core empirical claim. The weaknesses — incomplete causal isolation, confounded ablations, absence of error bars — are real but addressable and do not invalidate the contribution. This is a solid paper that would be strengthened by the suggested revisions.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

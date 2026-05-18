@@ -1,18 +1,20 @@
-Now I have all the information needed. Let me produce the final consolidated review.
+Now I have a comprehensive understanding of the paper. Let me write the consolidated review.
 
 ## Summary
 
-This paper revisits the multi-play multi-armed bandit with shareable arm capacities (MP-MAB-SAC) problem under a new reward model where reward variance does not scale with the number of plays. It makes three contributions: (1) a tight sample-complexity lower bound Ω(σ²/μₖ² log δ⁻¹) for learning arm capacities, matched by algorithm ActInfCap — closing a gap from prior work; (2) the first instance-independent regret lower bound Ω(σ√(TK)) and a strengthened instance-dependent lower bound Ω(∑ cσ²/μₖ² log T); (3) an algorithm PC-CapUL with both instance-dependent and instance-independent regret upper bounds. The paper is primarily theoretical with a brief experimental section.
+This paper studies the multi-play multi-armed bandit with shareable arm capacities (MP-MAB-SAC) problem under a **new reward model** where noise is additive (independent of the number of plays), unlike prior work where noise scales with usage. The authors prove tight sample complexity bounds (Ω(σ²/μ_k² log δ⁻¹) with a matching algorithm ActInfCap), the first instance-independent regret lower bound (Ω(σ√(TK))), a strengthened instance-dependent regret lower bound (Ω(∑ cσ²/μ_k² log T)), and an algorithm PC-CapUL with regret upper bounds. The core theoretical machinery and the sample complexity result are solid contributions.
 
 ## Strengths
 
-- **Sample complexity gap genuinely closed.** Theorem 1 proves a minmax lower bound Ω(σ²/μₖ² log δ⁻¹) for learning a single arm's capacity, and Theorem 2 shows ActInfCap matches this bound exactly. This eliminates the gap in Wang et al. (2022a), whose lower bound was the trivial Ω(log δ⁻¹) and upper bound was O(mₖ²σ²/μₖ² log δ⁻¹). This is a clean, self-contained result.
+- **Tight sample complexity bounds for the additive-noise model.** Theorem 1 proves a minmax lower bound of Ω(σ²/μ_k² log δ⁻¹), and Theorem 2 shows that ActInfCap achieves a matching upper bound. This is a clean, self-contained result that improves upon the trivial Ω(log δ⁻¹) lower bound implied by Wang et al.'s condition.
 
-- **First instance-independent regret lower bound.** Theorem 3 establishes Ω(σ√(TK)) for any learning algorithm. This result was absent from prior work and provides meaningful scaling guidance for algorithm design in this setting.
+- **First instance-independent regret lower bound for this problem class.** Theorem 3 establishes Ω(σ√(TK)), filling a gap left by prior work which only provided instance-dependent bounds. The bound's independence from arm capacities m_k aligns with the sample complexity finding.
 
-- **Strengthened instance-dependent regret lower bound.** Theorem 4 gives Ω(∑ cσ²/μₖ² log T), replacing Wang et al.'s trivial Ω(∑ log T) lower bound. The dependence on μₖ⁻² is non-trivial and intuitively correct.
+- **Strengthened instance-dependent regret lower bound.** Theorem 4 gives Ω(∑_{k=1}^K (cσ²/μ_k²) log T), which introduces a dependence on μ_k⁻² and removes dependence on m_k compared to the Ω(∑_k log T) lower bound of Wang et al. (2022a) under their restrictive condition. This is a genuine improvement in understanding which parameters govern learning difficulty.
 
-- **Novel algorithmic principles with provable guarantees.** Algorithm 2 (PC-CapUL) introduces four heuristics (preventing excessive UE, balancing UE/IE, favoring larger-mean arms, stopping on convergence) that together achieve the first instance-independent regret upper bound for this setting. The comparison against the prior Orch baseline in Figure 1 shows substantial empirical improvement.
+- **Improved confidence intervals for capacity estimation.** The paper derives tighter UCB/LCB (Equations 10–11) that place the UE estimation error term above the denominator rather than in it, yielding narrower intervals and faster convergence compared to Wang et al. (2022a).
+
+- **Algorithm PC-CapUL with well-motivated design principles.** The four design insights (preventing excessive UEs, balancing UE/IE, prioritizing favorable arms, stopping on convergence) are explicitly tied to the lower bound analysis, giving the algorithm a principled motivation.
 
 ## Weaknesses
 
@@ -21,59 +23,55 @@ None.
 
 ### Major
 
-- **The claim that the regret upper bounds "match" the lower bounds is significantly overstated.** The instance-dependent lower bound (Theorem 4) is Ω(∑ cσ²/μₖ² log T) — with **no dependence on capacities mₖ**. The instance-dependent upper bound (Theorem 5) contains terms like Σₖ ((Σᵢ 2304σ²mᵢ²/μᵢ² log T)(μₖ−c)mₖ) where mₖ appears quadratically. Similarly, the instance-independent lower bound (Theorem 3) is Ω(σ√(TK)) while the upper bound (Theorem 6) scales as σ√((9216M³+128KM+1152M²N)M T log T) where M = Σ mₖ — dramatically larger when capacities are non-uniform. These are not constant-factor gaps; they are structural differences in parameter dependence. The repeated claim of "matching up to acceptable model-dependent factors" is misleading and would need to be replaced by an honest characterization of the gap and its sources. This is the paper's most consequential flaw because it undermines the central narrative. *(Verified: compare Theorem 3/4 vs Theorem 5/6 in the paper.)*
+- **Framing overstates the connection to prior work.** The paper introduces a structurally different reward model (additive noise, R_k(a_k) = min{a_k,m_k}μ_k + ε_k) compared to Wang et al.'s scaling-noise model (R_k(a_k) = min{a_k,m_k}(μ_k + ε_k)), yet repeatedly claims to "close the sample complexity gap of Wang et al." The paper does acknowledge the model difference (Section 1: "we reduce the capacity information in the reward to the minimum"), but the framing throughout — including in the abstract, introduction, and conclusion — presents the results as resolving open problems from Wang et al.'s model rather than establishing tight bounds for a new, harder variant. Since capacity information resides only in the mean under the new model but in both mean and variance under Wang et al.'s, these are meaningfully different problems. The paper should be reframed as studying a harder variant and providing tight limits for it, not as closing gaps in prior work's model.
 
-- **The motivation regarding "closing the gap of Wang et al." is misleading because the reward model is changed.** The paper changes from Wang et al.'s reward model (1) (where variance scales with min{aₖ, mₖ}²) to (5) (where variance is independent of the number of plays). The sample complexity and regret results are derived under model (5). While the paper does state the model change explicitly, it then claims to "close the gap" of Wang et al. as if the comparison were apples-to-apples. The gap closed is under a different, arguably harder model. The paper never compares results under the same model, weakening the claimed significance. *(Verified: paper states both models (1) and (5) in Section 1, and acknowledges the model is "harder," but the narrative framing still implies a direct improvement.)*
+- **Experimental comparison is insufficiently controlled.** The baselines MP-SE-SA and Orch from Wang et al. (2022a) were designed for the scaling-noise model, where variance carries capacity information. They are applied to the additive-noise model without any reported adaptation or re-tuning. The performance gap observed in Figure 1 is therefore expected — baselines that relied on variance for capacity information will naturally struggle when that signal is removed. A more informative comparison would: (a) adapt the baselines to the additive-noise setting by modifying their confidence intervals accordingly, or (b) include a simple UCB-on-discretized-actions baseline or explore-then-commit baseline that is agnostic to the noise structure. Without this, the experiments do not convincingly isolate whether PC-CapUL's advantage comes from its specific design or simply from being designed for the right model.
+
+- **Instance-independent upper bound does not cleanly match the lower bound.** The instance-independent regret lower bound (Theorem 3) is Ω(σ√(TK)), while the instance-independent upper bound (Theorem 6) is O(σ√(9216M³ + 128KM + 1152M²N)M(T log T)) plus additive terms in M, K, N, and m_k. These are not of the same form, and the paper's claim that they "match the lower bounds up to some acceptable model-dependent factors" is not justified. The bound does not simplify to σ√(TK) under natural conditions (e.g., M = O(K)), and the "model-dependent factors" are never characterized. The paper should either tighten the bound, provide explicit conditions under which the match holds, or honestly state that minimax optimality remains open for the instance-independent regret.
 
 ### Minor
 
-- **Experimental evaluation is too narrow for a paper claiming practical relevance.** Only one baseline from prior work (Orch) is compared against; the third baseline "MP-SE-SA" is introduced without any citation or description of what it is. No error bars or multiple-seed runs are reported — the single regret curves in Figure 1 cannot be assessed for variance. No ablation study isolates the effect of the four claimed design principles. The movement cost c is mentioned as varied (0.2, 0.1, 0.01) but no results for different c values are shown. The paper is primarily theoretical, so these are not fatal, but they limit the confidence readers can place in the algorithm's practical efficiency. *(Verified: Section 6 — only one figure shown, no error bars, MP-SE-SA undefined.)*
+- **Instance-dependent upper bound structural comparison is incomplete.** Theorem 5's upper bound contains terms like Σ_i (2304σ²m_i²/μ_i²) log T that are not directly comparable to Theorem 4's Σ (cσ²/μ_k²) log T. While both have μ_k² in the denominator, the presence of m_k² and M-dependencies in the upper bound is not discussed relative to the lower bound's absence of m_k dependence. A clearer itemized comparison of how the upper bound terms map to lower bound terms would help.
 
-- **The role of the movement cost c is underdeveloped.** The constant movement cost c is introduced in the model (Section 3) and appears in the instance-dependent lower bound (Theorem 4), but its effect on the optimal allocation, the algorithm's decisions, and the upper bounds is not systematically analyzed. The experiments mention varying c but do not present results. *(Verified: c appears in model definition and Theorem 4, but the paper does not analyze how it affects the algorithm or optimal strategy.)*
-
-- **Lemma 5 is referenced multiple times but its statement does not appear in the main text.** The algorithm's design principles are repeatedly justified by "the insight from Lemma 5" (in the description of PC-CapUL), but Lemma 5 is not stated in the main body. This makes the algorithmic rationale hard to follow for a reader limited to the main text. *(Verified: Lemma 5 referenced on lines 43 and 238 but not stated in the visible text. Per policy this would be in the appendix, but the algorithm description relies on it.)*
+- **Notation clarity.** The definitions of ĉ_{k,t} and î_{k,t} (lines 124–128) depend on m_{k,s-1}^l and m_{k,s-1}^u, which are themselves iteratively defined. This circularity is standard in confidence-bound-based algorithms, but the main text could briefly explain why it does not break the argument (e.g., by noting that the event A_k guarantees correctness inductively). This is acceptable if the appendix proof covers this, but stating the inductive assumption explicitly in the main text would improve readability.
 
 ### Trivial
-
-- The baseline "MP-SE-SA" is mentioned without any citation or description, leaving the reader to guess what it is.
-- The paper says "match the lower bounds" in both the abstract and introduction without acknowledging the structural gap — this should be corrected in any revision.
+None.
 
 ## Nice-to-Haves
 
-- An ablation study isolating the four design principles of PC-CapUL (removing the prioritization rule, removing the stop-learning condition, etc.) would substantially strengthen the empirical validation.
-- Error bars or multiple runs for Figure 1 would allow readers to assess the variability of the regret curves.
-- A systematic experimental study varying the movement cost c would help validate its role in the lower bounds.
+- Adding a naive rounding strategy (rounding estimated capacities to nearest integer) or explore-then-commit baseline would strengthen the empirical validation.
+- Adapting the Wang et al. baselines to the additive-noise setting and re-running the experiments would make the comparison more informative.
+- A more explicit discussion of when M = O(K) (e.g., when capacities are bounded) and what this implies for the instance-independent upper bound would clarify the claimed matching.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points (from the reviewer inputs) were removed or downgraded after cross-checking against the paper:
 
-- **"Missing initialization of mₖ,₀ˡ, mₖ,₀ᵘ in Algorithm 1"** — REMOVED because it is factually wrong. Algorithm 1 line 1 clearly states: "Initialize: t←0, mₖ,₀ˡ←1, mₖ,₀ᵘ←N." *(Verified on line 191.)*
-- **"No appendix with proofs / missing proofs"** — REMOVED per policy. The parser strips appendix content from all papers; the original submission contains these proofs (Lemma 5 and full theorem proofs are referenced in-text).
-- **"Figures not embedded in the text"** — REMOVED as a parser/formatting artifact.
-- **"Typos, grammar, formatting issues"** — REMOVED per policy as parser artifacts, not author errors.
-- **"Missing comparison to uniform allocation, epsilon-greedy, etc."** — REMOVED. The paper already compares against three baselines including one from prior work (Orch) and a variant (PC-CapUL-old). For a primarily theoretical paper, this is adequate. Adding more naive baselines would not change the evaluation.
-- **Strength Finder's claim that "upper bounds match the lower bounds"** — REMOVED per conflict rule: this strength conflicts with the verified weakness that the bounds do not actually match (structural gap in capacity dependence). The strength is inaccurate.
+- **"The paper changes the reward model without adequately distinguishing this from prior work"** — Partially removed. The paper DOES acknowledge the model difference (lines 25–29). The substantive remaining point is about the framing/overclaim, which is kept in Major.
+- **"The paper's writing is often unclear and contains notation that is defined only implicitly" (circular dependency complaint)** — Downgraded to Minor. The confidence-interval circularity is standard in the bandit literature and is resolved in the appendix; this is not a structural problem.
+- **"No comparison against a naive rounding strategy or a simple explore-then-commit baseline"** — Moved to Nice-to-Haves. Useful additional baselines but not a flaw in the current comparison.
+- **Strength: "Algorithm PC-CapUL with regret upper bounds that match lower bounds"** — Modified. The instance-dependent case has structural similarity, but the instance-independent case does not clearly match. The overclaim is noted as a weakness; the strength is retained only in a qualified form.
 
 ## Novel Insights
 
-The most interesting observation emerging from the reviews — beyond what the paper itself states — is that the sample complexity result (Theorem 1/2) is the paper's cleanest contribution and stands on its own, while the regret upper bounds are a separate (and much looser) story. The structural gap between the lower bounds (which are capacity-independent) and the upper bounds (which carry mₖ² terms) suggests either that the lower bounds can be strengthened substantially, or that the algorithm is far from optimal. A reader should treat the regret analysis as providing an upper bound on the algorithm's performance, not as a fundamental limit that is tight. The paper would benefit from contrasting the tightness of the sample complexity result with the acknowledged looseness of the regret bounds, and from discussing which direction (tightening the lower bound or improving the algorithm) is more plausible.
+None beyond the paper's own contributions. The key novel insight identified by the reviewers is that the sample complexity of arm capacity estimation depends on per-unit reward mean μ_k rather than arm capacity m_k — but this is already the paper's own stated finding. The reviewer discussions do not surface an additional insight not present in the paper.
 
 ## Suggestions
 
-1. **Honestly characterize the gap between upper and lower regret bounds.** Remove or qualify all claims of "matching." Explicitly state the residual gap (mₖ dependence in the upper bound vs. no mₖ in the lower bound) and discuss whether the lower bound or the algorithm is likely to be the source of looseness. This is the single most important change.
+1. **Reframe the contribution honestly.** The abstract and introduction should clearly state that the paper studies a **variant** of MP-MAB-SAC with additive noise (where capacity information resides only in the mean), and that tight bounds are established for this variant. The connection to Wang et al. should be described as "we consider a harder variant where the variance carries no capacity information, and provide tight bounds that contrast with the loose bounds in the prior model," not as "closing the gap of Wang et al."
 
-2. **Clarify the relationship to Wang et al.'s model.** Make explicit that the sample complexity gap is closed under a different (harder) reward model, and describe what this implies about the comparison. Consider adding a short discussion of how results would change under the original model (1).
+2. **Adapt baselines or add model-agnostic ones.** Re-run experiments with baselines adapted to the additive-noise setting, or add baselines that do not rely on the noise structure (e.g., discretized-action UCB, explore-then-commit on rounded estimates).
 
-3. **Expand the experimental section.** Add at least error bars or multiple runs. If possible, add an ablation showing the impact of one design principle (e.g., the "favorable arms win UE first" priority rule). Show results for at least one non-default value of c.
+3. **Clarify the instance-independent regret gap.** Either simplify Theorem 6 to a form comparable to Theorem 3 under explicit conditions (e.g., when m_k ≤ C for all k so M = O(K)), or state candidly that minimax optimality for instance-independent regret remains open.
 
-4. **Define or cite MP-SE-SA.** The reader needs to know what this baseline is.
+4. **Add a structural comparison table for the bounds.** A table showing lower bound terms → corresponding upper bound terms for each of Theorems 3–6 would make the "matching" claim transparent and allow readers to assess which factors remain unclosed.
 
-5. **Move a key lemma to the main text.** Since Lemma 5 is used to justify the algorithm's design principles, its statement (if not its full proof) should appear in the main body.
+---
 
 ## Score and Decision
 
-This paper has genuine technical contributions — most notably the tight sample complexity result and the first instance-independent regret lower bound. However, the central narrative of "matching regret bounds" is not supported, and this overclaiming pervades the abstract and introduction. The paper can be repaired with a candid revision, but in its current form, the main claim does not hold. I cannot recommend acceptance.
+The paper makes genuine theoretical contributions: tight sample complexity bounds for the additive-noise variant and new regret lower bounds. However, the framing overstates the connection to prior work (claiming to close gaps in a different model), the experiments use non-adapted baselines that cannot produce a fair comparison, and the instance-independent upper bound does not cleanly match the lower bound as claimed. These issues are fixable with a major revision, but in its current form the paper's narrative is misleading and its empirical claims are not properly supported.
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

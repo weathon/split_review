@@ -1,87 +1,75 @@
-Now I have all the information I need. Let me construct the final consolidated review.
+Now I have all the information needed. Let me compose the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes CompA, a collection of two expert-annotated benchmarks (CompA-order and CompA-attribute) for evaluating compositional reasoning in audio-language models (ALMs), and CompA-CLAP, a two-stage fine-tuning method that combines composition-aware hard negatives with a novel modular contrastive learning objective. The CompA benchmarks fill an important gap: existing audio retrieval benchmarks are insufficient for evaluating compositionality, as demonstrated by the paper's finding that ALMs are largely insensitive to word order on standard benchmarks. CompA-CLAP achieves substantial improvements on CompA-order (group score rising from 11.50 to 33.85 over the authors' own CLAP baseline) while maintaining performance on standard retrieval and classification tasks. However, performance on CompA-attribute remains near or below random chance for all models.
+This paper makes two contributions: (1) **CompA**, a pair of expert-annotated benchmarks (CompA-order and CompA-attribute, 400+200 instances) in the Winograd twin-sentence format that test compositional reasoning in audio-language models (ALMs), and (2) **CompA-CLAP**, a two-stage fine-tuning method combining composition-aware hard negatives with a novel modular contrastive loss to improve compositional reasoning. The benchmarks reveal that existing ALMs perform near or below random chance on compositional understanding, and CompA-CLAP substantially improves over baselines on CompA-order (e.g., group score from 5.50% to 33.85%) while largely retaining performance on standard retrieval and classification benchmarks.
 
 ## Strengths
 
-1. **First dedicated benchmark for compositional reasoning in audio-language models.** Prior work in compositionality has focused nearly exclusively on vision-language models (Winoground, NegCLIP, CREPE). The paper correctly identifies that no systematic study of compositionality exists in the audio space (Section 1), and the CompA benchmarks — with 400 (order) and 200 (attribute) expert-annotated instances using majority real-world audio from AudioSet — directly address this gap. The paper demonstrates convincingly (Fig. 1, Section 2.1) that standard retrieval benchmarks like Clotho and AudioCaps are insufficient for evaluating compositionality because CLAP's performance degrades by only 0.04 R@1 when word order is shuffled.
+- **First systematic benchmark for compositional reasoning in ALMs.** CompA-order and CompA-attribute are carefully designed with expert annotation, real-world audio (90%+ from AudioSet Strong), and a Winoground-style evaluation that directly tests whether models can match the right caption to the right audio when only composition differs. Human performance (87.4% group on CompA-order) vs. all existing models near or below random proves the gap is real and severe — a clear and valuable finding.
 
-2. **Demonstrably effective method for improving order understanding.** CompA-CLAP raises the group score on CompA-order from 11.50 (CLAP ours) to 33.85 (Table 2). Ablations confirm the contribution of both training stages: removing hard negatives drops the order group score from 33.85 to 20.20, and removing modular contrastive drops it to 21.25. The improvement on CompA-order is substantial and represents a genuine advance in audio compositional reasoning.
+- **CompA-CLAP produces meaningful and controlled improvements.** The proposed two-stage training boosts group score on CompA-order from 11.50% (CLAP-ours) to 33.85%, and improves over all baselines on every metric on both benchmarks (Table \ref{tab:compa-results}). These gains come with minimal degradation on standard retrieval (Table 1: AudioCaps/Clotho R@1 changes within ±0.4) and zero-shot classification (ESC-50: 90.2→89.1, US8K: 86.1→85.7), showing the fine-tuning does not sacrifice general capability.
 
-3. **Performance retention on standard benchmarks.** CompA-CLAP maintains competitive performance on text-to-audio retrieval (AudioCaps R@1: 36.1) and zero-shot classification (ESC-50: 89.1%, US8K: 85.7%) despite being fine-tuned specifically for compositionality (Table 1). This is non-trivial and demonstrates that compositional reasoning can be improved without catastrophic forgetting.
+- **Ablation study validates each component.** The paper includes ablation rows ("- Hard Negative" and "- Modular Contrastive") in Table 3, confirming that removing either stage degrades performance, with the full model achieving the best results.
 
-4. **Methodological innovations to address data scarcity.** The paper proposes a template-based synthetic audio-caption creation method that generates ~251k compositional training audios and ~110k real compositional pairs (AudioSet-CompA), overcoming the acute scarcity of compositional audio data noted in Section 3.1. The use of GPT-4 to generate semantically valid hard negatives and the modular contrastive loss that does not require existing compositional audio-caption pairs are practical contributions.
+- **Tackles data scarcity with a scalable synthetic approach.** The modular contrastive framework generates ~251k training audios from single-event snippets and their labels, providing a practical solution to the acute lack of compositional audio-text pairs in existing datasets.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-None. The paper's most significant weakness — poor performance on CompA-attribute — is openly acknowledged by the authors (line 279: "all models, including CompA-CLAP, perform worse than our random baseline on CompA-attribute").
+- **Asymmetric loss formulation is not discussed and likely explains the systematically poor audio scores.** In both stages, hard negatives appear only in the audio-to-text direction (ℓ^{a-2-t}, Eq. 5 and Eq. 7) and are absent from the text-to-audio direction (ℓ^{t-2-a}, Eq. 4 and Eq. 6). Concretely:
+
+  - Stage 1, Eq. 4 (ℓ^{t-2-a}): denominator = Σⱼ exp(t_i^⊤ a_j / σ) — *no hard negatives*
+  - Stage 1, Eq. 5 (ℓ^{a-2-t}): denominator = Σⱼ exp(a_i^⊤ t_j / σ) + Σₖ exp(a_i^⊤ t_{i_k}^{hard} / σ) — *includes hard negatives*
+  - Stage 2, Eq. 6 (ℓ^{t-2-a}): denominator = Σⱼ exp(t_i^⊤ a_j / σ) — *no hard negatives*
+  - Stage 2, Eq. 7 (ℓ^{a-2-t}): denominator = Σⱼ exp(a_i^⊤ t_j / σ) + Σₖ exp(a_i^⊤ t_{i_k}^{neg} / σ) — *includes hard negatives*
+
+  Crucially, ℓ^{t-2-a} (text→audio) contributes to the **audio score** (given a caption, select the correct audio), while ℓ^{a-2-t} (audio→text) contributes to the **text score** (given an audio, select the correct caption). The loss asymmetry therefore directly maps to the observed performance gap: text scores are consistently higher than audio scores, and on CompA-attribute even CompA-CLAP's audio score (22.52) remains below random (25.0). The paper never discusses this asymmetry or its potential consequences. The authors should either explain the design rationale, investigate whether adding hard negatives to the text-to-audio direction resolves the deficiency, or acknowledge this as an explicit limitation.
+
+- **Evaluation metrics for three-pair instances are not defined.** The paper states that 100 out of 400 CompA-order instances have three audio-caption pairs (C₂, A₂) where events occur simultaneously (line 87). However, Section 3.4 defines the text, audio, and group scores (Eqs. 1–3) only for the two-pair case. How these metrics extend to three-pair instances is never specified, making it impossible for readers to verify the reported random baselines (text=19.70, audio=19.70, group=16.67) or reproduce the evaluation. This is a missing technical specification that must be provided.
 
 ### Minor
 
-1. **Attribute binding remains essentially unsolved.** CompA-CLAP achieves a group score of 15.13 on CompA-attribute, marginally above the authors' own CLAP baseline (14.75) and below the random baseline (16.67). The improvement is ~0.4 percentage points and, despite tiny reported standard deviations, is not practically meaningful. The paper's broad claim (abstract) that "CompA-CLAP significantly improves over all our baseline models on the CompA benchmark" does not adequately differentiate between the large, convincing gains on CompA-order and the essentially null result on CompA-attribute. The introduction's claim of "10%-28%" improvement does not hold for most attribute metrics (e.g., attribute text improves by 4.4%, attribute group by 2.6%).
+- **Confounding of architectural/data improvements with novel loss contributions.** The "CLAP (ours)" baseline already replaces RoBERTa with Flan-T5-large and uses CompA-661k, outperforming CLAP-LAION on CompA-order text score by 9.75 points (33.75 vs. 24.0). The proposed two-stage fine-tuning adds a further 6.95 points. While the ablations in Table 3 isolate the marginal contribution of each stage *starting from the stronger CLAP (ours)*, the paper does not ablate whether applying the novel losses to the original CLAP-LAION (with RoBERTa) would produce similar gains. The majority of the overall improvement over the literature baseline comes from architecture/data choices, and a reader cannot fully disentangle the contributions. An additional ablation using the original CLAP architecture would clarify this.
 
-2. **Baseline comparison partially confounded by text encoder choice.** The authors' CLAP uses Flan-T5-large as the text encoder rather than RoBERTa used by prior CLAP variants. While the main comparison (CLAP ours → CompA-CLAP) controls for this, the paper attributes the large gap between CLAP (ours) and CLAP-LAION on CompA-order (group 11.50 vs. 5.50) to "the better dataset and encoder" without isolating the encoder's contribution. An ablation initializing CompA-CLAP from a RoBERTa-based CLAP would strengthen the claim that the method itself, not just the encoder upgrade, drives the improvement.
+- **Synthetic training-to-real transfer is not analyzed.** The modular contrastive data concatenates/overlays short AudioSet Strong snippets with template-generated captions — audios where events are strictly sequential or perfectly overlaid with no natural acoustic interaction. While the aggregate CompA improvements suggest transfer, there is no per-instance analysis (by event distinctness, background noise level, or number of acoustic events) to establish whether the gains concentrate on test cases that resemble the synthetic training distribution. The paper offers only qualitative observations (line 281) about when the model performs better or worse.
 
-3. **Synthetic training data quality is not validated.** The modular contrastive learning stage generates 251k synthetic audios by concatenating/overlaying single-event snippets from a pool of 500k, using template-based captions. The paper does not report any human evaluation or automated quality check (e.g., sound event detection accuracy) to confirm that these synthetic compositions sound natural, contain the intended acoustic events, or that the template captions are linguistically diverse. Given that the method is evaluated partly on real-world audio (CompA-order), this creates uncertainty about how well the synthetic training distribution matches the test distribution.
-
-4. **The "10%-28%" improvement claim is imprecise.** Verifying this claim against Table 2: CompA-CLAP vs. CLAP (ours) improvements range from 2.6% (attribute group) to 194% (order group). Only CompA-order text (20.6%) falls cleanly within the stated range. While approximate ranges are acceptable in narrative text, the discrepancy between the stated range and the actual numbers across most metrics is noticeable.
+- **AudioSet-CompA annotation details are sparse.** The 110k-pair dataset is central to the hard-negative training stage, but the paper provides only that "two human annotators evaluated and corrected GPT-4 captions." No inter-annotator agreement, correction workload statistics, or quality metrics are reported. These details would help establish the reliability of this resource.
 
 ### Trivial
 
-- The paper states "All scores have been averaged for 3 runs on 3 random seeds" but the standard deviations for CompA-CLAP in Table 2 are extremely small (≤0.20), which is unusual for a 200–400 instance benchmark. A brief explanation of how variance is computed would be helpful.
+- **"Marginally better than random chance" (abstract) is imprecisely stated.** On most baseline models, the audio and group scores are *below* random (e.g., CLAP-LAION group = 5.50 vs. random 16.67 on CompA-order). Characterizing this as "marginally better" is too generous; "near or below random" would be more accurate.
 
 ## Nice-to-Haves
 
-- **Validation of synthetic training data:** A small human rating study or sound event detection analysis on the 251k synthetic audios would increase confidence that the training data captures the intended compositional structure.
-- **Qualitative failure analysis on CompA-attribute:** Understanding why the model fails at attribute binding — does it systematically prefer one type of misbinding? — could guide future work.
-- **Ablation of Kpos/Kneg:** The paper fixes Kpos, Kneg ≤ 7; analysis of how performance varies with the number of compositional granularities would inform practical usage.
+- Provide the GPT-4 prompts used for hard-negative generation and template creation, along with a small validation set for generated text.
+- Report a breakdown of the synthetic modular training data by number of events (2/3/4) and construction type (concatenation vs. overlay).
+- Expand the benchmark with more instances and provide confidence intervals accounting for benchmark sampling variance (not just seed variance from 3 runs).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-1. **"Random baseline error for CompA-attribute" (Harsh Critic, Critical Issue #1):** The critic claimed the random group score for CompA-attribute should be 50% rather than the reported 16.67%. This is **factually incorrect**. For a 2-pair instance, the group score requires **all four** inequalities from both the text and audio scores to hold simultaneously (Eqs. 4-6). Under i.i.d. random similarities, this requires that {s(C0,A0), s(C1,A1)} are the two largest among four values — probability = 1/6 ≈ 16.67%. The paper's math is correct; the critic confused the individual text/audio scores (25% each) with the more stringent group score. The critic's downstream claims that "the model performs far below chance" and "has learned an inverse mapping" are based on this mathematical error and are unfounded.
-
-2. **"The paper does not discuss potential transfer from VLM compositionality methods to audio" (Section-by-Section note).** This is a scope-creep request. The paper already discusses NegCLIP and CREPE as inspiration. Requiring explicit adaptation of VLM methods to audio in a first-of-its-kind paper is beyond reasonable expectations.
-
-3. **"The paper does not discuss potential train-test distribution gap" (Section 3 note on synthetic audios).** The paper explicitly states that CompA-attribute uses WavJourney-generated audios validated by experts (Section 3.3). The limitation is noted. This is covered by weakness #3 above in a more precise form.
-
-4. **"Reproducibility details for GPT-4 prompting" note:** The paper states GPT-4 prompts would be in the appendix. Missing appendix content is a parser artifact, not an author error.
+- **Criticism about models "not yet released" or "cannot be independently verified":** None present in the original review. The paper provides a project page URL.
+- **Notation inconsistency gripe about t_i vs. t^{pos}_{i_k}:** The notation in Eq. 4 (stage 1) is internally consistent — there are no t^{pos} in stage 1. The real issue is the *asymmetry of hard-negative inclusion*, which is covered in Major weakness #1 above.
+- **Criticism that below-random audio scores "fundamentally undermines" compositional reasoning claims:** The paper's core claim is that CompA-CLAP *improves* over baselines (which is supported). The claim is comparative, not absolute. The paper also explicitly acknowledges the limitation (line 279). The asymmetry concern is serious but does not invalidate the comparative result.
+- **Criticism about the synthetic data being artificial:** This is an inherent property of the approach, not a flaw. The paper is transparent about the synthetic nature of the modular data. The reasonable remaining ask (per-instance analysis) is retained as a Minor weakness.
 
 ## Novel Insights
 
-The reviews surface one genuinely novel insight beyond the paper's own contributions: the **asymmetry between order understanding and attribute binding** in audio-language models appears to be substantially larger than what has been observed in vision-language models. In the VLM literature (Winoground, NegCLIP), models typically struggle roughly equally with both phenomena. The fact that CompA-CLAP achieves a 33.85 group score on CompA-order (3× the CLAP baseline) but remains at chance (15.13, below random 16.67) on CompA-attribute suggests that **audio attribute binding may be a fundamentally harder problem** — possibly because acoustic attributes (source, quality, pitch) are perceptually more entangled in the audio signal than visual attributes are in images, making contrastive representation learning less effective for disambiguation. This insight is worth stating explicitly and could motivate dedicated architectural solutions for attribute binding in audio.
+The most valuable analytical observation across the reviews — and one the paper itself does not make — is that the **hard-negative inclusion asymmetry maps directly onto the evaluation asymmetry**: ℓ^{a-2-t} (which gets hard negatives) drives the text score (above random), while ℓ^{t-2-a} (no hard negatives) drives the audio score (below random on CompA-attribute). This is not a side note; it is a plausible structural explanation for the paper's most puzzling result. If this connection holds, it suggests the audio-score deficiency may be a consequence of an asymmetric training design choice rather than an inherent limitation of the approach. Investigating this would substantially strengthen the paper.
 
 ## Suggestions
 
-1. **Scope the claims precisely.** Replace "improves compositional reasoning" in the abstract and intro with a two-part claim: "substantially improves order understanding (group score 11.50→33.85 on CompA-order) while attribute binding remains an open challenge." This is far more honest and still impressive.
-
-2. **Acknowledge and discuss the order/attribute asymmetry explicitly.** The paper presents this as a uniform failure, but the contrast between order and attribute performance is the most interesting finding in the results. A dedicated analysis of why modular contrastive learning succeeds for order but not attribute would strengthen the paper considerably.
-
-3. **Add an ablation varying the text encoder** (e.g., RoBERTa vs. Flan-T5) in the hard-negative training stage. This would directly address concerns about whether the encoder upgrade or the method itself drives improvements.
-
-4. **Run a small human evaluation on the synthetic training data** (e.g., 100 samples rated by 2 annotators) to validate that the template-based concatenations/overlays produce recognizable compositional audio. This is a quick experiment that would significantly increase confidence in the training methodology.
+1. **Address the loss asymmetry.** Add hard negatives (or the modular negatives) to the ℓ^{t-2-a} direction in both stages, or provide a principled justification for why they are intentionally excluded from one direction only. Report whether this resolves the audio-score deficiency on CompA-attribute.
+2. **Define the 3-pair evaluation metric.** Specify how text, audio, and group scores extend to instances with three audio-caption pairs, and how the random baselines (19.70, 16.67) are derived.
+3. **Add an ablation that starts from the original CLAP-LAION architecture.** Apply the hard-negative and modular contrastive stages to the original CLAP (with RoBERTa and LAION-630K) to isolate the value of the loss formulations independent of the architecture/data improvements.
+4. **Add per-instance analysis on CompA test sets.** Categorize instances by acoustic similarity, number of events, and whether events are present in AudioSet, and report accuracy per category to establish where synthetic-to-real transfer succeeds and fails.
 
 ## Score and Decision
 
-**Originality:** 7/10 — First systematic study of audio compositional reasoning; novel modular contrastive loss.
-**Importance of research question:** 8/10 — Compositional reasoning is a well-recognized limitation of contrastive models; extending this to audio fills a clear gap.
-**Claims support:** 6/10 — Strong evidence for order understanding; the 10-28% improvement claim and abstract framing overstate the attribute results.
-**Soundness of experiments:** 7/10 — Benchmarks are well-designed and expert-annotated; encoder confounding and lack of synthetic data validation are minor concerns.
-**Clarity:** 7/10 — Generally well-written; the random baseline calculation is correct but could be explained more explicitly to prevent misinterpretation.
-**Value to community:** 8/10 — CompA benchmarks are likely to become a standard evaluation for audio compositionality; the method provides a strong baseline for future work.
+This paper addresses a genuine and underexplored problem — compositional reasoning in audio-language models — and provides two valuable contributions: carefully designed benchmarks and a method that delivers real improvements. The weaknesses are significant but addressable: the most serious (asymmetric loss formulation and undefined 3-pair metrics) can be resolved in a revision. The benchmarks alone are a standalone contribution that advances the field. I recommend acceptance conditional on addressing the two Major weaknesses.
 
-The paper makes a genuine contribution through its carefully constructed benchmarks and a method that convincingly improves order understanding. The primary weakness is not a methodological flaw but an overclaim: the paper's framing implies broader compositional reasoning gains than the evidence supports, since attribute binding remains at chance. However, the paper openly acknowledges this limitation in its Results section. The benchmark contribution alone is valuable enough to merit acceptance, as it provides the community with a much-needed evaluation tool. The modest methodological contribution on the attribute side does not invalidate the substantial contribution on the order side.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,18 +1,20 @@
-Now I have all the information I need. Let me synthesize the review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
-The paper proposes a neuroexplicit hybrid architecture for inpainting sparse optical flow fields. It combines a fixed PDE-based anisotropic diffusion solver with a learned U-Net module (DTM) that predicts the per-pixel diffusion tensor (eigenvalues, eigenvectors) and discretization parameters from the reference image. The architecture preserves stability guarantees of the explicit scheme while making the parameter selection data-driven. The method is evaluated against explicit PDE baselines (EED, AMLE, LB) and neural baselines (FlowNetS, WGAIN, Probabilistic Diffusion) on FlyingThings, Sintel, and KITTI, and is shown to consistently achieve lower endpoint error with substantially fewer parameters and less training data.
+
+This paper proposes a neuroexplicit architecture for inpainting sparse optical flow fields. The core idea is to keep the diffusion process explicit (anisotropic PDE-based inpainting with stability guarantees) while using a lightweight U-Net (the Diffusion Tensor Module, DTM) to predict per-pixel diffusion parameters (eigenvalues, eigenvectors, discretization parameter α) from the reference image, replacing the heuristic structure tensor used in classical Edge-Enhancing Diffusion (EED). The model is evaluated on FlyingThings (training domain), Sintel (out-of-domain), and KITTI (real-world autonomous driving), consistently outperforming both fully explicit baselines (EED, AMLE, LB) and fully neural baselines (FlowNetS, WGAIN, Probabilistic Diffusion) in endpoint error, parameter count, and data efficiency.
 
 ## Strengths
-- **Well-motivated hybrid architecture with theoretical grounding.** The paper cleanly derives the diffusion inpainting framework, then shows how to replace the heuristic structure tensor with learned DTM outputs while preserving the PDE solver's stability constraints (α ∈ [0, ½], |β| ≤ 1−2α). This is a principled integration of model-driven and data-driven components, not a generic neural network.
 
-- **Consistent outperformance across datasets, mask densities, and metrics.** On all three Sintel densities (1%, 5%, 10%) the proposed method achieves the lowest EPE (0.72, 0.40, 0.28), including against the Sintel-tuned AMLE* and LB* baselines. On the in-domain FlyingThings test, the advantage is larger (e.g., 1.01 vs. 2.06 for EED at 1% density). On KITTI real-world data, the method ties LB on EPE but has the fewest flow outliers at 1% density (0.87% vs. LB 0.94%).
+- **Consistent state-of-the-art performance across mask densities and domains.** Table 1 shows that the proposed method achieves the lowest EPE at every mask density (1%, 5%, 10%) on both FlyingThings and Sintel. On Sintel at 5% density, the method scores 0.40 EPE, beating the best explicit baseline (LB at 0.43) and all neural baselines (FlowNetS 0.57, WGAIN 0.80, PD 0.55). This directly supports the paper's core claim of setting a new state of the art for flow field inpainting.
 
-- **Strong ablation study confirming each learned component's contribution.** Table 2 shows that replacing learned eigenvalues with explicit structure-tensor eigenvalues causes the largest drop (e.g., +0.28 on FlyingThings 5%), followed by replacing learned eigenvectors (+0.02–0.07 depending on setting) or replacing the learned spatially-varying α with a constant (+0.02–0.06). This directly validates the design.
+- **Exceptional data efficiency.** Figure 3 (left) shows that training on only 194 FlyingThings samples yields Sintel EPE already lower than every baseline trained on the full dataset. This is a compelling demonstration that the explicit PDE backbone reduces reliance on large training data — a core advantage of the neuroexplicit design.
 
-- **Exceptional data efficiency.** Figure 2 (left) shows that with only 196 training samples (1% of the full set), the proposed method outperforms all neural baselines trained on the full 19,640 samples, and also outperforms the explicit EED baseline. This is a strong and practically relevant result.
+- **Clean and informative ablation study (Table 2).** The ablation isolates the contribution of each learned component: learned eigenvalues provide the largest gain (+0.28–0.95 EPE increase when removed), eigenvectors and per-pixel α each provide consistent but smaller benefits. The comparison to the ResNet formulation of DiffBlockConn is a valuable sanity check showing that learning finite-difference operators adds complexity without gains.
 
-- **Lightweight architecture with stability guarantees.** The method uses 1.31M parameters (vs. 8.84M for FlowNetS, 976.7M for PD) and runs in 17.57ms. The explicit PDE formulation guarantees well-posedness and stability — the DTM operates within a bounded, theoretically sound parameter space.
+- **Lightweight architecture with competitive inference time.** The model uses only 1.3M parameters (versus FlowNetS 8.8M, WGAIN 11.5M, PD 976M) and runs in 17.57 ms per image, faster than WGAIN and orders of magnitude faster than PD (~97 s). This is a genuine practical advantage for a method with top-tier accuracy.
+
+- **Robust generalization to unseen densities and real-world data.** Figure 3 (right) shows the method improves with increasing mask density even when trained on a fixed 5% density — unlike FlowNetS and WGAIN which degrade. Table 2 on KITTI shows the method matches LB in EPE while achieving the fewest flow outliers at 1% density (0.87% vs. LB 0.94%), despite never seeing autonomous-driving data during training.
 
 ## Weaknesses
 
@@ -20,58 +22,45 @@ The paper proposes a neuroexplicit hybrid architecture for inpainting sparse opt
 None.
 
 ### Major
-- **Training loss function is not stated anywhere in the paper.** The paper describes training an end-to-end neural network but never specifies what loss is being optimized (L1 EPE? L2? A combination?). This is a fundamental piece of information for understanding and reproducing the method. It also does not specify the optimizer, learning rate, batch size, or training epochs in the main text. While some details may reside in the supplement (which is stripped here), the loss function should absolutely be in the main paper.
+None. The paper's core claims (SOTA performance, data efficiency, robustness) are well-supported by the evidence. The weaknesses below are real but do not invalidate the central contribution.
 
 ### Minor
-- **The data-efficiency experiment lacks controls that would strengthen its conclusion.** The comparison of methods trained on subsets (196 to 19,640 samples) does not control for whether neural baselines are limited by insufficient training *steps* rather than insufficient training *samples*. The paper does not state whether hyperparameters were re-tuned per subset, how subsets were drawn (random sampling?), or whether all methods were trained for the same number of gradient updates. These controls would rule out the alternative explanation that the neural baselines are under-trained rather than data-hungry.
 
-- **Transparency/interpretability claims are asserted but not demonstrated.** The paper argues that explicit PDE methods are "transparent by construction" (Abstract) and that the hybrid model is more interpretable (Section 1), but:
-  (1) The DTM (U-Net with >1M parameters) is fully opaque — the only explicit part is the PDE solver step itself, which is a fixed iterative algorithm.
-  (2) No visualizations of learned diffusion tensors (e.g., principal eigenvector fields, eigenvalue maps) are provided to show what the network learns or how it differs from the structure-tensor baseline.
-  The transparency claim therefore rests on rhetoric rather than evidence. The paper would be stronger by either providing such visualizations or tempering the claim.
+- **Interpretability claim is asserted but not evidenced.** The paper states the goal of achieving "interpretable models" (line 31) and positions the explicit PDE component as "transparent by construction" (line 8/abstract context). However, the DTM — which predicts the critical diffusion parameters — is a standard U-Net whose outputs (eigenvalues, eigenvectors, α maps) are never visualized or analyzed. The paper does not show which image features drive the learned tensor, how the predicted diffusivity relates to motion boundaries, or whether the network discovers anything beyond the edge-contrast heuristic of EED. This does not invalidate the paper's performance contributions, but the interpretability framing is a gap between claim and evidence. The paper would be strengthened by visualizing the DTM outputs for a few examples and qualitatively comparing them to the EED structure tensor.
 
-- **Inference-time comparison is incomplete.** Figure 3 reports runtime (17.57ms) against neural baselines but omits the explicit EED baseline (the most directly relevant comparison), stating "there is no clear way to compare." However, the paper states that EED requires 3,000–100,000 iterations — providing even an approximate runtime range for EED would give the reader a meaningful reference point for the claimed inference-time advantage.
-
-- **The 42% improvement over PD claim should be caveated with the datasets it covers.** PD is omitted from the KITTI evaluation (valid reason given: resolution mismatch), meaning the "42% improvement over PD" average reported in the abstract applies only to FlyingThings and Sintel. This is correctly described in the main text but could mislead a casual reader of the abstract.
+- **The Probabilistic Diffusion baseline comparison is not fully validated.** The PD model uses 976M parameters and ~97 s per image but performs worse than the zero-parameter EED baseline on both FlyingThings (e.g., 1.09 vs. 1.00 at 5%) and Sintel (0.55 vs. 0.52 at 5%). The paper attributes this to distribution shift but does not report training convergence curves, validation losses, or any hyperparameter search for the PD model. Given the computational cost of this baseline and its importance to the claimed "42% improvement," the comparison would be more credible with additional validation evidence (or the 42% headline number could reasonably be de-emphasized). This does not undermine the paper's core contribution, which is also supported by comparisons to EED, AMLE, LB, FlowNetS, and WGAIN.
 
 ### Trivial
-- The value of the time step τ and the number of inner FSI steps L are not explicitly stated (line 255: "chosen to satisfy a stable and well-posed process" — but no numerical value given; line 254: "one cycle per resolution" but L is unspecified).
-- The total training set size of the FlyingThings "final subset" (19,640) is only communicated through a figure axis tick label, not stated in the text.
-- Line 328 says "194 samples" while Figure 2 shows 196 — this minor inconsistency should be resolved.
+
+- **Results are reported without variance or confidence intervals.** All numerical results are single values without information about multiple trials, seeds, or test splits. This is standard practice for this type of benchmark evaluation, and the differences are large enough in most comparisons (e.g., 0.55 vs. 1.68 at 5% FlyingThings) that the findings are likely robust. However, a few tighter comparisons (e.g., KITTI 10% EPE: 0.23 across three methods) would benefit from uncertainty estimates. The paper should report this in a final version.
+
+- **FlowNetS (2015) is the oldest neural baseline.** The paper also includes WGAIN and PD as more modern baselines, so this is not a significant gap. However, specifying that FlowNetS was chosen as a generic U-Net baseline (as the paper already does) and that the main competitors are the explicit methods would clarify the positioning.
 
 ## Nice-to-Haves
-- Visualizations of learned diffusion tensors (e.g., overlaid eigenvector fields) to demonstrate what the DTM learns and to support any interpretability claims.
-- A runtime comparison with the explicit EED baseline to contextualize the "competitive inference time" claim.
-- Reporting variance (standard deviations or ranges) across Sintel sequences, since some advantages (e.g., 0.40 vs. 0.43 at 5% Sintel) are small and may not be statistically significant.
-- A limitations paragraph discussing failure cases, sensitivity to mask distribution, or known weaknesses.
+
+- A brief limitations paragraph acknowledging that the method requires a reference image and that the diffusion is image-driven (linear, not flow-driven) — applicable where flow discontinuities do not align well with image edges.
+- A failure case analysis showing one example where the method performs poorly (e.g., large occluded regions, extreme motion), which would help calibrate expectations for future work.
+- Visualization of the predicted diffusion tensor components (eigenvalues, eigenvectors) and the α map for a few inputs, compared to the EED structure tensor.
 
 ## Removed Points
-These points are flagged to be removed — treat them with caution:
 
-1. **"Unfair or poorly justified baseline configuration"** — The harsh critic claims the neural baselines were so poor as to make comparisons "not credible." However, the paper describes the baseline adaptations (line 263–268), explicitly acknowledges the Sintel-tuned advantage for AMLE/LB (line 261), and defers implementation details to the supplement (standard practice). The critic offers no evidence of poor tuning beyond the performance gaps themselves — which is circular. The large gaps on KITTI (e.g., WGAIN EPE 6.82 vs. proposed ~0.23 at 10%) are consistent with known generalization failures of neural methods under domain shift and are not evidence of misconfiguration. This criticism is speculative and removed.
-
-2. **"Table 1 Sintel comparison is asymmetric in the opposite direction"** — The critic claims the paper does not acknowledge that the proposed method is also out-of-domain on Sintel. This is false: lines 260–261 explicitly state "Note that other methods are not trained or tuned on Sintel and therefore this setting gives RaadOF an advantage." The paper correctly acknowledges the asymmetry favors the explicit baselines, not the proposed method. Removed as factually wrong.
-
-3. **"The PD baseline is omitted from KITTI" as a weakness** — This is not a weakness; the paper gives a valid reason (resolution mismatch, line 554). The critic acknowledges this is valid. The observation that the abstract's "42% over PD" doesn't carry to KITTI is kept as a minor caveat.
-
-4. **Strength about "outperforms both explicit and neural baselines"** — This is kept, it's well-supported.
+- **"FlowNetS is far outdated; LaMa/CoModGAN not discussed"** — The rule against mentioning missing related works applies. The paper already includes WGAIN (2019) and PD (2022) as modern neural baselines; its main competitors are the explicit PDE methods. The set of baselines is defensible for this task.
+- **"Missing training details (optimizer, LR, batch size)"** — The paper references the supplementary material for training details (lines 256, 268, 549), which was stripped by the parser. The main text provides the key architectural details (4 resolutions, iteration counts, λ initialization, FSI scheme).
+- **"Order-of-magnitude worse" characterization** — The critic's claim that PD is "an order-of-magnitude worse" than explicit baselines does not match the data (PD is ~9% to 2.5× worse depending on setting, not 10×). The underlying concern about insufficient PD validation is retained in Minor above.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews surface standard concerns (missing loss function, baseline tuning, transparency claims) but do not generate fundamentally novel observations about the method.
+
+None beyond the paper's own contributions. The reviews do not surface an unexpected angle not already present in the paper.
 
 ## Suggestions
-1. **Add the training loss function to Section 5.1.** One sentence stating whether the model minimizes L1 endpoint error, L2, or another objective — this is the single most impactful fix for reproducibility.
-2. **Provide visualizations of learned diffusion tensors** (eigenvector fields, eigenvalue maps) to back up any transparency/interpretability claim and to qualitatively validate what the DTM learns versus the structure-tensor baseline.
-3. **Add approximately 2–5 sentences of training details to the main paper:** optimizer, learning rate, batch size, training iterations. This is standard practice.
-4. **State the data-efficiency controls explicitly:** how subsets were drawn, whether hyperparameters were re-tuned per subset, and whether training steps were held constant across methods.
-5. **Add variance reporting** (e.g., per-sequence standard deviations on Sintel) since some margins are small.
-6. **Add a brief Limitations section** covering failure cases or sensitivity to mask patterns.
+
+- Add a dedicated analysis section visualizing the DTM outputs (eigenvalue maps, eigenvector orientation, α per pixel) for representative examples, and compare qualitatively to the EED structure tensor. This would substantiate the interpretability claim and provide insight into what the network learns.
+- Provide training convergence curves and validation loss trajectories for the PD baseline, or acknowledge more openly that the PD comparison may be disadvantaged by domain mismatch and de-emphasize the "42% improvement" headline.
+- Report results with variance estimates (e.g., across 3 random seeds) for the main comparisons, particularly on KITTI where multiple methods converge to similar EPE values.
 
 ## Score and Decision
 
-This is a methodologically sound paper with a well-motivated hybrid architecture, strong ablations, and convincing results across multiple settings. The main weakness is the omission of basic training details (loss function, optimizer) from the main paper, which is fixable. The core contributions — the DTM-augmented PDE solver and the ablation isolating each component — are solid. The paper should not be rejected over missing details that can be added in camera-ready, nor over the harsh critic's speculative claims about baseline unfairness.
+The paper presents a novel, well-motivated hybrid architecture that combines explicit PDE-based diffusion with a learned parameter predictor for optical flow inpainting. The experimental evaluation is thorough and the results are strong: the method consistently outperforms both explicit and neural baselines while requiring fewer parameters and less training data. The weaknesses are minor and addressable — the interpretability claim needs supporting evidence, and the PD baseline comparison could be better validated. Neither undermines the paper's central contribution.
 
-**Score: 6.0 / 10** — borderline accept. The paper makes a clear contribution; the experimental gaps are real but addressable.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

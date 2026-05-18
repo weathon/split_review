@@ -1,28 +1,20 @@
-Now I have all the verification I need. Let me compile the final consolidated review.
-
----
+Now I have all the information I need. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper introduces the first method for conditioning protein backbone diffusion models on dynamical properties — specifically the lowest non-trivial normal mode of oscillation via Normal Mode Analysis (NMA). The key innovation is replacing the intractable conditional score term with a simple analytical loss (NMA-loss), avoiding the need to train an auxiliary eigenvector-predicting network. The framework supports joint conditioning on both dynamics and structure, enabling scaffolding of functional hinge motifs. The method is demonstrated as a plug-and-play modification to the pre-trained Genie model (no retraining), producing novel backbones with targeted hinge dynamics that are partially designable by scTM criteria.
-
----
+This paper introduces a method for conditioning protein backbone diffusion models on dynamical properties — specifically the lowest non-trivial normal mode from Normal Mode Analysis (NMA). The key innovation is replacing a learned classifier with an analytical loss (NMA-loss) for guidance, making the approach practical without requiring eigenvector prediction networks. The authors demonstrate dynamics-only conditioning on a custom GVP-based model and joint dynamics+structure conditioning on the pretrained Genie model, using hinge targets from lysozyme, adenylate kinase, and hemoglobin. The work addresses a genuinely underexplored direction in protein design.
 
 ## Strengths
 
-1. **First method to condition protein diffusion on dynamical properties.** The paper addresses a genuine gap: existing protein diffusion models condition on structure (motifs, symmetry) but not dynamics, despite the well-known link between low-frequency collective motions and biological function. Evidence: Abstract, contributions list (line 16), and Section 2.2 motivation.
+- **First approach to condition protein generative models on dynamical properties**: The paper tackles a clear gap — existing protein diffusion models condition on structure but not dynamics. The abstract states this directly ("conditioning on dynamical properties remains elusive") and the conclusion reinforces it ("For the first time, we condition the protein diffusion model on dynamics"). This novelty is genuine and well-motivated.
 
-2. **Analytical approximation avoids training a dynamics-conditioning network.** Instead of learning a neural network to predict normal-mode eigenvectors (which is computationally difficult for variable-size matrices), the method approximates \(p(y|x_0)\) via a simple analytical loss and uses reconstruction-guidance-style score decomposition. This makes conditioning computationally feasible and directly transferable to pre-trained models without retraining. Evidence: Section 3.1 (lines 101–102), discussion of prior eigenvector-learning approaches.
+- **Analytical conditioning term replaces a learned model**: Instead of training a neural network to approximate \(p(y|x_t)\) (which would require predicting eigenvectors of arbitrary matrices — an unsolved problem), the paper equates this term to a simple analytical function (NMA-loss). This is stated at line 101: "We escape the need to train a neural network and equate \(p(y|x_0)\) to a simple analytical function." This design choice makes the approach computationally tractable and transferable.
 
-3. **Plug-and-play transfer to Genie without retraining.** The framework is applied to the unconditional Genie model by modifying only the sampling process with guidance terms. This demonstrates that dynamics conditioning can be retrofitted onto existing large diffusion models. Evidence: Abstract, Section 4.4 (line 211), Section 5.2 results.
+- **Joint conditioning framework with theoretical grounding**: The paper extends dynamics conditioning to joint dynamics+structure conditioning (Equation 17), providing SDE-based justification. This is important because, as the paper notes (line 160), "dynamics and structure are correlated" but not identical — many structures can share similar low-frequency modes without functional packing.
 
-4. **Invariant loss design.** The NMA-loss compares pairwise angles and relative amplitudes of displacement vectors, making it rotation/translation invariant and length-independent — a principled choice given the properties of normal-mode eigenvectors. Evidence: Section 3.2, Equation 15.
+- **Plug-and-play transfer to Genie without retraining**: The method is demonstrated on the pretrained Genie model by modifying only the sampling loop (consistent with standard guidance approaches). This universality is a practical strength for adoption.
 
-5. **SDE-based theoretical justification.** The paper provides a continuous-time score decomposition (Section 3.1) analogous to classifier guidance, showing how the delta approximation and Tweedie's formula lead to the practical loss function. Evidence: Equations 9–14.
-
-6. **Quantitative evidence that conditioning lowers NMA-loss.** Controlled experiments with the GVP model (Figure 2) show that conditioning significantly shifts the NMA-loss distribution toward lower values compared to unconditional sampling. Visual inspection in Figure 3 confirms better alignment of displacement vectors. Evidence: Section 5.1, Figures 2–3.
-
----
+- **Invariant loss function design**: The NMA-loss is constructed to be invariant to rotation and translation by comparing relative pairwise angles and relative magnitudes of displacement vectors (Section 3.2). This is a thoughtful design choice given that eigenvectors are orientation-independent and have only relative amplitude meaning.
 
 ## Weaknesses
 
@@ -31,77 +23,54 @@ None.
 
 ### Major
 
-1. **Missing structure-only baseline for joint conditioning (hinge targets).** The hinge-target experiments compare joint (dynamics+structure) conditioning against unconditional and dynamics-only conditioning, but *not* against structure-only conditioning. This means the added value of the dynamics term on top of structure conditioning is not isolated. Without this baseline, one cannot determine whether the dynamics conditioning meaningfully lowers NMA-loss beyond what structure conditioning alone would achieve, or whether it degrades designability. The paper claims "dynamics conditioning must be accompanied by structure conditioning" (line 160), which makes the structure-only baseline the most natural control — yet it is absent. This is the single largest evidential gap. (The paper does provide a dynamics-only comparison for scTM, which partially mitigates this, but the critical comparison remains missing.)
+- **Missing designability comparison for the hinge experiments**: For the joint conditioning hinge targets, the paper reports scTM proportions for joint-conditional samples (0.48, 0.78, 0.41) and for dynamics-only samples (0.93, 1.0, 0), but does **not** report the scTM of the 27 unconditional samples (or, more crucially, structure-conditioning-only samples). Without a comparison between joint conditioning (dynamics+structure) and structure-conditioning-only, it is impossible to assess whether adding dynamics guidance degrades designability or whether the observed scTM values reflect baseline difficulty of the hinge targets. This gap undermines the claim that "conditioning does not compromise designability."
 
-2. **GVP model experiments lack designability assessment.** For the random/strain targets (Section 5.1), only structural statistics (bond lengths, \(R_g\), SSE proportions, TM-score novelty) are reported. No sequence-design or inverse-folding step is applied, so there is no evidence that these dynamics-conditioned backbones can fold into stable proteins. The paper's abstract claims "biologically plausible" backbones, yet this is only tested for the Genie hinge experiments. Since the hinge experiments have the baseline problem noted above, the GVP model's designability gap weakens the overall evidence that dynamics conditioning produces useful proteins independent of the Genie architecture.
+- **Computational cost and stability of NMA during sampling are not addressed**: The method requires computing the lowest normal mode of the denoised prediction at every diffusion step. The paper provides no analysis of: (a) wall-clock time per sample, (b) whether the NMA eigenvectors computed on noisy early-step predictions are stable or physically meaningful, or (c) whether guidance should be restricted to later sampling steps. While the paper mentions using a coarse-grained Cα representation (line 88), which partially addresses implementation specifics, the broader practical concerns remain unaddressed. If the method requires O(N³) diagonalization per step on unreliable intermediate structures, its practical utility is questionable.
+
+- **Small sample sizes for the flagship hinge demonstration**: The hinge results rest on only 27 joint-conditional samples across three targets (≈9 per target) after filtering. The scTM proportions vary widely across targets (0.41–0.78), and with 9 samples per target the confidence intervals are large. The paper should either increase the sample size or explicitly frame the hinge results as preliminary/exploratory.
 
 ### Minor
 
-3. **NMA implementation is under-specified, harming reproducibility.** The paper does not state which elastic network model is used (cutoff distance, spring constant, mass assignment), how the Hessian is constructed, which eigenvector extraction routine is called, or how the lowest non-trivial mode is identified (e.g., whether translations/rotations are projected out). These choices directly affect the displacement vectors that enter the NMA-loss. Without this specification, the experiments cannot be reproduced, and it is unclear whether reported loss values reflect genuine dynamics conditioning or artifacts of a particular NMA parameterization. (The authors state code will be made public, which mitigates this somewhat, but the paper itself should document these details.)
+- **Guidance scale selection unexplained**: The guidance scales are reported as "in the order of 2000–3000" (line 211), which is several orders of magnitude larger than typical classifier guidance scales. The paper does not explain why such large scales are needed, how they were chosen for each target, or whether the results are sensitive to this choice. This is a practical reproducibility concern.
 
-4. **Asymmetric filtering and small sample sizes for hinge targets.** Conditional samples are filtered by motif RMSD (<1Å) and chain distance (3.75–3.85Å), retaining only 23–60% of samples and yielding just 27 per target. Unconditional samples are not filtered by the same criteria (they would be eliminated). Consequently, scTM scores are reported only for the filtered conditional set, conflating conditioning effectiveness with filter stringency. Reporting scTM on the unfiltered conditional set (with breakdown by filter pass/fail) would be more informative. The sample size of 27 also means scTM proportions have wide confidence intervals.
+- **No ablation of NMA-loss components**: The NMA-loss combines an angle term and an amplitude term (with the amplitude term weighted by 2). The paper does not ablate these components or test whether the angle term alone is sufficient. Given that eigenvector magnitudes are only meaningful up to a mode-wide scaling, it would be informative to know whether the amplitude term contributes meaningfully or whether it is redundant.
 
-5. **Guidance scale sensitivity not discussed.** The guidance scales are reported as "different for each target, and in the order of 2000–3000" (line 211). This is a large range and suggests sensitivity to the target and/or hyperparameter. A brief discussion of how the scale was chosen and whether results are robust to reasonable changes would strengthen the paper.
-
-6. **"Energy" for strain targets is ambiguous.** The paper states strain targets are "10 consecutive residues with the largest summed energy" (line 191) without defining whether this refers to kinetic energy in the mode, strain energy from the Hessian, or some other quantity.
+- **Presentation of the theoretical derivation could be cleaner**: The derivation from Equation 7 to Equation 14 follows the standard reconstruction guidance framework (Chung et al., 2022a) but re-derives it in a way that may cause confusion. Specifically, the introduction and subsequent cancellation of \(p(\mathbb{E}[x_0|x_t])\) in the fraction (Equation 14) is formally correct but the text does not clearly acknowledge the approximation being made or directly connect to the existing reconstruction guidance literature. This is a presentation issue, not a correctness issue.
 
 ### Trivial
-
-7. **Eigenvector extraction scope.** Clarify whether NMA eigenvectors are extracted from the full protein structure and then sliced to the subset \(\mathcal{C}\), or whether NMA is performed on the subset alone (the latter would be incorrect). The amplitude normalization discussion (Section 3.2) implicitly assumes the former but should state it explicitly.
-
----
+None.
 
 ## Nice-to-Haves
 
-- A designability check (ProteinMPNN + ESMFold) on a subset of the GVP model's conditioned samples would substantially strengthen the claim of biological plausibility beyond the Genie experiments.
-- A brief note on wall-clock cost added by repeated eigenvector solves during sampling would help readers assess practical applicability.
-
----
+- **Dynamics-only conditioning on Genie without structure conditioning**: Showing NMA-loss distributions for Genie conditional samples (analogous to Figure 2 but for Genie) would strengthen the transferability claim beyond just the three hinge targets.
+- **Ablation of guidance start step**: Testing whether dynamics guidance applied only in the last ~50 steps produces similar NMA-loss would address the practical concern about noisy early predictions.
+- **Wider range of hinge targets or increased sample size per target** would improve statistical reliability.
 
 ## Removed Points
 
-These points from the reviews were removed with justification:
+- The critic's claim that the paper "does not mention whether the NMA is performed on the full backbone or a coarse-grained representation" is inaccurate — line 88 explicitly states: "We use a coarse-grained protein representation, where each residue is represented with the Cα carbon only." This detail is removed from the computational-cost weakness, though the broader concern about cost/stability remains justified.
 
-1. **Criticism that the Section 3.1 derivation is "sloppy" or incorrect.** The critic claims the derivation requires that \(p(\mathbb{E}[x_0|x_t])\) "cancels in the chain rule" in a questionable way. In fact, the derivation is mathematically sound: the \(p(\mathbb{E}[x_0|x_t])\) terms appear in both numerator and denominator of the Bayes rule substitution and cancel directly (Equation 14). The resulting \(-\nabla_{x_t} l(y, v(\mathbb{E}[x_0|x_t]))\) follows straightforwardly. The critic's concern about the "unconditional model's score... not appear[ing]" reflects a misunderstanding of the algebra; the unconditional score correctly enters through the separate \(\nabla_{x_t} \ln p_t(x_t)\) term (Equation 11), not through the conditioning gradient. This is standard reconstruction guidance (Chung et al. 2022a).
+- The critic's note that the method is "not plug-and-play in the sense of requiring no modifications to the sampling loop" is technically true but standard for all guidance-based methods and does not constitute a meaningful weakness. It is removed.
 
-2. **Complaint that the amplitude term normalization is problematic because eigenvectors are unit vectors.** The paper already handles this correctly by normalizing by \(||y_D||\) and \(||v(x)||\) — the loss uses *relative* amplitudes, which is the correct approach given that NMA provides only relative amplitude information (as the paper states, citing Bahar et al. 2010).
-
-3. **"Comprehensive evaluation pipeline" strength claim** from the Strength Finder. This claim conflicts with the verified weaknesses (missing structure-only baseline, GVP lacking designability checks). The pipeline is reasonable but not comprehensive enough to warrant this label.
-
-4. **Formatting/style nitpicks and parser artifacts.** These are not author errors.
-
----
+- The critic's suggestion that "results from the two models are not directly comparable" is a feature of the experimental design, not a flaw — the GVP model is used for large-scale dynamics validation (300 targets) and Genie for the hinge demonstration, which is a reasonable two-pronged strategy. Removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the same core strengths the paper claims (first dynamics conditioning method, analytical approximation, plug-and-play transfer) and identify evidential gaps but do not reveal unrecognized conceptual observations.
-
----
+The most insightful observation across the reviews is that the paper's core technical innovation — using an analytical NMA-loss in place of a learned classifier for guidance — simultaneously solves two problems: (1) it avoids training an eigenvector prediction network, which the paper correctly notes is an unsolved problem for variable-size matrices, and (2) it makes the conditioning plug-and-play for pretrained models since no additional training data or labels are needed. This is a genuinely elegant design choice that future work on dynamics-aware protein design will likely build on. The trade-off is that this choice places the entire computational burden of NMA (Hessian construction + diagonalization) on the sampling loop, and the paper's evaluation does not adequately characterize whether this trade-off is acceptable. The hinge demonstration is compelling as a proof-of-concept but the evidence base is too thin (27 samples, 3 targets, missing baselines) to support strong claims about designability preservation.
 
 ## Suggestions
 
-1. **Add structure-only conditioning as a baseline for the hinge-target experiments.** Use the same motif scaffolding method on Genie without the NMA-loss guidance. Compare scTM and NMA-loss across four conditions: unconditional, structure-only, dynamics-only, and joint. This is the single most impactful improvement and would directly validate the claim that dynamics conditioning adds value beyond structure conditioning.
+1. **Provide the missing designability baseline**: Report scTM for Genie samples conditioned on structure only (no dynamics guidance) for the same hinge targets, and compare to the joint-conditioning scTM. This is the single most important experiment to add.
 
-2. **Specify NMA implementation details** in a new paragraph or appendix: elastic network model (cutoff, spring constant, mass model), eigenvector extraction routine, and how the lowest non-trivial mode is identified (projection of translations/rotations).
+2. **Add computational profiling**: Report average wall-clock time per sample for the Genie experiments and describe the NMA implementation (elastic network model parameters, number of neighbors, whether eigenvalue decomposition is done at every step or can be amortized).
 
-3. **Run designability checks on a representative subset of GVP model samples** to demonstrate biological plausibility for the dynamics-only conditioning setting.
+3. **Analyze NMA stability across the diffusion trajectory**: Show how the NMA-loss and eigenvectors of the denoised prediction evolve with sampling step t (e.g., early vs. late steps) to demonstrate that guidance on noisy structures is stable and meaningful.
 
-4. **Report conditional scTM before filtering** (on the full set of generated samples) alongside the filtered results, so readers can assess how much the filter drives the reported designability proportions.
+4. **Ablate and discuss guidance scale**: Provide a sensitivity analysis for the guidance scale (1–2 orders of magnitude) and explain why values of 2000–3000 are required.
 
-5. **Clarify "energy" for strain targets** and briefly discuss guidance scale selection and sensitivity.
-
----
+5. **Increase hinge sample size or reframe claims**: Either generate more samples per target to enable reliable statistics, or explicitly caveat the hinge results as preliminary proof-of-concept.
 
 ## Score and Decision
 
-The paper introduces a genuinely novel and well-motivated idea — conditioning protein diffusion on dynamics — with a clean theoretical framing and a practical, transferable implementation. The core contribution is clear and the problem is important. However, the experimental evaluation has notable gaps: the missing structure-only baseline for joint conditioning prevents isolating the contribution of the dynamics term, and the GVP model experiments stop short of demonstrating designability. These are addressable with additional experiments and documentation. The paper should not be accepted without revision, but the core approach is sufficiently promising that a major revision with the recommended ablations could make it a solid contribution.
-
-**Originality**: High — first to condition protein diffusion on dynamics.  
-**Importance**: High — addresses a genuine gap linking dynamics to function.  
-**Claims supported**: Partially — core claim (dynamics conditioning works) is supported, but added value over structure conditioning is not isolated.  
-**Soundness**: Moderate — main concerns are the missing ablation and under-specified NMA implementation.  
-**Clarity**: Good — writing is clear and well-structured.  
-**Value to community**: High — opens a new direction and provides a framework that transfers to other models.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>  
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

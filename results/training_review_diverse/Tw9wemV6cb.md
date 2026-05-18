@@ -1,22 +1,18 @@
-Now I have all the information I need. Let me synthesize the final review.
-
----
+Now I have a thorough understanding of the paper. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper proposes BTI-DBF, a backdoor trigger inversion method that reverses the usual paradigm: instead of attempting to extract backdoor features directly (which requires scanning all classes and guessing the trigger form), it decouples *benign features* using only local benign samples. A feature mask is learned such that benign features suffice for correct classification, then a generator produces poisoned samples that match benign samples on benign features but diverge on the complementary (backdoor) features. Two downstream defenses (fine-tuning-based removal and input pre-processing) are built on this BTI module. Experiments on CIFAR-10, GTSRB, and ImageNet against six attacks show strong defense results and dramatic efficiency gains.
+This paper proposes BTI-DBF, a backdoor trigger inversion method that decouples **benign** features (by learning a mask from benign samples) rather than attempting to approximate backdoor features directly. The mask guides trigger inversion: the generator minimizes feature distance in masked (benign) dimensions while maximizing it in complementary dimensions. The authors build backdoor-removal and pre-processing defenses on top of this BTI module. Empirically, the method achieves strong efficiency gains (20× speedup vs. Unicorn) and reports near-perfect defense results across six attacks and three datasets.
 
 ## Strengths
 
-- **Novel and principled paradigm shift.** Rather than trying to approximate unknown backdoor features—a fundamentally hard problem—the paper inverts the logic by decoupling benign features, for which defenders have direct local samples. This is conceptually clean and well-motivated (Section 3.2.1), and the ablation study (Table 4) confirms that the feature decoupling component is responsible for the gains.
+1. **Conceptually novel reframing of BTI.** Prior methods approximate backdoor features directly — which requires scanning all classes and assumes a particular poisoning form. BTI-DBF instead decouples benign features using only local benign samples, eliminating class scanning entirely. This is a well-motivated and genuinely different approach (Section 3.2.1).
 
-- **State-of-the-art defense effectiveness.** Tables 2 and 3 show that both BTI-DBF (U) (backdoor removal) and BTI-DBF (P) (pre-processing) achieve ASR < 10% with BA drop < 5% across all six attacks on three datasets. All baseline defenses fail (ASR > 10% or excessive BA drop) in at least one setting, directly supporting the claim that the defenses reach state-of-the-art performance.
+2. **Dramatic efficiency improvements.** Figure 4 shows BTI-DBF requires ~60 seconds on CIFAR-10, over 20× faster than Unicorn and 3× faster than the most efficient baseline (Pixel). Speedups on multi-class datasets are even larger since class scanning scales linearly with the number of classes.
 
-- **Dramatic efficiency gain.** Figure 4 reports BTI-DBF completes trigger inversion in 60 seconds on CIFAR-10—more than 20× faster than Unicorn and more than 3× faster than the most efficient baseline (Pixel). This efficiency follows directly from the design: because the method does not scan all potential target classes, the cost is independent of the number of classes.
+3. **Strong reported defense performance.** In Tables 2 and 3, BTI-DBF-based defenses achieve ASR <10% with BA drop <6% across nearly all settings, while baseline defenses (NAD, I-BAU, AWM, FeatureRE, Februus, ShrinkPad) fail in multiple cases.
 
-- **Quantitative reliability improvement.** Table 1 shows BTI-DBF achieves nearly 10× smaller feature distance (FD) under BadNets compared to Pixel, and 100% detection success rate (DSR) in almost all cases, whereas all baselines drop below 50% DSR on some attacks.
-
-- **Robustness to adaptive attacks.** Table 6 shows that defenses maintain high BA (>91%) and low ASR (<6%) under Adap-Blended (which reduces latent separation) and a custom Adaptive BadNets (which makes backdoor features also useful for benign classification).
+4. **Ablation studies confirm both main components.** Table 4 shows that removing the benign-feature decoupling causes DSR to drop below 50% in most cases. Table 5 verifies that iteration-based enhancement reduces ASR further.
 
 ## Weaknesses
 
@@ -24,57 +20,64 @@ This paper proposes BTI-DBF, a backdoor trigger inversion method that reverses t
 None.
 
 ### Major
-None. The core claims are well-supported by evidence; the weaknesses below are addressable gaps in presentation and evaluation breadth, not structural flaws.
+
+1. **The mask learned via Eq. (1) may separate *predictive* from *non-predictive* features rather than *benign* from *backdoor* features, and this is not validated.** The objective minimizes loss on masked features and maximizes loss on complementary features. This is a reasonable decomposition under the assumption that backdoor features contribute nothing to benign classification. However, if the trigger overlaps with discriminative object regions, the mask could simply identify the most predictive features for the true class and relegate the rest (including useful but less discriminative benign information) to the "backdoor" set. The paper provides no mechanistic evidence — feature visualization, attribution maps, gradient-based analysis, or controlled experiments — to verify that the mask captures the intended conceptual separation rather than an arbitrary predictive/non-predictive split. The ablation (Table 4) shows the mask helps empirically but does not establish *what* it captures.
+
+2. **The defense results are implausibly strong relative to baselines, with no evidence of baseline hyperparameter tuning.** BTI-DBF achieves ASR <10% in every single case. Baselines like I-BAU catastrophically fail (e.g., ASR 98.44% on Blended/ImageNet despite a 20% BA drop), and NAD, AWM, and FeatureRE fail across multiple settings. The paper does not report whether baseline hyperparameters were tuned or simply used at defaults. When the gap is this wide, it is impossible to rule out that baselines are suboptimally configured, which would make the claimed state-of-the-art unsubstantiated. At minimum, the paper should report baseline hyperparameter search ranges and final configurations.
 
 ### Minor
 
-- **FD metric lacks transparency for baseline comparison.** The paper measures feature distance (FD) between recovered and ground-truth poisoned samples in the feature space of the backdoored model's convolutional layers (S_a). However, it does not specify *how* baseline methods' outputs (e.g., masks + trigger patterns from NC, THTP, Pixel) are converted into poisoned samples for this comparison—e.g., whether a standard mask+trigger formulation is applied uniformly across methods. Without this detail, readers cannot assess whether the large FD gap reflects genuine superiority or an uneven comparison protocol. This is a necessary experimental clarification.
+1. **The iteration-based enhancement (IE) is under-specified and its contribution is not isolated from the core BTI method.** Section 3.3.1 and 3.3.2 mention "alternately update" without details: number of iterations, update schedule, whether the generator is re-initialized, or how the objective changes across iterations. Table 5 shows IE significantly reduces ASR, but without ablating the initial BTI versus the iterative refinement in isolation, it is unclear how much of the final defense performance is attributable to the core BTI contribution versus the iterative closed-loop refinement.
 
-- **DSR metric is non-standard and needs justification.** Detection Success Rate (DSR)—whether feeding generated poisoned samples to the model consistently yields the target-class label—is used as a primary reliability metric. This is not the standard way BTI methods like NC are evaluated; they are typically assessed by whether the recovered trigger *causes* a class flip to the target, not by majority-vote prediction on generated samples. The finding that "there are methods with small distances ... but they cannot find the target label correctly" suggests the metric conflates two capabilities. Reporting complementary standard metrics (e.g., trigger pattern similarity, attack success rate of recovered triggers) alongside DSR would strengthen the evaluation.
+2. **The adaptive attack evaluation is limited.** The paper considers only two adaptive attacks (Adap-Blended and Adaptive BadNets). A natural adaptive adversary could also attempt to poison the mask learning process itself — e.g., by inserting backdoors that embed trigger features into the regions the mask selects as "benign." The treatment feels perfunctory and does not explore the full space of countermeasures an informed adversary might take.
 
-- **No standard deviations for defense results.** Tables 2, 3, and 6 report ASR and BA as point estimates without standard deviations or confidence intervals. Given the small local dataset size (5% of training data), variance across runs could be nontrivial. This is important for assessing the reliability of the claimed superiority over baselines.
+3. **No sensitivity analysis for the number of local benign samples.** The paper uses 5% of training data (line 161) across all experiments. It would be informative to show performance with fewer samples (e.g., 1% or 0.5%) to understand the method's limits in data-scarce scenarios. This is a practical concern since defenders may not have many labeled samples.
 
-- **Feature separation assumption not deeply validated.** The method assumes that benign features suffice for correct prediction and that the remaining (backdoor) features lead to wrong predictions. While the ablation (Table 4) and adaptive attacks (Adap-Blended, which reduces latent separation) provide partial validation, an explicit diagnostic—e.g., measuring model accuracy when only the complement (1−m) features are used—would more directly confirm the assumption holds for the diverse attacks tested.
-
-- **Efficiency claim for larger datasets not shown.** The paper states "This efficiency advantage is even more pronounced in datasets with more classes (e.g., GTSRB and ImageNet)" (Section 4.2), but Figure 4 reports efficiency only on CIFAR-10. The efficiency advantage on CIFAR-10 is already clear, but the stronger claim about larger datasets is unsupported.
+4. **The BTI evaluation metric (feature distance to ground-truth poisoned samples) is reasonable but could be complemented by input-space metrics.** Feature distance is standard in the field, but since the mask is defined in this same feature space, there is a risk that the metric favors the authors' method by construction. Additional input-space metrics (e.g., trigger MSE/SSIM) or backdoor activation success rate on novel samples would strengthen the evaluation.
 
 ### Trivial
-
-- Some implementation details are deferred: how the mask *m* in Eq. (1) is optimized (gradient-based optimization with clamping to [0,1] is implied but not stated); how the hyperparameter *τ* in Eq. (2) is set and whether it is sensitive; and the specific schedule for the iteration-based enhancement (alternating updates of generator and defense target). These are standard details that would improve reproducibility but do not affect the paper's validity.
+None.
 
 ## Nice-to-Haves
 
-- A more systematic adaptive evaluation: the two adaptive attacks tested (Adap-Blended and Adaptive BadNets) are relevant, but additional adaptive strategies—e.g., an attack that directly fools the mask optimization in Eq. (1) by making backdoor features also contribute to correct classification on local benign samples containing the true backdoor pattern—would further strengthen the robustness claims.
-
-- Visualizing the learned mask *m* overlaid on feature maps to show it focuses on class-discriminative regions would deepen understanding of what benign features the method captures.
+- **All-to-all attack evaluation.** The paper focuses on all-to-one attacks (§3.2.2, Eq. 2). It is not obvious that a single generator trained across classes can handle all-to-all attacks where required trigger behavior varies per source class. Evaluating this setting would broaden the paper's scope.
+- **Discussion of how the s.t. constraint in Eq. (2)** (input-space distance ≤ τ) is enforced in practice (e.g., clamped projection or soft penalty).
+- **Ablation separating initial BTI from iterative refinement** to clarify each component's contribution to the defense results.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
-
-- The criticism that FD is "biased" because it uses the same feature extractor (S_a) that BTI-DBF optimizes against is overstated. Feature-space methods (FeatureRE, Unicorn) also optimize in this space; for input-space methods (NC, THTP, Pixel), the feature space is a legitimate evaluation space for measuring similarity of recovered triggers to ground truth. The paper does not unfairly handicap baselines—rather, the missing detail about *how* baselines are applied for FD calculation is the real issue (already captured above).
-
-- The criticism that DSR is "unusual" and effectively invalid is too strong. While DSR is non-standard, it measures a practically relevant property (can the BTI identify which class is targeted?). The issue is that it should be supplemented with standard metrics, not that it is wrong.
-
-- The call for hyperparameter analysis of *τ* and mask optimization details as a "significant gap" is downgraded: these are standard experimental details whose omission is common in conference papers and addressable in supplementary material.
+- **"The paper references an appendix for 'detailed settings' of attacks and baselines; the main text should include key hyperparameters."** — Removed per hard rule: the parser strips supplementary material, which exists in the original submission. The main text does specify architecture choices (ResNet-18, U-Net) and datasets.
+- **"The s.t. constraint in Eq. (2) is likely redundant given the objective already contains a norm-based term."** — Removed as factually incorrect: the objective operates on *feature-space* distances, while the constraint is on *input-space* distortion. They are not redundant.
+- **"Criticism about missing appendix details for hyperparameters."** — Removed per hard rule about missing appendix references.
+- **Generic strength rephrasings from Strength Finder that overlapped with verified weaknesses** — Specifically, the "state-of-the-art performance" strength is tempered by the verified baseline-tuning weakness (Major #2), but retained in modified form to reflect what the paper reports.
 
 ## Novel Insights
 
-The most interesting observation from the reviews is the tension between the BTI evaluation metrics (FD and DSR) and the downstream defense results. The reviewer correctly notes that FD and DSR have fairness/justification concerns, yet the downstream defense results (Tables 2, 3) independently validate that BTI-DBF's inverted triggers are practically useful—they enable both fine-tuning and pre-processing defenses to succeed where baselines fail. This creates an elegant "proof by utility" that partially insulates the paper from the metric concerns: even if the FD/DSR comparison were imperfect, the downstream results confirm the triggers are high-quality. The paper could lean into this more explicitly.
+The reviews collectively surface a tension that is deeper than any single technical flaw: the paper's central claim — that the learned mask separates benign from backdoor features — is asserted rather than demonstrated. Strong empirical results (low ASR, high efficiency) are presented, but without mechanistic validation of the mask, the reader cannot distinguish between two fundamentally different explanations: (a) the mask genuinely isolates backdoor features, enabling principled trigger inversion, versus (b) the mask simply identifies a discriminative feature subspace, and the strong defense results stem from the iterative closed-loop refinement rather than the quality of the decoupling. This gap between claimed mechanism and empirical evidence is the paper's most important limitation and the most impactful direction for future work.
 
 ## Suggestions
 
-1. **Clarify the FD evaluation protocol:** Specify exactly how each baseline method's outputs are converted to poisoned samples for feature distance calculation. Use a uniform procedure (e.g., the standard mask+trigger formulation from each method's original paper) and state this explicitly.
+1. **Validate the mask mechanistically.** Visualize spatial attention or feature attribution for high-weight mask entries across benign and poisoned samples. Show that replacing complementary features with those from another benign sample preserves the model's correct prediction. Measure overlap between mask-selected features and features most perturbed by the ground-truth trigger (via input gradients or representation perturbation).
 
-2. **Add standard BTI metrics:** Report trigger pattern similarity (e.g., pixel-space correlation or SSIM) and attack success rate of recovered triggers (i.e., does the recovered trigger cause misclassification to the target class?) alongside FD and DSR.
+2. **Tune baseline hyperparameters rigorously.** Perform a small search over learning rate, iterations, and key hyperparameters for each baseline defense on each dataset-attack combination. Report the search ranges, final configurations, and show that the performance gap persists after tuning.
 
-3. **Report variance:** Add standard deviations for Tables 2, 3, and 6 (or confidence intervals) to account for variability due to the small local dataset.
-
-4. **Validate the feature separation assumption directly:** Measure the model's accuracy when using only the complement features (1−m) on benign samples. If accuracy is near zero, the assumption holds strongly.
-
-5. **Show efficiency on GTSRB or ImageNet** to support the claim that the advantage scales with class count.
+3. **Specify the iteration-based enhancement in full detail.** Report the number of alternating rounds, update schedule, whether the generator is re-initialized, and the objective used during refinement. Provide an ablation that reports defense performance using only the initial BTI-based defense (no IE) versus with IE, to isolate each component's contribution.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Originality:** High. Decoupling benign instead of backdoor features is a genuinely different and well-motivated direction.
+
+**Importance of research question:** High. Backdoor defense in the third-party model scenario is practically important, and efficient trigger inversion is a recognized bottleneck.
+
+**Claims well-supported:** Moderate. Efficiency gains are well-supported. The reliability/defense claims are supported in reported numbers but weakened by unvalidated mechanism and potentially undertuned baselines.
+
+**Soundness:** Moderate. The core idea is sound but the experimental validation has gaps that prevent full confidence.
+
+**Clarity:** Good. The paper is clearly written and well-structured.
+
+**Value to community:** Moderate-High. If the mechanism can be validated and baselines confirmed fair, the method would be a strong contribution.
+
+This is a borderline paper with a genuinely novel idea and clear efficiency advantages, but also significant validation gaps that prevent full confidence in the defense claims.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

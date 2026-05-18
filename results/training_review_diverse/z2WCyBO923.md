@@ -1,80 +1,87 @@
-Now I have a thorough understanding of the paper. Let me produce the consolidated review.
+Now I have all the information I need. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes a mixture-of-experts (MoE) framework for dataset distillation to improve cross-architecture generalization. The approach divides the distillation task among K experts, each working on a disjoint subset of real data, minimizes distance correlation between experts' feature representations to encourage diversity, and applies a mixup-based fusion strategy during evaluation. Experiments on CIFAR-10/100, ImageNette, and STL-10 with three base distillation methods (IDC, IDM, MTT) show that the framework consistently improves cross-architecture performance over single-expert baselines.
+This paper proposes a mixture-of-experts (MoE) framework for dataset distillation that splits the distillation budget among multiple expert models, each distilling a disjoint subset of the original data. A distance correlation minimization loss encourages inter-expert diversity, and a cross-expert mixup-based fusion strategy is applied during downstream training. The goal is to improve cross-architecture generalization of distilled datasets, a known limitation of existing DD methods. The framework is evaluated by integrating it with three representative DD methods (IDC, IDM, MTT) on CIFAR-10/100 and higher-resolution datasets.
 
 ## Strengths
 
-1. **Consistent cross-architecture improvements across multiple DD paradigms**: Table 1 shows that the multi-expert setup (NoE=2) improves over single-expert baselines for all three distillation methods (IDC, IDM, MTT) on both CIFAR-10 and CIFAR-100 across ConvNet-3, VGG11, ResNet18, and AlexNet. The fact that the framework generalizes across gradient-matching, trajectory-matching, and distribution-matching methods is a strong indicator that the underlying diversity mechanism is not tied to a specific DD objective.
+- **Novel and well-motivated idea.** Applying an MoE structure to dataset distillation to promote diversity and mitigate cross-architecture degradation is a genuine contribution. The approach of having multiple experts each distill a disjoint subset and using distance correlation to enforce distinctiveness is creative.
 
-2. **Ablations disentangle the two technical components**: Table 2 shows that (i) adding distance correlation alone (multi-expert without mixup) improves over the single-expert baseline, and (ii) adding mixup-based fusion alone also improves, and (iii) the combination is best. This provides evidence that both the dCorr diversity mechanism and the mixup fusion contribute, rather than one component doing all the work.
+- **Consistent cross-architecture improvement across three DD paradigms.** Table 1 shows that for IDC on CIFAR-10/100, the multi-expert setup (NoE=2) outperforms the single-expert baseline on all four target architectures (ConvNet-3, VGG11, ResNet18, AlexNet) at both IPC=10 and IPC=20. Similar trends hold for most IDM and MTT results, suggesting the framework generalizes across distillation objectives.
 
-3. **Expert-specific mixup outperforms vanilla mixup**: Table 3 demonstrates that mixing images from different experts (the paper's strategy) yields higher accuracy than both "vanilla mixup" (mixing without expert constraint) and "w/o mixup" across all four target architectures on CIFAR-10 with IDC. This validates the claim that leveraging complementary information across experts is more effective than standard data augmentation.
+- **Ablation validates individual components.** Table 2 shows that adding distance correlation alone improves performance across IDM, IDC, and MTT, and adding mixup fusion on top yields further gains. The full combination obtains the best results in nearly every configuration, confirming both components are complementary and individually beneficial.
 
-4. **Quantified benefit for representation learning beyond classification**: Table 5 shows that multi-expert distillation achieves 46.62% SupCon accuracy on ImageNette vs. 34.57% for single-expert IDM, and also improves transfer accuracy to ImageWoof and STL-10. This extends the contribution beyond classification to general representation quality.
+- **Ablation isolating cross-expert mixup.** Table 3 compares cross-expert mixup (proposed), vanilla mixup, and no mixup. The proposed strategy outperforms both baselines on all target architectures, confirming that mixing across experts (rather than within the same expert) leverages complementary information.
 
-5. **Honest reporting of diminishing returns**: Table 4 systematically varies the number of experts (1→2→3 at total IPC=30) and documents that performance gains from 2→3 are smaller and sometimes negative (e.g., on VGG11 and AlexNet). The paper discusses this trade-off rather than glossing over it.
+- **Broader utility beyond standard classification.** Table 5 shows that the multi-expert distilled dataset (IDM, ImageNette) improves supervised contrastive learning accuracy (34.57% → 46.62%) and transfer performance to ImageWoof and STL-10.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **Test-time mixup confound is only partially controlled**: The single-expert baseline (NoE=1) does not use mixup, while the multi-expert setup applies mixup-based fusion during evaluation. Table 2 helps by showing that multi-expert + dCorr (no mixup) already beats the single-expert baseline, which implies the benefit is not entirely from mixup. However, the missing control of **single-expert + vanilla mixup** matters because: (a) it would reveal whether adding mixup alone to a single-expert distillation achieves comparable gains to the full multi-expert framework, and (b) it would cleanly attribute the residual improvement to the multi-expert data diversity rather than to mixup augmentation. Without this, the central claim — that multi-expert data diversity (not mixup) drives the improvement — is less cleanly supported than it could be. The paper's own Table 3 shows that vanilla mixup already improves over no-mixup in the multi-expert setting, making it plausible that a single-expert + vanilla mixup baseline might narrow the gap considerably.
+1. **Confounded comparison due to real-data subset selection.** The paper states (Implementation Details) that for IDC and IDM, each expert's synthetic images are initialized from easy real samples (top 10%–30% lowest-loss samples). For the single-expert (NoE=1) baseline, it is not specified whether the same easy-sample selection is applied or whether the full real dataset (including hard samples) is used. If the single-expert uses the full dataset while multi-expert uses only easy samples, the comparison in Table 1 is confounded: the multi-expert improvement could stem from distilling easier data rather than from the MoE structure or diversity-promoting losses. The ablation study in Table 2 (which compares variants within the multi-expert setup) is not affected by this confound, but the headline comparison between NoE=1 and NoE=2 in Table 1 is. A controlled experiment is needed: compare single-expert (using easy-only samples) vs. multi-expert (each using disjoint easy subsets), and single-expert (full data) vs. multi-expert (random disjoint subsets). Without this, the paper's core claim rests on shaky ground.
 
-2. **Distance correlation loss is underspecified for reproducibility**: The paper states the dCorr loss is applied "once every few iterations" (Section 3.2) without specifying the exact frequency. The overall loss (Eq. 8) sums the per-expert distillation losses and the pairwise dCorr terms without any balancing hyperparameter — yet the magnitudes of these losses likely differ substantially across methods (IDC, IDM, MTT) and IPC settings, making it unlikely that a simple sum works without tuning. Additionally, the application of dCor²(φ(S_i), φ(S_j)) to feature vectors of unequal-sized subsets is not explained: the distance correlation formulation in Section 3.1 assumes paired (x_i, y_i) observations of equal cardinality, and it is unclear how features are paired across experts when they have different numbers of samples per class (or how equal-size pairing is enforced). These omissions prevent reliable reproduction.
+2. **Under-specified distance correlation computation.** The loss is ℒ_Corr = dCor²(φ(Sᵢ), φ(Sⱼ)), but the paper does not explain how the pairing between the two sets of feature vectors is performed for distance correlation, which is defined for paired samples. While index-based pairing of same-size sets is the natural approach, it should be stated explicitly. The update frequency ("once every few iterations") is left vague. The reference to (Zhen et al., 2022) and (Székely et al., 2007) provides the mathematical definition but not the operational choice for this specific setting. This affects reproducibility and the reliability of the claimed diversity benefit.
 
 ### Minor
 
-1. **No statistical variance reported**: All results are single numbers without error bars, standard deviations, or multiple-seed runs. Given many improvements are in the 0.5–2% range, it is unclear whether these differences are statistically significant. While this is common practice in the dataset distillation literature, the paper would be substantially stronger with variance estimates, especially for the smaller gains.
+1. **MTT real-data subset selection not specified.** The easy-sample selection is mentioned only for IDC and IDM. For MTT, which requires training trajectories on real data, it is unclear whether different experts see different real-data subsets, different trajectories, both, or neither. This is a nontrivial detail since the trajectory-matching objective depends on which real data is used.
 
-2. **"Easy sample" initialization confounds the diversity mechanism**: The paper initializes each expert's synthetic data using real samples with the lowest classification loss (top 10%–30%). Since the real data is partitioned disjointly among experts, this selection procedure could itself encourage diversity (different experts get different easy samples) independently of the distance correlation loss. The paper does not ablate this initialization choice vs. random initialization, making it difficult to attribute the observed diversity gains to dCorr versus the initialization strategy.
+2. **Several hyperparameters not reported.** Specific values for the SGD learning rate and momentum applied to synthetic image optimization are not given (the paper only says "fixed learning rate and a momentum, following prior works"). For MTT, the inner-loop length N (number of synthetic-data training steps) is not stated. While deferring to prior work is common, the paper should at minimum state whether the same values as the original methods were used.
 
-3. **Some configurations underperform without adequate discussion**: Table 1 shows that several IDM and MTT multi-expert results (e.g., IDM on CIFAR-100 at 20×1 vs. 10×2 with AlexNet; MTT on CIFAR-10 at 10×1 vs. 5×2 with VGG11) are worse than the single-expert baseline. The paper notes this only with "most of the multi-expert results outperformed," but does not analyze which conditions degrade or why. Similarly, Table 4 shows three experts hurting performance on VGG11 and AlexNet. A discussion of failure modes would strengthen the paper.
+3. **Mixup label handling not clarified.** The paper specifies Beta(0.5) for image interpolation but does not state whether labels are also interpolated (canonical mixup) and, if so, how labels from different experts are combined. This is needed to reproduce the evaluation procedure.
 
-4. **Baselines are weakened versions of published methods**: The paper explicitly states it omits the multi-formation aspect of IDC and the model queue of IDM "for consistency." While this is transparent, it means the baselines are not the strongest reported versions of those methods, which should be more clearly acknowledged as a limitation in interpreting the absolute numbers.
-
-5. **No explicit limitations section**: The paper does not discuss its own limitations (e.g., the confound between data partitioning and the dCorr loss, computational cost of running K experts, sensitivity to the number of experts). Including a limitations paragraph would improve the paper's scholarly rigor.
+4. **Figure 1 vs. implementation inconsistency in initialization.** Figure 1's caption states "each expert initializes its synthetic data from the original full dataset," while the Implementation Details section says initialization uses only easy samples (top 10–30%). The paper should reconcile these statements.
 
 ### Trivial
-None beyond the usual formatting artifacts of the PDF extraction.
+
+- None that survive filtering.
 
 ## Nice-to-Haves
 
-- **Single-expert + vanilla mixup baseline** (see Major weakness 1 — this is the most impactful addition).
-- **Error bars / multiple seeds** (see Minor weakness 1).
-- **Ablation of easy-sample initialization vs. random initialization** (see Minor weakness 2).
-- **Analysis of computational cost**: Running K experts means K distillation processes. Is the framework meant to be cost-equivalent under a fixed budget, or more expensive? A brief comparison would help practitioners.
-- **Visualization of expert diversity**: t-SNE of synthetic image features from different experts, or per-image statistics, would corroborate the claim that diversity is achieved.
-- **Additional target architectures**: ResNet-50 or a small ViT would strengthen claims of cross-architecture generalization, but the current set (ResNet-18, VGG-11, AlexNet) is defensible.
+- **Additional architectures (e.g., ViT).** The cross-architecture claim is tested on three non-architectures beyond ConvNet-3. While VGG11, ResNet18, and AlexNet are reasonable and standard, adding a ViT or deeper ConvNet would strengthen the generalizability claim.
+
+- **Analysis of diminishing returns with more experts.** Table 4 shows mixed results when going from 2 to 3 experts. The paper attributes this to "diminishing returns" but provides no analysis of why (e.g., does the distance correlation loss saturate? Do subsets become too small?).
+
+- **Training time / compute cost analysis.** The paper runs multiple distillation processes in parallel (or sequentially) and adds a distance correlation loss. Reporting overhead would be useful for practitioners.
 
 ## Removed Points
 
-These points are flagged for removal; treat them with caution.
+These points are flagged to be removed; treat them with caution.
 
-1. **"The paper would be stronger by including at least one modern architecture (e.g., ResNet-50, a ViT variant)"** — This is scope creep. The paper uses architectures standard in the DD literature (ResNet-18, VGG-11, AlexNet). A valid nice-to-have but not a weakness of the current evaluation.
-2. **"The paper glosses over cases where multi-expert underperforms"** — The paper explicitly says "most of" the results improve, which is factually accurate. The underlying point (discuss failure cases) is kept as Minor weakness 3 in a softened form.
-3. **Criticisms about the paper lacking theoretical proofs** — The paper is an empirical methods paper; theoretical analysis is not expected.
-4. **Complaints that the set of datasets/tasks is not exhaustive** — The paper covers 5 datasets and 3 DD methods, which is reasonable for a conference-length paper.
+- **"Fusion strategy not properly scoped"** — The paper clearly presents fusion as part of the proposed framework (Section 3.3). Table 3 reports performance without fusion. This is proper scoping for a method paper. REMOVED: the reviewer's concern reflects a misunderstanding of standard method paper practice.
+
+- **"Same φ for dCor and distillation loss could introduce trivial correlation"** — Using the same pretrained feature extractor for both the distillation loss and the diversity loss is standard and expected. There is no confound here; the two losses operate on different terms in the objective. REMOVED: not a genuine weakness.
+
+- **"Only 4 architectures tested is a limitation"** — Four architectures spanning different design families (VGG, ResNet, AlexNet) is standard in DD research. This is a nice-to-have, not a weakness. DOWNGRADED to Nice-to-Haves.
+
+- **"Baseline methods used without their full original pipeline"** — The paper explicitly states which components are omitted and why (e.g., "omitting the multi-formation aspect," "excluded the model queue technique"). This is transparent and reasonable for integrating methods into a new framework. REMOVED.
+
+- **"Paper lacks a clear description of how many real images each expert receives"** — The paper states "top 10% to 30% of samples," which provides the range. REMOVED: the description is sufficient.
+
+- **"The 'decoupling' of synthetic data and model parameters for IDC is mentioned but not explained"** — This is a detail from the original IDC paper; readers can refer there. REMOVED: standard practice to reference original methods.
+
+- **"How is the gradient of distance correlation w.r.t. synthetic images computed?"** — Distance correlation is composed of differentiable operations (Euclidean distances, means); gradients are handled by standard auto-diff frameworks. REMOVED: the reviewer is asking about standard automatic differentiation.
 
 ## Novel Insights
 
-The cross-reviews surface a tension not fully resolved by the paper: the multi-expert framework simultaneously changes data partitioning, the diversity objective, and the evaluation protocol (mixup). The most novel observation from the reviews is that the dCorr-only ablation (multi-expert without mixup) already exceeds the single-expert baseline, which implies the core diversity mechanism has genuine value independent of the mixup fusion. However, the reviews also reveal that the "easy sample" initialization is a nontrivial confound — the paper may have inadvertently bundled two diversity-inducing choices (data selection and dCorr minimization) without isolating them. This interaction between initialization strategy and diversity regularization is worth investigating in future work.
+The most interesting observation across the reviews is that the distance correlation component and the mixup fusion component both show independent value in the ablation (Table 2), but their relative contributions vary noticeably across distillation methods. For IDM, distance correlation contributes more than fusion in some settings; for MTT, fusion contributes more. This suggests that the two components address different failure modes (representation diversity vs. feature integration) and that the optimal balance is method-dependent — an observation worth exploring further. None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Add the single-expert + vanilla mixup baseline to Table 2 or Table 3.** This is the single most impactful fix: it cleanly separates the benefit of multi-expert data diversity from the benefit of mixup augmentation. If the multi-expert + dCorr (no mixup) still beats single-expert + vanilla mixup, the core claim is strongly supported.
-2. **Report the dCorr loss weight, update frequency, and pairing strategy** in the implementation details. A simple sentence specifying "dCorr applied every 10 iterations with weight α = 0.1, pairing features by class index" would resolve the reproducibility concern.
-3. **Add an ablation with random (rather than easy-sample) initialization** for the expert's synthetic data. This would isolate whether the dCorr loss is driving diversity or whether the initialization alone suffices.
-4. **Report mean and standard deviation over 3–5 runs** for at least the main Table 1 comparisons, given the small margins.
-5. **Add a limitations paragraph** to the conclusion acknowledging the confounds discussed above.
+1. **Run a controlled experiment** that isolates the easy-sample confound: compare (a) single-expert with easy-only data vs. multi-expert with disjoint easy subsets, and (b) single-expert with full data vs. multi-expert with random (not easy-only) disjoint subsets. This will cleanly separate the effect of the MoE framework from the effect of easier distillation data.
+2. **Specify how pairing works for distance correlation** between two synthetic subsets (index-based pairing, assuming equal sizes). State the update frequency for the dCor loss (e.g., every K iterations) and confirm that the gradient is computed via standard auto-differentiation.
+3. **Report fusion-free performance in the main table** (or at least note the gap), since the distilled dataset alone underperforms without the prescribed mixup training procedure.
+4. **Clarify MTT real-data usage** — state whether each expert receives different trajectories, different real subsets, or both.
+5. **State specific hyperparameter values** (learning rate, momentum, MTT inner-loop length) or confirm they match the original papers exactly. Clarify label handling in mixup fusion.
+6. **Reconcile Figure 1** (which says initialization from "original full dataset") with the Implementation Details (which say easy-sample initialization).
 
 ## Score and Decision
 
-The paper addresses an important problem (cross-architecture generalization in DD) with a well-motivated and intuitively plausible approach. The evidence is positive and consistent across three DD paradigms and multiple datasets, and the ablations partially disentangle the key components. However, the evaluation has a residual confounding issue (test-time mixup) that weakens the attribution of improvements to the multi-expert diversity mechanism, and several implementation details are underspecified. The core contribution is real and the approach is novel — these problems are fixable with additional controls rather than fundamental.
+The paper introduces a genuinely novel and well-motivated idea, and the non-confounded ablation studies provide evidence that the individual components (distance correlation, cross-expert mixup) are effective. However, the main experimental comparison (Table 1) has a significant confounding factor: the single-expert baseline likely uses a different real-data selection than the multi-expert setup. This undermines confidence in the headline claim that the MoE structure itself is responsible for the improvement. The issue is fixable with additional controlled experiments, and the approach is worth pursuing, but in its current form the evidence is not clean enough to support acceptance.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Weak Accept</orange>
+MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

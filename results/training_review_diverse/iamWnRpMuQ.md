@@ -1,22 +1,18 @@
-Now I have all the information I need to write the consolidated review. Let me synthesize.
+Now I have a thorough understanding of the paper. Let me compile the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes UGDA, a three-stage method for reward model refinement in RLHF. UGDA uses reward model ensembles to collect policy interaction data, then selects a subset via a two-stage criterion (reward variance uncertainty + gradient-based influence computed on policy checkpoints). The selected samples are relabeled by GPT-4, projected onto the reward model's score distribution, and used to refine the reward model via MSE regression, after which the policy is retrained. The method aims to address the off-distribution problem in reward modeling without collecting new human preference data.
+This paper proposes UGDA (Uncertainty-Gradient based Data Augmentation), a method to improve reward modeling in RLHF by selectively retraining the reward model on on-policy interaction data. UGDA operates in three stages: (1) training reward LoRA ensembles to quantify uncertainty via reward variance, (2) selecting interaction samples that are both high-uncertainty and high-influence (using gradient-based influence scores from Xia et al., 2024), and (3) relabeling selected samples via GPT-4 (with quantile projection to the proxy reward distribution) and refining the reward ensembles with an MSE loss. Experiments on the HH dataset with Gemma-2B/7B reward models and Gemma-7B policy show improvements over several baselines.
 
 ## Strengths
 
-1. **Novel two-stage data selection combining uncertainty and gradient influence.** The idea of selecting interaction data for reward model refinement using *both* reward variance (uncertainty) and gradient-based influence scores is novel in the RLHF context. The ablation study (Figure 4) confirms that removing either component degrades performance, validating the combined design.
+1. **Novel combination of uncertainty and gradient-based selection for reward model refinement.** The core idea — that on-policy interaction samples should be filtered by both reward-ensemble uncertainty (variance) and gradient-based influence on validation subtasks before being used to retrain the reward model — is sensible and addresses a real problem (reward model off-distribution during RLHF). The ablation study (Figure 4) shows that removing either the uncertainty filter (UGDA(UN)) or the gradient filter (UGDA(GR)) degrades performance, providing evidence that both components contribute.
 
-2. **UGDA achieves competitive or superior policy performance on clean external benchmarks.** On instruction-following benchmarks (AlpacaEval, Arena-Hard, MT-Bench) shown in Figure 3 and RewardBench (Figure 6), UGDA outperforms baselines. These benchmarks are uncontaminated by the data leakage issue and provide independent evidence that the method works.
+2. **Practical GPT-4 relabeling pipeline with quantile projection.** The paper designs a prompt for GPT-4 to assign 1–5 scores and projects these onto the empirical quantiles of each reward LoRA's output distribution (Equation 13). This allows using an expert (GPT-4) to provide training targets while preserving the scale and distribution of the proxy reward model, avoiding distribution mismatch. Table 1 reports similarity between GPT-4 and human labels, suggesting the approach is feasible.
 
-3. **Robustness to noisy preference data is demonstrated.** Under 20% label noise in the reward training data (Table 3), UGDA shows smaller degradation relative to baselines (e.g., Gemma-7B helpful Avg_Reward drops 3.2% vs. PPO's 4.2%) and maintains the best absolute scores.
-
-4. **Reward model evaluation confirms downstream benefits.** Reward model accuracy on HH test sets (Figure 7) and RewardBench scores (Figure 6, all categories except Reasoning) show UGDA-refined reward models outperform baselines, supporting the claim that the refinement improves reward quality.
-
-5. **Practical efficiency via low data budget and GPT-4 relabeling.** Only 25% of interaction data is selected for refinement, and GPT-4 serves as a cost-effective substitute for human annotation (Table 1 reports high similarity with human labels).
+3. **Robustness to noisy preference data is demonstrated.** Table 3 shows that under 20% label flipping noise, UGDA suffers less performance degradation across most metrics compared to baselines, and Figure 5 shows UGDA still leads in GPT-4 pairwise comparisons. This is a useful practical result not explored in prior reward model refinement works.
 
 ## Weaknesses
 
@@ -24,61 +20,65 @@ This paper proposes UGDA, a three-stage method for reward model refinement in RL
 None.
 
 ### Major
-
-1. **Data leakage in gradient-based influence evaluation on HH dataset.** The validation samples used to compute influence scores (Eq. 10–11) are the *instructions and chosen responses from the HH test sets* (Section 5.1, line 214). The same test sets are then used to report the main policy evaluation results (Table 2, Table 3) and reward model accuracy (Figure 7). Because the influence function selects interaction data that maximizes gradient similarity to these test-set examples, the data-selection process benefits from knowledge of the test distribution. This gives UGDA an informational advantage over baselines that do not use the test set at any stage. **The HH results in the main comparison tables are potentially inflated and cannot be taken at face value.** The external benchmarks (AlpacaEval, Arena-Hard, MT-Bench, RewardBench) are not contaminated, so the method's core claims have partial support, but the paper's primary quantitative evidence (Table 2) is compromised.
+None. The paper's core claims are supported by the experimental results, and no fundamental methodological flaw invalidates the contribution.
 
 ### Minor
 
-2. **Structural mismatch between influence target and refinement objective.** The gradient-based influence (Eq. 10–11) measures how much training an interaction sample *z* would reduce the *policy's* loss on validation examples. However, the selected samples are used to refine the *reward model*, not the policy directly. The paper's justification (line 137: "The main goal of the reward model is to optimize the policy") provides a reasonable intuition but no formal or empirical analysis of why influence on the policy's loss should transfer to reward model refinement. The ablation shows the combined approach works, but the independent contribution of the gradient component is confounded with this conceptual gap.
+1. **Gradient influence computation is underspecified on one critical detail.** The paper adopts the Adam influence framework (Xia et al., 2024) in Section 4.2, referencing "each model checkpoint θ₁,…,θ_N" and "gradients obtained from LoRA," but never explicitly states **which model** these checkpoints come from. The natural reading is that they are reward model LoRA checkpoints (from the Stage 1 training), since the goal is to select data for reward model refining. However, the paper also frames the goal as "identify influential samples for policy optimization" and uses validation subtasks from the HH dataset (helpful/harmless), which are policy-relevant rather than reward-model validation tasks. The connection between influence computed on the reward model trajectory and usefulness for policy-relevant reward model retraining needs clarification. This does not invalidate the method — the formulation in Definition 1 and Equations (10–12) is mathematically well-defined regardless — but the ambiguity makes the paper harder to reproduce and assess.
 
-3. **No sensitivity analysis for selection thresholds γ and η.** Both thresholds are fixed at 0.5 (selecting 25% of interaction data), with no ablation or analysis showing how performance varies with the selection budget (e.g., 10%, 25%, 50%). Since the number of selected samples directly determines GPT-4 API cost and refinement computation, this is a practically relevant missing analysis.
+2. **No sensitivity analysis for key selection thresholds (γ, η).** The thresholds are fixed at γ=0.5 (top 50% by uncertainty) and η=0.5 (top 50% by influence), yielding 25% of interaction data. The paper provides no analysis of how performance varies with these choices. While the ablation (Figure 4) shows that both components are needed, it does not test different threshold values, leaving the robustness of the method to these hyperparameter choices unexamined.
 
-4. **Robustness experiment tests label noise rather than distribution shift.** The paper's central thesis is that UGDA addresses distribution shift from policy interaction. However, the robustness experiment (Table 3) flips 20% of preference pairs in the *original reward training data* — testing label noise, not distribution shift. A more relevant test would vary the degree of distribution shift (e.g., number of PPO steps before data collection) or inject noise into the interaction data before selection.
+3. **The reward relabeling pipeline has unvalidated design choices.** (a) The quantile projection (Equation 13) maps GPT-4's 1–5 ordinal scores onto quintiles of the PPO reward distribution — a sensible heuristic, but the paper provides no analysis of whether this mapping actually produces better reward targets than alternatives (e.g., direct score regression, no projection, or using raw ensemble scores). (b) The additive noise ε∼N(0,0.01) is introduced without explanation of its purpose. (c) While Table 1 reports "high degree of similarity" between GPT-4 and human labels, no quantitative metrics (e.g., Cohen's κ, accuracy per score level, sample size) are given in the text. These design choices are not unreasonable, but the paper would benefit from validating that they improve reward model accuracy compared to simpler alternatives.
 
-5. **Quantile-based reward projection (Eq. 13) makes a strong distributional assumption.** Mapping GPT-4's 1–5 ordinal scores onto the reward model's empirical quantiles assumes the reward model's score distribution aligns with a five-level ordinal scale. The added Gaussian noise ε does not correct systematic misalignment, and the impact of projection errors on the refinement loss (Eq. 14) is not studied. Additionally, the human vs. GPT-4 similarity comparison (Table 1) is reported for only a single prompt — a very narrow validation.
+4. **Interaction data collection details are underspecified for reproducibility.** The paper states that interaction samples are collected in D_inter during policy optimization, but does not specify: how many PPO steps are run before collecting, whether data is collected once or periodically throughout training, or the total size of D_inter (only that 25% is selected from it). A simple statement of dataset sizes and collection frequency is needed.
 
-6. **Projection dimension for random projections is not reported for main experiments.** The robustness experiment mentions a projection dimension of 8192 (line 249), but the main experiments do not specify this value, hampering reproducibility.
+5. **Computational cost is not discussed.** The method requires: (a) training k reward LoRAs (k=3), (b) running PPO with reward ensembles, (c) computing gradient influence with random projection on LoRA checkpoints, (d) calling GPT-4 for relabeling, and (e) retraining the reward model. This is substantially more expensive than standard PPO. A discussion of overhead relative to the baselines would help practitioners assess the practical trade-off.
 
-7. **Ensemble size k=3 is used without justification or sensitivity analysis.** The paper does not analyze whether results are sensitive to the number of ensemble members (e.g., k ∈ {2, 3, 5}).
+6. **Single noise level tested for robustness.** The robustness experiment (RQ3) uses only one noise condition (20% label flip). Testing multiple noise levels or types would strengthen the claim of robustness.
+
+7. **Reasoning underperformance on RewardBench is not analyzed.** Figure 6 shows UGDA underperforms on the "Reasoning" category of RewardBench. The paper speculates that "there are only few samples about the reasoning task in the filtered interaction data" but provides no analysis of the selected data's reasoning content. This is a minor gap given the overall positive results.
 
 ### Trivial
 
-8. **RLR baseline description could be more explicit.** While the paper states that RLR uses random selection of 25% of interaction data with GPT-4 annotation (line 216), it does not explicitly confirm whether the same MSE refinement loss is used. The description is adequate for a baseline but would benefit from a one-sentence clarification.
+- In Equation (2), "strenth" should be "strength."
+- The phrase "data augmentation" in the title and throughout the paper is somewhat misleading — the method selects and relabels existing data rather than generating new synthetic data. "Data selection and relabeling" or "refining" would be more accurate, though this does not affect technical correctness.
 
 ## Nice-to-Haves
 
-- Replace the test-set-derived validation samples with a held-out portion of the HH *training* set for influence computation, and re-report the HH results. This would eliminate the leakage concern and make the HH test-set results trustworthy.
-- Disentangle the uncertainty and gradient selection criteria further: report the overlap between the two criteria, and report ablation results on external benchmarks (not just HH) to verify that gains on clean benchmarks are not masking HH-specific leakage.
-- Add a sensitivity analysis on γ and η (e.g., 10%, 25%, 50% selection budgets) and on ensemble size k.
+- Sensitivity analysis for γ and η (e.g., 0.3, 0.5, 0.7) would increase confidence in the method's robustness.
+- Validation of the quantile projection by comparing reward model accuracy with vs. without the projection step.
+- Analysis of what kind of data the uncertainty and gradient criteria select — a qualitative example or distribution analysis would strengthen motivation.
+- Reporting error bars or variance across runs for the ablation study (Figure 4).
+- Testing multiple noise levels (e.g., 10%, 30%) for the robustness experiment.
 
 ## Removed Points
 
-- **Criticism about RLR baseline under-description (original):** The paper does describe RLR as random selection of 25% of interaction data with GPT-4 annotation (line 216). While the MSE loss is not explicitly stated, the fair-comparison framing makes it clear the same pipeline is used. This is a minor clarity issue, not a genuine weakness. → Moved to Trivial.
+These points were flagged by reviewers but are removed after verification:
 
-- **"The quantile projection is too strong an assumption" as a major point:** While the assumption is noted, quantile-based normalization is standard practice for aligning distributions from different sources. → Downgraded to Minor.
-
-- **Strength Finder's claimed strengths that were generic:** All five strengths from the Strength Finder are specific and evidence-backed. None are removed.
+- **"Baseline comparison is misleading / deceptive"** — The paper states that "0% represents the baselines without data augmentation" in discussing Table 2, meaning unmodified PPO/LCB/UWO results ARE reported alongside the versions with 25% random retraining. The comparison is therefore against both unmodified and modified baselines. The reviewer's claim that the comparison is "only against modified baselines" is factually incorrect based on the paper's own text. The claim is removed.
+- **"RLR is not defined in the paper"** — RLR is explicitly defined as "Reward LoRAs Retraining" in Section 5.1 (line 216). The reviewer missed this. Removed.
+- **"The paper calls this 'data augmentation' but no new data is generated"** — This is a semantic quibble. Relabeling existing data to create new training targets is a recognized form of data augmentation.
+- **"Llama2-13B evaluator may have distributional biases"** — Using a larger reward model as an automated evaluator is a standard practice in RLHF evaluation (Gao et al., 2023), and the paper also uses GPT-4 evaluations and standard benchmarks. This is not a valid criticism of this paper.
+- **"The gradient influence is likely misapplied / unfalsifiable"** — The reviewer overstates this concern. The methodology follows the standard Adam influence framework (Xia et al., 2024) and is mathematically well-defined and reproducible once the model identity is clarified. The ambiguity is real but minor (see Weakness #1).
+- **"Only one noise condition tested"** — This is a minor/nice-to-have request, not a structural flaw. The paper shows a clear result under the tested condition.
 
 ## Novel Insights
 
-The reviews collectively surface a tension not explicitly discussed in the paper: UGDA uses gradient influence computed on the *policy* to select samples for *reward model* refinement, but the paper never articulates when and why this transfer should hold. If the reward model is a good approximation of human preferences, then the policy's loss landscape is mediated by the reward model's outputs, creating an indirect link — but this connection weakens if the reward model is itself off-distribution (precisely the problem UGDA aims to solve). This circular dependence is a blind spot in the current exposition.
+The reviews do not surface any insight beyond the paper's own contributions. The observation that uncertainty (reward ensemble variance) may be insufficient alone for data selection — because not all high-uncertainty samples are influential for the reward model's policy-relevant performance — is the paper's own contribution, confirmed by its ablation study.
 
 ## Suggestions
 
-1. **Fix the data leakage before any resubmission.** Use a held-out portion of the HH *training* set (or a separate validation set) for influence computation. Re-run the HH evaluations and verify that UGDA still outperforms baselines on the clean test set.
-2. **Add sensitivity analyses** for selection thresholds (γ, η), projection dimension, and ensemble size k. These are low-cost experiments that would significantly strengthen the paper.
-3. **Either provide analysis justifying the policy→reward-model influence transfer, or** compute the gradient influence on the reward model's own parameters instead of the policy's, which would be conceptually cleaner.
+1. **Clarify which model's checkpoints and loss are used in the gradient influence computation (Section 4.2).** If these are reward model LoRA checkpoints, state this explicitly and explain why influence on HH validation subtasks is the right objective for selecting data to refine the reward model.
+
+2. **Add a validation experiment for the quantile projection.** Show that the projected rewards produce better reward model accuracy on a held-out set compared to alternatives (e.g., no projection, direct score regression, raw ensemble scores).
+
+3. **Report the size of D_inter and D'_train in absolute numbers** alongside the percentage (25%).
+
+4. **Add a brief computational cost comparison** (e.g., total GPU-hours for PPO vs. UGDA vs. baselines with retraining) so practitioners can assess the practical trade-off.
+
+5. **Include sensitivity analysis for γ and η** or at minimum acknowledge these as hyperparameters that may need tuning.
 
 ## Score and Decision
 
-**Originality:** 7/10 — The uncertainty-gradient combination for reward model data selection is novel.  
-**Importance of question:** 8/10 — Off-distribution reward modeling is a recognized problem in RLHF.  
-**Claims support:** 4/10 — The main HH results are compromised by data leakage; external benchmarks partially support the claims.  
-**Soundness:** 5/10 — The method's pipeline is logically presented, but the evaluation has a structural flaw.  
-**Clarity:** 6/10 — The three-stage pipeline is clearly described; some experimental details are missing.  
-**Value to community:** 6/10 — The idea of selective interaction-data reuse for reward refinement is valuable, but the current evidence is insufficiently reliable.
-
-The paper introduces a well-motivated method with a novel data selection strategy. However, the data leakage on the HH test set (using test data as validation for influence computation while evaluating on the same test set) undermines the primary quantitative evidence. The external benchmarks provide some support, but the main results in Table 2 cannot be trusted as presented. A revised version that fixes this issue could be a solid contribution.
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

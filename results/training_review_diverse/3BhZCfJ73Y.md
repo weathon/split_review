@@ -1,24 +1,20 @@
-Here is my consolidated review after reading the full paper and cross-referencing every claim.
-
----
+Now I have a thorough understanding of the paper and can verify the reviewer claims against the actual content. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper introduces Adaptive Prompt-Tailored Pruning (APTP), a method that learns to route each text prompt to a specialized pruned sub-network ("expert") of a T2I diffusion model. APTP trains a prompt router and a set of architecture codes using contrastive learning (to map similar prompts to similar codes) and optimal transport (to prevent code collapse), producing experts that collectively meet a target compute budget while preserving batch parallelism. Experiments pruning Stable Diffusion V2.1 on CC3M and MS-COCO show APTP outperforming a weight-norm pruning baseline.
-
----
+This paper introduces Adaptive Prompt-Tailored Pruning (APTP), a method that prunes a pretrained T2I diffusion model (Stable Diffusion V2.1) on a *target* dataset by learning a prompt router and a set of architecture codes. Different prompts are routed to different sub-networks ("experts") with varying compute budgets, enabling prompt-adaptive computational allocation. Experiments on CC3M and MS-COCO show APTP outperforms a weight-norm pruning baseline on FID, CLIP, and CMMD scores, and analysis reveals the router learns semantically meaningful clusters, automatically routing challenging prompts (e.g., text, human figures) to higher-capacity experts.
 
 ## Strengths
 
-- **Novel prompt-based pruning paradigm for T2I diffusion models.** APTP is the first method to allocate compute per input prompt in a T2I model while retaining GPU batch parallelism (lines 26–27, 43). This cleanly sidesteps the limitation of static pruning (input-agnostic) and dynamic pruning (no batching). The idea is well-motivated and distinct from prior work.
+- **Novel formulation of prompt-based pruning for T2I diffusion models.** The idea of learning a router that allocates different sub-networks to different prompts based on their complexity is well-motivated and addresses a genuine limitation of static pruning for T2I models. The paper is the first to propose this approach.
 
-- **Technically grounded design with credible ablations.** The combination of contrastive learning (Eqs. 7–9) and optimal transport (Eqs. 4–6) is justified by the need to diversify architecture codes without collapse. The ablation (Table "abl," described in Sec. 3.4) confirms that contrastive training alone fails, adding OT sharply improves results (FID 10.22, CLIP 1.17, CMMD 0.18), and distillation further boosts performance — validating each design component.
+- **APTP consistently outperforms the static pruning baseline across all evaluated configurations.** On CC3M Base (0.85 MACs), APTP beats Norm pruning on FID, CLIP, and CMMD while also having 15% lower latency than SD V2.1. On MS-COCO Base (0.78 MACs), APTP reduces latency by 22.5% while preserving CLIP score. These results hold across four configurations (two datasets × two compute budgets), demonstrating robustness (Sec. 4.1, Tables \ref{results:cc3m} and \ref{results:coco}).
 
-- **Consistent quantitative gains over the weight-norm pruning baseline.** On CC3M, APTP (0.85 MACs) achieves better FID, CLIP, and CMMD than weight-norm pruning at similar MACs while reducing latency by 15%. On MS-COCO, APTP (0.78 MACs) reduces latency 22.5% vs. SD V2.1 while outperforming weight-norm pruning under comparable budgets (Sec. 4.1). These results demonstrate that the prompt-based allocation provides a real efficiency-quality benefit over a standard static baseline.
+- **The prompt router analysis reveals interpretable, semantically meaningful clusters.** The paper shows that Expert 16 (highest budget) handles text and human figures — known hard cases for SD V2.1 — while easier topics like paintings and illustrations are routed to lower-budget experts (Sec. 4.2, Table \ref{tab:prompt-analysis:cc3m}). This goes beyond standard pruning by automatically discovering prompt difficulty.
 
-- **Qualitative analysis reveals semantically meaningful expert specialization.** Analysis of the CC3M Base model (Sec. 4.2) shows experts specialize in distinct topics (cityscapes, animals, interiors) with varying compute budgets. The router assigns the highest-capacity expert to prompts containing text/human figures — categories previously identified as difficult for SD 2.1 — without any manual labeling. This is a genuinely interesting emergent property.
+- **Clean ablation studies validate key design choices.** The ablation in Table \ref{tab:ablation_component} shows that contrastive loss alone collapses to a single expert (worse than baseline), and adding optimal transport significantly improves FID (10.22), CLIP (1.17), and CMMD (0.18). This cleanly isolates the contribution of each component.
 
----
+- **The contrastive learning objective provides a principled mechanism for routing.** Regularizing the architecture predictor to map similar prompts to nearby architecture codes grounds the specialization in prompt semantics (Eq. \ref{eq:contrastive_loss}), and the router analysis confirms this leads to interpretable topic-based clusters.
 
 ## Weaknesses
 
@@ -26,74 +22,46 @@ This paper introduces Adaptive Prompt-Tailored Pruning (APTP), a method that lea
 None.
 
 ### Major
-None.
+
+1. **The comparison against only a single static pruning baseline is insufficient to fully support the central claim that prompt-based pruning outperforms static pruning.** The paper evaluates APTP only against weight norm pruning (Li et al., 2017), which is a simple magnitude-based method. The paper itself identifies SPDM (Fang et al., 2023) in Related Work as a structurally pruning method for diffusion models, yet SPDM is not included as a baseline. The paper's claim that "prompt-based pruning is more suitable than static pruning for T2I models" (Sec. 4.1, Sec. 5) would be substantially strengthened by comparison against a broader set of static pruning methods — especially those designed specifically for diffusion models. Without such comparisons, it is unclear whether the advantage comes from prompt-adaptivity or simply from APTP being a better pruning procedure. This is the most significant limitation of the paper.
 
 ### Minor
 
-- **Comparison limited to a single static pruning baseline.** The paper compares APTP only against weight-norm pruning (Li et al., 2017), which is a simple magnitude-based method. Stronger static pruning / efficient-architecture methods for diffusion models exist — notably BK-SDM (Kim et al., 2023) and SPDM (Fang et al., 2023) — both of which operate on the same SD model family. The paper's claim that "prompt-based pruning is more suitable than static pruning for T2I models" (lines 26–27, 226) would be substantially strengthened by showing APTP is competitive with or superior to these stronger static baselines under comparable compute budgets. While weight-norm is a reasonable initial baseline and BK-SDM/SPDM have different scopes (BK-SDM is block removal at fixed budgets, not flexible pruning on a target dataset; SPDM uses Taylor-based importance scoring), the lack of any comparison means the reader cannot assess how much of the observed gain comes from prompt-specific allocation vs. simply using a stronger training pipeline (distillation + fine-tuning on target data).
+2. **The batch-parallelism advantage over dynamic pruning is overstated and unsupported by experiments.** The paper claims APTP "enables batch parallelism on GPUs, which is not possible with dynamic pruning" (line 26, contribution list). However, batch parallelism is only possible for prompts routed to the *same* expert — a batch with prompts routed to different experts must be split or processed sequentially per expert. The paper does not acknowledge this limitation, and no throughput or latency experiments compare APTP to any dynamic pruning method. The claimed advantage is plausible but unexamined, and the limitation should be qualified. *(Note: despite this overstatement, the design motivation — that APTP supports within-expert batching while dynamic pruning does not — remains conceptually valid.)*
 
-- **Training–inference assignment gap is unexamined.** During pruning, the router uses optimal transport with an equipartition constraint (Eq. 9) to assign prompts equally to experts per batch. At test time (line 115), the router switches to nearest-neighbor by cosine similarity. The paper does not analyze whether test-time assignments remain balanced across experts, nor does it discuss the consequences if some experts receive far more or far fewer prompts than they were fine-tuned for. This is a genuine structural concern for real deployment, as distribution shift could cause some experts to operate off-distribution. A simple analysis of test-time assignment counts and per-expert performance would address this.
+3. **Several implementation details needed for reproducibility are missing from the main text.** Specifically: the structure of the architecture predictor $f_{\text{AP}}$ (depth/width/activation), the exact dimension $D$ for SD V2.1's U-Net, initialization of architecture codes, the number of Sinkhorn-Knopp iterations, training batch size $B$, total training steps/GPU hours, and the absolute MACs of SD V2.1. While some of these may appear in a supplementary appendix (which the parser may have stripped), they are not present in the reviewed manuscript. Given the paper's stated motivation of practical deployment for resource-constrained organizations, these omissions hinder assessment of practicality.
 
-- **Ablation run at a different iteration count than main results.** The component ablation (Table "abl") fine-tunes all models for only 10k iterations, whereas main results use 30k iterations (Sec. 4). While ablations are commonly run at reduced compute, the paper does not acknowledge this discrepancy or verify that the relative ordering of components holds at the final operating point. The Uni-Arch baseline (single model) also only appears in this short-run ablation, not in the main comparison tables, which weakens the direct evidence that prompt-specific allocation is the source of gains.
-
-- **No error bars or multiple seeds reported.** The main results (Tables 1–2) are reported as point estimates without confidence intervals, standard deviations, or multi-seed runs. Given the number of hyperparameters ($\lambda_{\text{distill}}, \lambda_{\text{res}}, \lambda_{\text{cont}}, \tau, \gamma, N$) and the stochasticity in both Gumbel-sigmoid sampling and training, it is unclear whether the reported improvements are statistically significant. Adding 2–3 seeds for the main comparisons would substantially improve credibility.
-
-- **Conversion from continuous architecture codes to binary masks is underspecified.** The paper describes training with continuous Gumbel-sigmoid vectors (Eq. 6) but does not specify how these are converted to the binary masks used for the final expert models (line 185: "use the learned architecture codes to prune the T2I model into our experts"). Is a threshold applied (e.g., 0.5)? Are the continuous values used directly? This omission affects reproducibility.
+4. **The expert specialization analysis is only shown for one model (CC3M Base).** The discovery that the router clusters semantically meaningful topics and assigns challenging prompts to higher-budget experts is a highlight of the paper, but showing similar analysis for the COCO experiments or for different numbers of experts/compute budgets would significantly strengthen the claim that this behavior is robust and not coincidental.
 
 ### Trivial
-None.
 
----
+5. **The number-of-experts ablation uses only three data points (4, 8, 12 experts).** The conclusion that the optimal number is "dataset-dependent" is plausible but under-supported by three points. This is a minor scope limitation, not a flaw in the method itself.
 
 ## Nice-to-Haves
-
-- **Quantify per-expert benefit.** The observation that text/glyph prompts are routed to the highest-capacity expert (Sec. 4.2) is striking qualitatively. It would be strengthened by computing per-expert FID/CLIP on assigned prompts vs. a static model of the same per-expert budget, demonstrating that specialization improves generation quality for each cluster rather than just reallocating compute globally.
-
-- **Hyperparameter sensitivity study.** The contrastive loss weight $\lambda_{\text{cont}}=100$ is large relative to other terms. A brief sensitivity analysis (e.g., over {10, 100, 1000}) would show whether the method is robust or relies on precise balancing.
-
-- **Toy experiment for the contrastive-on-$\textbf{e}'$ design choice.** The paper applies contrastive loss to the Gumbel-sigmoid-transformed vectors $\textbf{e}'$ rather than the raw embeddings $e$, with a heuristic justification (lines 163–166). A small synthetic experiment demonstrating that this prevents latent-collapse in a controlled setting would make the design choice more principled.
-
-- **Include Uni-Arch baseline in main comparison tables.** The single-architecture baseline (trained with the same pipeline minus the router) already exists in the ablation (Table "abl"). Adding it to the main tables (Tables 1–2) would provide a cleaner demonstration of the value of prompt-specific allocation over a single model trained with the same machinery.
-
----
+- Release trained router weights and architecture codes to enable replication and adaptation.
+- Ablate the choice of frozen Sentence Transformer vs. the CLIP text encoder already present in SD.
+- Provide a brief discussion or small-scale experiment quantifying the practical throughput trade-off of within-expert batching as the number of experts increases.
 
 ## Removed Points
-
-These points are flagged to be removed by policy — treat them with caution:
-
-- **"Tables not included in provided text"** — The reviewer notes tables are referenced but not visible. This is a parser artifact; the original submission contains them. Removed per policy (parser-stripped content).
-- **"Missing related works"** — Removed per policy (cannot externally verify).
-- **"Reproducibility: undisclosed hyperparameters"** — The paper does specify all key hyperparameters (Sec. 4, line 195). Removed as factually incorrect.
-- **"Formatting/stylistic nitpicks"** — Removed per policy.
-- **"The paper should also cover Y/domain Z"** — Not present in any reviewer's comments in a substantive way.
-
----
+- *"Framing as pruning vs. architecture search"* (Harsh Critic): The method prunes channels and layers from a pretrained model via Gumbel-sigmoid — this is pruning, not architecture search from scratch. The framing is appropriate.
+- *"Number of experts ablation only three points"* downgraded from Minor to Trivial. Three points is a reasonable ablation; this is a minor scope observation, not a weakness.
+- *"Missing related works"*: Removed per instructions (cannot verify without external sources beyond the paper's own references).
+- *"Formatting/style nitpicks and reproducibility nitpicks about implementation details"*: Removed per instructions.
+- Strength Finder's claim about "batch parallelism enables practical advantage over dynamic pruning" kept (it is conceptually valid as a design motivation) but the weakness about overclaiming is preserved in Minor weaknesses per the rule that weakness wins when they conflict.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews surface legitimate methodological gaps but do not introduce fundamentally new interpretations of the work.
-
----
+The main novel insight from the reviews is that the paper's strongest asset — the prompt router's discovery of semantically meaningful clusters with automatic identification of hard prompts — could be developed further into a diagnostic tool for understanding T2I model failure modes, potentially extending beyond the pruning context. The interaction between the contrastive loss and optimal transport in producing non-collapsed, interpretable expert specialization is a methodological contribution that could benefit related areas like mixture-of-experts in LLMs.
 
 ## Suggestions
-
-1. **Add comparisons with BK-SDM and SPDM**, configuring BK-SDM to match APTP's MACs budgets as closely as possible. Even if exact budget matching is imperfect, this will calibrate the reader's understanding of how much the prompt-based paradigm contributes relative to the strongest static alternatives.
-
-2. **Analyze test-time assignment balance.** Report the histogram of per-expert prompt assignments on the validation set and, ideally, per-expert FID/CLIP. If the distribution is skewed, discuss whether the equipartition-constrained OT training is actually necessary or whether a softer regularization would suffice.
-
-3. **Run the component ablation at the same iteration count as main results (30k)** for at least one configuration (e.g., the full APTP vs. Uni-Arch) to confirm that the relative ordering holds at convergence. Include Uni-Arch in the main comparison tables.
-
-4. **Specify the binary conversion procedure** for architecture codes after training (threshold, rounding, or direct use of continuous values).
-
-5. **Add standard deviations** over 2–3 seeds for the main FID/CLIP/CMMD numbers.
-
----
+1. Add at least one additional static pruning baseline from the diffusion pruning literature (e.g., SPDM) to substantiate the claim that prompt-adaptive pruning is broadly superior to static methods.
+2. Qualify the batch-parallelism claim to acknowledge the within-expert limitation, and provide latency/throughput measurements under realistic batching scenarios to quantify the practical trade-off.
+3. Include expert specialization analysis for at least one additional model/dataset (e.g., COCO) to demonstrate robustness of the router's semantic clustering behavior.
+4. Provide missing reproducibility details (architecture predictor structure, Sinkhorn iterations, batch size, absolute MACs of SD V2.1) either in the main text or a publicly available technical supplement.
 
 ## Score and Decision
+The paper presents a genuinely novel idea — prompt-based pruning for T2I models — with clean ablations and an interesting qualitative analysis of the learned prompt router. The experiments convincingly show APTP outperforms the chosen baseline across all configurations. However, the evaluation is too narrow to fully support the broad claim that prompt-based pruning is superior to static pruning in general, as comparison to a single baseline leaves alternative explanations open. The batch-parallelism claim is also overstated without supporting experiments. These are fixable issues, but in their current form they weaken the paper relative to the strength of its claims.
 
-This paper introduces a genuinely novel and well-motivated approach — prompt-based pruning for T2I diffusion models with a clean router+code framework. The method is technically sound, the ablations are informative, and the qualitative router analysis is a nice bonus. The main weaknesses are the limited baseline comparison (weight-norm only) and several underspecified experimental details (test-time assignment gap, lack of error bars, unspecified binary conversion). These are real but **addressable** — they do not invalidate the core contribution, which is the novel paradigm and its convincing demonstration against a reasonable baseline. With the suggested additions (stronger static baselines, statistical rigor, and analysis of the training–inference gap), the paper would be significantly stronger.
+Qualitative assessment: The paper has originality and a clear practical motivation. The method is well-designed, the router analysis is insightful, and the ablations are clean. The main deficit is in the breadth of empirical validation relative to the strength of the claims, rather than in the method itself or the validity of results shown.
 
-**Recommendation: Accept** with minor revisions to address the baseline comparison and experimental rigor gaps.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

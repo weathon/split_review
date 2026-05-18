@@ -1,85 +1,91 @@
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+
 ## Summary
 
-This paper introduces VideoUntier, a text-video retrieval method that uses part-of-speech tagging to extract "object" (noun) and "event" (verb) tokens from text queries, then employs these tokens as queries in cross-attention to progressively merge video patch features into query-relevant object and event representations. The method uses three levels of similarity (global, object, event) with a coarse-filtering strategy for efficiency. Experiments on MSRVTT, DiDeMo, and MSVD show consistent improvements over prior fine-grained alignment methods (ProST, HBI, TS2-Net, UCOFIA), and domain generalization experiments suggest the learned features transfer across datasets.
+This paper introduces VideoUntier, a text-video retrieval framework that uses a Part-of-Speech-based Token Generator (PTG) to extract object (noun-derived) and event (verb-derived) tokens from query text, then employs a Language-guided Progressive Vision Merging (LPVM) module to extract corresponding multi-grained video features. The model computes similarity at global, object, and event levels with a top-\(K\) matching mechanism and uses coarse filtering for efficiency. Experiments on MSRVTT, DiDeMo, and MSVD show consistent improvements over strong baselines like ProST and HBI, along with domain generalization gains.
 
 ## Strengths
 
-- **Consistent accuracy gains across three benchmarks.** VideoUntier outperforms recent fine-grained alignment methods on MSRVTT-9k (e.g., +1.2% R@1 over ProST), DiDeMo (+2.6% R@1 over ProST), and MSVD (+1.0% R@1 over ProST), demonstrating that the overall pipeline works across different video domains.
+- **Consistent state-of-the-art retrieval accuracy across multiple benchmarks**: VideoUntier achieves the best reported R@1 on MSRVTT-9k (49.4%, vs. 48.2% for ProST), DiDeMo (37.8%), and MSVD (53.8%) in text-to-video retrieval, outperforming recent fine-grained methods. These gains are supported by comparisons across Tables 1, 3, and 5.
 
-- **Ablation confirms multi-grained design contributes positively.** Table 7 shows that adding object-level similarity improves global-only R@1 by +2.9%, and event-level adds another +1.3% (total +4.2%). This controlled ablation supports the core design rationale independent of cross-method comparisons.
+- **Demonstrated domain generalization improvement**: When pretrained on MSRVTT and tested without fine-tuning on DiDeMo and MSVD, VideoUntier surpasses prior domain-generalization work DVD by 2.6% and 2.2% R@1 respectively (Table 6), providing concrete evidence that the text-guided object features produce more transferable representations.
 
-- **Computational efficiency is convincingly demonstrated.** The coarse-filter strategy (Table 8) reduces fine-grained computation by 11.3× (227.01s → 20.07s) while losing only 0.2% R@1. The efficiency advantage over ProST (20.1s vs. 25.2s at higher accuracy) is a concrete benefit.
+- **Computational efficiency via coarse filtering**: The coarse-filtering strategy (selecting top-\(H\) hard samples for fine-grained comparison) reduces inference time to 20.1s on MSRVTT-9k while delivering 49.4% R@1, compared to 25.2s for ProST at 48.2% R@1 (Table 1). Table 8 validates this trade-off: using all samples increases time 11.3× with only 0.2% R@1 gain.
 
-- **Qualitative visualization supports the claimed attention mechanism.** Figure 3 shows that object/event tokens (e.g., 'bus') attend to relevant video regions while global features attend to background content, providing direct visual evidence for the language-guided feature extraction.
+- **Ablative validation of multi-grained components**: Table 7 shows that adding object-level similarity to global similarity improves R@1 by 2.9%, and incorporating all three granularities yields a 4.2% total gain over global-only alignment, confirming each level contributes meaningfully.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **Uncontrolled cross-method comparisons weaken the evidence for the core claim.** Only one baseline (TVMM*) is re-run under the same CLIP ViT-B/32 backbone. For all other competitors (HBI, TS2-Net, ProST, UCOFIA), the paper takes reported numbers directly. Since backbone choice strongly affects performance (the paper itself shows ViT-B/16 vs. ViT-B/32 differences of several R@1 points), and it is not stated which backbone variant each competitor used, the reader cannot determine whether the reported gains (0.6%–2.6% R@1) come from the proposed method or from backbone/hyperparameter differences. This is the single most significant weakness: the conclusion may be correct, but the evidence is inconclusive. The ablation study (Table 7) partially mitigates this by showing the benefit of multi-grained similarity within a controlled setting, but cross-method claims require controlled comparisons.
+**1. The paper overclaims that event features are extracted under direct language guidance from text event tokens.**  
+The paper repeatedly states (Abstract, Sec. 1, Sec. 3.1) that "object and event tokens from the text query guide the extraction" of both object and event video features. However, in the actual implementation (Sec. 3.4), the object merger genuinely uses text object tokens \(\{t^o\}\) as queries in cross-attention, but the "Temporal Feature Interaction" that produces event features \(\{v^e\}\) is simply a Transformer Encoder applied to the already-extracted object features with positional embeddings: \(\{v^e\} = \operatorname{Transformer-Enc}(\{v^o + p\})\). The text event tokens \(\{t^e\}\) are **not used as queries or guidance during event feature extraction** — they only appear in the event alignment loss (Eq. 13). This means the video event features are temporally aggregated object features, not directly conditioned on the query's event cues. The paper's central narrative — that text guides extraction of both objects and events — is only half-accurate. While the SOTA results are not invalidated by this issue, the framing misrepresents what the method actually does and would require either a corrected narrative that honestly characterizes the event features or a redesign of the event extraction to genuinely incorporate text guidance.
+
+**2. The PTG module's design choices are heuristic and insufficiently validated.**  
+The method indexes word positions by PoS tags (nouns → objects, verbs → events) and pads with other parts of speech when counts fall below fixed hyperparameters \(N_{noun}, N_{verb}\). Several concerns go unaddressed: (a) Nouns may not correspond to visual objects (e.g., "situation," "idea") and verbs may not correspond to visual events (e.g., "seem," "exist"), yet no analysis of tagging accuracy or token-to-concept mapping errors is provided. (b) CLIP's tokenizer can split a word tagged as a single noun into multiple subword tokens (e.g., "bookshelf" → "book" + "##shelf"), creating a potential misalignment between the word-level PoS index and the subword-level CLIP features — this is not discussed. (c) The effect of padding with non-noun/non-verb words is not ablated; the paper only states the priority order without showing how much padding occurs in practice or how it affects downstream performance. Since the entire extraction pipeline depends on these initial tokens, the lack of robustness analysis is a structural gap.
 
 ### Minor
 
-- **The PTG module's contribution is not empirically validated.** The paper extracts noun/verb tokens via POS tagging and enriches them with context via cross-attention, but never ablates this module. There is no experiment showing what happens when: (1) POS tags are replaced with ground-truth tags, (2) the context cross-attention is removed, or (3) the padding strategy uses different priority orders. Since the module is central to the claimed novelty, its lack of ablation is a meaningful gap.
+**1. No statistical significance or variance estimates for main results.**  
+Performance gains over strong baselines (ProST, HBI) are often 1–2% R@1. Without standard deviations or significance tests across multiple runs, it is unclear whether these differences are reliable rather than noise. This is particularly relevant given the modest margin of improvement on some benchmarks.
 
-- **The efficiency advantage is incompletely characterized.** Inference time is reported only against ProST. Times for HBI, TS2-Net, and UCOFIA are absent, making the claim of "better efficiency" only partially supported.
+**2. Key hyperparameter values are not disclosed.**  
+The paper defines symbols \(N_{noun}\), \(N_{verb}\), \(H\), \(K\), \(N_f\) (frames per video), and batch size \(B\), but does not state their actual numerical values in the text. While some may appear in the (unreadable) table images, the values should be explicitly reported for reproducibility and sensitivity analysis.
 
-- **Domain generalization experiment lacks training protocol details.** While the source dataset (MSRVTT, inferable from context) and targets (DiDeMo, MSVD, stated explicitly) are clear enough, the paper does not describe the training setup (hyperparameters, frame sampling strategy for the source, whether the full training set is used) used for the pre-trained model. Without this, the result cannot be reproduced or compared fairly.
+**3. The term "disentanglement" is used loosely.**  
+The paper uses "disentangle" in the title and throughout the text to describe separating features into global/object/event levels, but there is no explicit disentanglement loss or constraint ensuring these representations are actually independent or complementary. The term carries a more specific meaning in representation learning (e.g., factorizing latent factors) that does not apply here. A less loaded term like "decomposition" or "separation" would be more accurate.
 
-- **Key architectural details are omitted.** The Transformer Encoder used for temporal interaction (Section 3.2 and Section 3.4) is never specified: number of layers, attention heads, hidden dimension, or dropout. This hurts reproducibility beyond trivial hyperparameter nitpicking—these are architectural specifications.
+**4. Domain generalization results could be stronger with more comparisons.**  
+Table 6 only compares against CLIP4Clip (reproduced) and DVD. Several other methods have domain generalization capabilities or evaluations that are not discussed, making it difficult to assess how significant the 2–3% improvement is relative to the broader field.
 
-- **Single-run results without statistical significance.** All metrics are reported from single runs. Given the modest gains (0.6–2.6 R@1 points), confidence intervals or multi-run averages would help assess whether these improvements are stable or within noise range.
-
-- **Novelty claim is somewhat overstated.** The paper describes itself as "an original effort in learning object and event features from videos with guidance from text queries." However, prior works such as HBI and ProST already use text-guided attention to extract fine-grained video features. The paper's contribution lies in the specific pipeline (POS tagging + cross-attention + temporal Transformer + coarse filtering), which is meaningful but incremental relative to this prior work. A more precise positioning would strengthen the paper.
+**5. Visualization analysis is purely qualitative.**  
+Figure 3 shows attention maps with anecdotal claims (e.g., "the feature based on 'bus' accurately focuses on the bus area"), but there is no quantitative measure (e.g., IoU with ground-truth regions, or a user study) to substantiate that the extracted object features indeed localize correct regions.
 
 ### Trivial
-
-- **Underlined numbers in tables lack a legend.** It appears underlining indicates the best result per column, but this is never stated explicitly.
-
-- **No limitations section.** Including one would show awareness of the method's boundaries (e.g., reliance on POS tagger accuracy, handling of compound/complex queries, cluttered scenes).
+None.
 
 ## Nice-to-Haves
 
-- An ablation of the PTG module (ground-truth POS vs. tagger output, with/without context cross-attention) would directly support the claimed design rationale.
-- Reproducing 2–3 strong baselines (e.g., ProST, HBI) under identical backbone and training conditions would substantially strengthen the evaluation.
-- A failure case analysis (e.g., queries with abstract verbs, videos with cluttered scenes, POS tagger errors) would strengthen the paper's completeness.
-- Adding a section on limitations.
+- **Ablation: remove the object-merger's text guidance** — replacing object tokens with random or pooled text tokens as cross-attention queries would isolate the benefit of using specific noun-derived tokens, strengthening the causal claim.
+- **Sweep over \(H\)** — Table 8 shows only two extremes (all vs. \(H\)=40); a sweep over intermediate values would demonstrate robustness of the efficiency-accuracy trade-off.
+- **Redesign the event extraction to symmetrically use text event tokens as queries** (analogous to the object merger), which would make the pipeline fully support the "language-guided" claim, or alternatively, correct the narrative to honestly describe the current design.
 
 ## Removed Points
 
 These points are flagged to be removed; treat them with caution.
 
-1. **"Domain generalization never specifies what A and B are."** — The paper text (line 197) explicitly names DiDeMo and MSVD as target datasets, and the source (MSRVTT) is clear from context as the training dataset. The targets are stated. Removed because this criticism misreads the paper.
-
-2. **"No code link."** — Removed per hard rules: questioning the availability of artifacts is outside evaluation scope for the initial submission.
-
-3. **"Comparison with more recent work (2024–2025) needed."** — Removed per hard rules: this amounts to demanding citations of works the reviewer speculates exist; the paper's comparisons with up-to-2023 methods are within its stated scope.
-
-4. **"Many numbers are underlined without a clear legend"** — Removed as a formatting/table presentation nitpick. While technically true, this has near-zero impact on the paper's contribution.
+- *"The paper's novelty claim is overstated given precedents (JPoSE, cross-modal attention)"* — Removed because the paper does cite JPoSE in Related Work, and the specific combination (PTG + LPVM + multi-grained top-\(K\) alignment) is distinct. The novelty concern is better subsumed by Major Weakness #1 (narrative mismatch), which captures the real overclaiming issue more precisely.
+- *"Coarse-filtering is a well-known heuristic (hard-negative mining)"* — Removed because the paper presents this as an efficiency technique, not a core novelty claim, and the empirical validation (Table 8) is sufficient.
+- *"Missing comparison with methods that have domain generalization claims"* — Partially removed because asking for exhaustive comparisons across all domain generalization methods would expand scope beyond what is reasonable; kept in attenuated form as Minor #4.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a useful meta-observation: the paper's core idea (text-guided video feature disentanglement) is plausible, but the evidence is weakened by lack of controlled comparisons—a problem that is surprisingly common in this sub-area but rarely discussed in reviews. The reviews do not reveal any insight about the method or problem that the paper itself does not already articulate.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Re-run 2–3 key baselines (at minimum ProST and HBI) under your exact backbone and training protocol.** This is the single highest-leverage improvement. Without it, the central claim of "consistent outperformance" rests on incomparable numbers.
+1. **Correct the narrative for event feature extraction** — either (a) redesign the Temporal Feature Interaction to incorporate text event tokens \(\{t^e\}\) as queries (making the pipeline genuinely symmetrical), or (b) honestly describe the current design as temporal aggregation of text-guided object features and tone down claims about "language-guided event extraction."
 
-2. **Add an ablation of the PTG module.** Show retrieval performance with and without the context cross-attention (Eq. 8), and with ground-truth vs. predicted POS tags.
+2. **Add robustness analysis for the PTG module** — report PoS tagging accuracy on the datasets, analyze how often padding is triggered, study how subword token splits interact with word-level indexing, and ablate \(N_{noun}, N_{verb}\) to show sensitivity.
 
-3. **Expand the domain generalization experiment description.** State explicitly: source dataset, training protocol, hyperparameters. Ideally, compare a version of your model without language-guided modules to isolate the benefit of text guidance in the zero-shot setting.
+3. **Disclose all key hyperparameter values** (\(N_{noun}, N_{verb}, H, K, N_f, B\)) explicitly in the main text or a reproducibility table, and report results with variance estimates (multiple seeds or bootstrapped confidence intervals).
 
-4. **Specify the Transformer Encoder architecture** (layers, heads, dimension, dropout) used in both the global feature extraction and the temporal feature interaction.
-
-5. **Report results from at least 3 runs** with mean and std, or provide a statistical significance test for the key comparisons where gains are < 2%.
+4. **Replace "disentanglement" with more precise terminology** (e.g., "decomposition" or "separation") to avoid misleading readers about the nature of the feature separation.
 
 ## Score and Decision
 
-The paper tackles a well-motivated problem and proposes a clean, interpretable pipeline. The core idea—using POS-derived object/event tokens to guide video feature extraction—is sensible, and the ablation studies validate that each granularity of similarity contributes. However, the evaluation has a major methodological gap: almost all cross-method comparisons use numbers from different experimental setups without ensuring backbone parity. This weakens the paper's central claim of state-of-the-art performance to an uncomfortable degree. The gains are modest (0.6–2.6 R@1), and without controlled comparisons, the reader cannot attribute them to the method rather than to backbone choice. Several secondary issues (PTG not ablated, missing architectural details, incomplete efficiency characterization) compound the problem. The paper would need substantial additional experimental work to be convincing at a top venue.
+The paper makes a genuine empirical contribution: it proposes a text-guided object feature extraction pipeline for video retrieval that achieves SOTA results across three benchmarks with improved efficiency and domain generalization. The core strength — the language-guided object merger using noun tokens as cross-attention queries — is sound, well-validated, and produces consistent gains. The multi-grained similarity and top-\(K\) matching are sensible design elements supported by ablation.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+The most significant issue is the mismatch between the claimed "language-guided event feature extraction" and the actual implementation (event features are temporal aggregates of object features, not directly guided by event tokens). This is a narrative problem rather than a methodological failure — the results are not invalidated — but it must be corrected before the paper accurately represents its own contribution. The PTG module's heuristic nature and lack of robustness analysis is a secondary concern that can be addressed with additional experiments or discussion.
+
+Overall, the paper has real contributions and solid empirical support. The weaknesses are addressable and do not undermine the core findings.
+
+**Score**: 7.0
+
+**Decision**: Accept
+
+MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

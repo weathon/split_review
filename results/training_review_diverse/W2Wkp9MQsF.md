@@ -1,20 +1,18 @@
-Now I have a thorough understanding of the paper and can verify the reviewer claims. Let me construct the final review.
+Now I have everything I need. Let me write the final consolidated review.
 
 ## Summary
 
-This paper introduces **model folding**, a data-free and fine-tuning-free compression technique that merges structurally similar neurons within a network using k-means clustering on weight rows across adjacent layers. To prevent variance collapse/overshooting after merging, it proposes two data-free correction methods: Fold-AR (approximate REPAIR assuming uncorrelated inputs) and Fold-DIR (Deep Inversion-based REPAIR using synthetic images). Experiments on ResNet18/VGG11 (CIFAR10/100, ImageNet) and LLaMA-7B show the method outperforms the data-free baseline IFM and approaches data-driven methods.
+This paper introduces model folding, a data-free and fine-tuning-free model compression technique. The method uses k-means clustering to merge similar neurons within a network, then applies novel data-free variance repair strategies—Fold-AR (approximate REPAIR assuming independent inputs) and Fold-DIR (Deep Inversion-based REPAIR using one synthetic batch)—to prevent variance collapse or overshooting. Experiments on ResNet18, VGG11, and LLaMA-7B show that model folding outperforms the data-free IFM baseline at high sparsity and approaches data-driven compression methods.
 
 ## Strengths
 
-1. **Novel data-free compression with theoretically motivated clustering**: Unlike prior greedy/iterative data-free methods (e.g., IFM), the paper derives that k-means clustering minimizes the Frobenius-norm approximation error of the weight matrix (Eq. 3–6) and extends this to coupled successive layers (Eq. 8–14, 17). This provides formal justification absent in earlier work.
+- **Principled choice of k-means clustering**: Section 3.1 formally derives that k-means minimizes the Frobenius-norm reconstruction error for the weight matrix (Eqs. 3–6), providing a theoretical justification that contrasts with the greedy heuristic in IFM. The extension to inter-layer dependencies via concatenated clustering matrices (Eqs. 14–18) is a clean formalization.
 
-2. **Data-free variance correction that matches data-driven performance**: The proposed Fold-AR and Fold-DIR each maintain the variance ratio close to 1 after compression. Figure 5 shows both methods achieve accuracy nearly matching the data-driven Fold-R across sparsity levels, substantially outperforming IFM (e.g., at 0.5 sparsity, Fold-AR ≈ 88% vs IFM ≈ 68% on ResNet18/CIFAR10). This is the paper's cleanest result.
+- **Strong empirical outperformance over IFM at high sparsity**: Figures 5 and 6 consistently show that Fold-AR and Fold-DIR substantially surpass IFM on ResNet18 and VGG11 across CIFAR10, CIFAR100, and ImageNet, especially at sparsity levels above 30–40%. This directly supports the paper's central claim.
 
-3. **Demonstrates effectiveness on LLMs without data or fine-tuning**: Table 1 shows model folding on LLaMA-7B at 20% sparsity achieves perplexity 6.19 and average zero-shot accuracy 57.98%, close to Wanda_sp (5.83/58.18%) and FLAP (5.74/58.84%), despite using no calibration data. This is a nontrivial demonstration that the method generalizes beyond convolutional architectures.
+- **Data-free variance repair closely matches data-driven REPAIR**: Figure 5 demonstrates that Fold-AR and Fold-DIR achieve accuracy nearly identical to the data-based REPAIR (Fold-R) on ResNet18/CIFAR10, while naive averaging or IFM lead to variance collapse or overshooting. This validates the data-free repair approach.
 
-4. **Identifies and analyzes variance overshooting**: Beyond the known variance collapse phenomenon, the paper documents that naive compression can also cause variance overshooting (Fig. 4). The analysis shows IFM produces variance ratios >2 in some layers while Fold-AR/DIR keep ratios near 1, providing a clear diagnostic for why their methods succeed.
-
-5. **Systematic ablation on wider networks**: Figures 8–9 show model folding accuracy improves monotonically with model width (1×→3× wider MLP/ResNet50), validating that layer redundancy is the key enabler and distinguishing folding from methods that degrade with increased width.
+- **Extension to LLaMA-7B without data or fine-tuning**: Table 1 reports that model folding achieves perplexity and zero-shot accuracies comparable to data-driven methods (LLM-Pruner, Wanda_sp, FLAP) despite requiring no data access or post-training, demonstrating the method's generality.
 
 ## Weaknesses
 
@@ -23,53 +21,57 @@ None.
 
 ### Major
 
-- **Unsupported claim of superiority over INN (Solodskikh et al., 2023)**: The contributions section (line 26) states model folding *"surpasses the performance of SOTA model compression methods … including recently proposed IFM … and INN."* However, INN appears **nowhere** in the experimental section — no table, figure, or ablation compares against it. A reader cannot verify this claim, and its inclusion in the contribution list without evidence is misleading. This is the paper's most significant evidential gap. **Fix**: either add an experimental comparison with INN or remove INN from the claims.
+1. **The Fold-AR independence assumption is unvalidated**. The core formula for Fold-AR (line 211–214) estimates the mean within-cluster correlation E[c] by assuming that input activations from the previous layer are uncorrelated. This is a strong assumption—learned representations in deep networks are typically correlated—and the paper provides no empirical or theoretical analysis of how large the resulting approximation error can be. Without such analysis, it is unclear in which regimes Fold-AR will be reliable versus when it will fail. The fact that Fold-AR underperforms Fold-DIR (Fig. 5) is consistent with the approximation being poor, but the paper does not address this. A simple diagnostic—comparing the estimated E[c] against the true correlation on a small data sample—would substantially improve trust in the method.
+
+2. **No error bars or statistical variability reported**. The paper reports results from (apparently) single runs with no standard deviations, confidence intervals, or multi-seed experiments across all comparisons (Figs. 5, 6, Table 1). Given that k-means has random initialization and Deep Inversion involves optimization from random noise, the reported performance gaps—especially the large advantage over IFM—could be within run-to-run noise. This omission undermines the rigor of the empirical claims, which are central to the paper's contribution.
+
+3. **LLaMA-7B experiment uses an ad-hoc pruning schedule without principled justification**. The paper applies folding only to decoder blocks 22–29 and 11–21, with different sparsity levels for attention and feed-forward layers (20%/50% and 10%/40%, respectively), and leaves all other layers uncompressed. No principled criterion is given for this layer selection or sparsity allocation. The paper acknowledges this as a limitation ("it does not optimize sparsity levels per layer, leaving this for future work," line 255), but then still claims "comparable performance to data-driven methods." Without a controlled comparison at equivalent per-layer sparsity, this claim is not convincingly supported. A uniform sparsity experiment across all layers would be a more neutral evaluation.
 
 ### Minor
 
-- **No explicit mapping from target sparsity to number of clusters k**: The paper reports results at various sparsity levels but does not specify how a target sparsity fraction is converted to a per-layer cluster count k. The text says sparsity is "uniformly applied across all layers" (Fig. 1) and gives a block-wise schedule for LLaMA (line 240), but the actual algorithm for computing k from sparsity is absent. Without this, the method cannot be reproduced by other researchers. Pseudocode or a formula would resolve this.
+1. **Unclear which clustering variant was used in experiments**. Section 3.1 develops both per-layer clustering and concatenated clustering (for inter-layer dependence and BN-aware formulations), but the experimental section never explicitly states whether per-layer or concatenated clustering was used for the reported results. The paper connects these variants to Fold-AR and Fold-DIR in theory (lines 130–150), but the experiments lack a clear statement. This makes the theory section harder to connect to the empirical results.
 
-- **Fold-AR's independence assumption is unvalidated**: Fold-AR estimates cluster-internal correlations by assuming prior-layer outputs are uncorrelated (Eq. 14, line 211). The paper acknowledges the assumption but provides no empirical check — e.g., comparing the estimated scale factors against those computed from a small real-data batch. Given that Fold-AR works well empirically, this assumption may be reasonable, but the paper should at minimum discuss when it might fail (e.g., deep layers with strong residual correlations) or provide a small ablation.
+2. **INN claimed in contributions but not evaluated**. The paper states that model folding "surpasses... IFM... and INN" (line 26), but INN (Solodskikh et al., 2023) is never shown in any experiment, figure, or table. The empirical comparison is effectively limited to IFM (plus structured magnitude pruning in Fig. 6), which is narrower than the contributions claim.
 
-- **Figure captions sometimes omit which REPAIR variant was used**: Figure 6's caption compares against IFM but does not state whether Fold-AR, Fold-DIR, or Fold-R produced the plotted curves. The surrounding text discusses Fold-AR/Fold-DIR, so readers must infer. Making the variant explicit in captions would improve clarity.
-
-- **k-means vs. other clustering methods tested only with data-driven REPAIR**: Figure 3 compares clustering methods using data-based REPAIR (Fold-R), not Fold-AR/DIR. While the conclusion that k-means is optimal for clustering is fair, performance rankings could theoretically shift under data-free REPAIR. The paper should note this or add an ablation.
-
-- **No ablation on the number of DI images used in Fold-DIR**: Fold-DIR uses "a single batch" of Deep Inversion images, but the batch size is unspecified and no ablation shows whether performance saturates with more synthetic images. Practitioners need this detail.
-
-- **No statistical uncertainty reported**: Vision results lack error bars or multiple-seed runs. Variance matters most at high sparsity, where performance fluctuations are larger. (For LLM perplexity, single-run evaluation is standard.)
+3. **The theoretical connection between concatenated clustering and forward-pass behavior is not fully developed**. The derivation of J_{l,l+1} (Eq. 17) minimizes the Frobenius error of the concatenated matrix, but the paper does not formally show how this relates to the actual forward-pass error after folding under nonlinear activations. The connection is asserted rather than proven, and given the presence of nonlinearities, the relationship is not immediate.
 
 ### Trivial
-- Line 100: `$\mathbf{C}=\mathbf{\bar{U}}(\mathbf{U}^{T}\mathbf{U})^{-1}\mathbf{U}^{T}$` — the `\bar{U}` appears to be a typo for `U`.
-- Figure 4/5 share a single caption that is split across two figures, making it hard to tell which caption describes which figure.
+- None (parser artifacts aside, the paper is reasonably well-written).
 
 ## Nice-to-Haves
-- A small ablation validating Fold-AR's independence assumption (compare estimated vs. data-computed scale factors on a held-out batch) would significantly strengthen the paper's data-free claims.
-- A brief discussion of when Fold-AR's independence assumption might fail (e.g., highly correlated residual streams in deep ResNet stages) and whether fold-DIR would be preferred in those cases.
+
+- **Validate Fold-AR's independence assumption**: Compute the true E[c] for one or two layers on a small held-out subset (e.g., 1000 images) and compare to the value under the independence assumption. This would clarify when Fold-AR is reliable.
+- **Run multi-seed experiments** with k-means and Deep Inversion to report mean ± std for the main comparisons.
+- **Include a random-merging baseline** (k-means with random cluster assignments at the same sparsity) to isolate the contribution of the clustering objective.
+- **Include a uniform-sparsity experiment on LLaMA-7B** to provide a more neutral comparison with baselines.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
 
-- **Missing INN comparison as a "criticism about unreleased work"**: Not removed — this is a valid criticism about an unsupported claim, not about INN's existence. The paper cites INN and claims to outperform it but provides no evidence. This stays in Major.
-- **LLaMA table 50% row "cut off"**: Removed. The table is an image in the original PDF; the "cut off" appearance is a parser artifact from image-to-text extraction, not an author error. The paper describes having 20% and 50% sparsity configurations (line 240). However, the related concern about whether baseline comparisons at 50% are present cannot be verified either way from the text alone, so this specific angle is removed.
-- **"The theoretical justification is heuristic / not rigorous" as a fatal flaw**: Downgraded to Minor. The Frobenius-norm justification for joint clustering (Eq. 17) is mathematically correct for the weight matrix approximation. The gap between weight-matrix approximation and output error of a nonlinear network is standard for methods papers at this level. The paper never claims a formal end-to-end approximation bound, so this is not a structural flaw.
-- **Figure 3 uses data-driven REPAIR, results could differ**: Weakened from critic's "minor caution" to Trivial. Figure 3 compares clustering algorithms, not data-free vs. data-driven repair. Using the same repair method (Fold-R) for all clustering methods ensures a fair comparison of clustering quality.
+These points are flagged to be removed; treat them with caution:
+
+1. *"Does not include data-free magnitude pruning as a baseline"* — **Removed (factually wrong).** Fig. 6 explicitly compares with "structured magnitude pruning" (Cai et al., 2020; Yin et al., 2022).
+2. *"Fold-naive not included in later comparisons with error bars"* — **Removed (factually wrong).** Fold-naive is shown in Fig. 5 and Fig. 1.
+3. *"Notational inconsistency about matrix C"* — **Removed (misunderstanding).** C = U(U^T U)^{-1} U^T is consistently defined as a projection matrix (lines 99, 110, 120) and used coherently.
+4. *"The theoretical development is purely decorative/disconnected from implementation"* — **Removed (overstated).** The paper explicitly connects the different clustering formulations to Fold-AR and Fold-DIR (lines 130–150). The connection could be clearer, but it is not absent.
+5. *"The scaling formula assumes zero mean for centroids, which is omitted"* — **Removed (misunderstanding).** BatchNorm normalization explicitly ensures approximately zero mean and unit variance, making the derivation valid.
+6. *"Missing related works"* — **Removed (per guidelines: cannot verify presence of omitted references).**
+7. *"Should include more recent data-free work"* — **Removed (per guidelines: scope-creep; would expand the paper into a survey).**
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the key insight emerging from the reviews is that the paper's **strongest experimental evidence (Fig. 5) cleanly separates the clustering contribution from the repair contribution**: k-means clustering handles the merging, and Fold-AR/DIR handles the statistics. This decomposition is what allows the INN comparison issue to be so clean — the missing comparison is not about the method's architecture but about whether the paper documented what it promised.
+The reviews surface a tension that the paper itself does not fully engage with: the two data-free repair methods sit at opposite ends of a cost-accuracy spectrum that the paper does not adequately characterize. Fold-AR is cheap but makes an unverified independence assumption; Fold-DIR is more accurate but requires synthetic data generation that may not scale trivially. The paper positions both as "data-free," but they are data-free in meaningfully different senses (mathematical approximation vs. synthetic generation), and the paper never discusses when each is the appropriate tool. A practitioner reading this paper would have difficulty deciding which method to use for their specific constraints.
 
 ## Suggestions
 
-1. **Address the INN gap immediately**: Either add a full experimental comparison with INN (using the same architectures and sparsity levels) or strike INN from the contributions claim. This is the single issue most likely to determine acceptance.
-2. **Provide explicit pseudocode** showing how a target sparsity fraction is converted to a per-layer cluster count k.
-3. **Add a brief empirical validation of Fold-AR's independence assumption** using a single held-out batch to compute ground-truth correlations, and compare to the assumed values.
-4. **Explicitly state which REPAIR variant** (Fold-AR or Fold-DIR) was used in each figure caption, especially Figures 6, 8, and 9.
-5. **Report the DI batch size** used for Fold-DIR and add a small ablation showing performance vs. number of synthetic images.
+- **Add a small-sample validation of Fold-AR's independence assumption.** Even a single-layer comparison of estimated vs. true E[c] would dramatically improve the paper's credibility.
+- **Report multi-seed results** (at least 3 seeds) with mean ± std for the main experiments (Figs. 5, 6).
+- **Explicitly state in the experiments section** whether per-layer or concatenated clustering was used for each experiment.
+- **Add a uniform-sparsity LLaMA experiment** or align the sparsity allocation with the comparison methods' schemes to make the LLM comparison fair.
+- **Either include an INN comparison or remove the claim** from the contributions.
 
 ## Score and Decision
 
-The paper presents a genuinely novel technique with clean experiments showing superiority over IFM, a strong baseline. The method is well-motivated and the data-free angle (no training data, no fine-tuning) is practically appealing. However, the unsupported claim of outperforming INN in the contributions section is an evidential gap that must be fixed before the paper can be accepted. The remaining issues (sparsity-to-k mapping, unvalidated independence assumption, minor presentation) are all easily fixable. With revisions, this would be a solid contribution.
+The paper makes a clear contribution: it introduces a principled (k-means-based) approach to data-free neuron merging and develops two data-free variance repair methods that work well empirically. The core idea is sound and the results are promising. However, the lack of experimental rigor (no error bars), the unvalidated assumption underlying the cheaper repair method, and the unconvincing LLM comparison prevent the paper from being accepted at the level it aims for. These issues are addressable in revision, but they are substantive enough that the paper in its current form does not meet the bar for acceptance.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

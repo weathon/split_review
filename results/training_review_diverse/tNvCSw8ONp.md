@@ -1,20 +1,22 @@
-Now I have a thorough understanding of the paper's content. Let me synthesize the final review.
+Now I have a thorough understanding of the paper and the reviews. Let me construct the final consolidated review.
 
-The paper heavily relies on `\input` commands for its core technical content (method descriptions with equations, experiment results with tables, analyses). The extracted main text contains the high-level narrative, motivation, and some implementation details, but the detailed technical content is in files that were stripped during text extraction. I will account for this when evaluating the harsh critic's claims.
-
-Let me write the consolidated review.
+---
 
 ## Summary
 
-The paper tackles selection bias in LLMs answering multiple-choice questions. It proposes two debiasing methods: Bias Node Pruning (BNP), which removes nodes from the final linear layer that contribute to bias, and Auxiliary Option Injection (AOI), which adds an "I don't know" option to the prompt. It also introduces Choice Kullback-Leibler Divergence (CKLD) as a new bias metric that addresses limitations of existing metrics (RStd, RSD) regarding label imbalance. Experiments on ARC-Challenge, MMLU-Redux, and CommonsenseQA with Llama-3, Mistral, and Bloomz show accuracy improvements up to 24.9%, with compatibility demonstrated for black-box models and existing methods (CoT, ICL, DCL).
+This paper studies selection bias in LLMs answering multiple-choice questions and proposes two debiasing methods: Bias Node Pruning (BNP), which removes a small number of nodes from the final linear layer that contribute to selection bias, and Auxiliary Option Injection (AOI), which adds an "I don't know" option to the prompt. The paper also introduces Choice Kullback-Leibler Divergence (CKLD) as a new evaluation metric that addresses insensitivity to choice label imbalance in prior metrics like RStd and RSD. The methods are evaluated on three datasets (ARC-Challenge, MMLU-Redux, CommonsenseQA) and three LLMs (Llama-3-8B, Mistral-7B, Bloomz-7b1).
 
 ## Strengths
 
-- **Novel parameter-level approach to debiasing.** BNP is the first work to target selection bias by pruning internal parameters (as few as 32/4096 nodes) rather than modifying only input/output. This is a genuinely new direction supported by the paper's motivating finding that bias is represented in the final decoder layer (Sec. 2, Sec. 3).
-- **AOI is a simple, black-box-compatible method.** Adding an "I don't know" option is trivially deployable, requires no model access beyond token probabilities, and is shown to work across both open-source and closed-source models (Sec. 5.2). This broadens practical applicability.
-- **CKLD targets a real gap in existing metrics.** The paper correctly identifies that RStd and RSD are insensitive to label imbalance, and CKLD is motivated as a distribution-based metric that remedies this. Formal definition and usage in experiments (Sec. 4, Sec. 5) support this contribution.
-- **Broad empirical evaluation.** Three models (Llama-3-8B, Mistral-7B, Bloomz-7b1), three datasets (ARC-Challenge, MMLU-Redux, CommonsenseQA), and compatibility with CoT, ICL, and DCL demonstrate robustness (Sec. 5).
-- **Out-of-bag sample separation for bias vector computation.** Using a separate set of samples to compute bias vectors (Sec. 5, line 98) avoids data leakage and strengthens the validity of the pruning decisions.
+- **First parameter-level investigation of selection bias in LLMs.** The paper explicitly distinguishes itself from prior work that only modifies inputs or calibrates outputs, instead analyzing and modifying internal representations. This is a novel direction for the selection bias problem. (Supported by line 27: "no embedding or parameter-level investigation has been performed.")
+
+- **High efficiency through minimal pruning.** The paper reports that dropping as few as 32 out of 4096 nodes in the final layer (128 for Bloomz) can significantly reduce selection bias. This specificity demonstrates a lightweight approach compared to retraining or large-scale calibration. (Supported by lines 33, 106.)
+
+- **New metric (CKLD) motivated by a documented gap in prior metrics.** The paper identifies that existing metrics (RStd, RSD) are insensitive to imbalanced choice labels and can falsely indicate bias. CKLD is proposed to address this gap. (Supported by lines 38–40.)
+
+- **Compatibility with black-box LLMs via AOI.** Auxiliary Option Injection is a simple prompting technique that requires no model-internal access, making it applicable to closed-source API-based models. (Supported by line 35.)
+
+- **Demonstrated synergy with existing methods.** The paper shows that BNP and AOI can be combined with Chain-of-Thought, In-Context Learning, and Decoding by Contrasting Layers. (Supported by lines 45–46, 149.)
 
 ## Weaknesses
 
@@ -24,67 +26,52 @@ None.
 
 ### Major
 
-None that can be confirmed from the extracted text. The harsh critic raises the concern that BNP's pruning specificity is not validated against random/magnitude pruning. This is a substantive concern, but the paper's Section 6 (Analyses) is entirely in an input file (`5_Analyses/bnp`) that was stripped during text extraction. If the existing paper already includes such comparisons, this point is addressed. If not, it would weaken the claim that pruned nodes are specifically bias-related rather than generically unimportant parameters. Since I cannot verify the analyses section, I note this as a potential major issue that must be checked against the full submission.
+None.
 
 ### Minor
 
-- **AOI output handling is underspecified.** The paper states (line 105) that "we select the choice symbol (e.g., A, B, C, D) with the highest probability." When an auxiliary "I don't know" option is added, it is unclear whether (a) probabilities are computed only over the original option tokens, (b) the auxiliary token competes and is simply ignored in argmax selection, or (c) renormalization is performed. Each choice yields different behavior and the paper must specify this for reproducibility.
+- **Potential performance degradation on unrelated tasks is not discussed.** The paper does not address whether pruning nodes from the final linear layer degrades capabilities on tasks unrelated to MCQ answering. While the method prunes a small fraction of parameters (32/4096), the paper's available text provides no evaluation on held-out tasks to check for unintended side effects. A debiasing method that harms general performance would have limited practical utility.
 
-- **CKLD lacks a direct validation experiment.** The paper claims CKLD is more sensitive to label imbalance than RStd/RSD but does not (in the visible main text) include a controlled experiment — e.g., injecting synthetic bias into a bias-free model and showing CKLD detects it while RStd/RSD do not. This weakens the contribution of CKLD, though it is not fatal since CKLD is used alongside RSD in the experiments.
+- **The magnitude of claimed improvements is extraordinary and would benefit from explicit caveats.** The paper reports accuracy improvements of "up to 24.9%" (line 51) and "up to 33.8% on ARC-Challenge" (line 149) when combined with other methods. These are very large gains on established benchmarks. While the full experimental details reside in the (parser-excluded) experiments section, the paper's visible text does not discuss possible explanations for why such large improvements arise from modifying only the final linear layer, nor does it discuss how the baseline performance compares to standard reported numbers for these models on these benchmarks.
 
-- **Variance across out-of-bag splits is not reported.** The paper states "the entire process is not stochastic" (line 107), which is true only for a fixed OOB set. The selection of OOB samples introduces variance in which nodes are pruned. Reporting mean/std or ranges across different OOB partitions would strengthen the evidence and is standard practice.
-
-- **Hyperparameter choice for number of pruned nodes is not justified.** The paper prunes 32 nodes for Llama-3/Mistral and 128 for Bloomz (line 106), but no rule (e.g., fraction of layer size, validation-based selection) is stated in the main text. This information may be in the methods input file, but it should be stated clearly.
+- **The mechanism by which BNP identifies "bias-contributing" nodes raises open questions.** The paper mentions computing "average bias vectors" from a separate set of out-of-bag samples where the model was incorrect (line 98). A natural concern is whether pruning nodes that correlate with incorrect responses removes nodes that are important for correct answers in general, or whether the method requires careful tuning of the out-of-bag set composition. The paper's available text does not address how robust the selected nodes are across different out-of-bag subsets or random seeds.
 
 ### Trivial
 
-- The number of out-of-bag samples used for bias vector computation is not reported in the visible text. This is a small but useful reproducibility detail.
+- The paper uses bullet-style contributions in the introduction (lines 49–54) but does not provide a formal summary of limitations or failure cases anywhere in the visible text. A brief limitations paragraph in the conclusion would strengthen the presentation.
 
 ## Nice-to-Haves
 
-- A synthetic bias injection experiment validating CKLD's sensitivity vs. RStd/RSD would strengthen the metric contribution.
-- Reporting accuracy and bias metrics across multiple OOB splits (with variance) would improve confidence in the results.
-- Varying the auxiliary option text ("I don't know" vs. "Not sure" vs. "None of the above") would strengthen the AOI mechanism analysis.
+- Reporting standard deviations or confidence intervals for accuracy and bias metrics would help establish the statistical reliability of the reported improvements.
+- Validating CKLD on synthetic data with known ground-truth bias before using it as the primary evaluation metric would strengthen the case that it measures what it claims to measure.
+- An ablation study varying the number of pruned nodes and the size/composition of the out-of-bag set would help understand the method's sensitivity to these design choices.
+- Disentangling the contributions of BNP and AOI more explicitly would clarify whether the gains come primarily from the input modification or the parameter-level intervention.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+These points are flagged to be removed; treat them with caution.
 
-1. **"The paper should include the definition of the average bias vector and how nodes are scored for pruning"** — This definition is in the input file `3_Methods/bias_pruning`, which was stripped by the parser. The original submission contains it.
+- **"Core methods and evaluation are not present" (Harsh Critic Point 1):** The paper's methods, experiments, and evaluation sections are included via `\input` commands (lines 64, 65, 76, 77, 86, 108–112, 122–124). These are standard LaTeX includes for a multi-file project. Their non-resolution in the plain-text extraction is a parser artifact; the content exists in the original submission. Removed per rules about parser artifacts.
 
-2. **"CKLD description is missing"** — The evaluation section (`4_Experiments/evaluation`) containing CKLD's mathematical definition is in a stripped input file. The original submission contains it.
+- **"CKLD is introduced without any formal definition" (Harsh Critic Point 3):** The definition of CKLD resides in `\input{4_Experiments/evaluation}` (line 86), which the parser did not resolve. The original submission contains this definition. Removed per rules about parser artifacts.
 
-3. **"The paper should specify whether CKLD is computed per sample or over the dataset"** — This detail is in the evaluation input file.
+- **"BNP is underspecified" (Harsh Critic Point 2, parts about missing formal details):** The details of how bias vectors are computed and how nodes are selected for pruning are in `\input{3_Methods/bias_pruning}` (line 76), which the parser did not resolve. Removed per rules about parser artifacts.
 
-4. **"The paper should ensure that the main text discusses the key insights from analyses"** — Sections 6.1–6.3 are entirely in input files that were stripped. The original submission contains these discussions.
+- **"Large improvements would require strong evidence" (Harsh Critic Point 5, in its full form):** The experimental evidence supporting the claimed improvements resides in the parser-excluded experiments and tables sections. The magnitude concern is reasonable but is better framed as a minor question about interpretability rather than a claim of missing evidence.
 
-5. **"Missing related works" references** — Removed per instructions: I cannot verify existence of missing references with external sources.
-
-6. **"No embedding or parameter-level investigation has been performed" claim too strong** — The harsh critic says this claim "would benefit from acknowledging any logit-level calibration methods that operate before the final layer." Logit-level methods (e.g., Zheng et al.) are already cited in lines 27 and 133. The claim is appropriately scoped given the citations.
-
-7. **Criticism about the process being deterministic implying no error bars needed** — The paper states "the entire process is not stochastic" (line 107), which is re-stating a fact about their modified inference, not arguing against error bars. My review above handles this as a separate (retained) concern about OOB split variance.
+- **Generic strength claim about "robust empirical validation" (Strength Finder #6):** While three datasets and three models are listed, the actual results are in parser-excluded sections. The Strength Finder's phrasing overstates what can be verified from the available text. Moved here for caution.
 
 ## Novel Insights
 
-The harsh critic's main insight is that BNP's mechanism claim requires a specific ablation comparison (random pruning, magnitude-based pruning) to substantiate the "bias-specific" pruning narrative. This is a useful constructive observation that goes beyond what the paper currently validates. The critic also correctly notes that the AOI output handling must be precisely specified for reproducibility. These insights sharpen the evaluation criteria against which the paper should be judged.
-
-Beyond the reviewer inputs, I note that the paper's structural reliance on `\input` files for all technical content (methods, equations, tables, analyses) makes it impossible to fully evaluate from the extracted text alone. This is a systematic issue with the review pipeline, not the paper itself, but it means the present evaluation must be treated as provisional pending verification of those sections.
+None beyond the paper's own contributions. The reviews primarily raise concerns about content missing due to parser extraction issues and identify standard methodological questions (ablations, limitations, statistical reliability) that apply to most empirical papers.
 
 ## Suggestions
 
-1. **Specify AOI output handling precisely.** State clearly whether the auxiliary token is excluded from or included in the argmax, and how "accuracy" is computed when the model outputs "I don't know."
-
-2. **Add a BNP ablation against random and magnitude-based pruning** (if not already in the analyses section) to confirm the pruned nodes are specifically bias-related.
-
-3. **Include a synthetic validation for CKLD** — inject a known bias pattern into a model and show CKLD detects it while RStd/RSD do not.
-
-4. **Report variance across OOB splits** — repeat the pruning process with different OOB partitions and report mean/std of accuracy and bias metrics.
-
-5. **Clearly state the pruning criterion and k selection rule** in the main text, even if also present in the methods section.
+1. Add a brief limitations paragraph to the conclusion discussing: (a) potential degradation on unrelated tasks, (b) sensitivity to the out-of-bag set composition, (c) conditions under which BNP may not help.
+2. Explicitly state why pruning only 32/4096 nodes produces large accuracy gains — is the bias concentrated in those nodes, or is there another mechanism at play?
+3. Present the core experimental results (main table, baseline comparisons, black-box results) in the main text alongside qualitative interpretation, not in a separate section that could be missed.
 
 ## Score and Decision
 
-The paper proposes genuinely novel approaches (BNP, AOI) to a well-recognized problem, with a coherent motivation rooted in the internal representation of selection bias. The main claims are significant and the evaluation covers diverse models, datasets, and compatibility settings. The core concerns — BNP's bias specificity validation, AOI implementation details, and CKLD validation — are addressable in a revision and do not invalidate the contribution. The paper represents a solid contribution to the field.
-
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

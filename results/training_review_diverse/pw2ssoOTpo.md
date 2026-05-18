@@ -1,18 +1,18 @@
-Now I have thoroughly analyzed the paper and all reviewer claims. Let me produce the consolidated review.
+Now I have all the information I need. Let me compile the final consolidated review.
 
 ## Summary
 
-This paper introduces CIFAR-10-Warehouse (CIFAR-10-W), a large-scale collection of 180 datasets (domains) built by searching image search engines with controlled color/style/cartoon prompts (143 sets) and generating images via Stable Diffusion (37 sets). Each domain contains images from all 10 CIFAR-10 classes. The paper benchmarks accuracy prediction (AccP) and domain generalization (DG) methods on this testbed, demonstrating that CIFAR-10-W poses greater challenges than existing synthetic corruption benchmarks (CIFAR-10-C) and reveals non-trivial insights such as DG methods improving near-OOD performance but struggling on far-OOD cartoon domains. The dataset fills a genuine gap: a large multi-domain testbed with real-world (non-corrupted) images for 10-class classification.
+This paper introduces CIFAR-10-Warehouse (CIFAR-10-W), a collection of 180 test sets sharing the 10 CIFAR-10 classes, constructed via prompted image search (143 "real-world" domains from search engines) and diffusion model generation (37 domains). Each domain contains 300–8,000 images at 224×224 resolution. The dataset is benchmarked for accuracy prediction (AccP) across 8 methods and 40 classifiers, and domain generalization (DG) across 11 methods with single- and multi-source setups. The core findings — that far-OOD domains are substantially harder for both tasks, that AccP methods show larger MAE on CIFAR-10-W than on CIFAR-10-Cs, and that DG improvements concentrate on near-OOD domains — are empirically documented and useful for the community.
 
 ## Strengths
 
-1. **Largest multi-domain testbed for CIFAR-10 by a wide margin.** With 180 domains (vs. 4–6 in PACS/DomainNet, 19/50 in CIFAR-10-C), CIFAR-10-W dramatically expands the scale of available OOD evaluation for 10-class classification. Table 1 provides a clear comparison, and the paper explicitly notes 143 real-world + 37 diffusion-generated domains.
+- **Scale and diversity of domains**: With 180 domains (vs. 4–6 in PACS/Office-Home/DomainNet and 19–50 in CIFAR-10-C), CIFAR-10-W provides an order-of-magnitude more domains than existing multi-domain benchmarks. The variation spans color, cartoon style, naturalness, and class imbalance, as documented in Sec. 2 and Fig. 1. This is the paper's primary contribution and is clearly supported.
 
-2. **Carefully controlled, well-documented data construction.** The paper documents collection from 7 different search engines (Google, Bing, Baidu, 360, Sogou, Pexels, Flickr) with explicit color/style conditions and Stable Diffusion generation with controlled prompts. Privacy protection (blurring faces and license plates) and manual cleaning of noisy images are reported in Section 2.
+- **Comprehensive benchmarking with multiple classifiers and methods**: The AccP evaluation covers 8 methods × 40 classifiers (Table 2), and the DG evaluation covers 11 methods × 4 source settings (Table 3). This breadth provides a robust assessment of method behavior and is a level of rigor that many existing benchmarks lack.
 
-3. **Principled analysis of multiple confounding factors beyond leaderboard reporting.** The AccP benchmarking systematically examines classifier variance across architectures (Fig 3A), training set mismatch (Fig 3B), missing test classes (Fig 3C), and test set size (Fig 4A) — analyses that go well beyond what is typically provided in dataset papers and yield concrete evidence of CIFAR-10-W's challenging nature.
+- **Empirically documented gap between synthetic and realistic OOD performance**: The paper shows that AccP methods achieve substantially higher MAE on CIFAR-10-W than on CIFAR-10-Cs (e.g., avg MAE 6.65% vs. 3.62% for ResNet44, Table 2), and that this gap widens on far-OOD subsets (cartoon KWC: 9.14% vs. KW: 5.26%). These results surface challenges that synthetic corruption benchmarks may understate.
 
-4. **Empirical confirmation that CIFAR-10-W exposes limitations masked by synthetic benchmarks.** The paper demonstrates that AccP methods achieve substantially higher MAE on CIFAR-10-W (e.g., 6.65% overall for ResNet44) than on CIFAR-10-Cs (3.62%), and that DG methods' limited effectiveness on far-OOD domains (cartoon sets) becomes visible only with this diverse testbed. These findings validate the dataset's utility.
+- **DG analysis reveals differential improvement across domain distance**: Fig. 4(A) shows that DG methods improve over ERM primarily on near-OOD (KW) domains while often failing on far-OOD (KWC/DF) domains — a nuanced finding that small-scale benchmarks (e.g., 4-domain PACS) cannot expose. This is a genuine insight enabled by the dataset's scale.
 
 ## Weaknesses
 
@@ -20,55 +20,71 @@ This paper introduces CIFAR-10-Warehouse (CIFAR-10-W), a large-scale collection 
 None.
 
 ### Major
-
-1. **Quantitative validation of domain diversity is missing.** The paper asserts that its 180 datasets constitute "broad distribution coverage" and distinct domains, but provides no quantitative analysis of inter-domain similarity (e.g., pairwise feature distances, embedding visualizations, or clustering). While Fig. 1C shows qualitative examples, and the benchmarking results (varying accuracy from ~40% to ~99%) indirectly suggest domain differences, the core claim that 180 meaningfully distinct domains exist would be significantly strengthened by direct evidence. Many domains differ only in search engine for the same keyword+color query (e.g., Google-red-dog vs. Bing-red-dog), and without quantitative analysis it is unclear how many "effective" domains there are. This is the paper's most significant weakness because the dataset's headline contribution rests on this diversity claim.
-
-2. **DG experiments are too limited to demonstrate the dataset's full potential.** The multi-source DG setup trains on only 1–4 source domains (Yandex KW/KWC + two diffusion sets) — a tiny, non-representative sample of the distribution CIFAR-10-W is meant to cover. The paper does not explore the natural use case of training on a larger, diverse subset of CIFAR-10-W's own domains (e.g., randomly sampling 10, 20, or 50 domains as sources). As a result, the DG observations (e.g., "DG improves near-OOD but not far-OOD") may be specific to this particular source set. For a dataset positioned as a DG testbed, this evaluation is underpowered.
+None. The dataset is well-constructed and the benchmarks are sound. No individual weakness rises to the level where acceptance should hinge on it.
 
 ### Minor
 
-1. **AccP leave-one-out evaluation lacks robustness checks.** The paper uses a linear regressor trained on 179 domains to predict accuracy on the held-out domain. Domains are not independent — many share the same search engine, color palette, or prompt structure — which can inflate linear regressor performance and underestimate generalization error. No nonlinear regressors (random forest, SVR) are tried to test the linearity assumption. Confidence intervals or variance estimates across different domain splits (e.g., grouped cross-validation by search engine or color) are not reported. The paper's claim that "error bars are not relevant" (line 113) addresses the methods' own variance but not the statistical reliability of the MAE estimates themselves.
+- **Overstated "real-world" framing**: The paper repeatedly contrasts CIFAR-10-W's 143 "real-world" domains with CIFAR-10-C's synthetic corruptions. However, these domains were collected through highly specific prompted searches (e.g., "yellow cat," "cartoon deer") and manually curated. They are real photographs, but under constrained visual conditions — a specific form of distribution shift (color, style, composition) rather than broad "real-world" diversity in the sense of uncurated natural deployment data. The contrast with CIFAR-10-C is legitimate (photographs ≠ pixel corruptions), but the framing implies more than is delivered. The authors should describe CIFAR-10-W as providing *controlled compositional shifts at scale* rather than as a general "real-world" testbed.
 
-2. **The "noisy data for learning" claim is underspecified.** The paper states (line 391) that CIFAR-10-W offers a real-world noisy dataset because the authors "recorded the incorrectly labeled images during the cleaning and annotation process." However, it is unclear whether these incorrectly labeled images remain in the dataset or are held separately. If the cleaned dataset is the only version released, then the "noisy data" use case is not supported without additional details about what is actually released.
+- **DG evaluation does not use CIFAR-10-W domains as training sources**: The paper collects 4 separate source datasets (2 from Yandex, 2 from diffusion) and evaluates on CIFAR-10-W's 180 domains as targets only. This is a defensible design choice, but it means the paper does not demonstrate the dataset's utility for the "within-dataset" DG scenario where a practitioner would train on some CIFAR-10-W domains and test on others. The claim that CIFAR-10-W is a "comprehensive DG evaluation environment" (Sec. 4.2) is partially undermined because the dataset is used only as a test set. Adding a within-dataset experiment (e.g., train on 5 domains, test on 175) would directly substantiate this claim.
 
-3. **Missing limitations section.** The paper lacks an explicit discussion of its own limitations. Important caveats include: (a) domains are constructed via color/style queries, not naturally occurring shifts (geographic, temporal, demographic); (b) all domains share the same 10 CIFAR-10 classes, limiting evaluation scope; (c) per-domain sizes (300–8,000) may disadvantage methods requiring large unlabeled sets. While the paper is transparent about its construction, an explicit limitations paragraph would improve scientific rigor.
+- **"Other Fields That Potentially Benefit" section lacks evidence**: Sec. 6 lists three areas (noisy data learning, domain adaptation, OOD detection) where CIFAR-10-W "potentially" could be used, but provides no experiments or analysis. This section amounts to speculation and weakens the paper's credibility. Either provide initial proof-of-concept experiments in at least one of these areas, or remove the section.
 
-4. **DG improvements over ERM are small relative to variance.** In Table 3, the best DG methods (e.g., SD) often improve over ERM by only 1–3 percentage points on the overall average, and standard deviations from three runs (0.31–5.67pp) are large relative to these differences. The paper does not discuss whether these differences are practically or statistically significant.
+- **Single-source DG improvement over ERM is marginal with overlapping error bars**: In Table 3 (Single(1)-Source DG), SD achieves 72.70% vs. ERM's 72.27% — a 0.43% gain — with standard deviations ±4.28 and ±2.88, showing clear overlap. The paper should acknowledge that in the single-source setting, the advantages of DG methods are not statistically significant. (Multi-source improvements are larger and clearer.)
+
+- **Leave-one-out AccP regression setup could be validated**: The paper trains a linear regressor on 179 domains to predict accuracy on the held-out domain, following established practice in the field. However, the linearity assumption is unchecked. A simple cross-validation within the 179 domains (reporting residual patterns or coefficient stability) would strengthen the MAE numbers. This is a minor methodological gap.
+
+- **No dedicated limitations paragraph**: The paper acknowledges that "CIFAR-10-W may not cover all possible target domains" (Sec. 4.2) but lacks a structured limitations discussion. Adding one — covering the closed-world design (all 10 CIFAR-10 classes), the curation artifacts in the collection process, and the moderate per-domain image counts (300–8,000) — would improve scientific integrity.
 
 ### Trivial
-None.
+
+- **No reporting of computational cost**: The paper does not report experiment runtime, hardware used, or total compute. This is useful information for reproducibility-minded readers, especially since CIFAR-10-W has 608k images at 224×224.
+
+- **Dataset construction details (exact prompts, filtering protocol) are not fully documented in the paper**: The paper mentions a data/code release URL but does not include the exact search queries or annotation protocol. Providing these in an appendix or supplemental material would aid reproducibility.
 
 ## Nice-to-Haves
-- Compute pairwise feature distances (e.g., Fréchet distances using ImageNet-pretrained features) between all 180 domains and provide a t-SNE/UMAP visualization to support the diversity claim.
-- Include grouped cross-validation (by search engine, color, or domain type) in the AccP evaluation to test robustness.
-- For DG, experiment with training on random subsets of 10, 20, or 50 domains from CIFAR-10-W itself, rather than only 4 external source domains.
-- Report the number of images removed during cleaning and the criteria used to identify "noisy" images.
-- Add an explicit limitations section to the paper.
-- Clarify whether the incorrectly labeled images recorded during cleaning are included in the released dataset or kept separately.
-- Provide exact search queries per domain in supplementary material.
+
+- **Within-CIFAR-10-W DG experiment**: Using a subset of CIFAR-10-W domains as training sources and the rest as targets would directly demonstrate the dataset's utility for studying source multiplicity in DG.
+
+- **Decomposition of AccP MAE by domain characteristics**: The paper could bin the 180 domains along interpretable axes (e.g., color saturation, cartoon-ness score, background complexity) and plot method MAE along each axis. This would move from "farther is harder" to "what kind of farness matters."
+
+- **Correlation of per-domain class imbalance ratio with AccP error**: The paper's class removal experiment studies missing classes, but many CIFAR-10-W domains have *uneven* class proportions (Fig. 1(B)). Analyzing whether imbalance predicts prediction error would be informative.
+
+- **Explicit mention that the "consistency" claim about AccP methods (MS-AoL being best across classifiers on CIFAR-10-W but not on CIFAR-10-Cs) could be more carefully caveated**: The data supports the observation, but the paper could note that this may reflect CIFAR-10-W's domain structure rather than inherent benchmark superiority.
 
 ## Removed Points
+
 These points are flagged to be removed; treat them with caution.
 
-- **"The 'real-world' framing is overstated"** — The paper is transparent about having 37/180 synthetic (diffusion-generated) images and 143 real-world ones. Table 1 marks "corrupted? No" accurately because the images are not algorithmically corrupted like CIFAR-10-C. The paper's framing as "more realistic" relative to synthetic corruptions is appropriate, and it consistently states the exact breakdown. The reviewer's concern is overstated relative to the paper's actual claims.
-
-- **"The concept of 'domain' is not validated" (in its strongest form)** — While the absence of quantitative similarity metrics is a real weakness (retained above as Major #1), the reviewer's claim that there is "almost no evidence" of meaningful domain differences is too strong. The benchmarking results themselves provide indirect evidence: accuracy varies from ~40% to ~99% across domains (Table 3), and AccP MAE varies substantially across domain categories (KW vs. KWC vs. diffusion, Table 2). These empirical differences demonstrate that domains are not interchangeable.
-
-- **Formatting/style nitpicks about Table 1 color coding** — The caption clearly states "the best and second best methods... are highlighted in blue and bold, respectively." The formatting is consistent with this description. Dense tables are a necessary evil for comprehensive benchmarking.
+- **Claim that "superior accuracy prediction methods are more consistently reflected on CIFAR-10-W" is not well supported** — REMOVED. The paper shows MS-AoL is best across all three individual classifiers on CIFAR-10-W, while the best method varies on CIFAR-10-Cs. This is directly supported by Table 2. The reviewer's speculation that this "could simply mean CIFAR-10-W is less noisy" does not invalidate the empirical observation.
+- **"Missing related works"** — REMOVED per instructions (cannot verify existence of missing references).
+- **Formatting/style nitpicks** — REMOVED per instructions.
+- **Typo/grammar complaints** — REMOVED per instructions (parser artifacts).
+- **Missing appendix/proofs complaints** — REMOVED per instructions (parser strips these sections).
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews do not surface a novel observation absent from the paper itself.
+
+None beyond the paper's own contributions. The key insight — that large-scale multi-domain OOD testbeds reveal differential method performance across near- and far-OOD domains — is the paper's own contribution, not something synthesized from the reviews.
 
 ## Suggestions
-1. **Add quantitative domain diversity analysis.** Compute pairwise Fréchet distances or accuracy correlation matrices across the 180 domains and present a low-dimensional embedding (t-SNE/UMAP). This directly addresses the most significant weakness and would validate the headline "180 domains" claim.
-2. **Strengthen the DG evaluation** by training on larger, diverse subsets of CIFAR-10-W domains as sources (10, 20, 50 domains). Use grouped cross-validation that respects domain types (search engine, color, style) to test whether DG findings generalize.
-3. **Add robustness checks for AccP:** Try a nonlinear regressor (e.g., random forest) for leave-one-out MAE, and report variance across held-out domain groups partitioned by similarity/cluster.
-4. **Add an explicit limitations section** covering the constructed (not naturally occurring) nature of shifts, fixed CIFAR-10 label space, and per-domain size limitations.
-5. **Clarify the noisy-label release:** specify whether the recorded incorrectly-labeled images are part of CIFAR-10-W or a separate collection, and how they can be used for noisy-label learning research.
+
+1. Revise the abstract, introduction, and conclusion to describe CIFAR-10-W as providing *controlled compositional shifts* (color, style, unnatural compositions) at scale rather than "real-world" testbeds broadly contrasted with synthetic sets. This is more precise and avoids overclaiming.
+2. Add a within-CIFAR-10-W DG experiment (e.g., train on 5–10 domains, test on the remaining 170–175) to demonstrate the dataset's use as a source pool.
+3. Either provide initial experiments in one of the "Other Fields" (Sec. 6) or remove the section.
+4. Add a formal limitations paragraph acknowledging: (a) closed-world design (only 10 CIFAR-10 classes), (b) curation artifacts in the collection process, (c) moderate per-domain size (300–8,000 images), and (d) the dataset is released as a testbed only (no unified training set).
+5. Report computational cost (hardware, approximate runtime) for the benchmarking experiments.
+6. Include exact search queries and the filtering/annotation protocol in the supplementary material or code release.
 
 ## Score and Decision
 
-This paper contributes a large-scale, carefully constructed multi-domain dataset that fills a genuine gap in the OOD generalization testbed landscape. The 180-domain scale, transparency about data sources, and systematic analysis of multiple confounding factors are clear strengths. The most significant weakness — absence of quantitative domain diversity validation — is addressable and does not invalidate the core contribution (the dataset is clearly useful even without this analysis). The DG experiments are somewhat limited but do not undermine the dataset's value. The paper would benefit from revisions addressing the suggestions above, but in its current form it already represents a meaningful contribution to the community.
+The paper makes a solid contribution: a large, well-constructed, multi-domain OOD testset for the CIFAR-10 classes that substantially expands the scale of existing benchmarks, accompanied by extensive benchmarking. The weaknesses are non-fatal and addressable with minor revisions. The dataset will be valuable to the community for AccP and DG research.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+**Originality**: 7/10 — Novel in construction approach and scale, though building on existing ideas.
+**Importance**: 8/10 — Addresses a clear community need for larger, more diverse OOD testbeds.
+**Claims well supported**: 7/10 — Generally sound with some overclaiming.
+**Soundness of experiments**: 7/10 — Robust benchmarks with minor methodological gaps.
+**Clarity**: 8/10 — Well written and organized.
+**Value to community**: 8/10 — High potential for broad adoption.
+
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

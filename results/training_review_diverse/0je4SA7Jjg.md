@@ -1,123 +1,73 @@
-Now I have all the information needed to write the consolidated review. Let me construct it.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me compose the final consolidated review.
 
 ## Summary
-2-3 sentence summary of the paper's contribution.
 
-## Strengths
-- strength 1 with evidence
-- strength 2 with evidence
-
-## Weaknesses
-### Fatal
-### Major
-### Minor
-### Trivial
-
-## Nice-to-Haves
-
-## Removed Points
-
-## Novel Insights
-
-## Suggestions
-
-## Score and Decision
-
-Let me write the review now.
-
----
-
-Here is my reasoning before writing:
-
-1. **No error bars**: The paper reports single RMSE values. This is a real weakness but is standard practice in many PDE/ML works where training is expensive. I'll keep this as a Minor weakness since it doesn't invalidate the results but limits statistical confidence.
-
-2. **Parameter claim**: The paper claims improvement is due to cell features, not additional parameters. The control (deeper MGN) is weak because deeper networks face optimization difficulties. This is a Major weakness because it undermines a specific attribution claim.
-
-3. **Over-smoothing claim**: Asserted but never directly tested via feature similarity or spectral analysis. The paper only has indirect RMSE evidence. This is a Minor weakness — it's a gap in supporting a stated motivation, not in the core results.
-
-4. **Data scaling test**: The paper says "we report the results" but no results are shown (cut-off sentence, no table). This IS a Major weakness because sample efficiency with limited data is highlighted as a key advantage in the abstract and introduction, yet no evidence is provided.
-
-5. **Black-Sea modest improvement**: 8.4% vs 43-93% on synthetic. This is factual but not a weakness per se — it just shows the method is more effective on certain data types. I'll keep as a minor observation.
-
-6. **Miscellaneous minor issues**: "detecting discontinuities" never elaborated, FE algorithm ambiguity, missing experimental details, high GPU memory, etc. — all Minor or Trivial.
-
-Score: I'll give 5.5. The core architectural ideas are interesting and the synthetic results are strong, but the paper over-claims significantly (data scaling, parameter attribution, over-smoothing) and has a notable missing result (data scaling test claimed but not shown). This needs substantial revision.## Summary
-
-This paper proposes CeGNN, a graph neural network for spatiotemporal PDE prediction that introduces two architectural innovations: (1) **cell-embedded message passing** that incorporates triangular/tetrahedral cell features (centroid, area, relative positions) to upgrade aggregation from first-order (edge→node) to second-order (volume→edge→node), and (2) a **feature-enhanced (FE) block** that computes outer-product features with a learned mask and weight tensor to enrich node representations. The core contribution is methodological: reformulating message passing to include volumetric cell information alongside node-edge interactions. Experiments across five datasets (Burgers, FitzHugh-Nagumo, 2D/3D Gray-Scott, Black-Sea) show CeGNN achieves lower RMSE than MGN, MP-PDE, GAT, and FNO baselines, with 43–93% error reduction on synthetic PDEs and 8.4% on the real-world dataset.
+This paper proposes CeGNN, a graph neural network for learning spatiotemporal PDE dynamics. It introduces two complementary innovations: (1) a **cell-embedded message passing block** (CellMPNN) that adds learnable cell-level (volumetric) features to the standard node-edge message passing, upgrading aggregation from edge→node to volume→edge→node; and (2) a **Feature-Enhanced (FE) block** that constructs higher-order tensor features via outer product, then filters them through a learnable mechanism to combat over-smoothing. Experiments on four synthetic PDE systems (2D Burgers, 2D FitzHugh-Nagumo, 2D/3D Gray-Scott) and one real-world ocean temperature dataset (Black Sea) show that CeGNN consistently outperforms baselines including MeshGraphNets, MP-PDE, GAT, GATv2, and FNO, with up to ~14× error reduction on the Gray-Scott systems.
 
 ## Strengths
 
-1. **Cell-embedded message passing is a clean architectural innovation with empirical support.** The paper introduces learnable cell features into the GNN message-passing pipeline, reformulating it as volume→edge→node rather than just edge→node (Equations 5–7). The ablation (Table 4) confirms that removing the cell component consistently degrades performance across all datasets (e.g., 2D FN RMSE increases from 0.00364 to 0.00982 without cell), directly validating that the higher-order aggregation captures spatial dependencies that edge-only approaches miss.
+1. **Novel cell-embedded message passing demonstrably improves performance.** The cell mechanism upgrades aggregation from edge→node to volume→edge→node, and the ablation study (Table 6) confirms its contribution: removing the cell degrades RMSE on every dataset (e.g., 2D FN goes from 0.00364 to 0.00910, a ~60% increase). This is the paper's primary methodological novelty and it is well-supported by the evidence.
 
-2. **FE block consistently improves performance when plugged into multiple GNN architectures.** Table 3 (labeled "Effect" in the paper) shows that adding the FE block to MGN, MP-PDE, GAT, and GATv2 improves results across most settings, with particularly strong gains on MGN (e.g., 3D GS RD: RMSE drops from 0.01925 to 0.00721, a 62.5% reduction). This demonstrates the FE block's utility as a general-purpose enhancement module, not one narrowly tuned to CeGNN.
+2. **The FE block effectively reduces over-smoothing and enriches feature representation.** Table 5 shows that adding FE to MGN improves RMSE by 30.4% (Burgers), 41.1% (FN), 45.7% (2D GS RD), and 62.5% (3D GS RD). Table 6 confirms the full CeGNN (with FE) outperforms its FE-free variant on all five datasets. The mechanism is clearly motivated (outer product creates second-order nonlinear terms, the learnable mask selects informative combinations), and the feature-splitting scheme (Figure 3, Table 9) addresses computational cost.
 
-3. **State-of-the-art results across all five benchmarks.** Table 1 reports CeGNN achieving the lowest RMSE on every dataset, with error reductions of 43.4% (2D Burgers), 82.9% (2D FN), 91.4% (2D GS RD), 92.8% (3D GS RD), and 8.4% (Black-Sea) over the best baseline. Multi-step rollout visualizations (Figures 5–6) corroborate the quantitative results.
+3. **CeGNN achieves large, consistent error reductions across diverse PDEs and a real-world dataset.** In Table 2, CeGNN outperforms all baselines on every dataset: 43.4% (2D Burgers), 82.9% (2D FN), 91.4% (2D GS RD), 92.8% (3D GS RD), and 8.4% (Black Sea). The 91.4% and 92.8% reductions correspond to roughly one order of magnitude lower error than the best competitor (MGN). Generalization tests (Figures 5–6) confirm robust performance under varying initial conditions.
 
-4. **Clean ablation isolating each component's contribution.** The ablation study (Table 4) separately tests "w/o Cell, FE" (MGN baseline), "w/o Cell" (MGN+FE), "w/o FE" (CellMPNN without FE), and the full model, showing that both components contribute positively and that their combination yields the best results. The feature-splitting analysis (Table 6/impact_of_window_size) provides practical engineering guidance for controlling FE block complexity.
+4. **Thorough ablation and efficiency analysis validates design choices.** The paper systematically ablates cell and FE components (Table 6), examines feature-splitting (Table 9), and compares computational cost (Table 8). Notably, CeGNN (1.48M params) outperforms MGN with 12 layers (1.44M params, RMSE 0.01858 vs. 0.00664), showing gains come from architectural innovation, not added capacity.
+
+5. **Honest analysis of the FE block's negative interaction with attention mechanisms.** The paper reports that adding FE to GAT/GATv2 degrades performance (Table 5) and provides a clear explanation: the global normalization in attention aggregation is disrupted by the FE block's feature rearrangement. This candid discussion strengthens the paper's credibility.
 
 ## Weaknesses
 
 ### Fatal
-None. The core architectural ideas (cell-embedded messaging, FE block) are sound and supported by the ablation studies. No weakness invalidates the paper's central claims.
+None.
 
 ### Major
-
-1. **Data scaling results are claimed but entirely absent from the paper.** The paper states (Section 4.3, last paragraph): *"We also have performed a data scaling test and report the results (data size vs. ...). It can be observed that our model with a smaller amount of data has equal or superior performance compared with that of other methods (MGN and MP-PDE) with larger amounts of data."* No actual results — no table, figure, or numbers — appear anywhere. The sentence trails off in a typographically garbled form ("data size vs."), but the core problem is that **the claimed evidence does not exist in the submission**. Sample efficiency with limited data is highlighted as a key advantage in both the abstract ("particularly with limited datasets") and introduction. Presenting this claim without supporting data is a serious evidential gap that the authors must address.
-
-2. **The claim that improvement is due to cell features rather than additional parameters is unsupported by the presented comparison.** The paper states (Section 4.3): *"We have verified that the improvement of our model performance is due to the innovative use of cell features rather than the introduction of additional parameters."* The evidence is Table 5: CeGNN (1.48M params) vs. MGN with 12 layers (1.44M params), where MGN-12 performs worse. However, deeper MGN with the same channel width may suffer from optimization difficulties (over-smoothing, harder training) that have nothing to do with parameter count parity. A proper control would match parameter count by increasing MGN's hidden dimension at the same layer depth, not by adding layers. As presented, the parameter confound is not resolved, and the strong claim of "verification" is unjustified. This should be downgraded to a circumscribed claim or supported with a proper matched-capacity experiment.
+None.
 
 ### Minor
 
-1. **No error bars, confidence intervals, or multiple-run statistics are reported.** Every quantitative result in Tables 1–5 is a single number without variance estimates. While single-run reporting is common in PDE/ML due to training cost, the lack of any variance information means the reader cannot assess whether the reported improvements (especially the smaller 8.4% gain on Black-Sea) are significant relative to the noise floor. This does not invalidate the results, but it limits the strength of the quantitative evidence.
+1. **Ambiguity about MP-PDE training strategy.** The experimental setup (Section 4.3) states: "For fairness, we set the latent dimension to 128 and utilize the one-step training strategy...for **all tasks**" (emphasis added). However, the generalization test discussion (Section 4.4) says: "Although MP-PDE is trained by the multi-step prediction strategy during the training stage, its results are only slightly better than MGN on the BS dataset." The natural reading of the experimental setup is that MP-PDE was retrained with one-step like all other models, and the later comment describes the *original* MP-PDE paper's design. But the phrasing is ambiguous enough that a reader cannot be certain. The paper should explicitly state: "We retrained MP-PDE under the same one-step regime" (if that is the case) or clarify the discrepancy. This does not threaten the core claim — even in the worst case (MP-PDE advantaged by multi-step), CeGNN still outperforms it significantly — but it must be resolved for reproducibility. 
 
-2. **The over-smoothing claim is asserted as a demonstrated property but is never directly tested.** The paper repeatedly states that the FE block "relieves the over-smoothness problem" (abstract, introduction, Section 3.1.1, conclusion). However, no experiment measures feature similarity across layers, performs spectral analysis, or compares feature diversity with/without the FE block. The ablation only shows that FE improves RMSE, which could be due to increased expressiveness, better optimization, or other factors. This is a gap between what is claimed and what the evidence supports. Removing over-smoothing from the stated contributions or adding a targeted diagnostic would resolve this.
+2. **Cell definition for the 3D grid dataset is not specified.** The paper defines cells using triangle notation ($\triangle ijk$, centroid $\mathbf{x}_{\triangle ijk}$, area $A_{\triangle ijk}$) and Figure 4 shows a 2D triangular mesh. The 3D Gray-Scott dataset is generated on a regular grid, but the paper never explains how cells are constructed in 3D. Possible approaches include tetrahedralizing each voxel, using triangular surface elements, or some other scheme. The current formulation (3 nodes per cell, area-based features) does not trivially extend to 3D, and this missing detail affects reproducibility of the 3D results.
 
-3. **"Detecting discontinuities in space" is mentioned in the introduction but never elaborated.** The sentence *"Specifically, after detecting discontinuities in space, we introduce a learnable cell attribution..."* (Introduction, paragraph 3) suggests a specific preprocessing or detection mechanism for locating discontinuities, but neither the method section nor the experiments describe how this is done. This appears to be a remnant from an earlier draft and does not correspond to any component in the actual CeGNN architecture.
+3. **FE block mask status is unclear.** Algorithm 1 lists both $\mathbf{W}^{l}$ (weight tensor) and $\mathbf{M}^{l}$ (mask matrix) as "Parameters." The text (line 29) says "use a mask operation to randomly sample these terms into a learnable weight tensor," suggesting $\mathbf{M}^{l}$ is a fixed random binary mask while $\mathbf{W}^{l}$ is learned. But Algorithm 1 treats $\mathbf{M}^{l}$ as a parameter (implying it is learned). The paper should clarify whether $\mathbf{M}^{l}$ is (a) a fixed random binary mask, (b) a learned continuous matrix, or (c) something else, and how it interacts with $\mathbf{W}^{l}$.
 
-4. **The FE block algorithm has an underspecified tensor contraction.** Algorithm 1 Step 4: *"Multiply the masked states $\hat{\mathbf{h}}^{*l*} \in \mathbb{R}^{N\times D\times D}$ with the weight $\mathbf{W}^{l} \in \mathbb{R}^{D\times D\times D}$ to construct the final states $\mathbf{h}^{l} \in \mathbb{R}^{N\times D}$."* The indices being contracted are not specified (is this an einsum of the form `nij,ijk->nk`, a batched matrix multiplication, or another contraction order?). Given that a full tensor with $D^3$ parameters (~2M for D=128) is a significant design choice, the ambiguity prevents reliable reimplementation.
-
-5. **Missing experimental reproducibility details.** The experimental setup (Section 4.3) specifies latent dimension (128), optimizer (Adam), and hardware (A100), but omits: number of training trajectories, rollout length for evaluation, learning rate and schedule, batch size, total training epochs, and whether early stopping was used. These details are necessary for reproducibility and contextualizing computational cost (Table 5 reports s/epoch but without total epochs, total cost is unclear).
-
-6. **The real-world dataset improvement is modest and lacks contextualization.** CeGNN improves over MP-PDE on Black-Sea by only 8.4% (RMSE 0.60761 → 0.55599), contrasting sharply with the 43–93% gains on synthetic PDEs. The paper does not discuss why the method underperforms on realistic irregular-mesh data, nor does it describe the Black-Sea dataset source, resolution, or number of time steps. This limits the reader's ability to assess the method's practical utility.
-
-7. **GPU memory usage of 45.87 GB is very high without discussion of alternatives.** The paper does not discuss whether lower-memory variants (gradient checkpointing, smaller batch size, reduced latent dimension) are feasible, or whether the method can scale to larger 3D meshes common in engineering applications.
+4. **Data scaling experiment is mentioned in text but not properly presented.** The paper (Section 4.4, line 304) says: "tests were conducted on the Burgers example using 10, 20 and 30 trajectories as training data. It can be observed that our model with a smaller amount of data has equal or superior performance..." However, no table or figure is provided for this experiment, and the BS dataset size is not given. Given the prominence of the "small data" claim in the paper's framing, this deserves a proper presentation with quantitative results.
 
 ### Trivial
 
-1. The explanation for why the FE block degrades attention-based methods (Section 4.3, "Feature-enhanced effect") uses a simplified two-neighbor normalization example that does not account for multi-head attention or independent heads. The intuition is reasonable but the analysis is oversimplified.
-2. The "w/o Cell, FE" ablation row (Table 4) matches MGN's numerical values, but the paper does not confirm architectural equivalence beyond removing those two components (e.g., encoder/decoder design differences).
+- **Uneven improvement across domains.** The "up to 1 order of magnitude" claim is accurate for the 2D/3D Gray-Scott datasets (factors of ~12× and ~14×), but the improvement on Burgers is ~1.8×, on FN is ~5.8×, and on the real-world BS dataset is only 8.4%. A brief discussion of why the method's advantage varies so dramatically — particularly why the BS gain is marginal — would improve the paper's honesty and help readers understand where the method truly adds value.
 
 ## Nice-to-Haves
 
-- A diagnostic experiment directly measuring feature similarity or node feature diversity across GNN layers with and without the FE block would substantiate the over-smoothing claim.
-- A proper parameter-matched comparison (increasing MGN/MP-PDE hidden dimension at 4 layers rather than adding layers) would cleanly resolve the parameter-attribution question.
-- Reporting multiple random seeds with standard deviations would significantly strengthen the quantitative evidence.
-- Discussion of memory-efficient training strategies (gradient checkpointing, etc.) would address the practical usability concern.
+- **Diagnostics for the FE block's anti-over-smoothing effect.** The explanation for how FE alleviates over-smoothing is plausible but could be strengthened by quantitative evidence (e.g., node feature similarity metrics across layers with and without FE).
+- **Diagnostics for the FE-attention conflict.** The paper's explanation for why FE harms attention-based models is reasonable. Showing that attention weights become erratic or features collapse when FE is added would make the analysis more rigorous.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points were raised by reviewers but are removed after verification against the paper:
 
-- **"Related work does not discuss whether prior work already incorporated cell/face-level features"** — The reviewer speculates that MP-PDE uses "cell" features in a different sense. Without confirming MP-PDE's architecture details, this is an unverifiable claim and the paper adequately characterizes prior work's scope and limitations. (Removed per rule: DON'T mention missing related works as you cannot confirm existence.)
-- **"The paper would benefit from a controlled experiment for attention+FE explanation"** — This is a minor suggestion that does not affect the core contribution; the existing explanation (simplified as it is) provides reasonable intuition. Moved here as a wishlist item.
-- **Strength Finder claim that the FE block "directly supports the claim that FE relieves over-smoothing"** — This conflicts with the verified weakness that over-smoothing is never directly tested. The weakness wins. The FE block's performance improvement is genuine, but the over-smoothing attribution is unsupported. The strength is retained in modified form above (Strength 2, without the over-smoothing characterization).
+- **"Higher-order language overstates novelty."** Removed. The paper clearly defines "higher order" as volume→edge→node within its own framing. Cells aggregate information from three connected nodes of a triangle, which is a structurally different aggregation channel from edges. This is not an overstatement.
+- **"FE block + attention analysis is post-hoc story."** Removed. The paper provides a concrete mathematical explanation (normalized weighted summation disrupted by FE's feature rearrangement) supported by Table 5 results. This is substantive analysis, not a post-hoc story.
+- **Missing related works.** Removed per policy — no external sources to verify.
+- **Formatting/style nitpicks and typos.** Removed as parser artifacts.
+- **Reproducibility concerns about hyperparameters.** Removed — the paper provides adequate experimental details (latent dimension, training strategy, optimizer, noise injection, loss function).
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the tension between strong synthetic-benchmark results and weaker real-world gains, and the gap between claimed and demonstrated evidence for over-smoothing and sample efficiency. These are useful diagnostic observations but do not constitute a synthesis that goes beyond what the paper itself provides.
+None beyond the paper's own contributions. The reviews surface a useful observation: the dramatic variation in improvement across domains (from 8.4% on BS to ~93% on 3D GS RD) is itself a meaningful research question. Understanding when cell-level features matter most — structured PDEs vs. noisy real-world data, high-gradient regions vs. smooth fields — could guide future work on learned discretizations for physics simulation.
 
 ## Suggestions
 
-1. **Present the data scaling results in a proper table or figure** (RMSE vs. number of training trajectories for CeGNN and at least one strong baseline). This is non-negotiable: the paper claims sample efficiency as a key advantage but withholds the supporting evidence.
-2. **Replace the deep-MGN parameter control with a proper matched-parameter comparison** (e.g., MGN with larger hidden dimension at 4 layers). If this is infeasible, soften the attribution claim from "verified" to "suggested by."
-3. **Either add a diagnostic for over-smoothing** (average pairwise cosine similarity of node features across layers, with and without FE) **or remove over-smoothing from the list of demonstrated properties** and frame it as motivation only.
-4. **Add error bars or at minimum report results for 3 random seeds** on the main benchmark (Table 1). If training cost is prohibitive, report results for a subset.
-5. **Clarify the tensor contraction in Algorithm 1** (specify the einsum notation or contraction indices) and confirm whether the weight tensor is full-rank or factorized.
-6. **Provide standard reproducibility details**: number of training trajectories per dataset, learning rate, batch size, training epochs, and rollout horizon.
+1. **Clarify the MP-PDE training strategy.** Add an explicit statement: "All baselines, including MP-PDE, were retrained using the same one-step regime (Section 4.3) for a fair comparison."
+2. **Specify 3D cell construction.** Explain how cells are formed for the 3D regular grid (e.g., tetrahedralization, triangular faces, or another scheme) and how the cell feature computation generalizes from 2D triangles.
+3. **Clarify FE block mask.** Provide a clear statement of whether $\mathbf{M}^{l}$ is a fixed random binary mask or a learned parameter, and how it interacts with $\mathbf{W}^{l}$.
+4. **Present the data scaling experiment as a proper table or figure** with RMSE vs. training set size for CeGNN, MGN, and MP-PDE.
+5. **Add a brief discussion of why improvement varies so dramatically** (91–93% on GS RD vs. 8.4% on BS) to help readers understand the method's practical applicability.
 
 ## Score and Decision
 
-The paper presents a sensible architectural contribution (cell-based message passing + outer-product feature enhancement) and demonstrates strong results on synthetic PDE benchmarks. The core ideas are worth exploring and the ablation study is well-designed. However, the evaluation has significant evidential gaps: (1) the data scaling experiment — which the paper itself highlights as a key advantage — is claimed but entirely absent, (2) the central attribution claim (gains are due to architecture, not parameters) rests on a flawed matched-parameter comparison, and (3) the over-smoothing alleviation claim is asserted without direct evidence. These are not minor fixable issues; they require additional experimentation or substantial rewriting to align claims with evidence. In its current form, the paper oversells what it demonstrates. With the recommended revisions, it could become a solid contribution.
+The paper makes a genuine contribution: the cell-embedded message passing is novel, well-motivated, and convincingly shown to improve performance across diverse PDE systems through thorough ablation studies. The FE block is a complementary contribution that further reduces error and addresses over-smoothing. The weaknesses identified are all minor clarity issues that can be resolved through textual clarifications or additional exposition — none threaten the paper's core empirical findings. The paper is acceptable after minor revisions.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

@@ -1,78 +1,72 @@
-Now I have a thorough understanding of the paper and all reviewer claims. Let me compose the final consolidated review.
-
----
+Now I have all the information I need. Let me write the final consolidated review.
 
 ## Summary
 
-This paper introduces ORSO (Online Reward Selection and Policy Optimization), a framework that treats the problem of selecting among candidate shaping reward functions as an online model selection problem. The method uses bandit/online selection algorithms (ETC, ε-greedy, UCB, EXP3, D³RB) to allocate training iterations across candidate reward functions. The paper provides a regret analysis under an idealized monotonicity assumption (Assumption 4.2), showing that D³RB achieves improved regret bounds, and presents empirical results on six continuous control tasks in Isaac Gym.
+This paper introduces ORSO (Online Reward Selection and Policy Optimization), which frames the problem of selecting shaping reward functions for RL as an online model selection problem. The method uses an LLM to generate candidate reward functions, then applies adaptive allocation algorithms (notably D³RB) to decide which reward function to train on at each stage, balancing exploration and exploitation. The paper provides regret guarantees for ORSO with D³RB under a structural assumption, and presents experiments on 6 continuous control tasks showing that ORSO reaches human-level performance roughly twice as fast as naive uniform allocation.
 
 ## Strengths
 
-- **Framing reward selection as online model selection is sensible and practically motivated.** The paper formalizes a real bottleneck in reward design — the need to evaluate many candidate reward functions — as an exploration-exploitation problem, which is a natural and useful framing. The distinction between reward generation and reward selection phases is clearly drawn.
+- **Novel problem framing**: Formalizing reward function design as an online model selection problem with a regret-based objective (Definition 3.1, Equation 2) is a principled departure from prior heuristic reward search methods. This framing naturally captures the exploration-exploitation tradeoff inherent in reward selection and connects to a well-studied theoretical literature.
 
-- **Systematic comparison of five selection algorithms with informative ablation.** The paper compares ETC, ε-greedy, UCB, EXP3, and D³RB (Section 5.3, Figures 4–6), showing that more exploratory algorithms (D³RB, EXP3) outperform greedy methods, and that even simple strategies beat uniform allocation. This ablation provides genuine insight into which algorithms suit the reward selection problem.
+- **Empirical speedup over naive selection**: Across 6 continuous control tasks, 3 budget levels, and 162 runs, ORSO with D³RB reaches human-level policy performance in less than half the iterations required by naive uniform selection (Figure 2, left). The advantage is consistent and grows with the number of candidates (Figure 6).
 
-- **Empirical results demonstrate ORSO reaches human-level performance faster than uniform allocation.** Across 6 tasks, 3 budgets, and multiple seeds, ORSO with D³RB reaches human-level performance in roughly half the iterations of the naive uniform-allocation baseline (Figure 2, left). The method also scales with budget and outperforms naive selection on large candidate sets (K=48,96, Figure 6).
+- **Comprehensive ablation of selection algorithms**: The paper evaluates five selection algorithms (ETC, ε-greedy, UCB, Exp3, D³RB) and shows that even simple adaptive strategies substantially outperform naive uniform allocation (Figures 4, 5). This validates that the core framing — treating reward design as a sequential decision problem — is what drives the gains.
 
-- **Improved regret analysis under the monotonicity assumption.** Lemma 4.4 shows that under Assumption 4.2, D³RB's regret scales with the true regret coefficient \(d_T^{i_\star}\) rather than the worst-case coefficient \(\bar{d}_T^{i_\star}\), which is a genuine refinement of the general D³RB analysis in Dann et al. (2024).
+- **Scalability to large candidate sets**: ORSO maintains its advantage when the candidate set grows to K=48 or 96 (Figure 6, Ant task), a realistic setting for automated reward generation where greedier methods degrade.
+
+- **Computational efficiency analysis**: The paper provides GPU-time-to-performance estimates (Figure 3), showing that ORSO can match the wall-clock performance of a parallelized naive baseline using far fewer GPUs.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The main empirical baseline ("Naive Selection") is confusingly specified, undermining the headline quantitative claims.** The paper states "We employ EUREKA as a baseline for the naive selection approach" (Section 5.1.1) but then describes naive selection as allocating a fixed number of iterations uniformly across candidates — a description that does not match EUREKA's actual evolutionary algorithm. The central claims that ORSO is "more than twice as fast" (abstract, Figure 2) and requires "up to 16× less compute" (Section 5.2, Figure 3) are measured against this baseline. Because the baseline's implementation is unclear — is it EUREKA's full evolutionary process, or simply uniform allocation after generation? — the significance of these headline comparisons is unclear. The paper would substantially benefit from (a) clarifying exactly what the baseline does, (b) separating the uniform-allocation ablation from a "prior method" comparison, and (c) tempering the claim that speedups are relative to "current methods" rather than to a naive strategy.
+- **Assumption 4.2 is strong and unchecked, overstating the "provable regret guarantees" claim**: The theoretical guarantee (Lemma 4.4) relies on Assumption 4.2, which requires that there exists a learner whose cumulative expected reward dominates all others at all times *and* whose average performance is non-decreasing. In RL training, policy performance often oscillates, plateaus, or degrades due to exploration noise, policy updates, and nonstationarity. The paper provides no argument — theoretical or empirical — that this assumption holds in any of the tested environments, nor does it discuss when it might be violated. The abstract and introduction prominently claim "provable regret guarantees" without qualification. A guarantee that depends on an unchecked assumption that may not hold in practice is not a guarantee a practitioner can rely on. This does **not** invalidate the empirical contribution, which stands separately, but it does mean the theoretical claims are significantly weaker than advertised.
 
 ### Minor
 
-- **Assumption 4.2 is strong and its practical relevance is not examined.** The assumption requires that the optimal learner's *expected cumulative reward dominates all others at all time steps* and has non-decreasing average performance. The paper does not test whether this holds empirically, nor does it discuss how the algorithm degrades when the assumption is violated. The theoretical contribution is valuable under the stated assumption, but the gap between theory and practice is unaddressed.
+- **Naive baseline / EUREKA comparison is underspecified**: The paper describes the naive baseline as EUREKA-based, but also characterizes it as "uniformly exploring each reward function for a fixed number of iterations." EUREKA uses an evolutionary loop across multiple generations, which involves more total computation than a single set of K candidates. It is unclear whether the reported "naive" baseline matches EUREKA's full pipeline (with multiple generations) or a simplified single-generation uniform allocation. This ambiguity makes it hard to interpret whether the comparison is apples-to-apples on total compute.
 
-- **Only aggregated results are shown; per-task breakdowns are absent.** The paper reports that ORSO "consistently matches or exceeds human-designed rewards, particularly in more complex environments" (Section 5.2), but results are only shown as averages across 6 tasks, 3 budgets, and 3 random seeds (Figure 2). Without per-task data, the reader cannot assess whether the aggregate advantage is driven by a subset of tasks or is consistent across all environments. This is especially relevant given that the PPO hyperparameters were tuned specifically for the human-designed rewards (acknowledged in Sections 5.1 and 5.3), which gives the human baseline a structural advantage that may vary by task.
+- **Iterative resampling mechanism is ambiguous**: The paper mentions "iterative resampling and in-context evolution" (Section 5.1.2) to handle the risk that the initial candidate set contains no good reward functions, but it does not clearly state whether this mechanism is used in the main experiments, and if so, on what schedule. The main results (Figure 2) are presented as if the candidate set is fixed, but the text suggests resampling may occur after at least 100 selection steps. This needs clarification for reproducibility.
 
-- **The "twice as fast" claim is complicated by the baseline not reaching the threshold.** The paper states that "the naive selection strategy on average does not manage to select an effective reward function within the limited budget" (Section 5.2). If the naive baseline plateaus below human-level performance, claiming "twice as fast to reach human-level" is comparing against a baseline that never reaches that milestone — making the comparison somewhat ill-defined. The paper should clarify the basis for this computation.
+- **Regret definition disconnect between theory and experiments**: The model selection regret defined in Equation (2) uses the *best policy observed so far* (π*_t), which can be negative and is not the same quantity targeted by the D³RB analysis. The paper notes in one sentence that the standard regret definition is "an upper bound" for their definition (Section 4), but does not prove or discuss this relationship. This weakens the narrative that the theoretical guarantees directly justify the empirical speed-ups.
 
-- **Selection algorithm hyperparameters are not reported.** The paper does not specify the ε value for ε-greedy, the learning rate for EXP3, the confidence parameter \(c\) for D³RB, or the value of \(d_{\min}\). These details affect reproducibility and may influence the relative ranking of selection algorithms in the ablation study.
+- **n_iters value not explicitly stated**: The selection granularity N is set to n_iters/100, but the value of n_iters (the number of training iterations used for baselines) is never reported, making it impossible to gauge the granularity of the selection process.
+
+- **D³RB hyperparameters not reported**: Tunable parameters for D³RB (confidence parameter δ, constant c, etc.) are not specified for the experiments, hurting reproducibility.
+
+- **No statistical significance testing for "surpasses human" claim**: The paper claims ORSO "surpasses human-designed rewards" (Section 5.2), but Figure 2 (middle) shows overlapping 95% confidence intervals in many settings, and no formal statistical test or effect size is reported.
 
 ### Trivial
+
 None.
 
 ## Nice-to-Haves
 
-- A per-task results table (normalized return for each environment) would substantially strengthen the empirical evaluation.
-- A discussion of how the regret bounds degrade when Assumption 4.2 is violated would improve the theory section's honesty.
-- Wall-clock time measurements (rather than approximations based on per-iteration time) for the GPU comparison would be more convincing.
-- An analysis of how often iterative resampling is triggered and the quality of the generated reward set (e.g., fraction of buggy candidates) would contextualize the selection problem.
+- Per-task results (individual learning curves) alongside the aggregated plots would help readers assess whether ORSO's superiority is consistent across environments or driven by a subset.
+- A sensitivity analysis of Assumption 4.2 (e.g., plotting the cumulative task reward of the best policy to check approximate monotonicity) would strengthen the theoretical contribution.
+- Analysis of how the quality of the LLM-generated candidate set affects ORSO's performance would be interesting but is outside the paper's stated scope.
 
 ## Removed Points
 
-- **Missing comparison against L2R, Text2Reward, etc.:** These are reward *generation* methods, not selection methods. Criticizing the paper for not comparing against a fundamentally different paradigm is scope creep (Soft Rule — scope).
-- **Proof not visible in paper body / missing appendix:** Rule 9 — the appendix is stripped by the PDF parser; the proof exists in the original submission.
-- **Missing related work on bandit-based reward selection:** Rule 4 — cannot confirm existence of relevant prior work without external sources.
-- **Seeds not clearly stated:** Factually incorrect — the paper states 3 seeds for main experiments (Section 5.2) and 5 for the large reward set (Section 5.3).
-- **Figure 1 contradicts Assumption 4.2:** Misreading. Figure 1(b) shows a scenario where f² hasn't been trained yet early on, not where it has intrinsically worse expected returns per training iteration. The assumption is about expected rewards given equal training, which the figure does not violate.
-- **Human-designed reward baseline is "wrong gold standard":** The paper explicitly acknowledges the hyperparameter tuning advantage (Sections 5.1, 5.3) and addresses it directly. The criticism is already addressed by the paper.
+- **"Reward generation from GPT-4 is treated as a black box"**: This is scope creep — the paper's contribution is about selection, not generation. The paper does not claim to analyze the generator.
+- **"Computation-time comparison is an estimate"**: The paper explicitly acknowledges this and qualifies the claim. Not a real weakness.
+- **"Human rewards are not necessarily optimal"**: The paper does not claim human rewards are optimal; it uses them as a reasonable baseline from prior work. The claim is that ORSO matches or surpasses this baseline.
 
 ## Novel Insights
 
-The reviews surface an interesting tension: the paper's main claim to practical impact rests on a speedup relative to a baseline that is both weakly specified and probably too weak to be a fair proxy for "current methods." However, the internal ablation study — comparing five selection algorithms on the same candidate set — provides genuine evidence that framing reward selection as an online learning problem is useful, independent of whether the naive baseline is strong or weak. This suggests the paper's real contribution is the problem formalization and the finding that D³RB and EXP3 outperform greedy methods on this task, not the absolute speedup claim.
+None beyond the paper's own contributions. The reviewer critiques largely refine or qualify the paper's claims rather than introducing new observations.
 
 ## Suggestions
 
-1. **Clarify the naive selection baseline.** State explicitly whether the baseline uses full EUREKA evolution or simply samples candidates once and allocates uniformly. If the latter, rename it "Uniform Allocation" and remove the EUREKA reference. Add a separate uniform-allocation baseline that is unambiguously described.
-
-2. **Add a per-task results table** to the main paper (or make the appendix visible). This is essential for readers to assess where ORSO gains and where it does not, especially given the acknowledged hyperparameter bias toward the human baseline.
-
-3. **Temper the headline claims** to reflect what is actually compared. Replace "2× faster than current methods" with "2× faster than uniform allocation" or provide a comparison against a credible prior method.
-
-4. **Discuss the gap between Assumption 4.2 and practice.** Even a brief paragraph acknowledging that the assumption is strong and describing how the method behaves without it would significantly strengthen the theory section.
-
-5. **Report selection algorithm hyperparameters** (ε, learning rate, c, d_min) in the main paper or a table.
+1. Soften the theoretical claims in the abstract and introduction to acknowledge the reliance on Assumption 4.2. Alternatively, provide empirical evidence that the assumption approximately holds in the tested environments.
+2. Clarify exactly what the "naive" baseline is: is it full EUREKA with multiple generations, or a single-generation uniform allocation? If the former, compare under the same total interaction budget.
+3. State whether iterative resampling is used in the main experiments. If used, describe the schedule; if not, clarify.
+4. Explicitly report n_iters for each task and the hyperparameters (δ, c) used for D³RB.
+5. Include a note on statistical significance for the "surpasses human" claim, or soften the language to "matches or tends to exceed."
 
 ## Score and Decision
 
-The paper formalizes a useful problem and provides a clean empirical comparison of online selection algorithms for reward design. The internal ablation study is solid, and the theoretical refinement of D³RB's regret bound is a genuine contribution. However, the paper's headline claims are built on a baseline that is confusingly specified, and the absence of per-task results makes it difficult to assess the robustness of the empirical conclusions. These issues are addressable via revision but are substantive enough that the paper in its current form overclaims relative to the evidence. I recommend revision and resubmission.
+The paper introduces a conceptually clean and practically motivated framing, backed by a solid empirical evaluation across multiple tasks, budgets, and ablation conditions. The main weakness is an overclaimed theoretical guarantee that rests on a strong unchecked assumption — but this does not undermine the empirical contribution, which is the paper's primary deliverable. The experimental specification issues (baseline clarity, n_iters, hyperparameters) are addressable in a revision. Overall, this is a valuable contribution that advances the automated reward design literature.
 
-**MY FINAL SCORE:** <pineapple>5.5</pineapple>
-**MY FINAL DECISION:** <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

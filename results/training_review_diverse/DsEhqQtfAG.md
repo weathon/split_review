@@ -1,86 +1,78 @@
-Now I have verified all reviewer claims against the actual paper. Let me produce the final consolidated review.
+Now I have all the evidence I need. Let me write the final consolidated review.
 
 ---
 
 ## Summary
 
-The paper proposes Decomposed Diffusion Sampling (DDS), a method that replaces the computationally expensive manifold-constrained gradient (MCG) in diffusion-based inverse problem solvers with efficient Conjugate Gradient (CG) iterations on the denoised estimate. The theoretical insight is a conditional proof: if the tangent space at a denoised sample forms a Krylov subspace, then CG updates stay within that tangent space, making MCG unnecessary. The method is applied to large-scale medical imaging (multi-coil MRI and 3D CT), achieving 80–200× inference speedups over prior diffusion solvers while maintaining or improving reconstruction quality.
+This paper proposes Decomposed Diffusion Sampling (DDS), which replaces the expensive manifold-constrained gradient (MCG) computation in diffusion-based inverse problem solvers with efficient conjugate gradient (CG) iterations on the denoised (Tweedie) estimate. The method achieves state-of-the-art reconstruction quality on multi-coil MRI and 3D CT while reducing the number of function evaluations by 40–80× compared to prior diffusion-based solvers. The empirical contributions are substantial and clearly demonstrated across multiple modalities, sampling parametrizations (VP/VE), and noise conditions.
 
 ## Strengths
 
-- **Dramatic and well-documented practical acceleration.** DDS achieves state-of-the-art results with 19–99 NFE on tasks where prior methods require 1000–4000+ NFE. For 4× accelerated multi-coil MRI, DDS (99 NFE) reaches 34.88 dB PSNR vs. Score-MRI (4000 NFE) at 33.25 dB (Table 1). For 8-view CT, DDS (49 NFE) surpasses DiffusionMBIR (4000 NFE) at both PSNR and SSIM (Table 4). Wall-clock times are reported (e.g., ~4.7 sec for 49 NFE MRI; ~25 min vs. ~2 days for CT on a single RTX 3090).
+- **Dramatic acceleration with improved quality.** On multi-coil MRI (Uniform 1D ×4), DDS with 49 NFE achieves 34.61 PSNR / 0.956 SSIM, outperforming Score-MRI (33.25 PSNR, 4000 NFE) and DPS (30.56 PSNR, 1000 NFE). On 8-view sparse-view CT, DDS VP (49 NFE) achieves 33.86 PSNR vs. DiffusionMBIR's 33.49 PSNR (4000 NFE). These results are consistently verified across tables in the paper, supporting the claim of ≥80× speedup with superior or competitive quality.
 
-- **Broad experimental validation across challenging real-world tasks.** The paper evaluates on 5 MRI sampling patterns (including non-Cartesian NUFFT), multiple acceleration factors, noisy measurements, and two CT tasks (sparse-view and limited-angle), with both VP and VE diffusion schedules. This goes well beyond typical benchmarks in the DIS literature.
+- **Clean ablation isolating the CG contribution.** Table 2 (ablation) compares Score-MRI, DDNM, and DDS under identical DDIM sampling (49 NFE, uniform 1D ×4). DDS (34.61 PSNR) substantially outperforms both DDNM (31.36) and Score-MRI (26.48), with 5 CG iterations striking an optimal balance. This directly isolates the CG-based data consistency as the source of improvement.
 
-- **Principled handling of noisy measurements without SVD.** The proximal CG formulation (Eq. 17) avoids singular value decomposition, which is non-trivial for medical imaging forward operators. DDS (49 NFE) outperforms DPS (1000 NFE) by >5 dB PSNR on noisy MRI while being ~40× faster (Table 3).
+- **Broad applicability demonstrated.** The method is evaluated on multi-coil MRI (including non-Cartesian NUFFT), 3D CT (sparse-view and limited-angle), VP and VE parameterizations, and noisy measurements — covering a wider range of realistic settings than most prior DIS work.
 
-- **Clean conceptual connection between Krylov methods and diffusion geometry.** The observation that MCG is a single-step projected gradient (Proposition 1) and that multi-step CG can replace it under a Krylov subspace condition (Section 3) provides a principled framework for understanding why numerical optimization on the denoised estimate works well.
+- **Practical advantages.** DDS avoids backpropagation through the denoiser (required by DPS) and eliminates step-size tuning (required by gradient-based DIS methods), both of which are non-trivial practical benefits.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-- **The paper's central theoretical claim rests on an unverified condition that is not argued or tested.** The paper proves that *if* the tangent space at a denoised sample coincides with a Krylov subspace of the forward operator, *then* CG updates stay within that tangent space. However, it provides no evidence — empirical or theoretical — that this Krylov subspace condition holds (or approximately holds) for any of the tested forward operators (MRI Fourier sampling, CT Radon transform) or for natural image manifolds. The paper acknowledges the affine subspace assumption is an approximation (line 229), but the leap from "affine subspace" to "tangent space = Krylov subspace of A" is never justified. Without this, the theoretical framing is a motivating intuition rather than a verified explanation. The method's practical success is well-demonstrated empirically, but the paper should either (a) provide evidence of subspace containment (e.g., measuring how close CG-updated images stay to the estimated tangent space via local PCA or Jacobian analysis), or (b) clearly reframe the theory as an intuitive motivation and present the method as a well-motivated heuristic.
+- **The core theoretical claim is conditional on an unverified premise.** The paper argues that if the tangent space at a denoised sample equals a Krylov subspace of the forward operator, then CG updates remain in the tangent space and no MCG is needed. While the paper is transparent about the "if" (lines 246–253 state "Suppose, furthermore, that..."), it provides no evidence — theoretical or empirical — that this condition holds in practice. The tangent space of the data manifold is a geometric object determined by the data distribution; the Krylov subspace is defined solely by the linear operator **A** and the residual. There is no a priori reason these should coincide, and the paper's brief appeal to "piece-wise linear regions" (line 229) does not bridge this gap. This does not invalidate the method — the empirical results are strong — but the paper's framing as a "synergistic combination" with a "principled justification" (abstract, intro) overreaches relative to what is actually established. The method would be better described as an empirically motivated heuristic with a plausible but unverified geometric interpretation.
 
 ### Minor
 
-- **DPS baseline uses a non-standard sampling variant, and step-size re-tuning is not documented.** The paper uses DDIM sampling for DPS (line 348) rather than its original ancestral (DDPM) sampling. While the authors provide a rationale (isolating the effect of CG vs. MCG by keeping the sampling strategy fixed), DPS's step size γ was originally designed and tuned for ancestral sampling. The paper reports grid search on η for DPS but does not state whether γ was re-tuned for DDIM. If γ was not adjusted, this could disadvantage DPS. Given the large performance gap, the main conclusion is likely robust, but the concern should be addressed.
+- **The logical flow from Proposition 1 to the multi-step CG argument is not fully connected.** Proposition 1 shows that under an affine-subspace assumption, the DPS/MCG update reduces to a projected gradient. The paper then jumps to doing multi-step CG within the tangent space, introducing the Krylov subspace condition as a separate argument. The connection between these two pieces — why Proposition 1 motivates using CG specifically — is not clearly articulated, making the theoretical narrative feel disjointed.
 
-- **The choice of M=5 CG iterations is disconnected from the theoretical condition.** The theory requires M ≤ *l* where *l* is the (unknown) Krylov subspace dimension matching the tangent space. M=5 is chosen via ablation on a single configuration (uniform 1D ×4, 49 NFE). This empirical approach is standard and the ablation is useful, but the paper would be stronger with a broader sensitivity analysis across tasks and with some attempt to estimate *l* or verify subspace containment.
+- **Noisy reconstruction experiments are limited.** Only one noise level (σ=0.05) and two mask patterns are evaluated. While the paper correctly notes that SVD-based methods (DDNM) are inapplicable here, a broader evaluation across noise levels would strengthen the claim of robustness.
 
-- **Missing standard deviations in the noisy MRI results (Table 3).** The noiseless MRI results (Table 1) report mean ± std, but the noisy results (Table 3) report only means. The CT results (Table 4) indicate std values are deferred to a supplementary table, which is acceptable if present.
+- **Hyperparameter η is tuned per NFE.** The paper reports η=0.15 for 19 NFE, η=0.5 for 49 NFE, η=0.8 for 99 NFE. While this tuning is common in practice, it somewhat reduces the method's claimed generality and introduces a free parameter that could affect reproducibility across different settings.
 
-- **The η values for DDS vary with NFE (0.15 for 19 NFE, 0.5 for 49, 0.8 for 99) without explanation of how to set this parameter in practice.** This suggests η may be sensitive to sampling aggressiveness, which is relevant for practitioners trying to reproduce the method.
+- **VE parametrization instabilities acknowledged but not analyzed.** The paper notes that VE suffers from numerical instability with large NFE (line 385), which limits the claimed generality of being applicable "regardless of parametrization." The source of this instability is not discussed.
 
 ### Trivial
 
-- **Minor formatting inconsistency:** The paper claims to be "step-size-free" (line 316) regarding the CG optimization, but the overall method still requires tuning η and γ. This scope nuance is clear in context but could be clarified to avoid confusion.
+None.
 
 ## Nice-to-Haves
 
-- An explicit comparison between DDS and DPS with the original ancestral (DDPM) sampling at comparable NFE (even if approximate) would strengthen the baseline fairness argument.
-- For the ablation on CG iterations (M), testing across multiple mask patterns and acceleration factors (beyond uniform 1D ×4) would increase confidence in the robustness of M=5.
-- A brief discussion or visualization of failure cases (e.g., 2-view CT where DDS still outperforms baselines but performance degrades) would help users understand limitations.
+- An empirical analysis showing how much CG updates actually deviate from the tangent space (e.g., using the denoiser's Jacobian to estimate the tangent space and computing the projection residual) would either validate or clarify the theoretical motivation.
+- Reporting condition number estimates for the imaging operators used would help understand CG convergence behavior and guide the choice of M (number of CG steps).
+- A dedicated limitations/discussion section covering failure cases (e.g., very high acceleration factors, severely ill-conditioned forward operators) would improve scientific completeness.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
+The following criticisms from the harsh reviewer are removed because they are factually incorrect or the paper already addresses them:
 
-1. Criticisms about missing comparisons against non-DIS methods (e.g., compressed sensing with learned dictionaries): The paper's scope is diffusion-based inverse solvers, and it already includes strong CS baselines (TV, ADMM-TV). Demanding coverage of orthogonal literature classes is scope creep.
-
-2. Claim that the paper's theoretical claim is presented as a "given" condition: The paper repeatedly uses "if" and "Suppose" language (line 247, abstract "if the tangent space... forms a Krylov subspace"). The conditionality is transparent. The real weakness is the lack of verification, which is kept in Major.
-
-3. Suggestion that wall-clock times should be tabulated across all methods: The paper reports wall-clock times for DDS (lines 391, 476) and notes the dramatic contrast with prior methods (Score-MRI's 120k NFE, DiffusionMBIR's 2 days). A systematic table would be nice but the data is effectively communicated.
-
-4. Demand for comparison against DDNM in the main MRI table: DDNM is compared in the dedicated ablation (Table 1 in text), which is the appropriate place for a method that the paper argues is conceptually inferior for medical imaging. Its omission from the main table is justifiable.
-
-5. Criticism that the paper "oversells the theoretical guarantee": The paper's language ("we prove that if... then...") is technically accurate as a conditional proof. The issue is the unverified premise, which is already captured in the Major weakness above.
+- **"The paper does not analyze the computational cost of CG relative to the cost of the diffusion denoiser"** — The paper explicitly reports this (line 359): "a single CG iteration takes about 0.004 sec" and compares analytic (4.51 sec) vs. CG(5) (4.71 sec).
+- **"The paper does not compare against DPS with DDIM"** — Line 348 explicitly states: "for DPS, we use the DDIM sampling strategy to show that the strength of DDS not only comes from the DDIM sampling strategy but also the use of the sampling together with the CG update steps."
+- **"More comparisons with DDNM for noisy cases... the authors should explain why"** — The paper already explains (lines 421–423): "methods that try to cope with measurement noise via SVD... are not applicable and cannot be compared."
+- **"Insufficient comparison" / "overstated novelty"** — The paper compares against 6+ DIS methods (Score-MRI, Jalal et al., DPS, DDNM, DiffusionMBIR, MCG, Score-Med) across two major modalities, plus supervised and CS baselines. The baseline set is comprehensive for the settings studied.
+- **"The 80× faster claim should be stated more clearly"** — The paper provides wall-clock times (4.7 sec for 49 NFE on RTX 3090) and explicitly attributes the speedup to NFE reduction with minimal per-step CG overhead, which is appropriate.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews primarily validate the paper's empirical strengths and identify the gap between its theoretical framing and the evidence provided. No reviewer identified a structural flaw or novel application the authors missed.
+The key observation that bridges the harsh critic's and strength finder's perspectives is this: the paper's real contribution is an effective computational shortcut (replacing backprop-through-denoiser with CG on the denoised estimate), but it is framed as a theoretical insight about manifold geometry and Krylov subspaces. The empirical results are strong enough that the method stands on its own as a practical contribution; the theoretical scaffolding is at best suggestive and at worst a distraction from what is actually a clever engineering insight. A reader interested in the method's practical value will find plenty of evidence; a reader interested in a principled understanding of why it works will find only a conditional argument with an unverified premise. This mismatch between framing and substance is the paper's central weakness, not any flaw in the experiments or the algorithm itself.
 
 ## Suggestions
 
-1. Add an experiment that provides empirical evidence about the tangent-space-containment property. For a few representative cases, estimate the tangent space (e.g., via the Jacobian of the denoiser or local PCA) and measure the distance between the CG-updated denoised image and its projection onto that space. This would directly test the paper's motivating assumption.
-2. For the DPS baseline, either (a) report results with ancestral (DDPM) sampling and document step-size re-tuning, or (b) more clearly justify why DDIM is the appropriate comparison and state whether γ was re-tuned.
-3. Add standard deviations to Table 3 (noisy MRI), and move std values for CT from the appendix into the main table or clearly reference the appendix.
-4. Provide guidance on how to set η in practice (e.g., a heuristic or a small ablation).
-5. Broaden the ablation on M (CG iterations) to at least one more mask/acceleration combination to support the claim that M=5 is generally robust.
+1. Reframe the theoretical contribution: explicitly describe the Krylov subspace condition as a **sufficient condition** that motivates the method but is not verified, and position the paper's primary contribution as an empirically effective and computationally efficient heuristic. The empirical results do not need the theoretical justification to be compelling.
+
+2. Add an empirical analysis measuring how far CG updates deviate from the estimated tangent space (e.g., via the denoiser's Jacobian). This would either validate the geometric motivation or provide a more honest characterization.
+
+3. Expand the noisy reconstruction experiments to at least two noise levels and additional mask patterns.
+
+4. Include a brief discussion of limitations and failure cases (e.g., very high acceleration factors where DDS underperforms).
+
+5. For the VP/VE generality claim, add a short analysis of when and why VE becomes unstable.
 
 ## Score and Decision
 
-**Originality:** Good — the combination of CG with diffusion for the tangent-space property is novel.  
-**Importance of research question:** High — accelerating DIS for medical imaging is practically significant.  
-**Claims well supported:** Generally yes for empirical claims; the theoretical framing lacks verification of its key premise.  
-**Soundness of experiments:** Good breadth and quality, with minor gaps (DPS DDIM variant, missing std).  
-**Clarity of writing:** Clear.  
-**Value to community:** High — the speed-quality tradeoff is genuinely useful for medical imaging.
-
-The paper makes a strong empirical contribution with a useful practical method. The main weakness is the gap between the theoretical framing and the evidence for its key premise — but this does not invalidate the empirical results, which speak for themselves. The other issues are addressable in revision.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,76 +1,67 @@
-Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper provides theoretical upper and lower bounds on the number of tunable weights required for ResNet with bottleneck blocks (b-ResNet) to approximate monomials, polynomials, smooth functions, and a KST-based function class. The main result is that b-ResNet achieves a factor-of-\(d\) reduction in tunable weights compared to the best known ReLU FNN constructions, with approximation guarantees that are order-optimal in \(\varepsilon\). The paper also shows that ResNet can circumvent the curse of dimensionality for a dense subclass of continuous functions via the Kolmogorov Superposition Theorem.
+This paper studies the approximation capabilities of ResNet (specifically bottleneck ResNet, or b-ResNet) through the lens of parametric complexity — how many tunable weights are needed to approximate various function classes to error ε. The main results are: (1) b-ResNet approximates any d-dimensional monomial of degree p with O(p log(p/ε)) tunable weights (Theorem 3), a factor of d fewer than the best known ReLU FNN construction from DeVore et al. (2021); (2) extension to polynomials (Theorem 4) and smooth functions in W^{r,∞} (Theorem 5, achieving O(ε^{-d/r} log(1/ε)) weights); (3) a KST-based construction that avoids the curse of dimensionality for a dense subclass (Theorem 8); and (4) lower bounds transferred from FNNs via an equivalence result (Proposition 1). The paper also provides limited experimental validation.
 
 ## Strengths
 
-- **Factor-of-\(d\) reduction in tunable weights for monomial approximation (Theorem 3).** The paper shows that b-ResNet approximates any monomial of degree \(p\) on \([0,1]^d\) with \(\mathcal{O}(dp\log(p/\varepsilon))\) total weights, of which only \(\mathcal{O}(p\log(p/\varepsilon))\) are non-zero (tunable). This is a clear \(d\)-factor improvement over the best known ReLU FNN upper bound of \(\mathcal{O}(d^2 p\log(p/\varepsilon))\) total weights / \(\mathcal{O}(dp\log(p/\varepsilon))\) tunable weights (DeVore et al., 2021). The paper explicitly states and discusses this comparison (lines 149), making the contribution concrete.
+1. **Factor-of-d reduction in tunable weights for monomials (Theorem 3).** The paper constructs a b-ResNet with width independent of d that approximates any d-dimensional monomial of degree p using O(p log(p/ε)) tunable weights, compared to O(dp log(p/ε)) for the best known ReLU FNN construction (DeVore et al., 2021). This cleanly quantifies an architectural advantage of ResNet's identity shortcuts.
 
-- **Order-optimal \(\varepsilon\)-dependence for polynomial approximation.** Theorem 2 gives a lower bound of \(\Theta_d(\log 1/\varepsilon)\) neurons for any ReLU FNN (and thus any ResNet via Proposition 1) approximating polynomials. Theorem 3's upper bound matches this \(\varepsilon\)-dependence, and the paper explicitly notes this optimality (lines 149, 173). This tightness is a strong theoretical contribution.
+2. **Near-optimal approximation rates for smooth functions (Theorem 5).** The upper bound of O_{d,r}(ε^{-d/r} log(1/ε)) tunable weights for the Sobolev space W^{r,∞}([0,1]^d) matches the generalized lower bound Θ_r(ε^{-d/r}) up to a log factor. The paper acknowledges this gap and discusses it candidly.
 
-- **Circumventing the curse of dimensionality for a dense function class (Theorem 8).** For the class \(K_C\) (dense in \(C([0,1]^d)\)), the paper establishes that b-ResNet achieves \(\varepsilon\)-approximation with \(\mathcal{O}(d^4\varepsilon^{-1})\) tunable weights — polynomial in \(d\), directly avoiding the exponential dependence typical of uniform approximation in high dimensions. This is a noteworthy theoretical result.
+3. **Lower bounds via explicit ResNet-to-FNN equivalence (Proposition 1).** Showing that any ResNet can be simulated by a ReLU FNN with only a constant-factor increase in parameters is technically useful — it allows the paper to leverage existing FNN lower bounds for ResNet, and the proof is straightforward and sound.
 
-- **Mechanistic explanation of how identity mappings enable efficiency ("Root of reduction," lines 151–152).** The paper provides a clear verbal argument explaining why identity mappings allow a bottleneck block with constant width to maintain linear independence across layers, turning what would be an additive reduction into a multiplicative factor-\(d\) reduction. This gives conceptual insight into why the construction works.
+4. **Curse-of-dimensionality avoidance via KST structure (Theorem 8).** The construction approximating functions in the dense subclass K_C with O(d⁴ ε^{-1}) parameters (polynomial in d, not exponential) provides a concrete mechanism through which ResNet can overcome the curse of dimensionality for a nontrivial function class.
 
-- **Exact representation of CPwL functions with narrow ResNets (Theorem 6).** The result showing that ResNet with only one neuron per activation layer can exactly represent any continuous piecewise linear function extends prior step-function results and demonstrates the expressive power of very narrow ResNets.
+5. **Extension of ResNet's exact representation capability (Theorem 6).** Proving that a ResNet with one neuron per activation layer can exactly represent any CPwL function strengthens the universal approximation foundation for narrow ResNets, extending prior step-function results.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-None.
+1. **Theorem 2 (polynomial lower bound) is stated without proof or citation, yet is used to claim ε-order optimality.** The theorem claims T ≥ Θ_d(log 1/ε) for approximating polynomials of degree p, and the paper relies on it to argue that the upper bounds for monomials and polynomials (Theorems 3, 4) are ε-order optimal. However, the paper provides neither a proof nor a supporting reference — it merely says "the proof is simple" without elaboration. The claim also appears to potentially conflict with known results (e.g., Yarotsky 2017 gives a depth lower bound of Ω(log log 1/ε) for x², a special case of a degree-2 polynomial). Without a valid, stated lower bound, the optimality claim for monomials and polynomials is unsupported. This does not invalidate the paper's core constructive results (the upper bounds and factor-d reduction stand on their own), but it does mean the paper overclaims by asserting ε-order optimality for polynomial approximation.
 
 ### Minor
 
-- **The central bottleneck-block construction for approximating \(x^2\) and \(xy\) is not sketched in the main text.** The paper states that it constructs b-ResNet blocks for these primitives (lines 84–91) and provides the "Root of reduction" analysis explaining *why* identity mappings help (lines 151–152), but no concrete block-level example, weight assignment, or schematic is given in the body. The paper relies on "as shown in our constructive proof" (line 145), deferring all detail to the appendix. While this is common practice for theory papers, including a brief concrete illustration (e.g., a 2-dimensional case with explicit weight values) would make the core claim immediately verifiable by the reader and is the single highest-leverage improvement. It does not undermine the validity of the results — the construction exists in the full submission — but it does reduce the self-containedness of the main text.
+2. **The experimental validation does not test the paper's scaling predictions.** Section 6 compares b-ResNet against a fully connected network on a single composite function. While the results show that b-ResNet achieves lower error with fewer parameters, the experiments do not verify the predicted scaling with ε, p, or d (e.g., measuring required depth for varying ε). Given that the paper is primarily theoretical, minimal experiments are acceptable, but the current experiments add little beyond what the theory already claims.
 
-- **Experimental section (Section 6) is too minimal to be informative.** The experiments describe a test function, mention comparing b-ResNet with fully connected networks, and show MSE/MAX loss curves in figures that are not present in the parsed text. No architecture details, hyperparameters, dataset sizes, number of runs, or statistical significance are reported. The paper is primarily theoretical, so experiments are not required to support the core contribution; but if included, they should be presented with sufficient methodological detail to be interpretable. As they stand, they provide no evidentiary value and should either be expanded or removed.
+3. **The lower bound discussion for smooth and continuous functions is incomplete.** The paper quotes Yarotsky's lower bounds for "continuous ReLU network approximators" and applies them to ResNet via Proposition 1. However, the paper does not discuss whether the architectural constraints of ResNet (e.g., bounded weights in the construction) might affect which specific lower bound applies. The paper also acknowledges (line 200) that its smooth function upper bounds are suboptimal by a polynomial factor of 1/2 compared to the best FNN rates, suggesting the lower bound discussion could be more precisely aligned with the actual ResNet construction. This doesn't invalidate the results but makes the optimality claims harder to evaluate.
 
-- **Abstract makes an unsupported claim about "continuous-depth" networks.** The abstract states: *"Our results reveal that a continuous-depth network generated via a dynamical system possesses significant approximation capabilities even if its dynamics function is realized by a shallow ReLU network with absolute constant neurons."* The paper studies only discrete ResNet (as defined in Section 2.1) and contains no analysis of ODE-based continuous-depth models or dynamical systems. This claim in the abstract misrepresents the scope of the paper and is not justified by any result in the body. It should be removed or explicitly connected to the discrete ResNet studied.
+4. **The "Root of reduction" explanation, while reasonable, is heuristic rather than a formal rank argument.** The paper's explanation for why identity mappings reduce the required width gives intuition about linear independence but stops short of a rigorous theorem showing a separation between ResNet and FNN expressivity in terms of rank or dimension of the reachable function space. A formal statement would strengthen this part of the paper.
 
 ### Trivial
-
-None.
+- Theorem 2 has a typo in the codomain (ℝ^d instead of ℝ).
+- Modulus of continuity ω_f(t) appears with an inconsistent bar notation at one point (line 105).
+- The paper would benefit from a conclusion section.
 
 ## Nice-to-Haves
-
-- Include a brief (half-page) concrete example of a bottleneck block approximating \(x^2\), with explicit weight assignments, to make the central construction accessible in the main text.
-- Clarify that the comparison in Theorem 3 is against *existing* FNN constructions (as the paper already does at line 149), not against a proven lower bound for FNNs — this is already handled but could be made more explicit.
-- Remove the unsupported "continuous-depth" sentence from the abstract.
+- A formal proof (or at least a citation) for the polynomial lower bound in Theorem 2 would resolve the main weakness. If no such bound exists in the literature, the optimality claims should be explicitly qualified.
+- Experiments testing how required depth scales with ε for fixed target functions would substantially strengthen the empirical validation.
+- A discussion of whether the sparse b-ResNet construction (most weights zero) can be recovered by gradient-based training, or whether it should be viewed purely as an existence result.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution:
-
-- **Critic's claim about "no discussion of the number of non-zero weights vs. total weights."** The paper explicitly discusses this distinction at lines 143–146: "Note that the number of total weights of \(R\) is \(\mathcal{O}(dp\log(p/\varepsilon))\) ... However, in each constructive residual block, there are only absolute constant non-zero weights ... Thus it is enough to adjust \(\mathcal{O}(p\log(p/\varepsilon))\) weights." This criticism is factually incorrect.
-
-- **Critic's claim about "No analysis of the constant hidden in the \(\mathcal{O}\) for the smooth-function bound (Thm. 5)."** The paper provides explicit lower and upper bounds on \(c(d,r)\) at line 179: \((\frac{2^{(d+1)/r}d}{r})^d < c(d,r) < (\frac{2^{(d+1)/r}d}{r})^d d^{r+2}(d+r)r\). This criticism is factually incorrect.
-
-- **Critic's claim that "The paper does not discuss how to know whether a given practical function belongs to \(K_C\)."** The paper acknowledges this limitation explicitly: "it is not easy to judge if a function belongs to \(K_C\). The outer function \(g\) can vary badly even though \(f\) is very smooth such as a linear polynomial" (line 223). The paper already addresses this.
-
-- **Strength Finder's point about "Experimental validation of the theoretical bounds."** This conflicts with the verified weakness that the experimental section is too minimal to be informative. The experiments lack all methodological details (architecture, hyperparameters, number of runs, statistical significance), so claiming they "empirically confirm" the theory is not warranted from what is presented. This strength is dropped.
-
-- **Critic's characterization of the missing construction sketch as a "structural flaw" and "impossible for the reader to evaluate."** The paper provides the high-level approach (lines 84–91) and the "Root of reduction" analysis (lines 151–152); the detailed construction is in the appendix, which is standard practice for theory papers. The characterization as a "structural flaw" is overstated for the genre.
+- **Criticism about factor-d reduction being "sparsity, not total architecture size":** REMOVED because the paper transparently reports both total weights (O(dp log(p/ε))) and tunable weights (O(p log(p/ε))), and the total architecture size also shows a factor-d reduction (O(dp) vs O(d²p) for FNNs). The critic's comparison mixes total vs. tunable metrics across architectures, which is misleading.
+- **Criticism about Theorem 6 (CPwL) proof not given:** REMOVED per hard rules (proofs may reside in the stripped appendix).
+- **Criticism that "Root of reduction" is too vague:** REMOVED — the explanation gives a specific rank-based intuition about linear independence with vs. without identity mappings, which is appropriate for a paper of this type.
+- **Criticism about "tunable weights" usage being inconsistent:** REMOVED — the paper clearly defines "tunable weights" as non-zero parameters (line 82) and consistently distinguishes total from tunable in Theorem 3 and the surrounding discussion.
+- **Generic criticism about "more efficient FNN might have a different dependence on d":** DOWNGRADED and subsumed into Minor issues — comparing against the best known construction is standard practice, and the critic offers no specific alternative construction.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The reviews do not surface a genuinely novel perspective that the paper itself does not already articulate. The key insight — that identity mappings in bottleneck blocks allow constant-width constructions to achieve a factor-\(d\) reduction in tunable weights — is already presented in the paper's "Root of reduction" paragraph.
+None beyond the paper's own contributions. The reviews confirm that the upper bounds and the factor-d reduction are the paper's main value, while the optimality claim via Theorem 2 is the principal unresolved concern.
 
 ## Suggestions
-
-1. Add a concrete example (even one paragraph) of the bottleneck-block construction for \(x^2\) in Section 4.1. Show the weight values, how the identity connection is used, and why the number of non-zero weights per block is independent of \(d\). This single addition would address the most significant presentation gap.
-2. Remove the "continuous-depth" sentence from the abstract, or replace it with a sentence that accurately reflects the paper's scope (discrete ResNet).
-3. Either substantially expand the experimental section with full methodological details (architecture, hyperparameters, dataset generation, multiple runs with error bars) or remove it entirely, since the paper's contribution is theoretical and experiments are not required.
+1. **Address Theorem 2 directly:** Either provide a proof (even a brief one) for the polynomial lower bound, cite an existing result, or remove the ε-order optimality claim for Theorems 3 and 4. The core contribution of the paper (the upper bounds showing factor-d reduction) does not depend on this theorem, so removing the claim would not weaken the paper's main results.
+2. **Improve the lower bound discussion:** Clarify which specific Yarotsky lower bound applies to the ResNet construction used (bounded weights? continuous selection?) and explicitly state the gap between upper and lower bounds for smooth functions.
+3. **Strengthen experiments:** Even a simple experiment showing that required depth grows as O(log(1/ε)) for a fixed monomial would help validate the theory.
+4. **Add a conclusion section** summarizing the results, limitations, and future directions.
 
 ## Score and Decision
 
-The paper makes a solid theoretical contribution: it provides the first comprehensive characterization of ResNet's approximation complexity, with clean upper and lower bounds and a genuine factor-\(d\) improvement over known FNN constructions. The weaknesses are all presentation issues (central construction deferred to appendix, unsupported abstract claim, uninformative experiments). None of these threaten the validity of the theoretical results, which are stated as theorems with proofs in the full submission. The paper would benefit from minor revisions but is publishable in its current intellectual form.
+This paper makes a genuine theoretical contribution by quantifying how ResNet's identity shortcuts reduce parametric complexity for key function classes, with clean constructive proofs. The factor-of-d reduction over the best known FNN construction is well-supported and novel. However, the paper overclaims ε-order optimality for polynomial approximation based on Theorem 2, which is stated without proof or citation. The main results survive removal of this claim, but the framing needs correction. The paper is theoretically sound in its core contribution and the issues are addressable.
 
-MY FINAL SCORE: <pineapple>3.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Weak Accept</orange>

@@ -1,66 +1,76 @@
-Now I have all the information I need. Let me write the consolidated final review.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the final consolidated review.
 
 ## Summary
-This paper proposes a cascading RL framework that generalizes cascading bandits by incorporating user states and state transitions. To handle the combinatorial action space (item lists of size up to m from N items), the authors design an oracle BestPerm that finds the optimal item list in O(Nm+NlogN) time via dynamic programming, versus the O(N^m) exhaustive search. Using this oracle, they develop two algorithms — CascadingEuler for regret minimization with a Õ(H√(HSNK)) bound, and CascadingBPI for best-policy identification with Õ(H³SN/ε²) sample complexity — both avoiding dependence on the exponential action space. Experiments on MovieLens data show empirical benefits.
+
+This paper proposes "cascading reinforcement learning," a generalization of cascading bandits that incorporates user states and state transitions into an episodic MDP framework. The authors design the BestPerm oracle, which reduces the computational complexity of planning over a combinatorial action space (item lists) from O(N^m) to O(Nm + N log N) via a dynamic program leveraging the structure of the cascading reward function. Using this oracle, they develop two algorithms: CascadingEULER (regret minimization, $\tilde{O}(H\sqrt{HSNK})$ regret) and CascadingBPI (best policy identification, $\tilde{O}(H^3SN/\varepsilon^2)$ sample complexity), both with guarantees independent of the exponential-sized action space.
 
 ## Strengths
-- **Novel problem formulation with rigorous foundation.** The cascading RL framework meaningfully extends cascading bandits to incorporate state-dependent attraction probabilities, transitions, and long-term rewards. The Bellman optimality equations (Eq. 1) are correctly stated, and the motivation (e.g., video recommendation with user state evolution) is clear and well-argued.
 
-- **Computationally efficient oracle BestPerm with correctness guarantees.** Lemma 1 establishes two key structural properties: (i) within any fixed subset, listing items in descending order of weight is optimal (standard interchange argument); (ii) items with weight above w(a_⊥) should be included and those below should be excluded. The dynamic programming in Algorithm 1 (lines 255–276) reduces the subset selection from O(N^m) to O(Nm+NlogN), which is a significant computational contribution. Lemma 2 formally certifies correctness.
+1. **Novel and well-motivated cascading RL framework.** The paper identifies a genuine gap in cascading bandits (absence of state transitions and user states) and proposes a principled generalization to an episodic MDP. The formulation in Section 3 is clear and captures realistic recommendation dynamics where current actions affect both immediate reward and future states. The Bellman equations for the cascading structure are correctly stated.
 
-- **Theoretical guarantees that avoid exponential action-space dependence.** The regret bound Õ(H√(HSNK)) scales with N (number of items), not |A|=O(N^m). Similarly, the BPI sample complexity Õ(H³SN/ε²) avoids |A| dependence. When the problem degenerates to cascading bandits (S=H=1), the regret matches the optimal cascading-bandit result (Vial et al., 2022), demonstrating tightness in that special case.
+2. **Efficient BestPerm oracle with provable correctness and polynomial complexity.** Lemma 1 establishes two key properties: (i) for any fixed subset, items should be sorted by descending weight $w$, reducing the problem to subset selection; (ii) items with $w \leq w(a_\bot)$ should be discarded, and items with $w > w(a_\bot)$ should be included subject to the cardinality constraint. The dynamic program (Algorithm 1) correctly solves the resulting subset selection problem, with Lemma 2 proving correctness and $O(Nm + N\log N)$ complexity. This directly addresses the stated computational challenge.
 
-- **Variance-aware exploration bonus design.** The bonus b^{k,q} scales with √(q̂(1-q̂)), which saves a √m factor and is empirically validated through the comparison with CascadingVI-Bonus (which uses a variance-unaware bonus and shows worse regret).
+3. **Near-optimal regret bound independent of action-space size.** Theorem 1 provides $\tilde{O}(H\sqrt{HSNK})$ regret, which depends only on the number of items $N$, not the exponential $|\mathcal{A}| = O(N^m)$. The paper acknowledges the $\sqrt{H}$ gap to the $\Omega(H\sqrt{SNK})$ lower bound for general episodic RL and provides a plausible explanation for this gap (separate bonuses for $q$ and $p^\top V$).
 
-- **Empirical confirmation of computational and sample efficiency.** Experiments on MovieLens with N=10–25 show CascadingEuler achieving the lowest regret and competitive running time relative to three baselines. The comparison with CascadingVI-Oracle (exhaustive search) validates the computational benefit of BestPerm; the comparison with AdaptVI (naive adaptation to combinatorial space) shows the cost of maintaining estimates for all permutations.
+4. **Sample complexity for best policy identification without dependence on $|\mathcal{A}|$.** Theorem 2 provides $\tilde{O}(H^3SN/\varepsilon^2)$ sample complexity, which is near-optimal (up to $H$) compared to the $\Omega(H^2SN/\varepsilon^2)$ lower bound when $\varepsilon < H/S^2$.
+
+5. **Experimental validation of computational and sample efficiency.** Figure 1 on MovieLens data shows CascadingEULER achieves lower regret and faster running time than CascadingVI-Oracle (exhaustive search variant, validates computational savings) and CascadingVI-Bonus (variance-unaware variant, validates the variance-aware bonus design).
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None.
+
+1. **The optimism argument depends on an unverified monotonicity claim.** The paper's entire theoretical framework (Theorems 1 and 2) depends on the claim that using elementwise optimistic estimates $(\bar{q}, \bar{w})$ in BestPerm yields an optimistic value function: $\max_A f(A, \bar{q}, \bar{w}) \geq \max_A f(A, q, w^*)$. The paper asserts a "monotonicity property of $f(A,u,w)$ with respect to the attraction probability $u$ and weight $w$" (lines 402, 426-427), but this property is neither stated formally as a lemma nor proved in the main text. The mathematical concern is nontrivial: for a *fixed* action $A$, the function $f(A,u,w) = \sum_i [\prod_{j<i}(1-u_j)]\,u_i\,w_i$ is not monotone non-decreasing in each $u_i$ for arbitrary orderings — increasing an early item's attraction probability can reduce the probability mass reaching later items, decreasing the overall value. The paper claims the proof "leverage[s] the fact that the items in the optimal permutation are ranked in descending order of $w$" (line 427), which may resolve this, but the reasoning is absent from the main text. While the full proof may reside in the appendix (stripped by the parser), the lack of any statement or sketch in the main text makes this a significant open question about correctness. **This is the paper's most serious weakness** — if the optimism claim is false, both Theorems 1 and 2 are unsupported.
+
+2. **Insufficient novelty attribution for the oracle.** The BestPerm oracle combines: (a) the interchange argument (Lemma 1(i)) showing that items should be sorted by descending weight — this is known from prior cascading bandits literature — and (b) a standard DP for selecting $m$ best items from a sorted list. The paper's contribution is the *application* of these ideas to the RL setting and the observation that the cascading structure permits efficient planning despite the combinatorial action space, which is genuine but more incremental than the "novel oracle" and "carefully-designed dynamic programming" framing suggests.
 
 ### Minor
-- **Experimental section lacks details for reproducibility.** The paper states that experiments use MovieLens data but does not describe how MDP parameters (attraction probabilities q, transition distributions p, rewards r, and state definitions) are derived from the ratings. There is no description of the simulation procedure, how the 20 states are constructed, or how attraction probabilities are generated. This makes it impossible to reproduce or independently verify the empirical results. The "variance-unaware bonus" used by the CascadingVI-Bonus baseline is also not precisely defined.
 
-- **"Near-optimal" language is imprecise for the magnitude of gaps.** The regret bound has a √H gap relative to the lower bound (which can be a factor of ~3–10 in practice), and the BPI bound has an H gap. While the paper honestly discusses these gaps (lines 446–453) and the analysis is transparent, calling the results "near-optimal" in the abstract and contributions without immediate qualification overstates the optimality. The paper would better calibrate expectations by stating the gap factors explicitly in these prominent locations.
+1. **Experimental comparison lacks strong external baselines.** The experiments compare against two ablations of the proposed method (CascadingVI-Oracle and CascadingVI-Bonus) and AdaptVI, a deliberately inefficient strawman that treats each combinatorial action independently. While the ablations usefully isolate individual contributions, a comparison with a reasonably efficient alternative — e.g., an algorithm that estimates per-item $(q, p)$ with Thompson sampling and applies the oracle at test time for planning — would better demonstrate that the *exploration* strategy, not just the oracle, is effective. The current design mostly shows that the oracle helps computationally and variance-aware bonuses help statistically, which are relatively narrow conclusions.
 
-- **BPI algorithm description is vague.** CascadingBPI is described only textually — no pseudocode is provided, the stopping criterion is not specified, and the sample complexity bound (Theorem 4) includes a messy second term Õ(H²√H SN/(ε√ε)(log(1/δ)+S)) whose provenance is unclear. The optimality condition ε < H/S² is restrictive, and the gap beyond this regime is not discussed.
+2. **Scope of experimental evaluation is limited.** Experiments use only $H=3$, $m=3$, $S=20$, and $N \leq 25$. While these are reasonable for a first evaluation, the limited scale makes the $\tilde{O}(H\sqrt{HSNK})$ regret bound largely untested outside narrow parameter ranges. The paper would benefit from at least one configuration with larger $H$ or $m$.
+
+3. **Imprecise framing of the contextual-bandit comparison.** The paper states that "cascading RL is more suitable for long-term reward maximization, since it considers potential rewards from future states" (Section 1, paragraph 3). This framing slightly oversimplifies the distinction: contextual bandits can incorporate historical context but cannot capture how the *current action* influences future contexts/states. The real contribution is that cascading RL models state *transitions* as a function of the clicked item, which contextual bandits cannot express. The rhetorical framing could be more precise without diminishing the contribution.
 
 ### Trivial
-- **Figure caption is uninformative.** The caption reads simply "Experiments for cascading RL on real-world data." It does not describe what each subfigure shows (the four panels correspond to different N values), which axes represent, or what the baselines are. Readers must infer this entirely from the text.
 
-- **Lower-bound citation is unspecific.** The paper cites "jaksch2010near,osband2016lower" for the Ω(H√(SNK)) lower bound in the regret analysis, and "dann2015sample" for the BPI lower bound, without stating the exact bound formula in the main text. Including the explicit bound would improve readability.
+- The claim "we prove the monotonicity property" in the main text (line 426) should be accompanied by at least a lemma statement or a sketch; merely asserting it is insufficient for reader verification.
 
 ## Nice-to-Haves
-- A table of running times for all algorithms across the four N values would strengthen the computational efficiency claim beyond the qualitative statement in the text.
-- A brief discussion of limitations (e.g., scalability to continuous/large state spaces, or settings where m is large relative to N) would improve the paper's positioning.
-- Additional experimental robustness checks (varying H, m, or S) would broaden the empirical support.
+
+- Provide a lemma statement and proof sketch for the monotonicity property in the main text, even if the full proof is deferred to the appendix.
+- Include at least one stronger baseline beyond the current set (e.g., Thompson sampling with posterior sampling over $q$ and $p$, using the oracle at decision time).
+- Test at least one configuration with larger $H$ (e.g., $H=5$ or $H=10$) or larger $m$ to probe the regret bound's behavior.
 
 ## Removed Points
-These points are flagged to be removed, treat them with caution:
 
-- **Monotonicity concern (Harsh Critic #1).** The reviewer questions whether f(A,u,w) is monotone in u and w for the optimal permutation, noting the proof is in the appendix and cannot be verified. The paper states it proves this property (lines 426–427). Since the appendix was stripped by the parser but existed in the original submission, and the rule instructs removing weaknesses about missing appendix proofs, this concern is removed from the main evaluation. The reviewer's mathematical observation that f is not monotone for a *fixed* permutation is correct but does not directly refute the paper's claim about the *optimal* permutation (whose composition changes with u and w). Without a concrete counterexample or access to the deferred proof, this does not rise to a confirmed weakness.
-- **Missing related works** (combinatorial RL, factored MDPs). Per guidelines, missing related works should not be mentioned.
-- **Formatting/style nitpicks** (Õ notation hiding log factors, notation on algorithm line, etc.). These are either standard practice or parser artifacts.
-- **Strength Finder claim #5 about Lemma 1 showing monotonicity.** Lemma 1 does *not* state monotonicity in u and w; it establishes structural properties about optimal ordering and inclusion/exclusion. The monotonicity claim is separate and referenced as proven in the appendix.
-- **Strength Finder claims that are generic or lack specific content.** All other strengths were verified and retained.
+- **"The optimism argument is unsubstantiated and likely wrong"** (critic's mathematical critique about non-monotonicity for fixed arbitrary actions): Partially retained above as a Major weakness (concern #1), but the critic's specific claim that the monotonicity is "likely wrong" is downgraded because for permutations sorted by descending $w$ (which is the optimal ordering), we verified that $\partial f/\partial u_k \propto (w_k - \text{expected downstream } w) \geq 0$, so the property plausibly holds. The retained concern is about insufficient exposition and lack of formal statement, not a definitive refutation.
+- **"The novelty is overstated"** (about the oracle being a standard DP): Retained in weakened form as a Minor concern about framing, but the algorithmic contribution is still real — applying interchange arguments and DP to the *RL planning* setting with combinatorial actions is non-trivial.
+- **"Contextual bandits can also capture long-term rewards"** (critic's point about the framing in Section 1): Retained as Minor concern #3 for imprecise framing, but the critic overstates the case — contextual bandits cannot model how the *current action* shapes future contexts, which is the core RL distinction.
+- **"The reward is assumed deterministic — this is restrictive"**: Removed. Deterministic reward given $(s,a)$ is a standard assumption in many RL papers and is not a meaningful weakness of this paper.
+- **"The experimental comparison is weak because AdaptVI is a strawman"**: Partially retained (Minor #1) but downgraded. AdaptVI is a natural naive baseline showing the cost of ignoring the problem structure; calling it a "strawman" overstates the case.
+- **"Missing related work on combinatorial action spaces in RL"**: Removed per instructions (cannot confirm existence of missing references).
+- **Formatting/style nitpicks and missing proof references**: Removed per instructions (parser strips appendix).
 
 ## Novel Insights
-The reviews surface one genuinely novel observation: the paper's approach of separating the exploration bonuses for attraction probabilities (q) and future values (p^⊤V) individually (rather than treating the cascading action as a single atomic transition) is both the source of computational efficiency and the cause of the √H gap. This tradeoff between computational tractability (avoiding enumerating |A|) and statistical optimality (the √H penalty from the cross-term b^{k,q}(p̂^⊤V̄+b^{k,pV}−p^⊤V)) is a clean and instructive tension that the paper discusses honestly. Understanding whether this gap can be closed without reintroducing exponential complexity is a well-posed open problem for follow-up work.
+
+None beyond the paper's own contributions. The harsh critic's analysis provides a useful technical examination of the monotonicity condition but does not yield a novel insight about the problem that the paper itself does not contain.
 
 ## Suggestions
-1. Expand the experimental section to describe how MovieLens ratings map to MDP parameters (state construction, attraction probabilities, transitions). Even a brief paragraph would significantly improve reproducibility.
-2. Add pseudocode for CascadingBPI to match the level of detail given for CascadingEuler.
-3. Qualify "near-optimal" in the abstract and contribution list with the specific gap factors (√H for regret, H for BPI) to better calibrate reader expectations.
-4. Improve the figure caption to describe what each panel shows and what the axes represent.
-5. If the monotonicity proof is not already in the paper, consider moving a sketch of it to the main text to remove reliance on the appendix for this critical step.
+
+1. **Provide a formal lemma statement and proof sketch** for the monotonicity property of $f(A,u,w)$ in the main text, clarifying whether it applies to (a) a fixed action, (b) the optimal action (sorted by descending $w$), or (c) the max over actions, and showing rigorously how the "descending $w$" ordering ensures optimism. This is the single most important revision.
+
+2. **Add a stronger external baseline** such as an algorithm that estimates $q$ and $p$ via Thompson sampling with Beta-Dirichlet priors and uses the oracle for planning, to better separate the contributions of the exploration strategy from the oracle's computational savings.
+
+3. **Expand the experimental scope** to include at least one setting with larger $H$ (e.g., $H=5$ or $H=10$) and report standard errors or confidence intervals to assess variability.
+
+4. **Clarify the framing** in Section 1 to state precisely that the key distinction from contextual bandits is the explicit modeling of state *transitions* as a function of the clicked item, not merely "considering future states."
 
 ## Score and Decision
 
-This paper makes a solid contribution: it formulates a new problem (cascading RL), designs a clever computationally efficient oracle, and provides algorithms with theoretical guarantees that avoid exponential action-space dependence. The theoretical analysis is careful and transparent about gaps. The main weaknesses are in experimental presentation (lack of reproducibility details) and some imprecision in language. No confirmed fatal flaws exist in the main text. The deferred monotonicity proof in the appendix is critical but cannot be verified from the visible portion; taking the paper at its word, this is a correct argument.
+This paper tackles a well-motivated problem (generalizing cascading bandits to account for state transitions) and makes several concrete contributions: a clean problem formulation, an efficient oracle with provable correctness, and sample-complexity guarantees independent of the exponential action space. The experiments confirm the computational benefits of the oracle and the statistical benefits of variance-aware bonuses.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+However, the paper's core theoretical contribution — the regret and sample-complexity guarantees — depends on an optimism argument that is asserted but not substantiated in the main text. The monotonicity property of $f(A,u,w)$ that underlies this argument is mathematically non-trivial, and the paper provides no lemma or proof sketch to support it. While the full proof may reside in the appendix, this gap is too central to the paper's claims to ignore. Combined with the limited experimental baselines, the paper in its current form is not ready for publication.
+
+MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

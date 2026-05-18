@@ -1,18 +1,20 @@
-Now I have all the information needed. Let me write the final consolidated review.
-
----
+Now I have complete verification of all claims. Let me write the final consolidated review.
 
 ## Summary
 
-This paper presents the first systematic study of scale shift in domain generalization for crowd localization. It constructs ScaleBench, a benchmark with 17,138 images (including 1.5M manually annotated bounding boxes) partitioned into four scale-differentiated domains via a novel GMM-based patch splitting and domain partitioning method. The paper benchmarks 20 DG algorithms on ScaleBench, finding most underperform compared to simple ERM. A theoretical analysis frames scale shift as a mixture of diversity and correlation shifts. A case-study method (SemanticHook) is proposed and analyzed, yielding three empirical insights about data scaling, scale as a primary attribute, interpolation efficacy, and effective components.
+This paper introduces the problem of *scale shift domain generalization* in crowd localization — where training and test data differ in head scale distributions. It builds ScaleBench (17,138 images, 1.5M manually annotated bounding boxes, partitioned into 4 scale-based domains), reproduces 20 domain generalization algorithms (finding most perform worse than a simple ERM baseline), provides theoretical framing of scale shift as a mixed diversity-and-correlation shift, and proposes Semantic Hook as a case-study mitigation method. The main empirical analysis (Q1–Q4) yields three actionable insights: (i) scale is a major attribute for representing crowd images, (ii) image interpolation offers limited relief, and (iii) increasing in-distribution data yields marginal gains.
 
 ## Strengths
 
-- **First dedicated benchmark for scale shift in crowd localization DG.** The paper manually annotates bounding boxes for 1.5M objects across 2,700 images from SHHA, SHHB, and QNRF, integrating them with three existing datasets into ScaleBench (17,138 images). The domain partition method using 2D GMM on scale × vertical location, followed by patch filtering and equal-size domain splitting with Gaussian smoothing, is a thoughtful and creative solution to a non-trivial problem (Section 2.2.2).
+- **First formal study of scale shift domain generalization in crowd localization.** The paper identifies and systematically studies a genuine, underexplored challenge. The problem formulation (Sec. 2.1) explicitly incorporates performance retention on both source and target domains, which is more realistic than standard DG setups.
 
-- **Theoretical framing of scale shift as a mixed domain shift.** Theorem 1 (Section 3.1) formally connects scale shift to established DG concepts by showing that when scale distributions differ ($p_1(c|z) \neq p_2(c|z)$), both diversity shift ($Div_{div} > 0$) and correlation shift ($Div_{cor} > 0$) arise simultaneously. This provides a principled explanation for why methods targeting only one type of shift underperform.
+- **Comprehensive ScaleBench benchmark.** The dataset combines 6 existing crowd datasets with 1.5M new bounding box annotations across 17,138 images. The controllable domain partition method (2D mixed Gaussian for patch creation, scale-distribution-based domain assignment) is a thoughtful solution to the challenge of intra-image scale variance.
 
-- **Empirical analysis (Q1–Q4) yields actionable insights.** The four controlled experiments generate genuinely useful findings: (i) adding in-distribution data beyond what is already present provides marginal benefit (Table 3, e.g., TN→S 77.92% vs. TNB→S 77.94%); (ii) scale is a primary attribute — 30% IID-sampled data achieves comparable performance to the full dataset (Figure 4); (iii) interpolation helps primarily for extreme scale shifts (Table 4, Tiny: 13.84→33.73 with RA). These insights are valuable for future work.
+- **Systematic empirical analysis with 20 DG algorithms and Q1–Q4 insights.** Table 2 provides a large-scale evaluation across three backbones (ResNet18, HRNetW-48, ViT-Base). The finding that many advanced DG methods perform worse than ERM on scale shift is non-trivial and supports the claim that this problem is under-explored. The Q1–Q4 analysis (Tables 3–5, Figure 4) is well-designed and yields actionable insights.
+
+- **"Less is more" finding (Q2, Figure 4).** The demonstration that IID sampling by scale distribution achieves comparable performance with only 30% of the data is a clean and useful result that challenges naive data scaling assumptions.
+
+- **Informative ablation study for Semantic Hook (Q4, Table 5).** The comparison of semantic vs. scale perturbation and hooked semantic vs. global feature directly supports the paper's central thesis that scale-related features act as spurious associations.
 
 ## Weaknesses
 
@@ -20,61 +22,48 @@ This paper presents the first systematic study of scale shift in domain generali
 None.
 
 ### Major
-
-- **Insufficient transparency on how the 20 DG algorithms were adapted for dense prediction.** The paper's central empirical claim — that most DG algorithms underperform ERM on scale shift — depends critically on fair and competent adaptation of each method from its original setting (typically classification) to the dense-prediction crowd localization architecture. The paper provides essentially zero detail on: (a) which specific layers/modules were modified for each algorithm (e.g., where CORAL aligns feature statistics, how DANN's domain discriminator interfaces with encoder-decoder features); (b) whether and how hyperparameters (alignment weights, learning rates, momentum) were searched; (c) how algorithms requiring specific optimization schemes (e.g., IRM's two-phase procedure) were handled. The paper states it "reproduced 20 state-of-the-art domain generalization algorithms and integrated them with a robust crowd localization baseline" (line 112) and uses DomainBed's Leave-One-Out protocol, but no adaptation methodology is described. Without this information, a reader cannot distinguish between genuine limitations of DG algorithms and artifacts of poor integration. This is the most consequential gap because it undermines the paper's most attention-grabbing claim.
-
-- **No variance or confidence intervals reported for any quantitative result.** The paper makes comparative claims throughout (e.g., "marginal improvement," "limited help") without any measure of uncertainty. Table 3 shows a 0.02 F1 difference (77.92% vs. 77.94%) used to support the claim that adding domain B offers "minimal" benefit — this is well within likely noise. No seed repetitions are reported. For a benchmark paper whose main currency is quantitative comparisons, this is a significant omission that prevents readers from assessing the reliability of the conclusions.
+- **Potential confound between scale and spatial location in domain partition.** The 2D mixed Gaussian model (Eq. 3) jointly fits scale *c* and vertical spatial location *l*. Patches are cut using boundaries of the *sub-spatial* distributions (lines 85–92). Because of perspective geometry, heads near the top of images tend to be smaller and heads near the bottom tend to be larger. This creates a natural correlation between domain membership (based on scale) and spatial location. The paper does not analyze whether its four domains differ primarily in scale or also systematically in scene geometry (close-up vs. far-field, camera angle). The "scale shift" effects observed could partially reflect a correlated perspective shift. This is a genuine limitation — but it reflects natural correlations in real crowd scenes, so it does not invalidate the paper's core findings. The authors should characterize the residual location distributions across domains or construct a synthetic control experiment.
 
 ### Minor
+- **Theorem 1 is not a proper theorem.** The paper asserts that both diversity shift and correlation shift divergences are strictly positive whenever \(p_1(c|z) \neq p_2(c|z)\). The correlation shift term \(\text{Div}_{\text{cor}}\) (Eq. 6) involves \(p(y|c)\), not \(p(c|z)\), and strict positivity does *not* automatically follow from the premise — a separate argument is needed to show \(p_1(y|c) \neq p_2(y|c)\). The "theorem" is better understood as a qualitative framing that scale shift involves both types of distribution shift. This does not threaten the paper's empirical contributions (which stand on their own) but should be corrected in revision.
 
-- **SemanticHook's claimed mechanism is not well-justified.** The paper asserts "the added perturbation ε affects only the pixel values, which primarily influences the semantic information of the original image" (Section 3.2, Intuitive Remark). This claim is unsupported: pixel-level Gaussian noise perturbs *all* visual features (texture, edges, scale), not selectively semantic information. The ablation study in Table 5 compares "semantic concentrated" vs. "scale concentrated" perturbation, but neither perturbation type is defined — the paper simply states "we opt for two perturbations conducted on semantic concentrated feature" without specifying how they were constructed. This weakens the case study and the derived insight #1.
+- **Semantic Hook mechanism is justified with an unsupported claim.** The paper states that additive Gaussian noise \(\epsilon\) "primarily influences the semantic information" because it "affects only the pixel values" (Intuitive Remark, Sec. 3.2). This is not argued or evidenced: isotropic Gaussian noise perturbs all low-level pixel statistics uniformly, with no known selectivity for semantic over scale features. The method works empirically (the ablation in Table 5 supports it), but the claimed mechanism is speculative. The authors should either provide evidence (e.g., probe-based measurement of feature-space changes) or reframe the explanation as a heuristic that happens to work.
 
-- **Theoretical analysis is informal and the connection to SemanticHook is tenuous.** The decomposition in Eq. 6 is presented as a chain-rule integration over attributes $s, c, \ldots$ without a clear generative model, and the derivation of spurious association $c \mapsto y$ is intuitive rather than rigorous. More importantly, SemanticHook does not explicitly address either diversity shift or correlation shift (it does not enforce invariance or decorrelation), so the theoretical framing and the proposed method are not directly connected. The paper acknowledges SemanticHook is a "case study" rather than a solution, which mitigates this, but the disconnect remains.
+- **Limited transparency in DG algorithm reproduction.** The paper reproduces 20 DG algorithms and bases a central claim on this (that existing methods fail on scale shift) but provides no details about hyperparameter search ranges, number of random seeds, or adaptation procedures for this specific benchmark. The single-sentence reference to "DomainBed evaluation protocol" (line 173) is insufficient to rule out the possibility that poor tuning caused the poor results — a well-known sensitivity in DG (Gulrajani & Lopez-Paz, 2021).
 
-- **Several implementation details needed for reproducibility are missing.** The number of GMM components $K$ used for patch splitting is never specified (Section 2.2.2 only says it is "pre-defined"). The "minimal height" threshold for filtering unqualified patches is not quantified. The heuristic search for optimal $\sigma_m$ in Eq. 5 is mentioned but not described (cost, stability, search range). The annealing schedule for $\gamma$ is discussed qualitatively ("starts from 0, then increases") but no schedule or bounds are given.
+- **Missing variance estimates.** Table 2 reports single numbers per column with no standard deviations across the 4 Leave-One-Out folds or across random seeds. Given the modest domain sizes, variance could be substantial.
 
-- **Interpretation of Q3 (interpolation) results is slightly inconsistent.** The paper states "image interpolation provides modest benefits" but the Tiny domain improves from 13.84 to 33.73 with Random Augmentation — a substantial gain. The paper acknowledges this ("the improvement on Tiny domain is because its original poor performance") but this reasoning is somewhat circular. A more precise characterization would be that interpolation helps substantially for extreme shifts but less for moderate ones, which is itself an interesting finding.
+- **No inter-annotator agreement metrics.** The paper reports 1.5M manual bounding box annotations across 2,700 images (a major annotation effort) but provides no quality control metrics (e.g., agreement rate, IOU threshold, double-annotation proportion). For a benchmark dataset, this is a notable omission.
 
 ### Trivial
-
-- The garbled text fragments (e.g., "432 433 434...", "rsity Shift)") are parser artifacts and do not appear in the original submission.
-- The sentence "While we could not reproduce every algorithm, we welcome contributions" (line 112) is unusual for a benchmark paper — it would be more transparent to state which algorithms could not be reproduced and why.
+- **F1 as sole evaluation metric.** While standard for crowd localization, reporting only F1 (without precision, recall, MAE, or MSE) limits the granularity of error analysis under scale shift. The paper would benefit from showing whether scale shift causes more false positives or false negatives.
 
 ## Nice-to-Haves
 
-- Sensitivity analysis on the number of domains $M$: the paper fixes $M=4$; exploring $M=3$ or $M=5$ would test whether conclusions are robust to this choice.
-- Analysis of learned representations (e.g., feature visualization or probe experiments) to directly verify whether SemanticHook actually reduces scale information in the feature space, rather than relying on the indirect perturbation-ablation argument.
-- Clarification of whether "Inference Augmentation" in Table 4 is intended as an adversarial attack or a test-time robustness evaluation — the current description is ambiguous.
+- A diagnostic showing that the four domains have similar distributions of spatial location, camera angle proxies, or scene types, to confirm that scale (not confounds) drives the observed effects. Alternatively, a synthetic control where images are uniformly rescaled to isolate pure scale shift.
+- Direct empirical measurement of the diversity and correlation shift divergences (as defined in Ye et al. 2022) between domain pairs, converting Theorem 1 into a testable quantitative claim.
+- An additional Q2 baseline using *random* subsampling (not scale-based IID) at the same dataset sizes, to confirm that scale-based sampling is specifically effective.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- *Criticism that Table 2 shows only a subset of algorithms.* This is a parser artifact — the table is embedded as an image; the full table with all algorithms exists in the original submission.
-- *Criticism that the benchmark dataset is not released or described with access information.* Per the hard rules, questioning availability of a cited entity is removed. The paper states ScaleBench is established; release details are assumed to be handled outside the review format.
-- *Criticism requesting missing appendix content.* The parser strips appendix sections; these are assumed to exist in the original submission.
-- *Formatting/style nitpicks* — these are parser artifacts, not author errors.
+- **"Ambiguous notation in Equation 8."** The parentheses \(f_D[(1-\gamma)(f_E(x+\epsilon)-\gamma f_E(x))]\) are unambiguous — the outer scalar \((1-\gamma)\) multiplies the residual. Removed per formatting/pedantry rules.
+- **Strength "Rigorous theoretical characterization."** The "rigorous" qualifier conflicts with the verified weakness about Theorem 1's lack of derivation. The core point (that the paper provides theoretical analysis) is preserved in spirit but not as a standalone strength.
+- **Generic strengths from Strength Finder.** None were sufficiently generic to drop — all had specific supporting evidence.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, two observations from this review stand out. First, the paper's central tension — a well-constructed benchmark paired with insufficiently documented algorithm adaptation — is a recurring pattern in domain generalization research that attempts to benchmark methods not designed for the target task. The community would benefit from standardized adaptation protocols for migrating classification DG algorithms to dense prediction architectures. Second, the finding that scale shift constitutes a *simultaneous* diversity and correlation shift (Theorem 1) is a genuinely useful conceptual contribution: it predicts that neither invariant feature learning (targeting correlation shift) nor data diversification (targeting diversity shift) alone will suffice, explaining the observed ERM competitiveness and pointing toward hybrid strategies.
+None beyond the paper's own contributions. The most novel observations come from the paper itself: that scale shift behaves as a mixed domain shift where existing DG methods fail more than on other shift types, and that scale is a sufficiently "major" attribute that IID sampling by scale distribution can drastically reduce data needs.
 
-## Suggestions
+## Suggestions for Authors
 
-1. **Document the DG algorithm adaptation in full detail.** For each of the 20 algorithms, specify: which layers/feature maps were modified, how hyperparameters were searched (method, ranges, budget), and whether any algorithms required non-trivial architectural changes. Even a table in the main paper summarizing this would dramatically improve credibility.
-2. **Add variance estimates.** Report results over at least 3 seeds with mean and standard deviation for all main tables. This is standard for benchmark papers and would allow readers to distinguish signal from noise in comparative claims.
-3. **Define the perturbation types in the ablation study.** Specify what "semantic concentrated perturbation" and "scale concentrated perturbation" actually are — how they are generated, and why they are believed to affect one attribute more than the other.
-4. **Softened the theoretical claims.** The "proof" language for Theorem 1 is strong for what is essentially an application of existing definitions (Ye et al., 2022) to the scale shift setting. Clarify that the contribution is in *identifying* scale shift as a mixed shift, not in deriving new OOD theory.
-5. **Reconciled the Q3 narrative with the results.** The Tiny improvement (13.84→33.73) is striking and deserves emphasis, not downplaying. A more nuanced conclusion — "interpolation is highly effective for extreme scale shifts but marginal for moderate ones" — would be both more accurate and more informative.
+1. **Address the scale–location confound directly.** Report the distribution of vertical head positions across the four domains. If they differ significantly, conduct a controlled experiment (e.g., synthetic rescaling within the same image region) to verify that effects replicate under pure scale variation.
+2. **Replace Theorem 1's formal claim** with an explicitly qualitative statement: "scale shift induces both types of shift because..." — supported by empirical measurements of the divergences on your data, rather than an unverified derivation.
+3. **Provide evidence for the Semantic Hook mechanism** by measuring how the Gaussian perturbation changes scale-related vs. semantic feature statistics (e.g., probe-based classification of patch scale from the perturbed vs. unperturbed embedding).
+4. **Report standard deviations** for the Leave-One-Out evaluation (at minimum across the 4 folds; across seeds if feasible).
+5. **Add documentation of the annotation protocol** — even a brief description of the annotation tool, instructions, and a sample agreement check — to support benchmark credibility.
+6. **Include hyperparameter ranges and search procedure** for the 20 DG algorithms, or at minimum state that the DomainBed default protocol was followed without modification.
 
 ## Score and Decision
 
-**Originality:** 7/10 — First study on scale shift DG in crowd localization; the mixed-shift framing is conceptually novel.
-**Importance of research question:** 8/10 — Scale shift is a real, practical problem for deployed crowd models.
-**Claims well supported:** 4/10 — The central empirical claim about DG algorithms is undermined by insufficient documentation; some analytical claims are overstated relative to evidence.
-**Soundness of experiments:** 5/10 — Benchmark construction is sound, but missing variance estimates and insufficient algorithm adaptation details weaken confidence.
-**Clarity of writing:** 6/10 — Generally clear despite parser artifacts; the SemanticHook mechanism section needs better justification.
-**Value to the research community:** 7/10 — ScaleBench and the empirical insights are valuable; the benchmark fills a gap.
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

@@ -1,81 +1,68 @@
-Now I have a thorough understanding of the paper and can cross-check the reviewer claims against the actual text. Let me compose the final review.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes FastLSH, a simple LSH scheme that reduces hash computation from O(n) to O(m) (m < n) by randomly sampling a subset of dimensions before applying random projection. The paper provides a theoretical analysis of the collision probability, claims asymptotic equivalence to E2LSH, and demonstrates speedups of up to 6.1×, 1.7×, and 20× across three application domains (outlier detection, neural network training, and nearest neighbor search).
+This paper proposes FastLSH, a simple modification to E2LSH that first randomly samples $m$ of the $n$ dimensions before applying the standard random projection, reducing per-vector hashing cost from $O(n)$ to $O(m)$. The paper claims FastLSH retains the provable LSH property (via asymptotic equivalence to E2LSH) and validates the method across three machine learning tasks: outlier detection, neural network training, and nearest neighbor search.
 
 ## Strengths
 
-- **O(n) to O(m) complexity reduction with broad applicability**: FastLSH requires only two operations — random sampling and random projection — and can be dropped into any existing LSH-based pipeline without modifying the downstream algorithm. The paper demonstrates this by substituting FastLSH into ACE, SLIDE, and ANN search pipelines.
+- **Substantial and verified speedups**: FastLSH achieves up to 80× speedup in hash computation (Figure 3c) and up to 20× speedup in end-to-end index construction (Figure 3d,h) across multiple real-world datasets. These gains translate to 6.1× end-to-end speedup in anomaly detection (Table 1) and 1.7× in neural network training (Figure 2), while maintaining accuracy comparable to E2LSH.
 
-- **Consistent end-to-end speedups across three diverse tasks**: Experimental results show meaningful runtime reductions: up to 6.1× in outlier detection (Table 1), 1.7× in neural network training (Figure 2), and 20× in index construction for nearest neighbor search (Figure 3d). These are concrete wall-clock measurements, not just asymptotic claims.
+- **Broad and consistent experimental validation**: The method is tested on three distinct tasks (outlier detection, neural network training, ANN search) using multiple real-world datasets per task (Statlog Shuttle, a9a, Musk; Delicious-200K, Amazon-670K; ImageNet, Trevi, Deep, Glove, Ukbench, etc.). Results are consistent: FastLSH preserves accuracy while significantly reducing execution time.
 
-- **Empirical validation of the distributional approximation**: Figure 1 provides a direct visualization comparing the PDF of ŝX against N(0, ms²/n) on real data (Trevi) across different m values, giving visual evidence that the approximation improves as m grows. This is a helpful sanity check that goes beyond purely theoretical moment matching.
-
-- **Clear motivation and problem framing**: The paper convincingly argues that index construction time — dominated by hashing cost — is the main bottleneck in many LSH-based applications, a point that is underappreciated in the literature.
+- **Simplicity and ease of integration**: The method requires only random sampling plus standard random projection — no Hadamard transforms or other machinery. This makes it straightforward to drop into any existing LSH-based application (ACE, SLIDE, etc.), as demonstrated in the experiments.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The "provable LSH property" claim is overstated for the limited‑m case**: The paper provides a rigorous derivation of the collision probability (Theorem 4.2) and claims asymptotic equivalence to E2LSH for large m. However, the analysis for limited m (Section 4.3) relies on matching the first four moments of ŝX to those of N(0, ms²/n) and citing that "distributions near the normal can be decided very well given the first four moments." Moment matching does **not** constitute a proof that the collision probability p(s,σ) is a monotonically decreasing function of s for all s — which is what the LSH definition (p₁ > p₂) formally requires. The paper asserts that similarity in PDFs "directly translates to the equivalence between p(s) and p(s,σ)," but the step from matching moments to guaranteeing the LSH inequality is heuristic, not rigorous. While the asymptotic large‑m case may be fully proven in the (stripped) appendix, the limited‑m case — which is the practically relevant regime — is not rigorously established. The authors should either provide a bound on the deviation or explicitly temper the "provable" claim for limited m.
+- **The claimed "provable LSH property" is not actually proven.** The paper asserts (lines 4, 22, 99, 276) that FastLSH "has provable LSH property" and "maintains the same theoretical guarantee as the classic E2LSH." However, the analysis never proves that the collision probability $p(s,\sigma)$ is monotonically decreasing in the Euclidean distance $s$, which is required by Definition 2.1. Instead, the argument proceeds as: (i) derive collision probability expression (Theorem 4.2), (ii) show asymptotic equivalence to E2LSH in the limit $m \to \infty$ via characteristic functions (Section 4.2), and (iii) compare first-four moments of distributions (Section 4.3) for finite $m$. Step (ii) only addresses the infinite-$m$ limit — not the finite-$m$ regime used in all experiments. Step (iii) shows distributional similarity between $\tilde{s}X$ and a normal — it does **not** establish that the LSH inequalities ($p_1 > p_2$) hold for thresholds $R$ and $cR$. Moment matching is not a proof of the LSH property. The paper conflates "asymptotically similar distribution" with "satisfies the LSH definition," which is a non sequitur. Because the paper's core differentiating claim (vs. non-LSH sketches like ACHash) rests on this theoretical guarantee, this gap is significant.
+
+- **The collision probability depends on $\sigma$ (per-dimension squared-distance variance) in an unanalyzed way.** The paper acknowledges (line 175) that $p(s,\sigma)$ depends on both $s$ and $\sigma$, whereas E2LSH's $p(s)$ depends only on $s$. Two pairs with the same Euclidean distance $s$ can have different $\sigma$ values and thus different collision probabilities. The LSH definition (Definition 2.1) requires that *all* pairs with distance $\le R$ have collision probability at least $p_1$, and *all* pairs with distance $\ge cR$ have probability at most $p_2$. The paper offers no analysis of whether such uniform thresholds exist when $\sigma$ varies arbitrarily. This is a genuine conceptual gap in the claimed theoretical guarantee.
 
 ### Minor
 
-- **Key experimental parameters are absent from the main text**: The sampling ratio m/n (the central parameter governing the speed–accuracy trade-off) is not reported for any dataset or task in the main text. Nor are the bucket width (ẅ), number of hash tables, or number of hash functions — all of which are needed to assess whether comparisons are fair and results are reproducible. While the paper references appendices (C.1–C.4), the main narrative should report at least the m values and justify how they were chosen. The paper mentions "a small m (say 30)" in the theory section, but the actual values used in experiments are not stated.
-
-- **No variance or confidence estimates for any experimental result**: LSH is an intrinsically randomized method, yet all tables and figures report single runs without error bars, confidence intervals, or variance estimates. This makes it impossible to assess whether observed differences between methods are statistically significant, especially when several numbers are very close (e.g., outliers detected across ACE, FastACE, and ACHashACE in Tables 1–3).
-
-- **Extensions to other similarity metrics are sketched but untested**: Section 5 mentions angular similarity and maximum inner product search but provides no experimental validation. This weakens the claim of "broad applicability" beyond the Euclidean case.
-
-- **The ACHash comparison is mostly tangential**: The paper devotes substantial space to comparing against ACHash, which the paper itself acknowledges is not an LSH. The meaningful comparison is against E2LSH, and those results (6.1×, 1.7×, 20×) are already reported. The ACHash discussion inflates the evaluation without deepening the core comparison. This is not a flaw in the experiments but a framing issue.
+- **Sampling with replacement vs. without replacement is not discussed.** The paper draws $m$ i.i.d. samples with replacement (forming a multiset, line 82). This means the same dimension can be sampled multiple times, inflating the effective dimension without adding new information. The variance of $\tilde{s}^2$ under sampling with replacement differs from sampling without replacement, but the paper does not discuss this choice or its implications.
 
 ### Trivial
 
-- The formal LSH inequality in Definition 2.1 is truncated in the main text (line 33–34), though the verbal requirement (p₁ > p₂, c > 1) is stated on the next line. This should be completed in the camera‑ready version.
-
-- Figure 2 uses a log-scale x-axis; the paper notes this but an inset showing the early iterations on a linear scale would help.
+None.
 
 ## Nice-to-Haves
 
-- **Ablation study on m**: A plot showing how recall and hashing time vary as m is swept from small values up to n (on at least one dataset) would give practitioners concrete guidance for choosing m.
-- **Empirical verification of monotonicity**: A direct experiment plotting empirical collision probability vs. pairwise distance for FastLSH (for several m values) would directly support the LSH property claim and would be more convincing than the moment analysis alone.
-- **Time breakdown**: Breaking the end-to-end speedup into hashing vs. other operations (hash table initialization, linked-list maintenance) would help attribute the gains more precisely.
+- Show recall-vs.-query-time curves across multiple target recalls in the main paper (currently only the 0.9 operating point is in the main text; the appendix contains more). This would strengthen the empirical case.
+- Report explicit $m$ values and the bucket-width scaling relationship $\tilde{w} = \frac{m}{n} w$ for each experiment in the main text, so readers can directly see the trade-off between sampling ratio and accuracy.
+- Add an empirical verification that the collision probability is indeed monotonically decreasing in $s$ (e.g., by sampling random pairs and measuring empirical collision rates), which would compensate for the incomplete theory.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **Characteristic function derivation correctness (Lemma 4.4)**: The reviewer questioned whether the characteristic function expression is correct, noting the proof is deferred to the appendix. This is removed because proof details exist in the original submission's appendix (stripped by the parser). The rule states: "REMOVE weaknesses about missing appendix, missing proofs in appendix."
 
-- **"The promised theorem about asymptotic behavior is not presented"** — The paper references Corollary 4.7, Lemma 4.8, and Fact 4.9 that are not present in the parsed text. Per the review guidelines, these were in the original submission appendices which the parser strips. The criticism that the proof is missing from the main text is a parser artifact, not an author error.
+- **Missing $m$, $k$, $L$ values in experiments**: The reviewer noted these parameters are not reported in the main text. Removed because parameter settings are referenced to appendix sections (C.1–C.4) which were stripped by the parser. The original submission contains these details.
 
-- **"The paper never says how small m is"** — The paper explicitly states (line 110): "a small m (say 30) often suffices." The critic missed this.
+- **Only one recall operating point shown**: The paper shows the 0.9 recall case in the main text and references the appendix for full curves. This is a presentation choice, not a flaw — moved to Nice-to-Haves.
 
-- **"Comparison with ACHash is unfair / ACHash is not an LSH"** — The paper itself acknowledges ACHash is not an LSH (line 20–21). Comparing against the only existing fast alternative is defensible and the paper uses it primarily to demonstrate the cost of lacking LSH guarantees, not as the central baseline.
+- **ACHash comparison is unfair**: The reviewer claimed the comparison with ACHash is expected/stated. The paper also compares against E2LSH and MPLSH alongside ACHash, so this is not a weakness — ACHash is a natural baseline as the only other fast sketch.
 
-- **"Missing related works on fast LSH"** — Per guidelines, I cannot verify existence of works I have not seen. This point is removed.
-
-- **"Definition 2.1 is cut off"** — The critic acknowledges this is a parser artifact. Removed.
+- **Hashing vs. end-to-end cost**: The reviewer noted that other steps (hash table initialization, linked list maintenance) can dominate. The paper already acknowledges this explicitly (line 267: "Besides hashing, the procedure of index construction consists of other operations such as hash table initialization and linked list maintenance, which cannot be accelerated"). Removed as already addressed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a genuine tension: the paper's "provable LSH" claim is neither purely false nor fully rigorous — it sits in a gray area where the asymptotic case may be provable but the practically relevant limited-m case rests on heuristic moment matching. This tension is the review's most useful observation and should be addressed directly in revision.
+None beyond the paper's own contributions. The key insight — randomly sample dimensions before the random projection to reduce hashing cost — is clean and practical. The theoretical gap (no proof of monotonicity) and the unanalyzed $\sigma$ dependence are the most important weaknesses to emerge from the review.
 
 ## Suggestions
 
-1. **Clarify the scope of the theoretical guarantee**: Either (a) provide a rigorous bound showing that the LSH inequality holds for limited m, or (b) clearly state that the formal LSH property is proven only asymptotically (large m) and that the limited-m analysis provides an approximate guarantee supported by numerical evidence. The term "provable LSH property" should be qualified accordingly.
+1. **Reframe the theoretical claim honestly.** Either provide a genuine proof that the collision probability is monotonically decreasing in $s$ (or that $p_1 > p_2$ thresholds exist), or downgrade the claim from "provable LSH property" to "asymptotic equivalence to E2LSH" and present FastLSH as an empirically validated efficient heuristic with strong theoretical intuition. The current blend of incomplete theory and strong language ("provable LSH property") is misleading.
 
-2. **Report m/n for each experiment in the main text**: Add a table or paragraph stating the sampling ratio, bucket width, number of hash tables, and how these were chosen (e.g., tuned for a target recall). This is essential for reproducibility.
+2. **Address the $\sigma$ dependence.** At minimum, provide empirical evidence (e.g., simulations) that for pairs with the same $s$ but different $\sigma$, collision probabilities stay within well-separated bounds for $R$ and $cR$. Or prove that the expected collision probability over the random sampling is still monotonic.
 
-3. **Add error bars or confidence intervals** to all experimental results, especially for the randomized LSH methods. Without these, the reader cannot assess whether the performance differences are statistically meaningful.
+3. **Discuss the sampling-with-replacement choice** and its effect on the variance of $\tilde{s}^2$ relative to sampling without replacement.
 
-4. **Add an empirical monotonicity plot**: Show the empirical collision probability of FastLSH as a function of pairwise distance (for several m values and a representative dataset). This would directly demonstrate the LSH property in practice and compensate for the theoretical gap.
+4. **Add recall-vs.-time curves** and explicit $m$ values to the main paper to strengthen the empirical case and make trade-offs transparent.
 
 ## Score and Decision
 
-This paper tackles a well-motivated problem (LSH hashing is a bottleneck), proposes an elegantly simple solution (random sampling before projection), and demonstrates substantial empirical speedups. The main weakness is that the "provable LSH property" claim is not fully rigorous for the limited-m regime that matters most in practice. However, the asymptotic analysis provides a solid theoretical foundation, the empirical evidence (including the PDF comparison in Figure 1) supports the claim, and the speedups are compelling. The weaknesses are addressable in revision — primarily by tempering the theoretical claim and adding missing experimental details.
+The paper presents a simple, practical idea with solid empirical validation across multiple tasks. The computational gains are real and well-demonstrated. However, the paper's central differentiating claim — "provable LSH property" with theoretical guarantee — is not substantiated. The theoretical analysis proves asymptotic equivalence (in the $m\to\infty$ limit) but never establishes that FastLSH satisfies Definition 2.1 for finite $m$, which is the regime used throughout the experiments. The unanalyzed $\sigma$ dependence introduces a further gap between claim and support. These are not minor presentation issues — they cut to the core of what the paper claims as its primary contribution over non-LSH alternatives. The paper could be acceptable after major revision (either by providing a proper proof or by reframing the contribution as an empirically effective heuristic with asymptotic intuition), but in its current form the overclaiming is too significant.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

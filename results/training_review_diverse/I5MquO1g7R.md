@@ -1,97 +1,71 @@
-Now I have a thorough understanding of the paper's content. Let me produce the consolidated review.
+Now I have a comprehensive understanding. Let me write the final review.
 
 ---
 
 ## Summary
 
-This paper proposes TV-HMM, a Bayesian offline change point detection method that models change point locations via a time-varying Markov chain with an upper-triangular transition matrix. The approach uses variational EM with stochastic approximation for inference, and the transition matrix learning enables automatic pruning of redundant regimes. The paper provides a theoretical consistency result for location estimation, validates it empirically, and extends the method to semi-parametric settings using Maximum Mean Discrepancy (MMD). The core idea of parameterizing change point locations through a learnable transition matrix is novel, and the competitive results across diverse simulation models suggest promise.
+This paper proposes TV-HMM, a time-varying hidden Markov model for offline change point detection. The key idea is to encode change point locations via a left-to-right Markov chain with a learnable upper-triangular transition matrix; diagonal entries can converge to 1 during learning, automatically pruning redundant change points. The paper presents a variational EM algorithm with stochastic approximation for inference, a theoretical consistency result for change point location estimation, and a semi-parametric extension using Maximum Mean Discrepancy (MMD) to remove distributional assumptions.
 
 ## Strengths
 
-- **Novel time-varying transition matrix formulation with automatic regime pruning.** The paper models change points via a Markov chain where the upper-triangular transition matrix $\Pi_k$ encodes all possible location pairs. Learning the diagonal elements $\pi_{k,i,i}$ from data allows the model to automatically eliminate redundant regimes (diagonal elements converging to 1 indicate zero-length regimes). This is demonstrated concretely in Figure 2(c,d), where the converged transition matrix is extremely sparse with significant mass only on the diagonal and near true change point locations. This is a genuinely novel modeling contribution that addresses the practical challenge of unknown $K$.
+- **Novel modeling approach with automatic selection of the number of change points.** Encoding change point locations via a time-varying transition matrix with learnable entries is a genuinely creative idea. The ARD-like behavior where diagonal elements of Πₖ converge to 1 effectively prunes spurious regimes without requiring the user to specify the number of change points *a priori*. This is illustrated empirically in Figure 2(c,d), where the converged transition matrix becomes sparse with mass concentrated at true locations and diagonals — a concrete demonstration that the mechanism works.
 
-- **Consistently competitive performance across diverse simulation settings.** Table 1 shows TV-HMM is the only method that performs well across all three simulated models (mixed binomial/Poisson/normal, 5D normal, 10D normal), whereas baselines like ECP3O and DPHMM fluctuate. On Model 2 it achieves the best Rand index, and on Models 1 and 3 it is competitive with the best methods. This breadth of consistent performance across heterogeneous data types is a genuine empirical strength.
+- **Semi-parametric MMD extension removes parametric assumptions.** Generalizing the likelihood term to a kernel-based MMD distance and deriving an MMD-ELBO objective (Section 4) is a principled extension. The paper explicitly shows the connection to the parametric Gaussian case (where the term reduces to MMD with linear kernel), and reports promising Rand index values (0.94, 0.87, 0.89) on three non-Gaussian distributions (Poisson, chi-squared, exponential) without incorporating distributional knowledge. This extension is useful for practitioners working with data where parametric assumptions are hard to justify.
 
-- **Theoretical analysis providing a consistency guarantee.** Theorem 1 establishes that the marginal probability $Q(\mathbf{t}_i(n)=1)$ consistently estimates the true change point locations at an exponential rate in $N$ under stated assumptions. This is validated in Section 3.1 (Figure 2a,b) where increasing $N$ yields a stable estimated number of change points (converging to the true 4) and rapidly decreasing MAE over 100 repeated trials. While the exact rate expressions are messily presented (see Weaknesses), the qualitative claim is communicated and empirically supported.
-
-- **Stochastic approximation reduces computational complexity.** The algorithm reduces per-iteration cost from $\mathcal{O}(K N^2)$ to $\mathcal{O}(K S^2)$ by chronologically sampling $S\ll N$ observations. The paper reports convergence typically within 30 iterations, and the method delivers strong performance on sequences of moderate length without prohibitive runtime. This efficiency claim is structurally justified even without wall-clock timing comparisons.
-
-- **Semi-parametric MMD extension addresses a genuine limitation.** Replacing the parametric likelihood with MMD-based message functions (Equation 4) removes distributional assumptions, and the MMD-ELBO objective (Equation 5) provides a principled learning target. The Rand indices of 0.89–0.94 on three non-Gaussian distributions (Poisson, chi-squared, exponential) without incorporating distributional knowledge demonstrate the potential of this generalization, even though it lacks baseline comparisons.
+- **Stochastic approximation reduces per-iteration cost from O(K N²) to O(K S²).** The chronological subsampling scheme is practical and the paper reports convergence within ~30 iterations, suggesting real applicability to long sequences.
 
 ## Weaknesses
 
-### Fatal
-
-None. The core methodological contribution is sound and the experiments, while having gaps, do not invalidate the approach.
-
 ### Major
 
-- **The semi-parametric MMD extension (Section 4) is evaluated without any baselines.** The paper reports Rand indices of 0.9447, 0.8686, and 0.8911 for Poisson, chi-squared, and exponential data respectively, but provides no comparison—not even the parametric TV-HMM on these same non-Gaussian distributions, nor standard non-parametric CPD methods (KCP, ECP). The claim that the method "has robust performance over a broader class of data distributions" (line 229) is unsupported without context for what constitutes good performance. This is a methodological gap in the experimental validation of what the paper advertises as a core contribution (Contribution 4 in the introduction).
+- **Theorem 1 is garbled and its logical content cannot be verified as stated.** The core theoretical claim — the paper's headline contribution — is presented in a form that is not coherent. The piecewise function in Equation (line 138-140) has mismatched cases (the "if n=T_k" case is paired with a rate that would be O(1) at that point, and the case boundaries are unclear). The second unlabeled equation (line 143) seems intended for junction points but its relationship to the first equation is unspecified. The Remark (line 146) cuts off mid-sentence ("those segments whose lel"). More substantively, the theorem appears to assert that both junction and non-junction points' marginals concentrate on the true locations, but the paper never formally establishes the mechanism by which redundant points are discarded — the Remark gestures at "unduplicated set" but this is not derived from any stated property of the marginals or of Πₖ. The connection between the ARD behavior of Πₖ (diagonal elements → 1) and the consistency theorem is never formally established. Until the theorem is restated with unambiguous cases, clearly separated behavior for junction vs. non-junction points, and an explicit link to the pruning mechanism, the paper's central theoretical contribution is not assessable.
 
-- **The theoretical centerpiece (Theorem 1, Section 2.3) is presented in a manner that prevents proper evaluation.** The equation for non-junction points (line 138–140) uses a confusing nested array structure where the branching conditions and their corresponding rate expressions are not clearly aligned. The second expression (lines 142–144) uses the nonstandard `{1 \atop O(...)}` notation for what appears to be a two-case statement without cleanly specifying the condition for the first case. While the *qualitative* claim of exponential-rate consistency is communicated, the *exact* statement of the theorem—which is a central advertised contribution—cannot be cleanly verified or falsified from the main text. For a paper that advertises theoretical guarantees as a differentiator from prior Bayesian CPD work, this undermines the contribution.
+- **Algorithm 1 is incompletely specified.** Several critical steps are missing or heuristic: (i) Line 8 reads "Set new prior by" with no continuation — a core update step is simply absent. (ii) The update for πₖ (π ← π + η · Q^S(...)) is presented as an M-step but is not derived from maximizing the ELBO with respect to Π; it is stochastic gradient ascent on an unspecified objective with no convergence guarantee. (iii) The message-passing in the E-step (line 5) has garbled conditional logic ("if m,n ∈ Ω, ..., or n=1,1,...,N"). These gaps make it impossible to reproduce the algorithm from the description alone. A conference paper's inference routine must be fully specified.
 
 ### Minor
 
-- **Table 1 reports no measure of variability.** The main empirical comparison shows a single Rand index per method per model with no standard deviation, confidence interval, or indication of the number of trials. The paper demonstrates awareness of replication elsewhere (Section 3.1 explicitly states results are repeated 100 times), making this omission in the central comparison table notable. Without knowing whether the 0.04–0.05 point differences from DPHMM or ECP3O are reproducible, the empirical advantage is not fully substantiated.
+- **The empirical evaluation is too narrow to fully support the claimed advantages.** The simulated comparison (Table 1) uses only the Rand index — while defensible as a partition-similarity metric, standard CPD metrics (F1 score, Hausdorff distance, coverage probability) are absent, making comparison with the broader literature difficult. The semi-parametric experiments (Section 4) report promising Rand indices on three non-Gaussian datasets but include **no baselines at all** — there is no comparison showing that the MMD extension improves over a misspecified parametric TV-HMM on the same data. The real-data experiment (Well-log) is qualitative only, with no quantitative metric. These are not fatal omissions but they weaken the otherwise interesting empirical claims.
 
-- **The Well-log analysis (Section 3.3) lacks ground truth for the claimed "comparative advantage."** The paper states TV-HMM detects a change point at timestamp 1540 that $\mathcal{D}_m$-BOCD misses, but provides no external validation (known regime boundaries from the geophysics literature or domain expert judgment) to confirm this detection is correct rather than a false positive. The grey bands in Figure 3 indicate mismatch between methods, not correctness. The claim of advantage is ambiguous.
+- **No ablation studies.** The method has several tunable components (initial overspecification factor K̃, subset size S, step size η, constant G), yet none are ablated. Readers cannot gauge sensitivity or get guidance on how to set these in practice.
 
-- **Missing methodological details for the MMD extension.** The paper does not specify which kernel is used for the MMD computation (e.g., Gaussian RBF), how its bandwidth is selected, or the value of the constant $G$ in Equation 4. These details are necessary for reproducibility.
-
-- **No wall-clock timing or empirical efficiency comparison.** The paper claims computational efficiency as a motivation (line 24: "reduces the computational cost compared to MCMC-based inference") but provides no timing measurements. A simple runtime comparison against DPHMM (an MCMC-based HMM method) would substantiate the practical advantage.
+- **Assumption A3 is strong.** It requires an initial grid where each segment either contains exactly one true change point or lies entirely within a true regime. This effectively assumes a "good" initialization that matches the unknown structure at a coarse level. While such assumptions are common in theoretical CPD analyses, their strength should be acknowledged more explicitly and the paper would benefit from discussing what happens when A3 is violated (e.g., two true change points in one initial segment).
 
 ### Trivial
 
-- The paper refers to the MMD extension as "semi-supervised TV-HMM" on line 206 but "semi-parametric TV-HMM" everywhere else, suggesting a typo.
-- Some pseudocode steps in Algorithm 1 are vague (Step 5 trails off with "..." and Step 6 references "Equation" without a number), though this may be a parsing artifact.
+- The visual quality of Figure 2(c,d) heatmaps is low (images appear to suffer from resolution issues in the extracted PDF).
+- Notation inconsistencies: line 50 has stray characters ("K+1$ $\{p(\theta_{k};\alpha_{k})\}_{k=1}^{K+1}$ $\alpha_{k}$ $k$").
 
 ## Nice-to-Haves
 
-- An ablation experiment comparing the stochastic approximation (subset-based) vs. full-data inference under similar compute budgets would justify the approximation's practical benefit.
-- Sensitivity analysis for key hyperparameters (initial $\tilde{K}$, subset size $S$, learning rate $\eta$) would strengthen practical guidance for users.
-- A timing comparison against MCMC-based competitors (e.g., DPHMM) would substantiate the claimed computational advantage.
+- A comparison of the parametric TV-HMM against the MMD-based TV-HMM on the same non-Gaussian data to directly measure the benefit of the semi-parametric extension.
+- A comparison against at least one standard penalty-based method (e.g., PELT with a suitable cost) to contextualize performance against the broader CPD literature.
+- An ablation varying the initial over-specification factor K̃ to show the method's robustness to this hyperparameter.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
-
-- **"Assumption A2 is dimensionally inconsistent"** — The Harsh Critic claims $O(N^{(n-m)/T})$ has dimensional issues. This is incorrect: $n$, $m$, and $T$ are all time coordinates in the same units, so $(n-m)/T$ is a dimensionless ratio describing how observation count scales with interval length. This is standard for continuous-time sampling frameworks.
-- **"A3 assumption is too strong"** — The initialization assumption (equal-distance grid with enough segments) is a standard condition for proving consistency in over-specified models. The method is evaluated empirically with random initializations, and the assumption is acknowledged transparently.
-- **"Equation 1 indexing oddity ($\prod_{t=j}^{i}$ with $j\geq i$)"** — This is either a typo or a parser artifact. The intended meaning (product over observations in a regime from $i$ to $j$) is clear from context.
-- **"Algorithm 1 has incomplete sentences"** — The trailing "..." and missing equation numbers are likely parser-induced artifacts from PDF extraction, not errors in the original submission.
-- **"Missing related works"** — Per policy, I cannot verify the existence of unmentioned works and therefore do not consider this a valid weakness.
+- **"Sign error in MMD-ELBO (factor (m-n-1) vs (n-m+1))":** Removed. The message functions use exp(-(n-m+1)/G · MMD) and the ELBO term is (m-n-1)/G · MMD. Since (m-n-1) = -(n-m+1), these are algebraically identical. No sign error exists.
+- **"Mean-field assumption broken by joint Q(t₁,...,t_K)":** Removed. The paper uses a structured mean-field that factorizes θ from t while keeping the t's as a joint distribution, then extracts marginals via sum-product. This is a standard and valid variational approximation, not an error.
+- **"Missing related works":** Removed per instructions (cannot verify existence of missing references without external sources).
+- **"Reproducibility concerns about hyperparameters, trivial implementation details":** Removed per instructions — these are impractical to include in a submission.
+- **"Missing appendix/proofs":** Removed per instructions — the parser strips these; they exist in the original submission.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the paper's core strengths (novel transition matrix modeling, competitive empirical breadth) and key weaknesses (unsubstantiated MMD baselines, unclear theorem presentation) but do not generate insights not already present in the paper's own framing.
+None beyond the paper's own contributions. The reviews surface a genuine tension: the paper has a clever modeling idea (time-varying transition matrix for automatic CP count selection) and a useful extension (MMD-based distribution-free CPD), but its presentation of the theoretical result is too garbled to evaluate, and the algorithm is incompletely described. The core innovation deserves scrutiny on its own terms, but the current write-up does not yet deliver a verifiable paper.
 
 ## Suggestions
 
-1. **Clarify Theorem 1.** Replace the garbled equation with a clean cases-environment statement. Clearly separate the junction-point result ($Q\to 1$ at the true $T_k$) from the non-junction-point result (convergence to the nearest true location), and explicitly state the rate in each branch. A brief intuition paragraph explaining why exponential rates hold under the assumptions would help readers who are not CPD theory specialists.
+1. **Restate Theorem 1 completely.** Separate the junction-point and non-junction-point cases with clear, independent equations. State explicitly what happens to each marginal Q(t_i) as N→∞ for both cases, and explain — in a sentence with a complete predicate — how the algorithm recovers the unduplicated set {T_k}. Connect this to the ARD property of Π_k or explicitly derive that redundant marginals collapse to the same mode.
 
-2. **Add baselines for the MMD extension.** At minimum, compare against the parametric TV-HMM on the same non-Gaussian data (to show the benefit of removing distributional assumptions) and one standard non-parametric CPD method (KCP or ECP). Even a single baseline per distribution would make the Rand indices interpretable.
+2. **Complete Algorithm 1.** Specify every step. Derive the M-step for Π from the ELBO (or justify the gradient step as a natural gradient / stochastic variational inference update with a reference). Complete line 8. Fix the garbled conditional in line 5.
 
-3. **Quantify variance in Table 1.** Re-run all methods multiple times (5–10 trials) and report mean ± std Rand index. The standard deviations on Table 2 show the authors know how to report variance—apply the same standard to the main comparison table.
+3. **Add at least one baseline to the semi-parametric experiment.** Compare the MMD-based TV-HMM to the parametric TV-HMM on the same non-Gaussian data to demonstrate that the MMD extension provides a concrete benefit under model misspecification.
 
-4. **Validate or soften the Well-log claim.** Either cite known ground-truth change points from the geophysics literature, or reframe the comparison as purely illustrative ("TV-HMM identifies a different regime structure") without claiming superiority based on unvalidated detections.
-
-5. **State the MMD kernel and bandwidth.** Specify which kernel (e.g., Gaussian RBF) and how its bandwidth and the constant $G$ are selected. This is required for reproducibility of the semi-parametric extension.
+4. **Add ablation studies.** Vary the initial overspecification factor K̃, subset size S, and step size η to show sensitivity and provide practical guidance to users.
 
 ## Score and Decision
 
-The paper introduces a genuinely novel modeling approach for offline change point detection with a clever transition-matrix parameterization, competitive empirical performance, theoretical grounding, and a principled semi-parametric extension. However, the experimental validation of the MMD extension lacks any baselines, making its central claim unsubstantiated. The theoretical contribution—a key advertised selling point—is presented in an unclear state that prevents proper evaluation. These are addressable gaps, but in the current form they weaken the paper's evidence for its advertised contributions.
+The paper introduces interesting ideas — the time-varying transition matrix for automatic CP count selection and the MMD-based semi-parametric extension are both genuinely creative. However, the main theoretical contribution (Theorem 1) is presented in a form that cannot be verified, and the inference algorithm is incompletely specified. In a conference setting where claims must be assessable and methods reproducible, these are significant barriers. The ideas are salvageable, but the paper in its current form does not meet the bar for acceptance.
 
-**Originality**: High. The time-varying transition matrix formulation is novel within the Bayesian CPD literature.
-
-**Importance**: Moderate-to-high. Offline CPD with unknown $K$ is practically important.
-
-**Claims support**: Partially. The main TV-HMM experiments support competitive performance, but the MMD extension claims are unsupported, and the theory is presented unclearly.
-
-**Experimental soundness**: Moderate. Missing variance and baselines limit confidence.
-
-**Clarity**: Below average for the theoretical section; average elsewhere.
-
-**Value to community**: Moderate. The method is interesting but needs more rigorous validation to be practically recommendable.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>3.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

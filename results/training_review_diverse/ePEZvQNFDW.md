@@ -1,22 +1,18 @@
-Now I have all the information I need. Let me construct the final consolidated review.
-
----
+I now have a complete picture of the paper. Let me compile the final review.
 
 ## Summary
 
-This paper proposes Continuous Ensemble Forecasting (CEF), a diffusion-based method that generates temporally consistent ensemble weather trajectories by freezing the driving noise across lead times. A single fixed noise sample is fed to an ODE solver for all lead times, making the score-network map deterministic in the noise, which yields trajectories that are continuous in time and can be sampled in parallel. The authors extend this with autoregressive rollouts combined with continuous interpolation (ARCI) to produce long-range forecasts at arbitrary temporal resolution. On WeatherBench data at 5.625°, ARCI-24/6h achieves results competitive with the best autoregressive baseline (AR-24h), and the method's ability to forecast at 1-hour resolution without the degradation seen in standard autoregressive 1-hour models is the strongest piece of evidence.
+This paper proposes Continuous Ensemble Forecasting, a method for diffusion-based weather forecasting that generates temporally consistent ensemble trajectories by using a single fixed (or autocorrelated) noise sample across all lead times. The key idea is that by fixing the random seed in the probability flow ODE solver, the resulting forecasts at different lead times form smooth, continuous trajectories without requiring autoregressive rollouts. The method can also be combined with autoregressive steps (ARCI) to handle long lead times, while achieving arbitrary temporal resolution. On the WeatherBench 5.625° benchmark, ARCI matches the accuracy of state-of-the-art autoregressive diffusion models (AR-24h) while offering computational benefits and higher temporal resolution.
 
 ## Strengths
 
-1. **Parallel, temporally consistent ensemble sampling.** Algorithm 1 is clean and well-motivated: freezing the noise across lead times turns the ODE solver into a deterministic map from noise to trajectory, enabling fully parallel sampling across both ensemble members and lead times. This directly addresses the computational bottleneck of iterative diffusion models. The paper reports a reduction from 32s (AR-6h) to 8s (ARCI-24/6h) per ensemble member.
+- **Parallel generation of temporally consistent ensemble trajectories**: The method generates forecasts for all lead times in parallel (no autoregressive steps), while maintaining temporal continuity. The temporal difference metric (Fig. 4) empirically validates that fixed-noise forecasts (ρ=0) closely track the data's temporal difference, confirming the method produces smooth trajectories.
 
-2. **Fine temporal resolution without accuracy loss.** The hourly-forecast experiment (Figure 4/6) is the paper's strongest evidence. ARCI-24/1h achieves RMSE/CRPS nearly identical to AR-24h (the best model) at all lead times, while AR-1h degrades severely. The method even generalizes to unobserved lead times: ARCI-24/2h\* (trained only on 2-hour steps) performs similarly to ARCI-24/1h, demonstrating an ability to interpolate in lead time.
+- **High temporal resolution without accuracy loss**: ARCI-24/1h achieves the same forecast skill as AR-24h at 1-hour resolution over 10 days, while a purely autoregressive model at 1-hour steps (AR-1h) degrades severely (RMSE > 1300 vs. < 1000). This demonstrates a clear practical benefit: the ability to produce forecasts at arbitrary fine temporal resolution without the error accumulation that plagues small-step autoregressive models.
 
-3. **Competitive probabilistic skill.** ARCI-24/6h is second-best overall in Table 1, closely matching AR-24h in RMSE, CRPS, and SSR across z500 and t850, while notably outperforming AR-6h and CI-6h. The method also beats the external baseline Graph-EFM.
+- **Competitive quantitative performance**: On the standard 5.625° WeatherBench benchmark, ARCI-24/6h matches AR-24h (the best autoregressive baseline) on most metrics for z500 and t850 at both 5- and 10-day lead times (Table 1), and outperforms the Graph-EFM latent-variable baseline. This shows the ARCI combination does not sacrifice accuracy for flexibility.
 
-4. **Principled motivation for noise freezing.** Section 4.1 formalizes the connection between latent noise space and the space of possible evolution functions via a commuting diagram (Figure 2), providing theoretical grounding for why freezing noise yields a valid sample from the trajectory distribution.
-
-5. **Addresses conditional determinism with autocorrelated noise.** Algorithm 2 introduces an Ornstein-Uhlenbeck noise process to relax the overly deterministic conditional distributions that arise under fixed noise. Figure 3 shows that appropriate ρ values keep the temporal difference closer to the data's.
+- **Generalization to unseen lead times**: ARCI-24/2h*, trained only on 2-hour intervals, performs nearly as well as ARCI-24/1h trained on all hourly steps (Fig. 4 description, line 335). This demonstrates the method can interpolate to finer temporal resolutions beyond its training setup, adding practical flexibility.
 
 ## Weaknesses
 
@@ -25,53 +21,54 @@ None.
 
 ### Major
 
-1. **Missing comparison against linear interpolation of coarse AR forecasts.** The paper acknowledges this baseline explicitly ("An alternative … would be to linearly interpolate the forecasts sampled using an autoregressive model") but the sentence cuts off and no results are provided. For the hourly-resolution experiment, the natural question is whether ARCI-24/1h adds value beyond linearly interpolating AR-24h predictions at intermediate hours. Without this comparison, the central claim that the method enables "forecasts at an arbitrary fine temporal resolution without sacrificing accuracy" is incompletely supported — the fine-resolution forecasts could in principle be matched by a trivial post-processing step. This gap is the single most significant unaddressed question in the paper. The authors should provide this comparison (or a clear argument for why it is inappropriate given the probabilistic/ensemble setting) before acceptance.
+- **The claim of sampling from the joint trajectory distribution p(X(𝒯)|X(Ω)) is unsupported by the evaluation.** The paper states "We treat this as a sample from p(X(𝒯)|X(Ω))" (line 143) and builds the theoretical motivation (Sec. 4.1) around identifying the latent noise space with the solution space of possible weather evolutions. However, the empirical evaluation uses only marginal metrics (RMSE, CRPS, SSR) at individual lead times — metrics that are insensitive to whether the joint distribution of forecasts across lead times is correct. The temporal difference metric (Fig. 4) checks smoothness but not joint probabilistic calibration (e.g., whether temporal autocorrelations of forecast errors match nature). The paper itself acknowledges the conditional determinism issue (Sec. 4.2), meaning the fixed-noise method imposes a structural constraint that cannot represent arbitrary joint distributions. Either (a) a joint-probabilistic evaluation (e.g., energy score over trajectories, rank histograms for sequences) or (b) an honest reframing of the contribution as a *deterministic coupling* heuristic that yields smooth trajectories with good marginal properties — rather than a provably correct joint sampling procedure — is needed to bring the claims in line with what is demonstrated. This is the paper's most significant weakness.
 
 ### Minor
 
-2. **Autocorrelated noise extension lacks evaluation on forecasting metrics.** Algorithm 2 is presented as a way to address the conditional determinism problem, but it is evaluated only on the temporal difference (ΔX) metric. No RMSE, CRPS, or SSR results are reported for any ρ > 0. While the ΔX plot shows the intended effect, the reader cannot determine whether the extension preserves or degrades probabilistic skill. The paper should report at least one forecasting metric for a representative ρ value.
+- **The autocorrelated-noise extension (Alg. 2) is presented as addressing the conditional determinism issue but is not evaluated for joint forecast skill.** The paper states that Algs. 1 and 2 are "probabilistically equivalent for all time marginals" (line 221) and therefore only reports marginal metrics for one version. However, the autocorrelated noise is the mechanism proposed to remedy the conditional determinism shortcoming, and the place where it would make a difference is precisely in the joint/trajectory properties. The temporal difference plot (Fig. 4) shows that different ρ values affect trajectory smoothness, but no metric (e.g., energy score over trajectories, autocorrelation of ensemble mean errors) assesses whether this actually improves the joint distribution. The paper should either evaluate Alg. 2 with a joint metric or de-emphasize it as a contribution to joint forecasting.
 
-3. **Temporal consistency evaluation relies on a single, limited metric.** The paper uses ΔX = |X(t) − X(t−1)| to argue for temporal consistency. While this captures continuity of the trajectory, small ΔX alone does not guarantee realistic temporal dynamics (a model predicting nearly the same state each hour could achieve small ΔX while being clearly wrong). The paper's strong RMSE results at 1h resolution partially mitigate this concern, but a complementary analysis (e.g., lag-1 autocorrelation, spectral content, or visual inspection of trajectory evolution) would strengthen the claim substantially.
+- **The paper would benefit from a clear delineation of where continuous-only forecasting works and where it does not.** CI-6h performs well at short lead times but degrades at 10 days (z500 RMSE 885.7 vs. AR-24h's 750.6, Table 1). The paper honestly acknowledges this (line 270, Limitations), but the framing of the contribution (contribution 1: "can generate ensemble member trajectories without iteration") is broad. Since the continuous-only mode is practically limited to short horizons (a few days), while long horizons require autoregressive steps, the paper should more explicitly demarcate these two regimes.
 
-4. **No error bars or uncertainty quantification on main results.** The paper acknowledges this limitation, but the omission is consequential because the differences between ARCI-24/6h and the top baseline (AR-24h) are small (e.g., z500 RMSE at 5d: 560.9 vs. 544.2). Without bootstrap intervals or replication-based uncertainty estimates, it is unclear whether these gaps are meaningful or within noise. The authors should report at least temporal bootstrap intervals over test years.
-
-5. **Varying conditioning window across models.** The paper states that all models condition on Ω = {0, −δ} with δ being the model's timestep. This means AR-24h and ARCI-24/6h condition on the previous 24h, while AR-6h and CI-6h condition on only the previous 6h. This asymmetry benefits models with larger δ. While the paper's primary comparison (ARCI vs. AR-24h) controls for this, the broader comparison table should note this difference explicitly.
-
-6. **Computational efficiency claim is undersubstantiated.** The 32s vs. 8s timing is reported as a single number without breakdown of neural network evaluations, solver steps, or GPU utilization. A more detailed cost comparison would strengthen the efficiency motivation.
+- **Evaluation limited to 5.625° resolution.** The paper acknowledges this in the Limitations (line 353), noting it has not been shown to scale to higher spatial resolution. While this is standard for a WeatherBench paper, it constrains the generality of the conclusions about operational applicability.
 
 ### Trivial
 
-None.
+- No error bars are reported due to computational constraints (acknowledged line 354). Acceptable for a conference paper but weakens comparison reliability.
+- The speed comparison (line 261: 32s for AR-6h → 8s for ARCI-24/6h) would be clearer if the wall-clock time for AR-24h were also reported, since ARCI-24/6h uses the same 24h autoregressive step size.
 
 ## Nice-to-Haves
 
-- Discuss why ARCI-24/6h does not quite reach AR-24h's performance (small gap). Is the score function less specialized when handling multiple lead times (6, 12, 18, 24h)?
-- Report the number of ODE solver steps and solver type for reproducibility of the timing results.
-- A brief note on whether the conditioning-window asymmetry in Table 1 systematically advantages models with larger δ.
+- A sensitivity analysis on the autoregressive step size (e.g., 12h vs. 24h) would strengthen claims about the method's flexibility.
+- A joint-trajectory evaluation metric for the autocorrelated-noise variant (e.g., energy score over 24h trajectories) would directly address the gap between claims and evidence.
+- A summary table of model architectures, training hyperparameters, and computational budgets would improve reproducibility.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- *Harsh Critic's statement that the paper "does not acknowledge the missing interpolation baseline"* — The paper does acknowledge it in line 333 (the cut-off sentence "An alternative … would be to linearly interpolate…"). However, the acknowledgment is incomplete, and no results are provided. The substantive criticism (missing comparison) remains in Major Weakness #1.
-
-- *Criticism that the ΔX metric alone invalidates the temporal consistency claim* — While ΔX alone is limited, the paper also provides strong RMSE/CRPS results at 1h resolution (Figure 4), showing the forecasts are accurate at fine timescales, which partially addresses this concern. The weakness is retained but downgraded to Minor.
+- **Missing comparison with DYffusion** — The paper discusses DYffusion in Related Work (lines 103–105), noting it "still requires sequential computations for sampling the prediction," which constitutes a conceptual comparison. An experimental comparison would require re-implementing a different training framework and is not a standard requirement for a method paper proposing a different approach.
+- **24h autoregressive step not motivated** — The paper says "Taking longer timesteps (24h) has been shown to give better results" (line 93) with citations. This is adequately motivated.
+- **Formatting/style nitpicks** — Removed per instructions.
+- **Reproducibility nitpicks about undisclosed hyperparameters** — Removed per instructions; such details are standard to leave for a code release or appendix.
 
 ## Novel Insights
 
-The core insight — that freezing the driving noise across lead times in a diffusion model's probability-flow ODE yields deterministic maps that are continuous in lead time, enabling parallel generation of temporally consistent ensemble trajectories — is the paper's most novel contribution. The identification of the latent noise space with the function space of possible evolutions (Section 4.1) provides a principled lens that goes beyond heuristic engineering. The ARCI combination (autoregressive rollouts at coarse resolution + continuous interpolation at fine resolution) is a practical contribution that cleanly decouples long-range accuracy from temporal resolution.
+None beyond the paper's own contributions. The reviews largely affirm the paper's claimed strengths (parallel generation, temporal consistency, high-resolution capability) while identifying a gap between the joint-distribution framing and the marginal-only evaluation. The core insight — that sharing noise across lead times in a diffusion model's ODE solver produces smooth forecast trajectories — remains the paper's primary contribution and is well-supported by the experiments.
 
 ## Suggestions
 
-1. **Add the linear interpolation baseline** as discussed. Compare ARCI-24/1h against linearly interpolated AR-24h forecasts on RMSE, CRPS, and SSR. Even if RMSE is similar, highlight where ARCI adds value: probabilistic calibration at intermediate times, ensemble spread, or faster-evolving variables (e.g., wind).
-2. **Report at least one forecasting metric for the autocorrelated noise extension** (Algorithm 2) at a representative ρ value to demonstrate that probabilistic skill is preserved.
-3. **Add bootstrap confidence intervals** (over test-year initialization times) to Table 1 and Figure 4.
-4. **Strengthen temporal consistency analysis** with a complementary metric (e.g., lag-1 autocorrelation of ensemble members, or power spectra).
-5. **Clarify the conditioning window** for each model variant and discuss how it may affect comparisons.
+1. **Reframe the central claim or add a joint evaluation.** The simplest path is to drop the claim of "sampling from p(X(𝒯)|X(Ω))" and instead describe the method as constructing a deterministic coupling between marginal forecast distributions, yielding smooth trajectories by design. Alternatively, add a joint probabilistic metric (e.g., energy score over 24h trajectories, autocorrelation of forecast errors) to validate the joint distribution claim.
+
+2. **Evaluate Alg. 2 with a trajectory-level metric.** Since the autocorrelated-noise extension is presented as the fix for conditional determinism, demonstrate that it actually improves the joint distribution (not just the temporal difference) relative to fixed noise.
+
+3. **Add a clear delineation in the paper of where continuous-only forecasting is applicable vs. where ARCI is needed.** This would help readers understand the practical deployment envelope.
 
 ## Score and Decision
 
-This paper proposes a genuinely novel method for ensemble weather forecasting with diffusion models. The core idea (noise freezing for temporally consistent parallel trajectories) is clean, well-motivated, and yields competitive results — especially the hourly-resolution experiment which convincingly shows the method's advantage over standard autoregressive approaches. The weaknesses are real but addressable: the missing linear interpolation baseline is the most important gap, but it does not invalidate the paper's core contributions (parallel sampling, temporal consistency, flexible resolution). The autocorrelated noise extension needs validation, and the temporal consistency metric could be strengthened. On balance, this is a solid paper with clear contributions that, with the suggested additions, would be a strong submission.
+**Originality:** 7/10 — The noise-sharing idea is simple and intuitive, and while related ideas exist (DYffusion, continuous-time forecasting for deterministic models), the specific application to diffusion ensemble trajectories is novel.  
+**Importance of research question:** 8/10 — Probabilistic high-temporal-resolution forecasting is practically important for decision support and extreme weather.  
+**Claims supported:** 5/10 — The practical claims about temporal consistency, parallelization, and competitive marginal scores are supported. The joint-distribution claim is not.  
+**Soundness of experiments:** 6/10 — Appropriate for a WeatherBench paper at this resolution, but the evaluation gap (marginal vs. joint) is a real limitation.  
+**Clarity of writing:** 7/10 — Well-structured and readable. The theoretical motivation is intuitive if not rigorous.  
+**Value to community:** 7/10 — The method is simple, effective, and likely to be adopted by practitioners working with diffusion-based forecasting.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

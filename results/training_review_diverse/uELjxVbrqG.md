@@ -1,203 +1,90 @@
-Now I have all the evidence needed. Let me construct the final consolidated review.
-
-## Summary
-2-3 sentence summary of the paper's contribution.
-
-## Strengths
-- strength 1 with evidence
-- strength 2 with evidence
-
-## Weaknesses
-### Fatal
-### Major
-### Minor
-### Trivial
-
-## Nice-to-Haves
-- suggestion that would improve but is not a core flaw
-
-## Removed Points
-Include something like this "These points are flagged to be removed, treat them with caution"
-
-## Novel Insights
-
-## Suggestions
-
-## Score and Decision
-
-Now I need to produce this.
-
-Let me finalize my judgments:
-
-**Paper class**: New-method paper with experimental evaluation. The core contribution is IIC - a training paradigm that adds a feature dissimilarity constraint between student and teacher in a KD framework.
-
-**Key decisions on what to keep/remove:**
-
-REMOVE (Critic Point 1 part about "Section 3.1 reference error"): The framework IS described in Section 3.1. The critic misread.
-
-REMOVE (Critic's claim about "does not clarify how logit-level supervision is handled"): The loss function is clearly L_S = L_FR + γ*L_dissim. No logit supervision. The paper is clear.
-
-REMOVE (Critic's claim about "not specified whether the student is trained for the same number of epochs"): Actually, the paper says 50 epochs (line 139), BUT doesn't say how many epochs the teacher was trained for. However, Table 7 shows that training from teacher initialization WITHOUT IIC (for the same duration) leads to WORSE performance. So the critic's concern about "additional training explaining gains" is already addressed. I'll weaken this.
-
-Actually, re-reading the critic: "It is not specified whether the student is trained for the same number of epochs as the original teacher training, or whether hyperparameters (learning rate schedule, batch size) are exactly matched. This matters because additional training could explain gains."
-
-The paper does say "models are trained for 50 epochs" (line 139). And the ablation (Table 7) shows that training without IIC for the same 50 epochs (from teacher init) leads to WORSE performance. So the "additional training" concern is addressed. However, the hyperparameter matching concern remains. Let me weaken this to a minor note.
-
-Actually, looking at the table descriptions - Tables 3 and 4 compare baselines (ArcFace, CosFace, etc.) against their IIC-enhanced versions. The baselines are presumably trained under their original settings. The IIC versions use the same teacher initialization + IIC loss. The 50-epoch training is for the IIC student. It's possible the original baselines were trained for more than 50 epochs. But since the ablation shows that training without IIC for 50 epochs hurts performance, the improvement from IIC can't be attributed to simply more training. So this concern is largely addressed.
-
-I'll weaken this point significantly or remove it.
-
-WEAKEN (Critic Point 4 - "gains are small and unreplicated"): The critic says improvements are modest on saturated benchmarks. This is true but the paper also shows larger gains on IJB-C at low FPR. The lack of confidence intervals is standard for FR evaluation. I'll keep as minor.
-
-Now let me also think about what to do with the Strength Finder:
-
-Strength 3: "verifies that adjusting innovation modulus can enhance feature representation beyond the original model" - Table 2 shows mixed results (AgeDB drops at c=1.1). This conflicts with the verified weakness that the decomposition evidence is thin. But it's not a direct conflict - the strength says "can enhance" (which is true in some cases) while the weakness says the evidence is "thin" (which is also true). I'll keep the strength but note the mixed evidence.
-
-Actually, looking at the rules: "Drop strengths that conflict with a verified weakness — when a strength and weakness disagree, the weakness wins." Let me check if there's a true conflict. Strength 3 says the paper verifies that adjusting innovation modulus can enhance features. Weakness 3 says the evidence is thin and results are marginal/inconsistent. These describe the same evidence differently but don't directly contradict - one says "can enhance" (which is supported by some metrics) and the other says "marginal and inconsistent" (which is also true). I'll keep both but frame the strength more carefully.
-
-Let me now write the review.
-
-For scoring: I need to be honest. The paper has:
-- A genuine novelty (IIC applied to FR in a KD framework)
-- Consistent improvements across multiple methods and benchmarks
-- But a logical disconnect in the motivation
-- An unsubstantiated claimed mechanism (not compared against other regularizers)
-- Small gains on saturated benchmarks without uncertainty quantification
-- Terminology inconsistency
-
-I'd say this is a borderline paper. The empirical results are interesting but the claimed mechanism isn't well-supported. The motivation has a logical gap. I'd lean toward weak reject or borderline accept.
-
-Actually, let me reconsider. The paper shows consistent improvements across 4 different FR methods (ArcFace, CosFace, MagFace, AdaFace) on 7 benchmarks. Even if the mechanism is regularization rather than "innovation learning," the empirical finding is valuable. Many papers are accepted based on empirical findings with imperfectly understood mechanisms.
-
-But the motivation disconnect is real and significant. And the lack of comparison to other regularizers is a major gap. I think this is a weak reject / borderline paper. Let me score it around 5-6 out of 10 (reject range for a top conference).
-
-Actually, I'm supposed to assign a score and decision. Let me think more carefully.
-
-The paper's weaknesses:
-1. Motivation disconnect (Major) - The two-model analysis shows innovation orthogonal to the INFERIOR model, but IIC makes the student orthogonal to the TEACHER (superior model). This leap is not justified.
-2. Mechanism not isolated (Major) - IIC isn't compared against other regularizers, so the claimed "innovation learning" explanation is unsupported.
-3. Decomposition evidence thin (Minor) - The foundation for the claimed mechanism is weak.
-4. Small gains without confidence intervals (Minor) - Standard for the field but still a limitation.
-5. Terminology inconsistency (Trivial)
-
-I'd say this paper has two Major weaknesses that would need to be addressed. The core empirical finding is credible but the paper's framing overclaims the mechanism. I'd give this a score of ~5.0 (borderline reject).
-
-Actually, let me re-examine whether the motivation disconnect is really "Major." The paper's core contribution is the IIC method and its empirical results. The decomposition motivation is interesting but not essential. Even if you remove the motivation narrative, the paper could stand on: "we propose adding a feature dissimilarity constraint between student and teacher in KD for FR, and show it improves performance." The motivation disconnect mainly affects the "innovation" narrative but not the method itself.
-
-So maybe the motivation disconnect is more of a Minor-Major issue. And the regularization concern is the bigger issue - but even there, the paper does show consistent improvements which is genuine empirical value.
-
-Let me settle on:
-- Score: 5.5 (borderline)
-- Decision: Reject (because of the two Major weaknesses that would require significant revision to address)
-
-Actually, wait. Let me re-read the assignment instructions:
-
-"If the weaknesses identified would, if true, invalidate or severely undermine the paper's core contribution, the review should reflect that clearly."
-
-Do the weaknesses invalidate the core contribution? Let me think about what the core contribution is:
-
-The abstract says: "this paper endeavors to improve FR performance in the view of feature representation space...we incorporate the intra-class incoherence constraint (IIC) to solve the problem. Experiments on various FR benchmarks show the existing state-of-the-art method with IIC can be further improved."
-
-The core claim is that IIC improves FR performance. This is supported by empirical results. The weaknesses don't invalidate this core claim - they question the motivation (innovation narrative) and the claimed mechanism, but the empirical results are still there.
-
-However, the weakness about regularization does undermine the claim that the improvement comes from learning "innovation" specifically. If it's just regularizing, then the paper's unique selling point (innovation learning) is questionable.
-
-I think the paper has value but needs revision. Let me assign a score of 5.0 and decision of Reject, noting that a major revision could address the issues.
-
-Actually, one more thing to consider: the rules say "Similarly, if the paper made real contributions do not reject just because it has some weaknesses - every paper has some."
-
-The paper does make real contributions:
-1. Novel idea of using intra-class dissimilarity in KD for FR
-2. Consistent empirical improvements across multiple methods/benchmarks
-3. Interesting decomposition analysis (even if motivation is imperfect)
-
-But the weaknesses are substantive enough that I'd say this needs major revision. Let me go with 5.5 and Reject, with clear suggestions for improvement.
-
-Wait, maybe I'm being too harsh. Let me reconsider. 
-
-The paper shows IIC improves ArcFace, CosFace, MagFace, and AdaFace across 7 benchmarks. That's a robust empirical finding. The two Major weaknesses (motivation disconnect, mechanism not isolated) are about the framing and interpretation, not about the empirical results being wrong.
-
-If I consider this as a methods paper that says "here's a simple training trick that improves FR" - the empirical evidence supports this. The claimed mechanism ("innovation learning") is speculative but the results are real.
-
-I think I should give this a borderline accept score. Let me go with 6.0.
-
-No wait, the lack of comparison to other regularizers is a real gap. Without it, we don't know if this is better than, say, just adding more weight decay or feature dropout. The paper claims a novel mechanism but doesn't rule out simple alternatives.
-
-Let me go with 5.5 and Reject, with clear suggestions for how to fix the paper. The issues are fixable in revision.
-
-Hmm, actually the instructions say I should "be honest and unsparing about real problems, but do not manufacture or inflate weaknesses." Let me settle this.
-
-Score: 5.0-5.5 range, Reject, with clear pathway to acceptance after revision.
-
-Let me finalize with score 5.5 and decision Reject.Now I have thoroughly read the paper and verified the reviewer claims against the actual text. Here is my consolidated final review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes an intra-class incoherence constraint (IIC) within a knowledge distillation framework to improve face recognition accuracy. The motivation comes from a feature decomposition analysis showing that an orthogonal "innovation" component of ArcFace features (relative to CosFace features) retains discriminative power. The authors then train a student network to be dissimilar (orthogonal) to a teacher network's features while maintaining a standard FR loss, and show consistent improvements across multiple FR methods (ArcFace, CosFace, MagFace, AdaFace) on seven benchmarks.
+This paper explores face recognition improvement from a feature-space perspective. It first shows via orthogonal decomposition that the "innovation" component of a superior model's feature (orthogonal to an inferior model's feature) retains discriminative ability, and that recombining a scaled innovation with the parallel component can outperform the original superior model. Motivated by this two-model observation, the paper proposes an intra-class incoherence constraint (IIC) within a knowledge distillation setup: a student network (same architecture as a strong teacher) is trained to minimize cosine similarity between its features and the teacher's, alongside a standard FR loss. Experiments on CASIA and MS1MV2 with ResNet50/100 backbones show consistent improvements over ArcFace, CosFace, MagFace, and AdaFace on multiple benchmarks (LFW, CFP-FP, CPLFW, AgeDB, CALFW, VGGFace2, IJB-C).
 
 ## Strengths
 
-- **Novel finding of discriminative power in orthogonal feature components.** Through orthogonal decomposition of features from a superior model (ArcFace) along those from an inferior model (CosFace), the paper shows that the orthogonal sub-feature ("innovation") retains surprising discriminative ability, outperforming CosFace on several benchmarks (Table 1). This provides a genuinely interesting perspective on what makes high-accuracy FR models succeed.
+- **Novel concept of "innovation" with concrete empirical validation.** The orthogonal decomposition analysis (Eq. 1, Table 1) is a clean geometric demonstration: the innovation component of ArcFace orthogonal to CosFace's feature space achieves 95.23% on CPLFW vs. 95.15% for CosFace, while the parallel "pro-feature" degrades to 38.33%. This provides a verifiable basis for the claim that innovation carries useful discriminative information.
 
-- **Consistent empirical improvements across multiple FR methods and benchmarks.** The IIC training paradigm consistently improves four different state-of-the-art FR algorithms (ArcFace, CosFace, MagFace, AdaFace) across seven benchmarks using two backbones (ResNet50, ResNet100) and two training datasets (CASIA, MS1MV2). For example, AdaFace improves from 98.65% to 99.00% on LFW and from 96.74% to 97.16% on CPLFW (Table 3). On IJB-C at low FPR (1e-6), the improvements are notably larger (Table 5), which is a more meaningful regime for practical FR deployment.
+- **Consistent empirical gains across multiple benchmarks, backbones, and base methods.** Tables 3–5 report improvements that, while modest on saturated benchmarks like LFW, are more substantial on harder protocols: e.g., AdaFace + IIC improves from 89.20% to 90.83% on AgeDB (Table 3), and ArcFace + IIC improves from 70.75% to 72.27% at FPR=1e-6 on IJB-C (Table 5). The pattern holds across ArcFace, CosFace, MagFace, and AdaFace, suggesting the benefit is not specific to any one base method.
 
-- **Thorough ablation study investigating design choices.** The paper examines the effect of different IIC weights, initialization methods, and which network layers to apply the constraint to. The ablation confirms that training from teacher initialization without IIC leads to performance degradation (overfitting), while adding IIC recovers and surpasses teacher performance (Table 7). The reduced-data experiment (1/10 of MS1MV2) provides preliminary support for the "feature augmentation" hypothesis.
+- **Ablation studies show the IIC term is the active ingredient.** Table 7 provides a critical control: loading teacher weights and training with only FR loss (no IIC) causes a performance *drop*, ruling out the trivial explanation that additional training alone drives the gains. Weight sensitivity (Table 6) shows marginal variation across γ ∈ {0.1, 0.5, 1.0}, indicating robustness rather than brittleness.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **Motivation-to-method logical disconnect.** The decomposition analysis identifies "innovation" as the component of the superior model's features *orthogonal to the inferior model* (e.g., ArcFace's features orthogonal to CosFace's features). The proposed IIC method, however, makes the student's features orthogonal to the *teacher*—which is the same superior model, not an inferior one. When the paper then claims that "innovation a^⊥ is orthogonal to a" (line 86–87), this is a redefinition that does not follow from the two-model analysis. The paper never justifies why orthogonality to the teacher should yield the same kind of beneficial "innovation" identified in the two-model decomposition. This disconnect undermines the claimed narrative; the paper would benefit from either a clearer bridge or a simpler, more honest framing (e.g., "dissimilarity in KD acts as a beneficial regularizer").
+- **The loss function does not implement what the motivation claims.** The paper motivates IIC as encouraging *orthogonality* between student and teacher features (innovation = component orthogonal to the teacher's feature). However, the actual loss \(L_{dissim}\) is defined as the cosine similarity of \(f_T\) and \(f_S\) (lines 107, 115). Minimizing \(L_S = L_{FR} + \gamma L_{dissim}\) pushes cosine similarity *down* (toward −1, i.e., anti-correlation), not toward 0 (orthogonality). The paper provides no discussion of why anti-correlation would be preferable to orthogonality, nor does it consider alternatives such as absolute cosine similarity or squared cosine similarity. This mismatch means the claimed mechanism ("learning orthogonal innovation") is not what the training objective actually enforces. The empirical gains may arise from a different, unidentified mechanism (e.g., feature decorrelation or a regularization effect), and the paper's central conceptual framing is therefore unreliable.
 
-- **Claimed mechanism ("innovation learning") is not isolated from alternative explanations.** The ablation (Table 7) shows that training from teacher initialization without IIC degrades performance (overfitting), and adding IIC recovers and slightly surpasses the teacher. This pattern is equally consistent with IIC acting as a generic regularizer (e.g., preventing feature collapse, reducing overfitting to reused data). The paper does not compare IIC against other diversity-promoting regularizers (higher weight decay, feature dropout, additive noise, or standard KD losses). Without these controls, the central claim that the improvement stems from learning "innovation" (a novel orthogonal feature space with discriminative properties identified by the decomposition) is entirely unsubstantiated. The "feature augmentation" hypothesis is tested with only one experiment (1/10 MS1MV2, one backbone, one base loss), which is suggestive but far from conclusive.
+- **The logical leap from the two-model decomposition to the single-model IIC is unsubstantiated.** In the two-model setting (Section 3.1, Fig. 1(a)), innovation is defined relative to a *weaker* model's feature space (CosFace), and it can be concretely decomposed, measured, and recombined. The paper then jumps to a single-model setting where the teacher is a *strong* model, and the student is pushed to be dissimilar to it. The justification for why pushing away from a strong model should yield useful (rather than degrading) features is never established. The analogy does not transfer: in the two-model case, the orthogonal component is informative precisely because it captures what the superior model has that the weaker one lacks; in the single-model case, there is no weaker reference model to define what "innovation" means. The paper asserts (line 86) that innovation has two characteristics—orthogonal to \(a\) and improving accuracy—but never shows that the IIC-trained student's features satisfy either property in a measurable way (beyond a brief, unquantified mention in the ablation, line 181).
 
 ### Minor
 
-- **Decomposition experiments providing the motivational foundation are quantitatively weak.** Table 2 shows that recombining innovation and pro-feature with adjusted modulus yields marginal and inconsistent improvements: AgeDB actually drops at c=1.1 (97.90→97.87), and the LFW gain at c=1.2 is only 99.63→99.70. The paper claims this recombination "is likely to contribute to an improved facial feature representation, even better than features from ArcFace," but the evidence is thin and operates on test features, not a training procedure.
+- **The claim of doing "the opposite" of traditional FR is overstated.** The paper states (line 197) that "This paper does the opposite" of increasing intra-class correlation. But the student's loss still includes a standard FR loss (\(L_{FR}\)) that enforces intra-class compactness. IIC adds a dissimilarity constraint on top; the net effect is a trade-off, not an inversion. The paper provides no analysis of the resulting intra-class vs. inter-class feature distribution (e.g., cosine similarity statistics, effective margins), so the "opposite" framing is misleading.
 
-- **No uncertainty quantification.** All results are reported as single numbers without confidence intervals, standard deviations, or multiple seeds. For a paper claiming consistent improvements in the 0.1–0.5% range on nearly-saturated benchmarks, the possibility of evaluation randomness or lucky runs cannot be ruled out. While single-run reporting is common in FR literature, the absence of variance estimates weakens confidence in the results.
+- **The control experiment in Table 7 lacks sufficient detail to fully rule out fine-tuning effects.** The paper reports that loading teacher weights and training with only \(L_{FR}\) causes a slight performance drop (Table 7). However, it does not specify whether this control uses the same learning rate schedule, number of epochs, and data ordering as the IIC run. Since the "feature augmentation" hypothesis (Section 4.2) hinges partly on this comparison, the missing details are a gap, though a minor one given the clear directional result.
+
+- **The "feature augmentation" hypothesis is supported by only one small-scale experiment.** The claim that IIC acts as a form of feature augmentation (Section 4.2) is validated using only 1/10 of MS1MV2 with a single method (AdaFace). While the results are suggestive, the paper would benefit from testing this hypothesis on other methods or at larger scale.
 
 ### Trivial
 
-- **Terminology inconsistency.** The paper uses "intra-class incoherence constraint (IIC)" in the title and abstract, "intra-class irrelevance" in the introduction and body (lines 29, 35, 92, 109), and "intra-class incoherence cost" for the loss (line 101). These should be unified.
+- The paper's reference to Shin et al. (2022) correctly identifies that prior work uses attention similarity for same-size distillation. The positioning is adequate for a conference paper, but the connection to feature decorrelation methods from self-supervised learning (e.g., Barlow Twins) is not discussed—this is a minor omission rather than a flaw.
 
 ## Nice-to-Haves
 
-- Compare IIC against other regularizers (higher weight decay, feature dropout, feature noise, standard attractive KD losses) to determine whether the effect is unique to the proposed dissimilarity approach or simply a generic regularization benefit.
-- Report results over at least 3 runs for the main tables to provide uncertainty estimates.
-- Directly measure and report the cosine similarity between teacher and student features on the test set to verify that orthogonality is actually learned.
-- Compare against related representation-diversity methods (e.g., Barlow Twins, VICReg) adapted for FR, to understand whether the IIC effect is unique.
-- Provide t-SNE or PCA visualizations comparing teacher vs. student feature spaces.
+- **Replace the cosine similarity minimization with a loss that explicitly enforces orthogonality** (e.g., minimize the absolute or squared cosine similarity), or justify why anti-correlation is acceptable. This would align the method with the motivating geometry.
+- **Provide direct evidence of the student's orthogonal component.** Perform the same orthogonal decomposition used in the two-model analysis (treat student as "superior" relative to teacher) and measure the recognition accuracy of the student's innovation component, as the paper hints at in the ablation (line 181) but does not quantify.
+- **Visualize the feature space.** A t-SNE plot or cosine similarity distribution between teacher and student features (same-identity vs. different-identity) would clarify what IIC actually does to the representation geometry.
+- **Compare with simple regularizers.** Adding feature noise, dropout, or a feature decorrelation loss on batch features would help isolate whether IIC's benefit is specific to dissimilarity from the teacher or a generic regularization effect.
 
 ## Removed Points
 
-- **"Reference error in Section 3.1"**: The critic claimed the paper says "we adopt a framework inspired by knowledge distillation in Section 3.1" when Section 3.1 describes the decomposition, not the framework. This is factually incorrect—Section 3.1 (titled "FEATURE DECOMPOSITION AND RECOMBINATION") contains both the decomposition analysis (lines 71–90) AND the framework description (lines 92–125). The critic misread the section structure.
+These points are flagged for removal — treat with caution.
 
-- **"Logit-level supervision not clarified"**: The critic claimed the paper does not clarify how logit-level supervision is handled. The loss function is clearly stated as L_S = L_FR + γ·L_dissim (Eq. 2, lines 103–107). No logit KD term is used, and the paper is explicit that only feature-level dissimilarity is employed. The critic's concern is already addressed in the paper.
+1. **IoT device footnote (line 14):** The garbled footnote text about IoT devices and healthcare is clearly a PDF extraction artifact (parser corruption of what was originally a mathematical caption). The reviewer acknowledges this may be a formatting issue. Removed as a parser artifact, following hard rules on formatting nitpicks.
 
-- **"Not specified whether student is trained for same epochs as teacher"**: The paper states "models are trained for 50 epochs" (line 139). More importantly, the ablation (Table 7) shows that training from teacher initialization without IIC (for the same duration) leads to *worse* performance. This directly addresses the concern that additional training could explain the gains—more training without IIC hurts, not helps.
+2. **Typos/grammar concerns:** Comments about "careful proofreading" based on the garbled footnote. Removed as parser artifacts.
 
-- **"Missing comparison to related dissimilarity approaches"**: While the critic mentions Barlow Twins and VICReg, these are from self-supervised learning and not standard FR baselines. The paper's comparison to four FR methods (ArcFace, CosFace, MagFace, AdaFace) is appropriate for its scope.
+3. **"Method not yet released / cannot be independently verified":** The harsh critic questioned reproducibility. The paper cites publicly available checkpoints ("parameters of the teacher network are downloaded from their official offered checkpoints if available," line 146). Removed per hard rules: cited entities are assumed to exist.
+
+4. **Training from scratch with IIC as a necessary control:** The reviewer asks to compare IIC-trained student to a model trained from scratch with IIC without teacher initialization. This is infeasible by design — IIC requires a pre-trained teacher to compute \(f_T\). Removed as practically impossible.
+
+5. **Weight sensitivity implying IIC is "ignored":** The reviewer speculates that marginal differences across γ values could mean the loss is "essentially ignored." However, Table 7 shows that removing IIC (γ=0) causes a performance drop, confirming IIC is active. Marginal differences across non-zero γ indicate robustness, not irrelevance. Removed as factually incorrect inference.
+
+6. **Missing appendix/proofs references:** Any complaints about missing appendix content. Removed per hard rules (parser strips appendices).
+
+7. **Related work on Barlow Twins/VicREG:** The suggestion to compare with self-supervised decorrelation methods. This is a reasonable direction for future work but does not constitute a weakness of the current paper — the paper operates in a supervised distillation paradigm, not self-supervised learning. Moved to Removed Points.
+
+8. **Criticism that "the paper does not report multiple runs or statistical significance":** This is standard practice in face recognition benchmark papers at this scale. Single-run evaluation on these benchmarks is the norm. Downgraded and removed per soft rules on field-appropriate methodology.
+
+9. **Sentence-level pedantry:** Claims that individual sentences are "not supported" when the overall argument is coherent. Removed as nitpicking.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, a genuinely novel insight emerging from the reviewer analysis is the tension between the paper's narrative framing and its empirical findings. The decomposition motivation suggests a specific mechanism (learning "innovation" in the sense of the two-model analysis), but the experimental pattern is equally consistent with simpler regularization effects. This highlights a broader issue in representation learning research: when a method improves performance primarily by preventing overfitting rather than discovering genuinely new feature structure, the claimed mechanism often overinterprets what is actually happening. The paper's "feature augmentation" hypothesis represents a step toward acknowledging this, but without direct tests (e.g., verifying that the learned orthogonal features have similar properties to the two-model innovation), the mechanism remains a post-hoc explanation rather than an established fact.
+The most interesting observation in the paper — and one largely separable from the IIC proposal — is the geometric demonstration in Tables 1–2. The finding that the innovation component of a superior model (orthogonal to an inferior model's feature space) retains discriminative ability, and that re-scaling it can produce features that beat the original superior model, is genuinely non-trivial. It suggests that different FR models may have complementary blind spots that can be exploited through vector operations in feature space. This idea is worth separately developing, even if the IIC extension has conceptual problems.
+
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Reframe the contribution.** Either (a) provide direct evidence that the student's orthogonal component inherits the properties claimed from the two-model decomposition (e.g., decompose the student's features, show the orthogonal sub-feature has discriminative power analogous to Table 1), or (b) reframe the method as an effective regularization technique for KD in FR and compare it thoroughly against other regularizers. Option (b) is the more honest and achievable path.
+1. **Reframe the paper around what the experiments actually show.** The empirical finding — that training a student to be dissimilar to a teacher (alongside a standard FR loss) can improve recognition — is defensible as an empirical contribution even without the orthogonal-decomposition motivation. Drop the claim that IIC "learns innovation orthogonal to the teacher" unless the loss is changed to enforce orthogonality. A more honest framing would describe IIC as a regularization strategy that prevents feature collapse during fine-tuning.
 
-2. **Add control experiments.** Compare IIC against: (i) training the student with an *attractive* KD loss (minimizing distance to teacher), (ii) higher weight decay, (iii) feature dropout/noise, (iv) an L2 penalty on feature norms. If IIC outperforms these simple alternatives, the claim of a unique mechanism is substantially strengthened.
+2. **Fix the loss function to match the claimed mechanism.** If the goal is truly orthogonal features, replace \(L_{dissim} = \cos(f_T, f_S)\) with \(L_{dissim} = |\cos(f_T, f_S)|\) or \(\cos^2(f_T, f_S)\) so that the gradient pushes toward 0 (orthogonality) rather than −1 (anti-correlation).
 
-3. **Provide uncertainty estimates.** Report mean and standard deviation over at least 3 runs for the main experimental tables, or state if results are from a single run and justify why.
+3. **Add quantitative analysis of the teacher–student feature relationship.** Report the distribution of cosine similarities between teacher and student for same-identity pairs, and perform the orthogonal decomposition of student features relative to teacher features to confirm that the learned features have an orthogonal component that is discriminative (potentially reusing the methodology from Section 3.1).
 
-4. **Unify terminology.** Choose either "intra-class incoherence" or "intra-class irrelevance" and use it consistently throughout the paper.
+4. **Tone down the "opposite" framing.** Acknowledge that IIC is an additive constraint on top of standard FR training, not a replacement. The current language in the conclusion is misleading.
 
 ## Score and Decision
 
-The paper presents an intelligible idea and reports consistent empirical improvements across multiple FR methods and benchmarks, which is valuable. However, two major weaknesses prevent acceptance: (1) the logical connection between the two-model decomposition motivation and the single-model IIC method is not justified, and (2) the claimed "innovation learning" mechanism is not isolated from the simpler explanation of generic regularization. The paper overclaims its novelty relative to what the evidence supports. These issues are fixable through reframing and additional experiments, but as written, the contribution is not convincingly demonstrated.
+**Score: 4.5/10** — The paper has a genuine empirical finding (IIC improves multiple FR baselines) and a novel geometric observation about feature decomposition. However, two major conceptual problems undermine the paper's claimed contribution: (1) the loss function does not implement orthogonality despite claiming to do so, and (2) the logical transfer from the two-model decomposition to the single-model IIC is unjustified. The theoretical framing is therefore unreliable, and the empirical results, while positive, lack the mechanistic explanation the paper asserts. The paper would require major revisions — including reframing the contribution and fixing the loss — before it could be accepted.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

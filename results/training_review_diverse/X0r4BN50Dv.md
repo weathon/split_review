@@ -1,71 +1,18 @@
-Now I have all the information needed. Let me write the consolidated review.
-
-## Summary
-2-3 sentence summary of the paper's contribution.
-
-## Strengths
-- strength 1 with evidence
-- strength 2 with evidence
-
-## Weaknesses
-### Fatal
-### Major
-### Minor
-### Trivial
-
-## Nice-to-Haves
-
-## Removed Points
-
-## Novel Insights
-
-## Suggestions
-
-## Score and Decision
-
-Let me organize my thoughts:
-
-**Paper type**: Evaluation methodology paper proposing F-Fidelity, a faithfulness evaluation framework for XAI.
-
-**Core contribution**: A new faithfulness metric that (a) uses explanation-agnostic fine-tuning with random masking to mitigate OOD and information leakage, (b) bounds removals to stay in-distribution, and (c) can theoretically recover ground-truth explanation size.
-
-**Verified weaknesses to keep**:
-1. β not reported in main experiments (Minor) - confirmed
-2. No statistical uncertainty reported (Minor) - confirmed  
-3. Perfect correlations on Tiny ImageNet (-1.00) suspicious without explanation (Minor)
-4. Abstraction claims ROAR convergence issues without citation (Minor/Trivial)
-5. Sparsity recovery claim validated only on simple synthetic colored-MNIST (Minor)
-6. NLP claims without results in main text (Minor - presentation)
-
-**Weaknesses to remove**:
-1. "ROAR convergence issues unsupported" - partially: abstract makes the claim without citation, but main text (line 43) cites prior work. I'll downgrade to trivial.
-2. "Mapping from continuous scores to masks not discussed" - The Preliminaries section defines the mask function ξ as part of the explainer pair. The paper does discuss this.
-3. Formatting nitpicks - remove.
-
-**Strengths verified**:
-1. OOD mitigation via explanation-agnostic fine-tuning - well-motivated in the paper
-2. Good empirical results on images and time series
-3. Theoretical result on sparsity recovery is novel
-4. Efficiency over ROAR (single fine-tuning vs. per-explainer retraining)
-5. Controlled experimental design
-
-Let me now produce the final review.Here is my consolidated review:
-
----
+Now I have all the information needed to write the consolidated review.
 
 ## Summary
 
-This paper proposes F-Fidelity, a faithfulness evaluation framework for XAI that extends the RFid metric with (a) explanation-agnostic fine-tuning using random stochastic masking (to prevent information leakage) and (b) bounded removals that cap the fraction of removed input (to mitigate OOD issues). The authors evaluate their metric on controlled degradation experiments across images and time series, showing superior Spearman rank correlations against ground-truth explainer rankings compared to Fidelity, ROAR, and RFid baselines. A theoretical theorem establishes that FFid⁺ can recover the size of the most influential input tier under idealized assumptions, and this is empirically validated on colored-MNIST.
+The paper introduces F-Fidelity (FFid), a framework for evaluating the faithfulness of XAI explanations. FFid addresses two core problems in removal-based faithfulness metrics: (1) out-of-distribution (OOD) inputs caused by large removals, which it mitigates via an upper-bounded removal (controlled by a β parameter), and (2) classifier unreliability on perturbed inputs, which it addresses via explanation-agnostic fine-tuning using random stochastic masks. The paper evaluates FFid on image (CIFAR, Tiny ImageNet) and time series (PAM, Boiler) tasks using a systematic degradation framework to create known ground-truth rankings of explainer quality. It additionally provides a theoretical result (Theorem 1) connecting the FFid⁺ metric to explanation size recovery, validated on a synthetic colored-MNIST dataset.
 
 ## Strengths
 
-- **Directly addresses the OOD and information-leakage problems that plague prior removal-based metrics**: The explanation-agnostic fine-tuning (Eq. 3) uses random stochastic masks, which prevents the surrogate model from learning explanation-specific patterns (unlike ROAR, which retrains per explainer and risks information leakage). Combined with upper-bounded removals (Eq. 2), this is a principled and well-motivated design that targets the core limitations of Fidelity/RFid.
+1. **Explanation-agnostic fine-tuning elegantly sidesteps information leakage.** Unlike ROAR, which retrains on explainer-specific masks and can leak information about which explainer produced the mask, FFid fine-tunes with random stochastic masks that are independent of any explainer output (Section 3, Eq. 4). This design choice cleanly separates robustness adaptation from explanation evaluation.
 
-- **Consistently recovers ground-truth explainer rankings across image and time series domains**: In controlled degradation experiments (Section 4), F-Fidelity achieves substantially higher Spearman correlations with the ground-truth ranking than Fidelity, ROAR, and RFid. On CIFAR-100 with SG-SQ it achieves perfect macro and micro correlations; on Tiny ImageNet it reports -1.00 across all metrics for both explainers; on the Boiler time-series dataset it substantially outperforms all baselines. These results are replicated across multiple datasets and two data modalities.
+2. **Systematic degradation framework provides a principled ground-truth for comparison.** Rather than relying on human annotations or synthetic datasets with potentially questionable ground truth, the paper degrades a known-good explainer (Integrated Gradients) with controlled noise to create a provably correct ranking of explainer quality (Section 4). This methodological choice raises the bar for how faithfulness metrics should be compared.
 
-- **Novel theoretical connection between evaluation metrics and explanation sparsity**: Theorem 1 (Section 5) shows that under an influence-tier model with a Shapley-based explainer, FFid⁺ changes monotonicity at the boundary of the first tier, enabling inference of explanation size. The colored-MNIST experiments (Section 6, Figure 1) empirically validate this across multiple γ and β settings — a capability not offered by prior faithfulness metrics.
+3. **Consistent empirical superiority across two modalities and both macro/micro metrics.** The results in Sections 4.1 and 4.2 show FFid achieving perfect or near-perfect macro Spearman correlations on Tiny ImageNet (-1.00 across all metrics for both SG-SQ and GradCAM) and consistently outperforming Fidelity, ROAR, and RFid on time series datasets. The comprehensive sparsity range (5–95% at 5% intervals) rules out the concern that results are artifacts of a particular sparsity level.
 
-- **Computational efficiency over ROAR**: The fine-tuning step is performed once per dataset using explainer-agnostic masks, whereas ROAR requires retraining the classifier separately for each explainer. This is a practical advantage explicitly noted in the paper.
+4. **Theoretical insight connecting faithfulness metrics to explanation sparsity is novel.** Theorem 1 provides a formal link between the FFid⁺ metric's monotonicity and the size of the most influential feature tier, under Shapley-value-based explainers and a tiered influence structure. While the assumptions are idealized, this is a genuinely novel theoretical contribution that goes beyond the standard "propose a metric and evaluate it" paradigm.
 
 ## Weaknesses
 
@@ -73,63 +20,49 @@ This paper proposes F-Fidelity, a faithfulness evaluation framework for XAI that
 None.
 
 ### Major
-None.
+
+1. **The β hyperparameter is never specified for the main evaluation experiments (Sections 4.1, 4.2).** β is a critical parameter in the framework: it simultaneously controls (a) the fraction of input removed during evaluation via Eq. 3 (the truncation), and (b) the mask size used in the fine-tuning loss via Eq. 4. Yet the reader is told only that "For RFid and FFid, we set α⁺ = α⁻ = 0.5" for the time series experiments (line 144), with no mention of β for either time series or image experiments. Without this information, the experiments cannot be reproduced, and it is unclear whether β was tuned per domain, held fixed, or set to a default value. This is a basic methodological reporting gap that must be addressed.
+
+2. **No ablation study isolates the contributions of the two proposed components.** FFid incorporates two modifications relative to the RFid baseline: (i) explanation-agnostic fine-tuning and (ii) upper-bounded removal (β-truncation). The paper compares FFid against RFid (which uses neither) and reports large improvements. However, it never tests the intermediate conditions: RFid + bounded removal alone (no fine-tuning), or FFid without β-truncation but with fine-tuning. Without an ablation, the reader cannot tell whether both components are necessary or whether one alone drives the gains. Given that the paper frames both as contributions, this gap weakens the empirical claims about the method's design.
 
 ### Minor
 
-- **The sparsity-recovery claim rests on strong assumptions and thin empirical validation**: Theorem 1 assumes (a) discrete influence tiers with fixed sizes, (b) a Shapley-value-based explainer, and (c) a monotonic function g over lexicographic tier orderings. The empirical validation is limited to colored-MNIST with a simple 3-layer CNN and perfectly separable digit/background tiers. Real-world explanations rarely decompose into clean, fixed-size tiers, and popular explainers (GradCAM, IG) are not Shapley-based in the sense required. The paper claims FFid "can be used to compute the sparsity of influential input components" but the gap between the idealized theory and realistic settings is large. At minimum, the assumptions behind Theorem 1 should be explicitly stated as limitations, and a discussion of when the tier assumption fails would strengthen the paper.
+3. **The explanation-size recovery claim is broader than the evidence supports.** The abstract and conclusion state that FFid "can be used to compute the sparsity of influential input components, i.e., to extract the true explanation size" (line 14). However, Theorem 1 operates under strong idealized assumptions: a Shapley-value-based explainer, a fixed tier structure with known sizes, and a monotonic function g. The empirical validation (Section 6) is limited to a single synthetic dataset (colored-MNIST) with two tiers. The paper itself acknowledges that good explainers often produce continuous scores without distinct clustering (lines 155-156), yet the claimed capability is not tested in those realistic scenarios. The theoretical insight is valuable and the synthetic validation is appropriate for a first step, but the practical claim should be scoped to match the evidence.
 
-- **No statistical uncertainty reported for any correlation value**: The Spearman correlations in Tables 1–3 are reported as point estimates without confidence intervals, standard deviations, or significance tests. Given that only 5–6 noise levels are used per dataset, these correlations may be high-variance. Bootstrap confidence intervals or a similar lightweight uncertainty estimate would substantially improve interpretability.
-
-- **The β hyperparameter is not reported in the main controlled experiments**: β determines the fraction of input elements removed during fine-tuning and evaluation, and interacts nontrivially with s and α⁺ (Eq. 2). Section 4 reports α⁺=α⁻=0.5 for time series but does not state β for any of the CIFAR-100, Tiny ImageNet, PAM, or Boiler experiments. β is only reported in the sparsity analysis (Section 6). This is a reproducibility gap for the paper's central empirical claims.
-
-- **Perfect correlations on Tiny ImageNet deserve scrutiny**: The paper reports Spearman correlations of exactly -1.00 across all metrics for both SG-SQ and GradCAM on Tiny ImageNet. While not impossible, this is unusual enough on a non-trivial dataset that the paper should discuss potential ceiling effects, the granularity of noise levels, or other artifacts that could produce this result.
-
-- **The paper claims NLP as a tested modality but presents no NLP results in the main text**: The abstract, introduction, and Section 4 header list natural language among the evaluated modalities, but no NLP experiments, tables, or even summary statements appear in the main body, nor is there a reference to where they can be found. If these experiments exist (e.g., in an appendix stripped by the parser), the main body should at minimum summarize them or reference their location; if not, the scope claim should be adjusted.
-
-- **The abstract states ROAR "may not always converge" without supporting citation**: The abstract claims "the training may not always converge given the distribution difference" as a criticism of ROAR, with no citation. The main text (line 43) does cite prior work for convergence issues, but the abstract's unsupported phrasing weakens the paper's rigor.
+4. **"Micro rank" is referenced in tables but never formally defined.** The text (lines 127-129) defines macro and micro *correlations*, stating it reports "the average rank of each method," but tables include a "micro rank" column with values (e.g., ~2.00) whose computation is not explicitly specified. This is a small presentation gap but affects interpretability of the results.
 
 ### Trivial
-- The paper alternates between "Fine-tuned Fidelity" and "F-Fidelity" for the same method; consistency would help readability.
+
+5. **The paper does not discuss the gap between random masks used in fine-tuning and structured masks used in evaluation.** The fine-tuning step uses random stochastic masks (randomly dropping pixels/patches), while evaluation removal masks are driven by explainer outputs and may be highly non-random (e.g., removing contiguous regions for images). The empirical results suggest this transfer works, but a brief discussion acknowledging this potential gap would strengthen the paper's analysis.
 
 ## Nice-to-Haves
-- **Ablation study separating the two components of FFid**: An ablation that tests (a) fine-tuning alone with standard RFid removal, (b) bounded removals alone without fine-tuning, and (c) the full FFid would isolate which component drives the improvement over RFid. This would also address whether the improvement comes primarily from the masking or the fine-tuning.
-- **Sensitivity analysis for β**: Reporting how FFid's ranking performance varies with β (e.g., β ∈ {0.1, 0.3, 0.5, 0.7}) would demonstrate robustness and guide practitioners on selection.
-- **Additional sparsity-recovery experiment on a less idealized setup**: A synthetic dataset where tiers have soft boundaries (e.g., MNIST with gradually decaying background noise) would show how the theory degrades gracefully under more realistic conditions.
+
+- A β-sensitivity analysis (e.g., varying β from 0.3 to 0.7) to help practitioners understand how to set this parameter in new domains.
+- An additional experiment on a real-world dataset where ground-truth explanation size is known (e.g., a graph dataset like BA-Shapes) to strengthen the cross-domain validity of the explanation-size recovery claim.
+- A more precise statement about explanation-size recovery in the abstract/conclusion that acknowledges the idealized conditions under which the result holds.
 
 ## Removed Points
-These points were flagged by reviewers but are removed or downgraded for the reasons stated:
-- **"Missing NLP experiments" treated as missing appendix content**: The parser strips appendix sections; if NLP experiments were there, they exist in the original submission. However, the main body's failure to reference or summarize them is kept as a Minor weakness above.
-- **"ROAR convergence issue unsupported"**: The main text (line 43) cites prior work (rong2022consistent) for convergence issues. The abstract's phrasing without citation is a minor presentation lapse, not an unsubstantiated claim. Moved to Trivial.
-- **"Mapping from continuous scores to masks not discussed"**: The Preliminaries define an explainer as a pair (score function ϕ, mask function ξ) which handles this mapping. The mapping is discussed.
-- **"SOTA is used but never explicitly stated which prior methods are SOTA"**: This is a generic phrasing concern that does not affect the paper's claims.
-- **Formatting/style nitpicks, typos, acronym inconsistency**: Per instructions, these are parser artifacts or trivial.
+
+- **NLP experiments absent from main text:** The reviewer claimed the main paper claims NLP as an evaluated modality but only shows images and time series. The appendix (which contained NLP results) was stripped by the parser. Per hard rules, criticisms about missing appendix content are removed — the content exists in the original submission.
+- **Random vs. structured mask discussion gap kept as trivial** (see Weakness Minor #5 above — retained but downgraded to trivial).
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews did not surface an unexpected interpretation or cross-connection that meaningfully extends what the paper itself provides.
+
+The most interesting signal emerging from the reviews is a tension that the paper itself does not fully explore: the method's success hinges on the *mismatch* between training-time masks (random, unstructured) and evaluation-time masks (explainer-driven, potentially structured). Most prior work assumes these distributions should match; FFid deliberately uses disjoint distributions and shows it works anyway. This suggests a deeper principle — that what matters for faithful evaluation is not distributional *identity* between training and evaluation masks, but a weaker property (perhaps coverage of the mask space or the model's learned invariance to masking patterns). Exploring why this transfer succeeds could lead to a more fundamental understanding of what makes a faithfulness metric reliable.
 
 ## Suggestions
-1. Report β values used in the image and time series experiments, and add a brief sensitivity analysis showing how performance varies with β.
-2. Add confidence intervals (e.g., bootstrap) to all reported Spearman correlations.
-3. Either present a summary of NLP results in the main text with a pointer to the appendix, or remove the NLP claim from the abstract and contributions.
-4. Add an explicit limitations paragraph discussing when the influence-tier assumptions of Theorem 1 are violated and what happens to sparsity recovery in those cases.
-5. Discuss the perfect -1.00 correlations on Tiny ImageNet — provide an explanation or caveat.
+
+1. Report the β value(s) used in the image (CIFAR, Tiny ImageNet) and time series (PAM, Boiler) main experiments. Also clarify whether β was held fixed across domains or tuned per dataset.
+2. Add an ablation study comparing at least four conditions: (a) FFid (full method), (b) RFid + bounded removal (no fine-tuning), (c) RFid + fine-tuning (no bounded removal), and (d) original RFid.
+3. Temper the abstract/conclusion claims about explanation-size recovery to reflect the idealized assumptions required. A phrasing such as "Under the assumption that the explainer approximates a Shapley-optimal explainer and features have a discrete tier structure, FFid⁺ can recover the most influential tier's size" would be more precise.
+4. Formally define "micro rank" in Section 4 and explain why it is informative beyond the micro correlation.
+5. Add a brief discussion (1–2 sentences in Section 3 or 4) acknowledging the distribution gap between random fine-tuning masks and structured evaluation masks.
 
 ## Score and Decision
 
-The paper makes a genuine contribution: F-Fidelity is a well-motivated improvement to removal-based faithfulness evaluation that addresses real problems (OOD, information leakage) with a clean design. The theoretical sparsity-recovery connection is novel and interesting. The weaknesses are real but addressable — missing β values, no error bars, the thin sparsity validation, and the NLP presentation gap — and none invalidate the core contribution. The paper would benefit from a round of revisions to address these issues, but the central claims are supported by the evidence presented.
+Based on my assessment: the core methodological contribution (explanation-agnostic fine-tuning + bounded removal) is well-motivated and the experimental evidence for its effectiveness is strong across two modalities. The two major weaknesses — the missing β specification and the absent ablation study — are significant but addressable. The paper's contribution is believable and represents a genuine advance over prior removal-based metrics.
 
-**Originality**: Good — the fine-tuning + bounded masking combination is novel, as is the theoretical sparsity-recovery result.
+A score of 6 reflects a solid paper with correctable gaps that should not prevent acceptance but require attention.
 
-**Importance**: High — robust XAI evaluation is an open problem and improved metrics are needed.
-
-**Claims support**: Moderate — the main empirical claims are supported but would benefit from uncertainty quantification and reporting of β.
-
-**Soundness**: Adequate — the experimental design (controlled degradation) is standard and appropriate.
-
-**Clarity**: Fair — the paper is generally well-structured but needs to report missing hyperparameters and clarify the NLP gap.
-
-**Value to community**: Positive — the metric is efficient and broadly applicable across data modalities.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

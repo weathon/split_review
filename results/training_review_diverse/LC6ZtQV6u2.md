@@ -1,79 +1,74 @@
-Now I have all the information I need. Let me produce the consolidated review.
+Now I have verified the paper's content against all reviewer claims. Here is my consolidated review:
+
+---
 
 ## Summary
 
-This paper proposes Proteus, a simple feature-level distillation framework that compresses vision foundation models (DINOv2, SynCLR, CLIP) into smaller equivalents using only ImageNet-1K as a proxy dataset, without accessing the original large-scale training data. The method removes the projection head and one-hot labels from conventional knowledge distillation (arguing they induce dataset bias) and employs three levels of objectives — token, patch, and feature — to maximize knowledge transfer. The central empirical finding is that Proteus-L/14, distilled from DINOv2-g on 1.2M images, matches the average performance of the Oracle DINOv2-L/14 (trained on 142M images) across 15 benchmarks.
+Proteus proposes a simple distillation framework to compress large vision foundation models (DINOv2, SynCLR, CLIP) into smaller equivalents using only ImageNet-1K (1.2M images). The method removes dataset-biased components from conventional knowledge distillation (CE loss, logit projection head) and introduces three MSE-based learning objectives (token-level, feature-level, patch-level). The core result — Proteus-L/14 matches DINOv2-L/14's 91.0% average fine-grained accuracy despite using 0.8% of its training data — is well-supported and practically valuable.
 
 ## Strengths
 
-1. **Enables data-efficient compression of vision foundation models.** Proteus achieves performance matching DINOv2-L/14 (trained on 142M images) while using only 1.2M images from ImageNet-1K, and outperforms CLIP-L/14 (400M), OpenCLIP-L/14 (2B), and SynCLR-L/14 (600M) on average fine-grained classification (Table 4). This directly delivers on the paper's core claim of replicating foundation-model success on a much smaller, publicly available dataset.
+- **Massive data efficiency with surprising performance**: Proteus-L/14, distilled from DINOv2-g/14 on 1.2M images, matches DINOv2-L/14 (142M images) at 91.0% average fine-grained accuracy and exceeds CLIP-L/14 (400M), OpenCLIP-L/14 (2B), and SynCLR-L/14 (600M) on the same metric (Table 3). This directly answers the paper's central question of whether foundation-model generalization can be replicated at ImageNet-level costs.
 
-2. **Comprehensively surpasses supervised knowledge distillation (DeiT) across multiple dimensions.** In Table 5, Proteus-S/14 outperforms DeiT-S/16 on ImageNet accuracy (81.8% vs. 81.2%), robustness (ImageNet-A: 31.1% vs. 20.7%), fine-grained generalization (85.8% vs. 77.8%), and dense prediction (ADE20K mIoU: 50.0 vs. 42.5). This demonstrates that Proteus provides a substantively different and more effective training paradigm.
+- **Principled removal of dataset bias is validated and effective**: By switching from logit-based CE+KL distillation to feature-level MSE (hint distillation), fine-grained classification accuracy jumps from 78.7% to 85.3% for ViT-S/14 (Table 5). The paper identifies two distinct sources of bias (one-hot labels and the logit projection head) and removes both, with clear ablation evidence.
 
-3. **Generalizes to diverse foundation models with different pre-training objectives.** When distilling from SynCLR-L/14 (contrastive, synthetic data) and CLIP-L/14 (image-text alignment), Proteus matches or exceeds the original teacher's ImageNet linear probing performance (81.4% vs. 80.5% for SynCLR; 81.2% vs. 78.7% for CLIP) and produces similar distributional patterns across fine-grained datasets (Figures 3 and 4). This validates the method as teacher-agnostic.
+- **Three-level proxy task is necessary for both classification and dense prediction**: Token-level distillation alone yields 85.3% fine-grained accuracy but only 44.0% mIoU on ADE20K segmentation; adding feature and patch objectives boosts segmentation to 50.0% while maintaining classification performance (Table 6). This confirms the multi-level design is empirically justified, not just decorative.
 
-4. **Multi-level objectives jointly improve dense prediction and classification.** Adding patch-level and feature-level objectives to the token-level objective boosts ADE20K segmentation mIoU from 44.0 to 50.0 and fine-grained average from 85.3 to 85.8 (Table 7), supporting the design rationale for three complementary proxy tasks.
+- **Strong scaling behavior across model sizes**: The performance gap between Proteus and DINOv2 decreases systematically from 1.8% (ViT-S) to 1.4% (ViT-B) to a tie (ViT-L). In depth estimation, Proteus-L even surpasses DINOv2-L (0.240 vs. 0.243 RMSE, Table 4). This scaling trend validates that the method becomes more effective with larger student capacity.
 
-5. **Demonstrates robustness to reduced data diversity and quantity.** Under sub-sampled classes (200 out of 1000), fine-grained accuracy drops only ~1% (Figure 5); under sub-sampled data per class (50%), ImageNet accuracy even slightly increases (Figure 6). This indicates the method is not brittle to dataset construction.
+- **Generality across diverse teacher models validated**: Proteus successfully distills from SynCLR (600M synthetic images) and CLIP (400M image-text pairs), achieving ImageNet linear probing of 81.4% and 81.2% respectively — exceeding the teachers' own ImageNet scores — while preserving the teachers' relative strengths on fine-grained datasets (Figures 5, 6). This proves the framework is teacher-agnostic.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None.
+
+None. The paper's core contribution — a simple, effective distillation method that achieves strong results on ImageNet-1K-level data — is sound and well-supported. The issues below concern framing and nuance, not correctness.
 
 ### Minor
 
-1. **The ablation supporting the "dataset bias" claim confounds distillation level with loss function.** In Table 3 (tab:bias), the transition from "Soft Logits + KL only" (fine-grained 80.5) to "Hint + MSE" (fine-grained 85.3) simultaneously changes the distillation target (logits → features) **and** the loss function (KL → MSE). The paper attributes this 4.8-point improvement specifically to "removing the projection head" (i.e., distilling before the FC layer), but the evidence does not rule out the alternative explanation that MSE on features is simply a richer distillation target than KL on logits. A controlled comparison — e.g., feature-level distillation under a distributional loss, or logit-level distillation under MSE — would be needed to isolate the claimed mechanism. This does **not** invalidate the method's effectiveness, but the causal framing should be revised to acknowledge the confound.
+- **The "matching DINOv2-L" narrative understates an important structural fact**: Both Proteus-L/14 and DINOv2-L/14 are distilled from the *same teacher* (DINOv2-g/14). The paper is transparent about this (abstract: "Leveraging DINOv2-g/14 as the teacher"; Table 3 caption: "DINOv2-B/L are distilled from DINOv2-g while Proteus-B/L are distilled from DINOv2-L/g"), but the narrative consistently frames the result as pure "data efficiency" (0.8% of the data, same result). This obscures a more precise insight: the bottleneck for downstream feature quality is the teacher's capacity, not the distillation data size — provided the distillation data is sufficiently diverse. The paper would be stronger if it foregrounded this interpretation rather than letting readers arrive at it on their own.
 
-2. **The "matching DINOv2-L/14" claim would benefit from acknowledging per-dataset variance.** The averages equal 91.0 across 15 benchmarks (Table 4), but per-dataset differences are visible: Proteus-L is lower on Cars (89.1 vs. 89.8), SUN397 (77.3 vs. 78.4), and higher elsewhere. While the average claim is technically correct, a brief acknowledgment of this dispersion — e.g., "on average across 15 benchmarks" — would strengthen precision. (The table footnote already notes that both Proteus-L and DINOv2-L are distilled from DINOv2-g, so that aspect of the reviewer's concern is already addressed.)
+- **The "surpassing supervised learning" claim compares different teachers**: Table 6 compares Proteus (distilled from DINOv2) against DeiT (distilled from RegNetY, a supervised CNN). The claim that Proteus "comprehensively surpasses the supervised learning method" conflates teacher quality with the distillation framework. A stronger supervised teacher (e.g., ConvNeXt-L, ViT-L trained on ImageNet-21K) would likely close much of this gap. The comparison is valid as reported (the table explicitly lists the teacher), but the scope of the claim should be narrowed to what is actually demonstrated: distilling from a foundation-model teacher outperforms distilling from a supervised CNN teacher at the same data scale.
 
-3. **The patch-level objective lacks critical implementation details.** The paper states "patches are randomly masked" (line 145) but does not specify the masking ratio (e.g., 75% as in MAE), the masking strategy (random uniform vs. block), or whether the teacher's patch tokens are taken from the same unmasked view or a different view. These details are needed for reproducibility of the patch-level objective.
-
-4. **The adaptation for CLIP is not foreshadowed in the method section.** The paper states (line 385) that for CLIP distillation, "we remove the patch and feature learning objectives ... following the original design," but the method section (Sec. 3) presents all three objectives as general components. The reader must infer the flexibility of the framework retroactively. Stating this explicitly in the method section would improve clarity.
+- **The dataset bias ablation conflates two mechanisms without disentangling their contributions**: The paper correctly identifies two distinct sources of bias (CE loss with one-hot labels, and the logit projection head) in lines 119-121, and the ablation in Table 5 shows clear improvements at each step. However, the largest jump (80.5 → 85.3) comes from switching from logit-level to feature-level distillation, not from removing CE. The paper's discussion attributes the improvement to "combating dataset bias" without quantifying how much stems from each mechanism. A cleaner isolation (e.g., applying feature-level MSE *with* a logit head still attached, or probing the logit head's output space directly) would strengthen the mechanistic claim.
 
 ### Trivial
 
-1. **"Hint" row label in Table 3 (tab:bias) is ambiguous.** The label "Hint" borrows FitNets terminology but is not self-explanatory. Renaming to "Feature-level MSE" would be clearer.
-2. **Computational cost is not fully quantified.** The paper mentions "ImageNet-level costs" and 300 epochs on 8 A100 GPUs (line 172) but does not report total GPU hours, making it harder for practitioners to assess practical overhead.
+- **The PCA visualization (Figure 3) is qualitative and adds limited evidence**: The claim that "the features are more separable" is not quantitatively supported. This figure could be removed or augmented with a quantitative separability measure (e.g., nearest-neighbor accuracy) without loss.
 
 ## Nice-to-Haves
 
-- **Controlled ablation for the causal claim:** A comparison of (a) feature-level distillation under a distributional loss (e.g., cosine similarity or softmax-KL) vs. (b) logit-level distillation under MSE would cleanly separate the effect of distillation level from loss function.
-- **Brief discussion of data-free or synthetic-data distillation methods** in related work, given that the paper positions itself in the setting of "data-free model compression with limited data" (line 569).
-- **Acknowledgment of ImageNet-1K's own biases** (object-centric, curated labels) as a limitation on generalization to tasks with large distribution shift.
+- Report the computational cost of the teacher forward pass (DINOv2-g is 1.1B parameters; running it on 1.2M images × 300 epochs is non-trivial and relevant for practitioners evaluating accessibility).
+- Add a simpler distillation baseline: distilling DINOv2-g into ViT-L using only KL divergence on logits (without CE) on ImageNet-1K, to directly isolate the benefit of the multi-level MSE objective over standard logit distillation.
+- Report results with 2-3 random seeds for the headline comparison (Proteus-L vs. DINOv2-L at 91.0%) to establish whether the tie is within noise.
+- Discuss the tasks where Proteus *exceeds* DINOv2-L (e.g., Food, Pets, Aircraft in Table 3) — is there a structural reason, or is it noise?
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **Strength Finder #4 ("Careful ablation isolating dataset bias"):** Removed because it conflicts with the verified weakness about the confound between distillation level and loss function. The ablation is informative but does not fully isolate the claimed mechanism.
-- **Criticism about projection head architecture not being described:** The paper does describe it as "LayerNorm + linear" (line 132). The reviewer's claim that it is "not described beyond" this is inaccurate — the architecture IS specified, though depth/width could be added.
-- **Related work missing data-free KD methods:** The paper's setting fundamentally uses a real proxy dataset (ImageNet-1K), unlike data-free methods. This criticism evaluates against the wrong class of expectations. Moved to Nice-to-Haves.
+- **Criticism that the PCA visualization "should be removed"**: This is a subjective presentation preference, not a substantive weakness. Kept in Trivial instead.
+- **Criticism about missing standard deviations**: Single-run evaluation is standard practice in large-scale vision benchmarks. Moved to Nice-to-Haves.
+- **Claim that the dataset bias discussion "attributes improvement primarily to (1) and mentions (2) only in passing"**: The paper explicitly discusses both mechanisms in consecutive sentences (lines 119-121). The critic overstated the imbalance. The remaining substance (failure to quantify relative contributions) is kept in Minor.
+- **Suggestion to compare against TinyCLIP**: TinyCLIP operates in a multimodal (CLIP) setting with LAION-400M data — not directly comparable to the pure-vision distillation setting here.
+- **Criticism about the patch-size constraint as a weakness**: The paper explicitly acknowledges this as a limitation in Section 5 ("Proteus has to keep the same patch size as the teacher model"), so this is already addressed.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface a specific experimental-design insight: the ablation in Table 3 cannot distinguish whether the improvement comes from removing the projection head or from switching from KL on logits to MSE on features. This is a genuinely useful methodological observation — it highlights that causal attribution in distillation research requires crossing both factors (distillation target × loss type) rather than varying them together. This is a concrete suggestion the authors could act on to strengthen their causal narrative.
+The reviews surface a latent interpretation that the paper hints at but does not fully articulate: that the ceiling on distilled feature quality is set by the teacher's representational capacity, not the distillation data volume — as long as the data is sufficiently diverse. The fact that Proteus-L ties DINOv2-L (both distilled from DINOv2-g) while Proteus-B lags behind DINOv2-B suggests the student's ability to absorb the teacher's knowledge saturates more slowly for larger students. This implies that for sufficiently large students, the teacher itself is the bottleneck, not the 1.2M vs. 142M data scale. This is a non-trivial insight that the paper could make more explicit.
 
 ## Suggestions
 
-- In Table 3, add two controlled conditions: (a) feature-level distillation with a distributional loss (e.g., softmax-KL or cosine similarity on projected features) and (b) logit-level distillation with MSE. This would separate the effect of distillation level from loss type and cleanly support (or reframe) the dataset-bias claim.
-- In Section 3, report the masking ratio and strategy for the patch-level objective explicitly.
-- In Section 4.2, when making the "matches the Oracle" claim, add a brief qualification acknowledging per-dataset variance (e.g., "on average across 15 benchmarks").
-- Pre-announce in Section 3 that the framework is modular and individual objectives can be removed when distilling from teachers whose training did not include those objectives (e.g., CLIP).
+1. Reframe the DINOv2-L comparison to explicitly discuss what the shared teacher implies: that the gap closed by Proteus is in distillation data size and objective simplicity, not in recovering information missing from the teacher.
+2. Qualify the "supervised learning" comparison to make clear it is Proteus (foundation-model teacher) vs. DeiT (supervised CNN teacher), not a general claim about all supervised approaches.
+3. Add a probing experiment (e.g., linear probe on intermediate features with and without the logit head) to disentangle the two sources of dataset bias identified in the ablation.
+4. Include a brief analysis of where Proteus exceeds vs. lags behind DINOv2-L on individual benchmarks, to help readers understand which tasks benefit from the large-scale data and which do not.
 
 ## Score and Decision
 
-**Originality:** Moderate-high — the framework combines known techniques (feature distillation, masked modeling) in a novel configuration for the specific problem of foundation model compression without original data.  
-**Importance of research question:** High — enabling accessible training of foundation-model-quality representations on public datasets is practically significant.  
-**Claims well-supported:** Mostly yes, with one secondary causal claim that is not fully isolated experimentally.  
-**Soundness of experiments:** Strong — evaluation across 15 benchmarks, three model scales, three teacher families, and multiple ablations.  
-**Clarity of writing:** Good — the method is clearly explained; could improve on foreshadowing design choices for different teachers.  
-**Value to the research community:** High — the method is simple, general, and reproducible, lowering the barrier for foundation model research.  
+The paper presents a clean, well-executed distillation framework with extensive empirical validation across 15 benchmarks and multiple teacher models. The core empirical results are robust and the contribution — enabling practitioners to obtain competitive vision features at ImageNet-level costs — is practically valuable. The main weaknesses are in narrative framing rather than experimental soundness, and all are correctable. The work is a solid contribution to model compression and the practical accessibility of vision foundation models.
 
-The paper makes a clear empirical contribution: Proteus demonstrably compresses foundation models at ImageNet-level costs with strong results across diverse tasks. The weaknesses are bounded and addressable — the method's effectiveness is not in question. I recommend acceptance.
-
-MY FINAL SCORE: <pineapple>8.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

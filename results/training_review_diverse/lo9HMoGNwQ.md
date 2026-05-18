@@ -1,79 +1,83 @@
-Now I have all the information I need. Let me produce the consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces the Sequential Multiple Instance Learning (SMIL) framework, which explicitly models the temporal ordering of clinical images — a dimension largely ignored by prior MIL work that treats images as unordered bags. The authors propose BiSMIL, a bidirectional Transformer architecture with a novel weighted incremental training loss that encourages accurate predictions from partial subsequences while maintaining high final accuracy. They also introduce SMILU, an uncertainty metric leveraging sequential prediction variability. Experiments on three medical imaging datasets (UTD, RSNA, SARS-CoV-2 CT) show BiSMIL achieves state-of-the-art final accuracy and can match baseline performance with 30–50% fewer images.
+This paper introduces the Sequential Multiple Instance Learning (SMIL) framework, which treats clinical image sequences as ordered rather than unordered bags. The authors propose BiSMIL, a bidirectional Transformer architecture with a subsequence-weighted training loss that balances final and early prediction accuracy without requiring subsequence-level labels. They also introduce SMILU, a sequence-aware uncertainty metric. Experiments on three medical imaging datasets (UTD ultrasound, RSNA brain CT, SARS-CoV-2 CT) show BiSMIL outperforming several MIL baselines on final accuracy and achieving competitive early predictions with 30–50% fewer instances.
 
 ## Strengths
 
-1. **Novel problem framing with practical significance.** The SMIL framework formalizes an underexplored but clinically important setting — sequential clinical imaging where the number of images per patient varies and only a single diagnostic label is available at the bag level. The tradeoff between early accuracy (reducing radiation/time) and final accuracy is well-motivated (Section 1, Section 3.1). The paper demonstrates concrete efficiency gains: on the UTD dataset, BiSMIL with 50% of images matches ADMIL's accuracy with 100% (Figure 4).
+- **Clear and well-motivated problem formulation**: The SMIL framework reframes MIL for sequential clinical imaging, where the ordering of images is clinically meaningful and early prediction can reduce radiation exposure and procedure time. This addresses a genuine gap between standard MIL (order-agnostic) and clinical practice.
 
-2. **State-of-the-art final accuracy across three datasets.** Table 1 shows BiSMIL consistently outperforms SA-DMIL, MaxPool, ADMIL, and its own unidirectional variant (SiSMIL) on Accuracy, Precision, Recall, and F1 across all three datasets, often with statistical significance at the 95% level. The inclusion of SiSMIL provides a clean ablation showing that bidirectionality contributes meaningful gains beyond the architecture alone.
+- **Consistent empirical gains across three diverse datasets**: Table 1 shows BiSMIL outperforming SA-DMIL, ADMIL, and MaxPool on accuracy, precision, recall, and F1 on all three datasets (UTD ultrasound, RSNA brain CT, SARS-CoV-2 CT). The SiSMIL ablation (one-directional) also outperforms baselines, confirming that incorporating sequential order is beneficial independent of the bidirectional design.
 
-3. **Novel training procedure for a genuinely hard problem.** The weighted incremental loss (Equation 3) is a thoughtful design that addresses the core challenge: subsequence labels are unavailable, and naively applying the bag label uniformly would distort early predictions. The softmax weighting scheme that down-weights shorter subsequences is a principled compromise between using available supervision and not over-penalizing early predictions (Section 3.3). The hybrid loss (combining BCE on full sequences with WIL on subsequences) is a reasonable approach to balancing early and final accuracy.
+- **Demonstrated early prediction capability**: Figure 4 provides concrete evidence that BiSMIL achieves comparable accuracy to full-sequence ADMIL with only ~50% of instances on UTD, and ~70% on RSNA. This is the paper's most practical contribution — a quantified improvement in efficiency that directly addresses the clinical motivation.
 
-4. **Multi-dataset validation with statistical reporting.** Results are averaged over 5 independent trials with standard deviations and 95% confidence bands reported (Table 1, Figure 4). The use of three distinct medical imaging modalities (ultrasound, brain CT, lung CT) supports generalizability claims.
+- **Novel training procedure for the label-sparse sequential setting**: The weighted incremental loss (Equation 2) is a thoughtful solution to the problem of missing subsequence labels. Weighting longer subsequences more heavily is principled: shorter subsequences are less likely to contain diagnostic evidence, so penalizing their predictions on the bag-level label would be inappropriate.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **The central claim of "faithful" subsequence-level predictions is not directly validated, and the evaluation of early accuracy relies on the same bag-level labels the paper acknowledges are inappropriate for subsequences.** The paper states in Section 3.1 that "the bag-level label might not be correct for the subsequence" and that it is "insufficient to directly utilize the sequence-level label as a stand-in for the labels of individual subsequences." Yet the primary evidence for early prediction accuracy (Figure 4) compares each subsequence prediction against the bag-level label. This creates a tension: if a positive bag's evidence appears only in the final images, an early negative prediction is clinically correct for that subsequence but counted as an error. Conversely, a model trained to predict positive from insufficient evidence would be counted as "correct." The paper acknowledges this issue in motivation but never provides an evaluation protocol that disentangles faithfulness to subsequence-level truth from early prediction of the bag label. While predicting the final diagnosis from fewer images is itself clinically useful — and the Figure 4 comparison is meaningful for that purpose — the paper's stated goal of "faithful to the (unobserved) subsequence labels" (Section 3.3, line 82) remains unsubstantiated. Some qualitative clinician validation is mentioned (Section 3.1, "evaluation from a clinician, who stated that only these three images showed any signs of abnormality"), but this is anecdotal rather than a systematic evaluation.
-
-2. **The SMILU uncertainty metric is validated against only a single baseline (entropy), with unspecified weights.** The paper claims SMILU "outperforms common metrics" (Section 5.3, Figure 3b), but the only comparison is against entropy and random removal. Entropy is a reasonable baseline, but the claim of superiority would be stronger with comparisons to predictive variance, Monte Carlo dropout uncertainty, or the model's own softmax confidence. Additionally, the weights $w_s$ and $w_o$ in Equation 6 are not reported — the paper says "the weights can vary depending on the particular application" (line 153) without stating what values were used in the experiments or how they were selected. This makes the result difficult to reproduce or interpret.
+1. **Training–inference mismatch in the reverse direction undermines the bidirectionality claim.**  
+   During training (line 86), the reverse direction receives {x_{i m_i}, …, x_{i l}} — instances from position l *to the end* of the full sequence. At inference (line 106–107), it receives {x_{i l}, …, x_{i 1}} — the first l instances reversed. The paper acknowledges this in a single sentence ("contrary to the training procedure") but provides no justification for why this discrepancy is acceptable. During training, the reverse branch receives instances *after* position l — future information relative to the subsequence being evaluated. At inference, those future instances are absent. This means the reverse branch's training signal comes from a data distribution that does not match inference. The reported gains of BiSMIL over SiSMIL (Table 1) could therefore be inflated by the model learning to exploit future-instance cues during training that are unavailable at test time. This is a structural concern that needs to be resolved — either by modifying training to match inference, or by providing evidence (e.g., an ablation with consistent training) that the gains are genuine.
 
 ### Minor
 
-1. **No ablation separating the training procedure from the architecture.** Figure 4 shows BiSMIL dominates baselines on early prediction, but the baselines were not designed or trained for early prediction (they use their original hyperparameters and objectives, as stated in Section 5.1). This makes it unclear how much of the gain comes from the weighted incremental loss vs. the bidirectional Transformer architecture itself. An ablation comparing BiSMIL trained with vs. without the weighted incremental loss, or comparing a baseline (e.g., ADMIL) fine-tuned with the same loss, would isolate the source of improvement. The SiSMIL ablation partially addresses architectural questions but does not disentangle architecture from training objective for early prediction.
+2. **Overclaimed "state-of-the-art" with a narrow baseline set.**  
+   The paper claims "state-of-the-art final accuracy" but compares against only three baselines: SA-DMIL (the most relevant sequential-aware baseline), ADMIL, and MaxPool. While these are reasonable, the baseline set is too small to support a "state-of-the-art" label. Missing comparisons include simple sequential models (e.g., an LSTM or Transformer operating on instance features) that would directly test whether the bidirectional MIL design adds value over basic sequence modeling. The core claim — that BiSMIL is the best method for this setting — is unsubstantiated without a broader comparison. The paper should either add more baselines or moderate the claim.
 
-2. **Inference procedure for combining bidirectional predictions is underspecified.** The paper describes that during inference, the front and reverse directions each produce a prediction (Algorithm 2, partially visible), but it does not state how $p_{il}^f$ and $p_{il}^r$ are combined into a single $p_{il}$. Are they averaged? Concatenated and passed through a final layer? This is a reproducibility gap.
+3. **Statistical significance claimed but not substantiated.**  
+   Table 1 states that models with "statistically indistinguishable performance at the 95% level" are highlighted, and the text (line 186) claims "often with statistical significance." However, no statistical test is described. With only 5 independent trials, the reader cannot assess whether differences (e.g., BiSMIL vs. SiSMIL on RSNA accuracy: 88.2 vs. 87.4) are real or within noise. The paper should specify the test used (e.g., corrected paired t-test, bootstrap) and report confidence intervals or exact p-values for key comparisons.
 
-3. **Feature extractor backbone is not specified.** The paper refers only to "convolutional layers" (Section 3.2, line 67) without specifying the architecture (ResNet? DenseNet? Custom?), pretraining details, image preprocessing (beyond the RSNA-specific windowing), or any data augmentation. This information is essential for reproducibility.
+4. **SMILU uncertainty metric is under-validated.**  
+   SMILU is tested on only the UTD dataset and compared only against entropy (Figure 3b). The claim that it "outperforms traditional metrics" is based on a single comparison against a single alternative. No comparisons to other standard uncertainty quantification methods (e.g., MC dropout, ensemble variance, predictive entropy from the model's final-layer softmax) are provided. The two weighting coefficients w_s and w_o are not analyzed for sensitivity. Validation on at least one additional dataset (RSNA) and against at least one additional uncertainty baseline would substantially strengthen the claim.
 
-4. **Position encoding components are not ablated.** The position encoding combines linear and Gaussian embeddings (Section 3.2). No experiment demonstrates that the Gaussian component provides benefit over linear alone, or that the design is robust to reversal as claimed.
-
-5. **SMILU's two components ($\mathcal{S}$ and $\mathcal{O}$) are not analyzed separately.** The paper does not show the relative contribution of sequence dispersion vs. output uncertainty to the overall SMILU metric, nor whether both components are necessary.
+5. **Several underspecified methodological details.**  
+   - The feature extractor backbone is described only as "convolutional layers" — no architecture name (ResNet, VGG, etc.), no pretraining information.  
+   - The hyperparameter γ (minimum subsequence percentage) is central to training, but no experimental results or cross-validation are shown to support the claim that 50–70% "generally works best."  
+   - There is no ablation isolating the linear vs. Gaussian components of the position embedding (the motivation for the Gaussian design is stated but not explained or empirically justified).
 
 ### Trivial
-None.
+
+- None that survive filtering (parser artifacts and minor presentation issues removed per guidelines).
 
 ## Nice-to-Haves
 
-- **Statistical testing for differences in incremental prediction curves (Figure 4).** The paper shows confidence bands but does not report whether differences between BiSMIL and baselines at specific subsequence lengths are statistically significant.
-- **Obtaining a small held-out set of subsequence-level labels** (e.g., 200–300 subsequences from a radiologist) would directly validate the faithfulness claim.
-- **Analysis of the relationship between attention weights and incremental predictions / SMILU scores.** Figure 3(a) marks the highest-attention image but does not quantify the connection.
+- Report the effect of γ (e.g., sweep over 50%, 60%, 70%) and loss weights α, β on both final and early accuracy.  
+- Provide a small-scale clinician agreement study validating that high-attention images correspond to clinically relevant findings (currently only one anecdotal example is given).  
+- Extend SMILU validation to the RSNA dataset and compare against at least one additional uncertainty baseline.  
+- Clarify the RSNA subset selection protocol (50,862 slices from 1,175 patients).  
+- Add an ablation of the position encoding components (linear-only, Gaussian-only, none).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **BCE equation typo (y_i appears twice):** The reviewer noted that Equation 3 has $y_i\log(1-p)$ instead of $(1-y_i)\log(1-p)$. This is almost certainly a PDF extraction/formatting artifact — the paper's results would be impossible with a broken loss function for negative bags. Per parser-error policy, this is removed.
-- **Weighting scheme "contradicting" early prediction goal:** The reviewer argued the softmax weights down-weight early subsequences too much, contradicting the goal. However, this is by design — the weights soften rather than eliminate early-subsequence supervision, and the paper explicitly states this addresses the problem that early subsequences may not have seen key evidence. The criticism reflects a misunderstanding of the design rationale.
-- **"The paper never returns to this problem during evaluation" (Section 1 criticism):** This is a restatement of the main evaluation concern already captured in Major Weakness 1.
-- **"If the original paper contains this error" speculation about BCE:** Removed per parser-error policy.
-- **Missing related works:** Per instructions, I cannot confirm the existence of related works I don't have access to.
-- **Code release not mentioned:** This is standard for conference submissions and not a weakness per se; many papers release code post-acceptance.
-- **Strength Finder's generic strengths** (e.g., "Thorough evaluation on three real-world medical datasets" which is partially redundant with listed strengths, and "Clinically motivated interpretability" which is vague and conflicts with the validated weakness about SMILU's limited validation) have been merged into the main strengths or removed.
+- **BCE formula typo** (harsh critic's "Other Observations"): The formula in line 91–92 has y_i instead of (1−y_i) in the second term. Per guidelines, typographical formula errors in extracted text are removed — this is a LaTeX-level mistake that does not affect the paper's substance.  
+- **Criticism about missing appendix / proofs**: Removed per guidelines — the parser strips these sections; they exist in the original submission.  
+- **Criticism that methods like CLAM/TransMIL/DSMIL must be included**: Partially removed and partially downgraded to Minor (see Weakness #2 above). The full original claim that all these WSI-focused methods are necessary baselines is scope-creep for a sequential imaging paper; the more relevant ask is for sequential baselines (LSTM, Transformer).  
+- **Criticism about the reverse direction position encoding being "unclear" without theoretical justification**: Downgraded from the critic's framing to Minor — the paper stakes its contribution on sequential modeling, and a missing explanation for a design choice is a presentation gap, not a structural flaw.  
+- **Request for a clinician study with hundreds of participants**: Removed as practically infeasible for an academic submission. The single-example clinician evaluation is appropriate as a qualitative illustration.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a novel observation that the paper itself does not already make.
+None beyond the paper's own contributions. The three reviews converge on the paper's strengths (problem framing, early prediction results) and weaknesses (training-inference mismatch, baseline coverage), but do not surface new connections the paper itself misses.
 
 ## Suggestions
 
-1. **Clarify the evaluation narrative.** Explicitly state that Figure 4 measures early accuracy of *bag-label prediction* (a clinically meaningful metric), and separate this from the "faithfulness to subsequence truth" claim. Either reframe the faithfulness claim or provide direct validation (e.g., a small set of subsequence-level labels from a clinician).
-2. **Ablate the training procedure from the architecture.** Compare BiSMIL with full loss vs. BiSMIL with BCE-only on full sequences, and/or compare a baseline (ADMIL) fine-tuned with the weighted incremental loss.
-3. **Report the SMILU weights $w_s$ and $w_o$** used in experiments.
-4. **Add more uncertainty baselines** (e.g., softmax confidence, MC dropout variance) to Figure 3(b).
-5. **Specify the feature extractor backbone**, image preprocessing, and how bidirectional predictions are combined during inference.
-6. **Ablate the position encoding components** (linear vs. Gaussian vs. both).
+1. **Resolve the training–inference mismatch** as the top priority. The simplest fix: during training, also provide {x_{i l}, …, x_{i 1}} (i.e., reversed subsequence, not the tail of the full sequence) to the reverse direction, matching inference. Run an ablation showing whether the bidirectional gains persist under this consistent protocol. If they do, the claim is clean; if not, the paper should acknowledge that bidirectionality's contribution is smaller than reported.
+
+2. **Add at least two more baselines**: (a) an LSTM or Transformer over instance features to test whether a standard sequential model captures the order information, and (b) one additional recent MIL method (e.g., TransMIL or DSMIL). Moderate the "state-of-the-art" claim if these are not included.
+
+3. **Report the specific statistical test** used for the 95% significance highlights in Table 1 and provide confidence intervals or p-values for the key BiSMIL vs. SiSMIL comparisons. If no formal test was used, remove the significance claims.
+
+4. **Extend SMILU validation** to at least the RSNA dataset and compare against at least one additional uncertainty method (e.g., entropy from the final prediction, or the model's softmax confidence).
+
+5. **Specify the feature extractor architecture** (backbone, pretraining, whether frozen or fine-tuned) for reproducibility.
 
 ## Score and Decision
 
-This paper addresses a genuine problem — sequential clinical imaging with bag-level labels — and proposes a well-motivated framework, architecture, and training procedure. The core empirical results (state-of-the-art final accuracy across three datasets, clinically meaningful early-prediction gains) are solid and supported by statistical reporting. However, the main weakness is a gap between the paper's claim of "faithful" subsequence-level predictions and an evaluation that necessarily relies on bag-level labels as a proxy. This does not invalidate the core contribution (early bag-label prediction is itself clinically important and is what Figure 4 measures), but it means one of the paper's stated goals remains unverified. The SMILU validation is thin, and several ablation and reproducibility details are missing. These are addressable issues, and the paper's core ideas represent a meaningful advance.
+The paper tackles a well-motivated problem, proposes a novel framework and training procedure, and provides credible initial evidence on three datasets. However, the training–inference mismatch in the bidirectional design is a significant structural concern that directly affects the paper's central architectural contribution, and the baseline set is too narrow to support the "state-of-the-art" claim. These issues require substantial revision.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

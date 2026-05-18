@@ -1,93 +1,70 @@
-Now I have a thorough understanding of the paper and all the reviewer claims. Let me compose the final consolidated review.
-
 ## Summary
 
-This is a theoretical paper that proposes differentially private algorithms for nonsmooth nonconvex (NSNC) optimization, improving the sample complexity bounds for achieving Goldstein stationarity. The paper has three main contributions: (1) a single-pass DP algorithm with sample complexity that is at least Ω(√d) times better than the prior state-of-the-art (Zhang et al. 2023), (2) a multi-pass ERM algorithm with further improved sublinear-dimension dependence, and (3) a generalization result showing that empirical Goldstein stationarity transfers to the population loss. The technical innovation centers on using high-probability sensitivity bounds (rather than worst-case bounds) for gradient estimators, which reduces the noise needed for privacy.
-
----
+This paper studies differentially private (DP) optimization for nonsmooth nonconvex (NSNC) objectives under the Goldstein stationarity criterion. It proposes two algorithms: a single-pass algorithm that improves over the prior work of Zhang et al. (2023) by at least a Ω(√d) factor, achieving a dimension-independent "non-private" term that was previously claimed impossible; and a multi-pass ERM algorithm that achieves sublinear dimension dependence—the first such result. The paper also provides a generalization result showing that empirical Goldstein stationarity implies population Goldstein stationarity. The core technical insight is that the zero-order gradient estimator concentrates around its mean with high probability, allowing sensitivity to be bounded by O(L/B) rather than the worst-case O(Ld/B), which reduces the privacy noise.
 
 ## Strengths
 
-1. **Quantified, dimension-dependent improvement over prior work (Theorem 1).** The single-pass algorithm's sample complexity Õ(1/(αβ³) + d/(εαβ²) + d^{3/4}/(ε^{1/2}αβ^{5/2})) is "always at least Ω(√d) times smaller" than the previous bound of Zhang et al. (2023). This is a concrete and well-documented advance, with the comparison explicitly shown in Table 1 and the AM-GM argument given in a footnote.
+1. **Dimension-independent non-private term in single-pass DP guarantee (Theorem 1, Remark 1):** The sample complexity's "non-private" term scales as 1/αβ³ with no dependence on dimension d. This directly refutes a claim of impossibility in Zhang et al. (2023) and represents a genuine advance.
 
-2. **First dimension-independent "non-private" term in NSNC DP optimization (Theorem 1, Remark 1).** The term 1/(αβ³) does not scale with dimension d. Remark 1 provides a clear explanation for why this is possible (distinguishing oracle complexity from sample complexity), resolving an apparent contradiction with prior claims. This is a genuine conceptual contribution.
+2. **First private ERM with sublinear dimension dependence for NSNC objectives (Theorem 2):** The multi-pass algorithm achieves sample complexity n = Õ(d^{3/4}/εα^{1/2}β^{3/2}), which is sublinear in d. The paper correctly states this is a first.
 
-3. **Novel high-probability sensitivity analysis (Lemma 2).** The paper bounds the sensitivity of the gradient estimator under a high-probability event as O(L/B₁ + Ld√(log(dB₁/δ))/√m), which can be much smaller than the worst-case bound O(Ld/B₁) used in prior work. This insight drives the improved sample complexity and is cleanly argued.
+3. **Key technical insight — high-probability sensitivity reduction:** The paper identifies that while worst-case sensitivity of the zero-order gradient estimator is O(Ld/B), with high probability it reduces to O(L/B) (Lemma 1 and the discussion following Eq. (4)). This insight drives the improvement and is clearly articulated.
 
-4. **Clean modular analysis via the O2NC framework (Proposition 1).** Disentangling variance G₀² and second moment G₁² of the gradient oracle provides a transparent structure that is reused across both the single-pass and multi-pass algorithms.
+4. **Generalization guarantee from empirical to population (Proposition 4):** A novel result showing that an (α,β̂)-Goldstein stationary point of the empirical loss is an (α,β)-stationary point of the population loss with β = β̂ + Õ(√{d/n}), bridging ERM and stochastic optimization. The proof appears correct and uses a uniform convergence bound.
 
-5. **Complete and verifiable proof details in Section 7.** The proofs give explicit assignments for all algorithmic parameters (B₁, B₂, m, σ, Σ, D, T, M), making the claims concrete and the algorithms implementable. The proof of Theorem 1 in the main text (lines 404–461) is actually quite detailed for a main-text proof, walking through the key algebraic steps from the O2NC bound to the final sample complexity.
-
----
+5. **Comprehensive comparison to prior work:** Table 1 and surrounding text clearly contrast sample complexities against the single existing result (Zhang et al. 2023), making improvements easy to verify.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **The generalization result (Proposition 3) relies on an unverified gradient uniform convergence bound for nonsmooth functions.** The proof invokes a gradient uniform convergence bound (citing Mei et al. 2018, Theorem 1) that claims ||∇ĥ^𝒟(x) − ∇F(x)|| = Õ(L√(d log(R/ζ)/n)) for all differentiable x ∈ 𝒳. There are two issues:
-
-   - **Applicability of the cited result**: Uniform convergence of gradients for general Lipschitz (nonsmooth) functions over a bounded domain is not a standard empirical process result. Standard uniform convergence bounds for gradients typically require smoothness (Lipschitz gradients) or a reproducing kernel structure. The functions in this paper are only L-Lipschitz (Assumption 1), with no smoothness assumption. The referenced work (Mei et al. 2018) may require additional structural assumptions (e.g., smoothness of components) that the paper does not state or verify.
-
-   - **The points yᵢ may not be differentiable**: The proof writes bpar_α ĥ^𝒟(x) = Σ λᵢ ∇ĥ^𝒟(yᵢ) for yᵢ ∈ 𝔹(x,α). But the Goldstein subdifferential is defined via Clarke subdifferentials, which are convex hulls of limit points of gradients. The points yᵢ achieving the minimum-norm element may not be differentiable points of ĥ^𝒟 or F, so the uniform convergence bound (which applies only at differentiable points) may not apply to them directly.
-
-   **Severity**: This weakness affects one of the paper's three claimed contributions — the transition from empirical ERM guarantees to population guarantees. The single-pass algorithm (Theorem 1) is **not affected** because it directly targets the population loss. The multi-pass ERM algorithm (Theorem 3) is still valid as an empirical guarantee. However, the population-level interpretation of Theorem 3 (as stated in Remark 2 and the table's "stochastic" column) is unsupported without a fix. This is a **Major** weakness, not Fatal, because the algorithmic core remains intact.
+1. **Privacy proof does not properly account for the high-probability sensitivity bound (Lemma 4 / Lemma 8).**  
+   The Tree Mechanism (Proposition 1) requires a *deterministic* bound on sensitivity for all neighboring datasets and all auxiliary inputs. Lemma 3 only provides a bound that holds with probability ≥ 1−δ/2 over the randomness of the zero-order estimator. The proof of Lemma 4 (lines 602–608) states: "By Lemma 3 and our assignment of m, we know that with probability at least 1−δ/2, the sensitivity of all t is bounded by … Then the privacy guarantee follows from the Tree Mechanism."  
+   This is insufficient. The δ/2 failure probability from the sensitivity bound is never composed with the δ from the Tree Mechanism. The proof needs to explicitly: (a) set the Tree Mechanism's internal δ parameter to δ/2, and (b) union-bound the two failure events to obtain overall (ε,δ)-DP. The same gap carries over to the multi-pass privacy guarantee (Lemmas 8).  
+   **Why it matters:** The privacy guarantee is the paper's central claim. While this gap is likely fixable with a more careful composition argument (and would not affect asymptotic rates), the proof as presented is incomplete, and readers cannot verify that the claimed (ε,δ)-DP guarantee holds.
 
 ### Minor
 
-1. **The proof of Proposition 3 implicitly assumes differentiable representatives for the Goldstein subdifferential.** Even if one trusts the uniform convergence bound, the step "let y₁,…,y_k ∈ 𝔹(x,α) be points satisfying bpar_α ĥ^𝒟(x) = Σ λᵢ ∇ĥ^𝒟(yᵢ)" requires that the minimum-norm element of the Goldstein subdifferential can be expressed as a convex combination of *gradients* (not general Clarke subgradients) at points within the ball. For Lipschitz functions, this is not guaranteed without additional justification (e.g., an approximation argument using differentiability almost everywhere). This gap is fixable but currently missing.
+1. **Conditioning in Lemma 3's second case is sloppy.**  
+   The second case states: "conditioned on g_{t−1} = g_{t−1}', we have with probability at least 1−δ/2: ‖g_t−g_t'‖ ≲ …". For the Tree Mechanism, what matters is the sensitivity of the *increment* (g_t − g_{t−1}), which uses only fresh data and does not require this conditioning. The bound itself is correct—the increment sensitivity does not depend on previous states being equal—but the presentation is confusing and the proof says "The other case follows from the same argument" without elaboration. This makes it harder for a reader to verify the privacy analysis. The analysis should be restated in terms of increment sensitivity directly.
 
-2. **The parameter assignments in the proof of Theorem 1 involve several interleaved variables (Σ, D, m, B₁, B₂, σ) whose asymptotic inequalities are solved simultaneously.** The text says "a straightforward calculation simplifies the bound" (around line 444) when going from Equation (11) to Equation (12). While the preceding derivation is more detailed than the critic suggests (eight lines of algebra are shown), the final simplification step could benefit from one or two intermediate equations explaining how the three terms in Equation (12) emerge from the three error sources (O2NC averaging, variance, privacy noise). This is a common presentation issue in theory papers and does not threaten correctness.
+2. **The proof of Lemma 4 (and Lemma 8) is too terse.**  
+   Even beyond the composition gap, the privacy proof is essentially one sentence: "the privacy guarantee follows from the Tree Mechanism." Given that the entire paper's contribution hinges on the privacy-utility trade-off, the privacy lemmas deserve more thorough justification.
 
 ### Trivial
-None.
 
----
+None.
 
 ## Nice-to-Haves
 
-- A brief remark acknowledging the computational cost (number of function evaluations) would be helpful for readers, though the paper is justifiably focused on sample complexity.
-- The claim that the dimension-independent term was "erroneously claimed impossible" (Remark 1) is substantiated by the oracle-vs-sample complexity distinction, but the phrasing could be softened to avoid appearing confrontational.
-
----
+- The paper could provide a brief discussion of why Rényi-DP (used by Zhang et al. 2023) would not directly benefit from the same high-probability sensitivity reduction technique, since the paper already notes this in the Discussion section. A short technical explanation would strengthen the paper.
+- A more explicit demonstration of how the composition of the δ/2 failure probability from the sensitivity bound and the Tree Mechanism's δ works out to give (ε,δ)-DP would resolve the major concern.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **Criticism that the high-probability sensitivity argument makes the paper "not meaningful as stated" and that "the (ε,δ)-DP guarantees are unsupported":** This overstates the severity. The composition gap is real but fixable; it does not invalidate the core idea. The paper's approach of using high-probability sensitivity bounds for privacy is valid when the failure probability is properly composed into δ (a standard technique). The weakness is kept in Major but the fatal framing is removed.
 
-- **Criticism that the generalizations reference "cannot be confirmed without access to that paper"** — This is not about the existence of the reference; it is about whether the cited theorem supports the claim. However, the substantive concern about uniform convergence for nonsmooth functions is valid and is retained in Major weakness #1. The "cannot confirm" framing is removed.
-
-- **Criticism about compressed algebra being an "under-specified" gap** — The proof of Theorem 1 in the main text actually shows 8+ lines of algebraic derivation (Equations 7–12). The level of detail is standard for main-text proofs in theory papers. The "extreme compression" claim is overstated.
-
-- **Complaint about Table 1 omitting Φ, L, and log factors** — This is standard practice for summary tables. The main theorems include these terms explicitly.
-
-- **Strength about the generalization result being "novel"** — This strength is kept in the main review but downgraded in significance since the proof has a gap. It remains listed as Strength #3 (with appropriate caveat).
-
----
+- **Criticism that the conditioning issue in Lemma 3 second case "undermines the central claim":** Overstated. The increment sensitivity analysis does not actually require the conditioning; the bound itself is correct. Moved to Minor.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The high-probability sensitivity technique for reducing privacy noise in nonsmooth optimization is the paper's key insight, and it is clearly articulated.
-
----
+None beyond the paper's own contributions. The reviews do not surface an insight that the paper itself does not already contain.
 
 ## Suggestions
 
-1. **Fix or clarify the generalization argument (Proposition 3).** The authors should either (a) provide a self-contained proof of the required gradient uniform convergence bound under Assumption 1 only, (b) prove the result for the smoothed functions F_α and ĥ^𝒟_α (which are smooth, making uniform convergence standard) and then relate stationarity of the smoothed empirical function to the original population function via Lemma 2, or (c) explicitly state any additional regularity condition needed (e.g., that the component functions are smooth) and adjust the claims accordingly.
-
-2. **In the proof of Proposition 3, address the differentiability of the yᵢ points.** Even a brief remark that Clarke subgradients can be approximated by gradients at nearby differentiable points (by definition of the Clarke subdifferential) would suffice to bridge this gap.
-
-3. **Add one or two intermediate equations in the proof of Theorem 1** showing more explicitly how the three sample complexity terms in the final bound arise from the three error sources (the O2NC averaging error ~ 1/√M, the variance term G₀, and the initialization error Φ/(DT)).
-
----
+1. **Fix the privacy composition argument in Lemma 4 and Lemma 8.** Explicitly set the Tree Mechanism's δ to δ/2 and union-bound with the δ/2 failure probability from Lemma 3. Show that the resulting guarantee is (ε,δ)-DP. (This will not change the asymptotic sample complexity.)
+2. **Restate Lemma 3 in terms of increment sensitivity** rather than conditioning on g_{t−1}=g_{t−1}'. The analysis is cleaner and avoids the misleading conditioning.
+3. **Expand the privacy proofs** beyond one-sentence appeals to the Tree Mechanism. Given that the paper's central advance depends on the privacy analysis, the proofs should be self-contained enough for a reviewer to verify the composition.
 
 ## Score and Decision
 
-The paper makes genuine theoretical contributions: the single-pass algorithm significantly improves over the existing state-of-the-art, the ERM algorithm achieves sublinear dimension dependence, and the high-probability sensitivity technique is novel and well-executed. The main concern — the generalization proof's reliance on an unverified uniform convergence bound — is significant but affects only one of three contributions and is likely fixable. The two core algorithmic results are solid. On balance, the paper presents real progress in the field.
+The paper addresses an important open problem (DP NSNC optimization) and makes genuine technical contributions: a dimension-independent non-private rate that refutes a prior impossibility claim, the first ERM algorithm with sublinear dimension dependence for this setting, and a novel generalization result. The core insight (using concentration to reduce sensitivity) is clever and well-motivated. The utility analysis and the generalization result appear sound.
 
-**Score: 7.0/10** — A strong paper with a clear gap in one component that reasonable revisions can address.
+However, the privacy analysis has a real gap: the composition of the high-probability sensitivity bound with the Tree Mechanism's δ is not properly accounted for. While likely fixable without changing rates, this gap means the paper's central claimed result—the (ε,δ)-DP guarantee at the stated sample complexities—is not yet fully supported by the presented proofs. The paper is at the borderline: the contributions are significant, but the technical verification is incomplete in a critical area.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

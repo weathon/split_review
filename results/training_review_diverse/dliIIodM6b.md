@@ -1,30 +1,20 @@
-Now let me compile my final review.
-
-I've carefully read the paper and verified each reviewer claim against the actual text. Let me now synthesize the authoritative final review.
-
----
+Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper proposes DICE (self-alignment with **D**PO **I**mpli**C**it r**E**wards), a method that iteratively bootstraps DPO-trained LLMs by using the model's own implicit reward function (the log-ratio of policy to reference probabilities) to construct preference datasets from on-policy samples. The method adds two refinements: length-regularized reward shaping to mitigate length bias, and experience replay (mixing generated data with original offline data) to prevent catastrophic forgetting. On AlpacaEval 2.0, DICE-Llama3 8B achieves 27.55% length-controlled win rate, outperforming Gemini Pro and the base DPO model by 9.35 points, with ablation studies confirming both proposed techniques are necessary.
-
----
+The paper introduces DICE, a method that bootstraps a DPO-tuned language model by using the model's own implicit reward (the log-ratio β log(π_θ/π_ref)) to construct new preference datasets for iterative DPO training. The method incorporates length-regularized reward shaping to mitigate length exploitation and experience replay with the original offline dataset to prevent catastrophic forgetting. On AlpacaEval 2, DICE applied to Llama-3-8B-DPO achieves 27.55% length-controlled win rate, surpassing Gemini Pro despite using only 8B parameters and no additional human annotations beyond the initial DPO training data.
 
 ## Strengths
 
-1. **Well-motivated and practical core idea.** Using DPO's built-in implicit reward model to bootstrap iterative self-alignment is a natural and elegant extension. The method requires no external reward models, human annotations, or LLM-as-a-judge prompting — just the DPO-trained model itself and the original offline preference data.
+1. **Novel use of DPO's implicit reward for self-bootstrapping**: The paper identifies and empirically validates that after DPO training, the implicit reward (r(x,y) = β log(π_θ/π_ref)) can be repurposed to construct preference datasets for iterative self-alignment without requiring any external reward model or additional human feedback. This is clearly stated in Sections 1 and 4, and supported by Table 1 results showing 8.02% and 9.35% LC win rate improvements over the base DPO models.
 
-2. **Clear empirical gains on a standard benchmark.** Table tb.baseline (visible in the paper) shows that DICE improves the length-controlled win rate by 8.02% (Zephyr 7B) and 9.35% (Llama3 8B) over the respective base DPO models, and substantially outperforms both Offline DPO and LLM-as-a-Judge baselines. The controlled comparison is properly designed with baselines that share the same computational budget.
+2. **Length-regularized reward shaping effectively addresses length exploitation**: The paper identifies a critical length bias in vanilla implicit rewards (Figure 1 shows an average length difference of 1031 tokens between chosen/rejected responses) and proposes a simple penalty term (Equation 3) with a principled α-selection mechanism that minimizes absolute length difference (Equation 4). The ablation in Table 2 confirms this is essential: e.g., with γ=0.5, LC win rate jumps from 12.83% (α=0) to 20.71% (α=α^★) in the Zephyr setting.
 
-3. **Ablation studies convincingly validate both proposed components.** The α-search ablation (Table tb.alpha) shows that α=0 yields length-exploited responses with low LC win rates, α=2α* over-penalizes quality, and the α* found by Equation 7 gives the best trade-off. The γ-experience-replay ablation (Figure fig:gamma) shows a clean inverted-U curve where γ=0.5 outperforms both extremes, confirming that mixing offline and generated data is beneficial.
+3. **Strong empirical results**: DICE-Llama3-8B achieves 27.55% LC win rate on AlpacaEval 2, surpassing Gemini Pro (24.38%) with only 8B parameters and no external reward model or additional human data. The gains over base DPO models are substantial and consistent across two different model families (Zephyr-7B and Llama3-8B).
 
-4. **Length bias mitigation is concretely demonstrated.** Figure 2 visually shows the skewed distribution of vanilla implicit rewards (mean length difference +1031) transforming to a near-zero mean (-21) after LR reward shaping, closely matching the UltraFeedback reference distribution. This is concrete evidence that the α-search procedure works as intended.
+4. **Compatibility with other alignment algorithms**: The paper shows (Table 3) that the DICE-generated preference dataset also improves policies trained with KTO, IPO, and Hinge loss, indicating the constructed data has general utility beyond DPO.
 
-5. **Compatibility with multiple DAP algorithms.** Section 5.3 shows that the generated dataset benefits not only DPO but also KTO, IPO, and Hinge loss, broadening the impact beyond the specific iterative training loop.
-
-6. **Competitive result with modest compute.** DICE-Llama3 8B achieving 27.55% LC win rate — surpassing Gemini Pro and larger open models like Mixtral 8×7B and Tulu 2+DPO 70B — is a noteworthy finding for a method using only 8B parameters and no external feedback.
-
----
+5. **Effective experience replay design**: The ablation (Figure 3) systematically validates that mixing offline data with generated data at γ=0.5 outperforms either pure offline (γ=1.0) or pure generated (γ=0.0) data, supporting the continual-learning-inspired design choice.
 
 ## Weaknesses
 
@@ -33,68 +23,68 @@ None.
 
 ### Major
 
-1. **Evaluation rests on a single benchmark with no variance estimates.** The paper's central empirical claims — that DICE "significantly improves" alignment and "achieves superior performance than Gemini Pro" — are supported only by AlpacaEval 2.0 LC win rates. No results on MT-Bench, Arena-Hard, or human evaluation are reported. Additionally, none of the reported numbers include error bars, confidence intervals, or results from multiple seeds. Given the known variability in LLM-as-a-judge evaluations (different GPT-4 versions, decoding parameters, stochasticity in sampling), the reported improvements — while positive — cannot be assessed for statistical reliability. The 3.17 percentage point gap over Gemini Pro on the leaderboard is a competitive result, but the paper does not provide the reader with the tools to judge whether this gap is meaningful under the evaluation's inherent variance.
+1. **Incomplete comparison to relevant iterative DPO methods**: The paper cites iterative DPO works (viethoangtranduong, Guo et al. 2024) and frames DICE within the iterative DPO framework, but provides no empirical comparison to them. The paper's baseline set includes only offline DPO and a prompted LLM-as-a-Judge baseline. Without comparing to standard iterative DPO (where a separate reward model or the original preference labels provide the signal), or to full Self-rewarding LM with its SFT-based judge training, it is unclear how much DICE's advantage comes from the iterative framework itself versus the specific use of the implicit reward. This is the most significant gap in the evaluation. The paper acknowledges the related methods in Section 2 but never benchmarks against them.
 
-2. **Missing comparison with a closely related prior method (SPIN).** SPIN (Singh et al., ICML 2024) is an iterative self-training method that also generates preference pairs from the model's own generations and trains with a modified DPO objective. The paper does not cite, discuss, or compare against SPIN anywhere — not in the Related Work section, not in the experiments, not even to explain how DICE differs. This omission directly affects the reader's ability to judge the novelty and marginal contribution of DICE. While DICE's use of DPO's implicit reward (rather than SPIN's likelihood-ratio-based approach) and its specific refinements (LR reward shaping, experience replay) are distinguishing features, the paper does not articulate them as such. A comparison — even a discussion of technical differences — is needed.
+2. **The implicit reward's quality as a preference signal is not directly validated**: The paper's core claim is that DPO's implicit reward can serve as a preference signal for bootstrapping. However, the paper never directly validates this quantity against any held-out preference judgments or human annotations. The quantity r(x,y) = β log(π_θ/π_ref) measures how much the policy has shifted from the reference on a specific response — this is not obviously correlated with human preferences, and a policy could increase this value on easy-to-model (short, generic) responses rather than genuinely aligned ones. The paper acknowledges this limitation qualitatively (lines 21, 159) and mitigates it with experience replay, but a direct correlation study (e.g., how well the implicit reward ordering agrees with UltraFeedback labels on held-out data, or with human judgments) would substantially strengthen the central claim. As written, the reader must take the AlpacaEval 2 gains as indirect evidence.
 
 ### Minor
 
-3. **α-search procedure not robustly validated against overfitting.** The regularization strength α is optimized (Equation 7) on the same set of generated responses used to construct the training dataset. While the ablation with α=0 and α=2α* provides some validation, the paper does not verify that the optimal α is stable across different generated datasets (e.g., across multiple random seeds, different rounds of iteration, or held-out prompts). If the α found by Equation 7 is specific to the idiosyncrasies of one set of generated responses, the method's robustness is unclear. A simple cross-validation check would strengthen this considerably.
+1. **"No external feedback" claim is imprecise**: The abstract and contributions state that DICE achieves its results "without any external feedback" / "no external reward model." However, the method starts from a model that was DPO-trained on UltraFeedback (an external human-annotated preference dataset) and uses that same dataset for experience replay. The contribution is better described as requiring *no additional external feedback beyond the initial DPO training data*. The paper's own Limitations section (line 245) acknowledges reliance on the initial DPO training, so clarifying this in the abstract/contributions would improve precision.
 
-4. **Compatibility experiments limited to first-round data.** Section 5.3 tests other DAP algorithms using only the first round's generated dataset. It would be more informative to test whether the full iterative process (multiple rounds) also benefits other algorithms, or whether the benefit is confined to DPO's own training loop.
+2. **Only two iterations reported, with no Iter-1 breakdown**: The paper reports results only after two bootstrapping rounds ("Iter 2"). Including Iter-1 results would clarify how much benefit comes from the first round alone versus the iterative process. This is especially important since the paper notes that performance degrades beyond three iterations (line 245) — a single Iteration-1 data point would help assess whether the method is genuinely iterative or if most gains come from the first round, with diminishing or even negative returns from additional rounds.
 
-5. **Round-3 negative result mentioned but not shown.** The Limitations section states that "we did not observe continuous improvement in our model beyond three iterations," but no data is presented. Showing the round-3 LC win rate (even as a negative result) would be informative for the community and would strengthen the paper's honesty about the method's boundaries.
+3. **No variance or standard deviations reported**: The main results (Tables 1, 2, 3) show only point estimates. Given that the reported improvements (8-9% LC) are practically meaningful and the method involves stochastic sampling and training, reporting uncertainty (e.g., 3 runs with different seeds) would increase confidence that the gains are robust rather than due to a favorable run.
 
-6. **Minor reproducibility details unspecified.** The random subsampling of 10k preference pairs from UltraFeedback does not specify the seed or selection methodology. Additionally, while K=16 responses per prompt is stated, there is no discussion of whether this is the minimum needed or what the cost-benefit trade-off looks like.
+4. **Stability of the length-regularization coefficient α not analyzed**: The paper optimizes α to minimize absolute length difference on the generated dataset. It is not reported whether the optimal α changes across iterations or across the two base models (Zephyr vs. Llama3). If α is sensitive to the model or iteration, the α-search procedure would need to be re-run at each step, which has practical implications.
 
 ### Trivial
-None of substance beyond the minor points above — the paper is well-written and the presentation is clean.
 
----
+1. The reference model is updated each iteration (π_ref^(t) = π_θ^(t-1)), meaning the "implicit reward" at round t is actually β log(π_θ^(t)/π_θ^(t-1)) — a per-round delta, not the same quantity analyzed in the original DPO paper (which uses a fixed reference). The paper states this (lines 107, 161) but does not discuss the implications. A brief remark that this changes the interpretation would help readers.
 
 ## Nice-to-Haves
 
-- **Additional evaluation on a second benchmark** (e.g., MT-Bench, Arena-Hard, or a controlled human evaluation) would substantially increase confidence that the AlpacaEval 2.0 improvements reflect genuine alignment gains rather than benchmark-specific idiosyncrasies.
-- **Error bars or confidence intervals** for the main results, even from a small number of seeds (e.g., 2–3 runs), would allow readers to assess the reliability of the reported improvements.
-- **A baseline combining iterative reference updates with purely offline data** (the γ=1 condition in Figure 4) could be included in the main Table tb.baseline for completeness. The paper has this result in the ablation figure but does not surface it in the main comparison table.
-- **A discussion of inference cost** (160k forward passes per round for 10k prompts with K=16) and whether smaller K suffices would help practitioners assess the method's practical deployability.
-
----
+- A direct correlation/agreement study between the implicit reward ordering and held-out human preference judgments or the original UltraFeedback labels, to validate that the log-ratio captures meaningful preference signal beyond mere self-reinforcement.
+- Iter-1 results alongside Iter-2 results to show the per-round improvement trajectory.
+- A brief analysis of how the optimal α varies (or doesn't) across iterations and base models.
+- Comparison to standard iterative DPO with an external reward model or with iterative updating using the original preference labels, to disentangle the effect of the iterative framework from the effect of the implicit reward signal.
 
 ## Removed Points
 
-These points were flagged by reviewers but are excluded or downgraded after verification against the paper:
+These points are flagged to be removed, treat them with caution:
 
-- **"Leaderboard comparison is not a controlled experiment"** — Removed. The paper clearly separates its controlled experiments (Table tb.baseline, which compares DICE against Offline DPO, Offline DPO w/ new ref, and LLM-as-a-Judge under the same protocol) from the leaderboard comparison (Table tb.leaderboard, which is labeled as such). The leaderboard comparison is a standard supplementary result, and the paper's primary claims about improvement over baselines rest on the controlled experiments, not the leaderboard.
-
-- **"Theoretical analysis is heuristic and not rigorous" / "does not add new insight"** — Downgraded from major to removed. The analysis (Section 4.1) is explicitly framed as an adaptation of existing theory ("similar to Xie et al. 2024") to provide intuition for why on-policy sampling helps. This is appropriate for an empirical paper. The reviewer demands formal rigor inappropriate for this section's purpose.
-
-- **"Offline DPO baseline confounds iterative reference update with self-generated data"** — The paper already includes the "Offline DPO w/ new ref" baseline to address this, and the γ ablation explores this systematically. The concern is substantially addressed.
-
-- **"The paper should not be accepted in its current form"** / overall tone of rejection — The reviewer's own assessment acknowledges the core idea is sound and the ablations are convincing. The issues raised are real but do not warrant rejection; they call for strengthening the evaluation.
-
----
+- **Critical Issue 2's claim that the LLM-as-a-Judge comparison is "unfair"**: The paper explicitly acknowledges that Self-rewarding LM uses SFT-based judge training (line 180) and compares against a prompted version of the same base model. This is a controlled ablation, not an unfair comparison. The asymmetry (prompted vs. SFT-trained judge) favors the paper's method, so even accepting the reviewer's framing, the hard rule about asymmetry favoring baselines applies in reverse — the comparison is valid as presented. Removed.
+- **Criticism about Section 4.1's theoretical analysis being "tangential"**: The paper frames this analysis (lines 100-101) as motivation for why on-policy sampling helps, not as the core novel contribution. The analysis is a generic but relevant background justification. The paper does not claim it proves anything about the implicit reward's quality. Removed as a strawman weakness (mistaking background motivation for an overclaim).
+- **"DR" prefix on \piref**: This is a LaTeX macro / parser artifact, not a paper flaw. Removed per formatting nitpick rule.
+- **Criticism about missing comparison to SPIN**: Per the hard rule, I cannot verify the existence/absence of this comparison from external knowledge. Removed.
+- **Suggestions that the theoretical analysis be "replaced or refocused"**: The existing analysis serves a legitimate purpose (motivating on-policy sampling). The paper would indeed benefit from additional analysis of implicit reward quality, but replacing the existing content is not justified. Moved to Nice-to-Haves.
 
 ## Novel Insights
 
-The reviews surface an interesting tension: the paper's greatest strength (competitive leaderboard performance with 8B parameters) is also the point most vulnerable to the single-benchmark criticism. The community would benefit from knowing whether DICE's gains on AlpacaEval 2.0 transfer to other evaluation settings — this is a genuine open question the paper (and its reviewers) identify. The second insight is that DICE occupies a specific niche in the iterative self-alignment landscape: unlike Self-Rewarding LM (which requires SFT on evaluation data to judge), and unlike SPIN (which uses likelihood ratios), DICE exploits the fact that DPO already provides a reward function for free. This distinction is real but the paper does not draw it sharply enough, and the missing SPIN discussion is a concrete omission that the authors should address.
-
----
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Add at least one additional evaluation benchmark** (MT-Bench or Arena-Hard) and provide error bars from multiple seeds (2–3 runs) for the main AlpacaEval 2.0 results. This single change would most directly address the central evidential weakness.
-2. **Cite and discuss SPIN** in the Related Work section, explicitly explaining the technical differences (implicit reward vs. likelihood ratio, LR reward shaping, experience replay) and ideally providing a direct experimental comparison.
-3. **Add a cross-validation check for the α-search:** split the prompt set into two halves, optimize α on one half, and verify the same α is optimal on the held-out half. This would address the overfitting concern about the α-search procedure.
-4. **Show the round-3 LC win rate**, even as a negative result, to substantiate the "lack of continued improvement" limitation mentioned in the text.
-
----
+1. Add Iter-1 results to show the per-round benefit curve, and ideally Iter-3 results if degradation is observed.
+2. Include at least one comparison to a standard iterative DPO baseline (e.g., using a separate reward model for labeling, or the same iterative framework with the original preference labels) to contextualize DICE's specific advantage.
+3. Add a small-scale analysis validating implicit reward quality against held-out preference labels (e.g., agreement rate on UltraFeedback validation data).
+4. Clarify the "no external feedback" phrasing in the abstract and contributions to "no additional external feedback beyond the initial DPO training data."
+5. Report the optimal α values for each base model and iteration to demonstrate stability.
+6. Add standard deviations or multi-seed results for the main AlpacaEval 2 numbers, or at minimum note that single runs were used and why.
 
 ## Score and Decision
 
-The paper proposes a sound, well-motivated method with convincing ablations and strong results on a widely-used benchmark. The two major weaknesses — single-benchmark evaluation without variance estimates, and the missing SPIN comparison — are addressable in revision and do not invalidate the core contribution. The method is clearly described, the ablations are informative, and the design choices (LR reward shaping, experience replay) are validated against sensible alternatives.
+The paper presents a surprisingly simple method with strong and consistent empirical gains across two model families. The core idea — reusing DPO's implicit reward as a cheap preference signal for self-bootstrapping — is novel, practical, and could be widely adopted. The length-regularization and experience replay components are well-motivated and ablated convincingly.
 
-**Score: 6.0** — A solid contribution with clear strengths; the main claims are plausible and the method is well-designed, but the evaluation needs broadening and a key related-work comparison is missing.
+However, the evaluation has two significant gaps: (1) no direct validation that the implicit reward correlates with actual preferences, and (2) no comparison to standard iterative DPO baselines despite citing them. These gaps mean the contribution, while empirically compelling, lacks the contextual grounding needed to fully assess its novelty relative to the closest prior work. Neither gap is fatal — the paper's empirical evidence is credible — but both weaken the paper's claims relative to what is achievable with simpler or more standard approaches.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+The paper is a clear accept after addressing these concerns. Its empirical results are strong enough to carry the contribution, and the required additions (Iter-1 results, one more baseline comparison, a small validation study) are well within scope for a rebuttal or minor revision.
+
+**Originality**: Moderate-High. Using the implicit reward for bootstrapping is a novel and non-obvious observation.
+**Importance**: High. Self-alignment without external feedback is a practically important capability.
+**Claims well-supported**: Adequate but incomplete — the main empirical claim is supported, but missing baselines and lack of direct reward validation leave the contribution not fully contextualized.
+**Soundness**: Good. The experimental design is reasonable, ablations are informative, but the missing direct validation of implicit reward quality is a gap.
+**Clarity**: Good. The paper is well-structured and the method is clearly explained.
+**Value to community**: High. The method is simple, practical, and achieves strong results with modest compute requirements.
+
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

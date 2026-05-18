@@ -1,20 +1,18 @@
-Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the final consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes DuMBO, a decentralized Bayesian optimization algorithm that relaxes assumptions about the maximum factor size (MFS) in additive decompositions. The paper has three main contributions: (1) theoretical — DuMBO achieves asymptotic optimality without requiring low MFS, unlike prior decomposing BO algorithms; (2) algorithmic — it uses ADMM for decentralized acquisition function maximization with closed-form message-passing updates; (3) a tighter additive approximation of GP-UCB that reduces over-exploration relative to ADD-GPUCB/DEC-HBO. Experiments on synthetic and real-world problems show competitive performance.
+This paper proposes DuMBO, a decentralized Bayesian Optimization algorithm that (1) relaxes the restrictive low Maximum Factor Size (MFS) assumption on additive decompositions by using ADMM for acquisition function maximization, and (2) introduces a tighter additive bound on the GP-UCB exploration term to reduce over-exploration. The paper provides a theoretical no-regret guarantee and demonstrates competitive empirical performance on synthetic and real-world benchmarks against both decomposing and non-decomposing BO algorithms.
 
 ## Strengths
 
-1. **Complete relaxation of low-MFS assumption with maintained asymptotic optimality**: The paper proves (Corollary 1) that DuMBO achieves no-regret while placing *no* restriction on the maximum factor size, unlike ADD-GPUCB (requires $\bar{d}=1$) and DEC-HBO (requires low $\bar{d}$). This is empirically validated on the 24d Powell function ($\bar{d}=4$, exceeding DEC-HBO's assumed limit of $\leq 3$), where DuMBO substantially outperforms both decomposing baselines (Table 2, Fig. 1a).
+- **Theoretically sound tighter exploration bound (Theorem 3.1)**: The paper proves that its proposed additive approximation of σ_t (Equation 8) is a tighter upper bound than the additive bound used by ADD-GPUCB, while being exact for complete factor graphs. This is a genuine mathematical contribution that directly addresses over-exploration in decentralized BO.
 
-2. **Tighter additive approximation of GP-UCB that directly reduces over-exploration**: Theorem 1 proves that the proposed decentralized approximation (Eq. 7) is a tighter upper bound of $\sigma_t$ than ADD-GPUCB's approximation. This yields a provably lower immediate regret bound (Theorem 3) and translates to empirical improvements — on the WLAN problem (12d, $\bar{d}=6$), DuMBO achieves average reward -120.67 vs. -119.05 for ADD-GPUCB.
+- **Relaxes low-MFS assumption without sacrificing asymptotic optimality**: Unlike ADD-GPUCB (requires MFS=1) and DEC-HBO (requires low MFS), DuMBO provably achieves no-regret (Corollary 4.4) while imposing no restriction on the maximum factor size. This is a meaningful advance over the prior state of the art.
 
-3. **Fully decentralized ADMM-based optimization with closed-form updates**: DuMBO's ADMM formulation yields closed-form expressions for the consensus variable (Eq. 15) and dual variables (Eq. 16), enabling each factor node to update locally and asynchronously via gradient ascent on its own Lagrangian (Eq. 13). This is a clean, practical framework that scales to arbitrary factor sizes.
+- **Strong empirical performance on problems where MFS exceeds competitor limits**: On the 24d Powell function (MFS=4) and the 100d Rastrigin function (MFS=5), DuMBO achieves minimal regret of 496 and 986 respectively — substantially outperforming ADD-GPUCB and DEC-HBO (which fail due to their MFS constraints) and also several non-decomposing baselines. On the WLAN problem (12d, MFS=6), DuMBO achieves -120.67 vs. next-best -116.40.
 
-4. **Competitive performance against non-decomposing state-of-the-art**: On the 60d Rover problem (where the objective is not additive), DuMBO matches/exceeds TuRBO and SAASBO (Table 2, Fig. 1c). It also achieves the best result on the Cosmo problem (avg negative reward 5.86), outperforming or tying with TuRBO, LineBO, and MS-UCB.
-
-5. **Flexible framework supporting both known and unknown decompositions**: The ADD-DuMBO variant, which uses the true decomposition when available, achieves the lowest regret on Powell (469) and WLAN (-121.11), demonstrating the framework's versatility.
+- **Efficient decentralized message-passing implementation**: The ADMM-based optimization yields closed-form updates for consensus and dual variables (Equations 14-15), enabling concurrent computation at each factor node with only local communication. The complexity scales linearly in the number of factors n and MFS, avoiding exponential dependence.
 
 ## Weaknesses
 
@@ -23,56 +21,67 @@ None.
 
 ### Major
 
-1. **Unspecified decomposition used in "Unknown Add. Dec." experiments**: The paper claims DuMBO "infers an efficient additive decomposition" (Section 6.1), but the algorithm description (Section 4) assumes a factor graph is given as input and contains no procedure for inferring the decomposition. For the "Unknown Add. Dec." problems in Table 2, the paper does not state what decomposition DuMBO actually uses. This makes the experimental results on those problems difficult to interpret and reproduce — the reader cannot assess whether the claimed advantages come from the method itself or from the particular decomposition chosen. The paper must specify: (a) what decomposition DuMBO uses in the unknown case (e.g., random grouping, problem-specific heuristics, or the same decomposition as the baselines minus MFS constraints), and (b) whether "infer" means the algorithm can determine a decomposition without MFS constraints (as contrasted with baselines that must approximate) or whether there is an actual structure-learning mechanism.
-
-2. **Theoretical chain for ADMM global convergence is incompletely justified**: Theorem 4 states each local $\varphi_t^{(i)}$ is restricted prox-regular and the augmented Lagrangian $\mathcal{L}_\eta$ is a Kurdyka–Łojasiewicz (KL) function. The paper then asserts that "ADMM is always able to globally maximize the acquisition function $\varphi_t$." However, (i) the restricted prox-regularity of individual components and the KL property of the augmented Lagrangian do not automatically guarantee global maximization of the *sum* acquisition function $\varphi_t$ — the connection depends on results from the cited [admm_conv] paper that are not demonstrated here; (ii) KL guarantees convergence to a *stationary point*, and the paper does not explain why this yields a global maximum for non-convex $\varphi_t$. While citing literature for this step is standard, the leap from Theorem 4 to "global maximization guaranteed" is asserted rather than argued. The claim should be relaxed or a more detailed justification should be provided.
+- **The decomposition "inference" procedure is never described, yet is claimed as a capability.** The paper repeatedly states that DuMBO can "infer a complex additive decomposition of f without any assumption regarding its MFS" (abstract, introduction, conclusion). However, the algorithm (Section 4) takes a factor graph as given and operates on it — there is no description of how the factor graph is obtained from data, what prior or search procedure identifies the additive structure, or how the number of factors n and their variable assignments are determined. The experimental table places DuMBO under "Unknown Add. Dec." without specifying what factor graph was actually used. This is a significant omission: a reader cannot reproduce the experiments or assess whether the claimed inference capability exists. The paper's core algorithmic contributions (ADMM-based optimization, tighter bound) do not depend on decomposition inference and remain valid, but the overclaim must be addressed. The authors should either (a) describe the inference procedure, (b) clarify that the factor graph is assumed given (as in standard additive BO) and retract the "inference" language, or (c) state explicitly what factor graph was used in the "unknown" setting.
 
 ### Minor
 
-3. **Limited statistical detail in experimental reporting**: Only 5 replicates are used, and Table 2 reports only point estimates (minimal regret / average negative reward) without confidence intervals or variance. While the figures show standard error, the table — which is the primary summary of results — lacks this information. For a paper claiming superiority over multiple baselines, the absence of significance testing or confidence bounds weakens the evidence.
+- **Empirical evaluation does not test high-MFS regimes that would differentiate DuMBO from alternatives.** The largest MFS tested is 6 (Hartmann and WLAN). The paper claims to "completely relax" the MFS constraint, yet no experiment examines problems where factors involve tens of dimensions (e.g., MFS=20 in 40d, or MFS=50 in 100d). While the tested range (MFS up to 6) already exceeds DEC-HBO's practical limit of ≤3, the central claim of "arbitrary MFS" remains unverified for substantially larger values. Adding even one experiment with MFS ≥ 10 would significantly strengthen the paper.
 
-4. **$N_A$ in complexity expression is undefined**: Table 1 gives DuMBO's complexity as $\mathcal{O}(\bar{d} N_A n t^3 \zeta^{-1})$ but $N_A$ (presumably the number of ADMM iterations) is never defined in the text. This makes the complexity comparison with other algorithms incomplete.
+- **The constant N_A in DuMBO's complexity expression (Table 1) is undefined.** The entry reads O(ḏ N_A n t³ ζ⁻¹), but N_A is never defined or explained. Its meaning ("number of ADMM iterations"?) is left to the reader's speculation. By contrast, N_m for DEC-HBO is explicitly referenced.
+
+- **The effect of the tighter bound cannot be separated from the effect of the different optimization mechanism.** The empirical results show DuMBO outperforming ADD-GPUCB and DEC-HBO, but both the acquisition function bound AND the optimization method (ADMM vs. max-sum) differ simultaneously. An ablation isolating the impact of the tighter bound alone would clarify which component drives the improvement.
 
 ### Trivial
-None.
+- None beyond the notation issue noted above (N_A undefined).
 
 ## Nice-to-Haves
 
-- The paper could benefit from an empirical runtime comparison, since ADMM may require many inner iterations, and the complexity expression is vague without defining $N_A$.
-- A discussion of robustness when the assumed additive structure is misspecified (i.e., when $f$ is not additive) would strengthen the paper, though the Rover experiment provides some evidence on this point.
-- The paper could clarify the relationship between "infer" (used in the introduction and experiments) and the actual algorithmic flow (which takes a factor graph as input).
+- A description of what factor graph DuMBO uses (or how it constructs one) in the "unknown decomposition" experimental setting.
+- An experiment with MFS ≥ 10 to substantiate the "arbitrary MFS" claim.
+- A definition of N_A in the table caption or text.
+- An ablation study separating the benefit of the tighter bound from the benefit of ADMM-based optimization.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+These points are flagged for removal; treat them with caution:
 
-- **"The algorithm does not specify how to obtain the additive decomposition when it is unknown — this is a structural flaw"** (critic's Issue 1, characterizated as "fatal"): The critic overstates the severity. The paper's core contribution is about relaxing MFS assumptions on *any given* decomposition, not about learning decomposition structure from data. The word "infer" is loosely used to mean "determine/use without MFS constraints" (contrasted with baselines that must approximate the decomposition due to MFS limits). However, the experimental *reporting gap* (what decomposition is used in the unknown case) is real and retained as Major weakness #1. The "fatal structural flaw" characterization is removed because the paper's central claims do not depend on an undeclared inference mechanism.
+1. **Theoretical guarantee of ADMM global convergence is unconvincing** — Removed. The reviewer criticizes the lack of proof for Theorem 3 (restricted-prox regularity and KL property). Per policy, missing proofs that would appear in an appendix are not valid weaknesses in the main review, as the parser strips appendix content. The theorem is stated and referenced to the relevant ADMM convergence literature [admm_conv]; the formal verification belongs in the (stripped) appendix.
 
-- **Missing appendix/proofs content**: The critic mentions that "the stripped appendix is unavailable for verification" — criticisms based on missing appendix content are removed per instructions, as the parser strips these sections.
+2. **Proposition 1 is standard** — Removed. This is an observation about prior work, not a weakness of the paper.
 
-- **"The paper should also cover Y / additional tasks"** style criticisms: Demands for additional experiments, baselines, or domain coverage beyond the paper's stated scope.
+3. **Missing related works** — Removed. Per policy, the reviewer cannot verify the existence of missing references with external sources.
 
-- **Downplaying the theoretical contribution as "insufficiently justified" in absolute terms**: The critique about prox-regularity of individuals not implying sum properties is somewhat misdirected — the paper claims the augmented Lagrangian $\mathcal{L}_\eta$ (not the sum) is KL, and ADMM convergence results apply to $\mathcal{L}_\eta$. The retained version (Minor #2) focuses on the gap between stationarity and global optimality, which is the more substantive concern.
+4. **Weaknesses that presume nonexistence of cited references or unreleased artifacts** — Not present in this review; all cited works are treated as existing.
+
+5. **Formatting/stylistic nitpicks** — Not present in this review.
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The most interesting observation emerging from the reviews is the tension between the paper's stated ambition ("infer a complex additive decomposition") and its actual technical content (ADMM-based optimization of a given factor graph). The paper's genuine contributions — the tighter exploration bound and the relaxation of the MFS constraint on acquisition maximization — are well-supported, but the framing oversells the algorithm's autonomy. This is a recurring pattern in the additive BO literature: the decomposition is typically assumed as domain knowledge, and the novelty lies in what you can do with it (here: handle larger factors, reduce over-exploration). The paper would be stronger if it leaned into this framing rather than claiming decomposition discovery.
 
 ## Suggestions
 
-1. **Specify the decomposition used in "Unknown Add. Dec." experiments**: Clearly state what decomposition DuMBO uses when the true decomposition is unknown (e.g., random grouping with factors of equal size, or the same decomposition used by baselines). This is essential for reproducibility and for interpreting whether the results reflect the method's advantages or the decomposition choice.
+1. **Clarify the decomposition inference.** Either describe how the factor graph is obtained from data (if there is a procedure), or explicitly state that DuMBO assumes the factor graph is given by domain knowledge (as standard in additive BO) and remove "infer" language from the abstract/conclusion. Provide the factor graph used for DuMBO in the "unknown decomposition" setting in the experimental section.
 
-2. **Clarify what "infer" means**: If "infer" means the algorithm can work with decompositions of arbitrary MFS (unlike baselines that must approximate them), rephrase to avoid the implication of a structure-learning procedure. If an actual inference mechanism was used, describe it explicitly.
+2. **Add at least one experiment with MFS ≥ 10** (e.g., a 40d or 100d synthetic function with MFS 15-20) where DuMBO's linear-in-MFS complexity can be shown against baselines whose complexity is exponential in MFS.
 
-3. **Strengthen the ADMM convergence claim**: Either provide a more detailed argument linking Theorem 4 to global maximization of $\varphi_t$, or relax the claim to convergence to a stationary point (which is still useful for BO in practice) and note that empirical performance supports the approach.
+3. **Define N_A** in the Table 1 caption and briefly explain the complexity derivation.
 
-4. **Add variance information to Table 2**: Include standard errors or confidence intervals for the reported metrics. With only 5 replicates, this is especially important for assessing significance of the reported advantages.
-
-5. **Define $N_A$ in the complexity expression** and ideally provide an empirical runtime comparison to calibrate the practical complexity.
+4. **Add an ablation** comparing DuMBO against a version that uses the ADD-GPUCB-style additive bound (∑σ_t^(i)) with ADMM optimization, to isolate the impact of the tighter bound from the impact of ADMM.
 
 ## Score and Decision
 
-The paper makes genuine contributions: it is the first decomposing BO algorithm to completely relax MFS assumptions while maintaining asymptotic optimality, it provides a tighter GP-UCB approximation, and it offers a clean ADMM-based decentralized optimization framework. The experimental results support these claims on multiple problems. The main weaknesses are (1) the unspecified decomposition used in the "Unknown Add. Dec." experiments, which needs clarification for reproducibility, and (2) an incompletely justified theoretical link between the KL/augmented Lagrangian properties and global ADMM convergence. These issues are addressable in a revision. The paper has real value for the BO community.
+**Originality**: Good — the tighter bound and ADMM-based acquisition maximization with relaxed MFS assumptions are novel. The decomposition inference claim, however, is not substantiated.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Importance of research question**: High — scaling BO to high dimensions with additive structure is an active and important problem.
+
+**Claims well-supported**: Partially — the tighter bound and no-regret guarantee are well-supported; the "inference" claim is not.
+
+**Soundness of experiments**: Adequate — results are solid for the tested range, but the absence of higher-MFS experiments limits the support for the central claim.
+
+**Clarity of writing**: Good overall, but the ambiguity around decomposition inference and the undefined N_A constant detract from reproducibility.
+
+**Value to the research community**: Moderate — the tighter bound and ADMM-based approach are likely to be used by researchers working on decentralized/additive BO, but the paper needs clarification on what exactly is being contributed.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,20 +1,18 @@
-Now I have a thorough understanding of the paper and can verify the claims. Let me compile the final consolidated review.
+Now I have a thorough understanding of the paper and all the review claims. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper introduces V-TIFA, a method that uses pretrained vision-language models (VLMs) to rate entire agent trajectories based on language instructions, using these ratings as reward signals for training instruction-following agents via reinforcement learning. The key idea is to divide trajectories into segments, use a VLM to summarize each segment, concatenate these summaries, and then query the VLM for a 4-level rating indicating how well the trajectory completes the instruction. The method is evaluated in the ALFRED household environment across four rooms with 80 crowd-sourced instructions, comparing against similarity-based reward methods (CLIP, R3M, RoboCLIP).
+This paper proposes V-TIFA, a method that uses pretrained vision-language models (VLMs) to generate evaluative ratings for entire agent trajectories, which are then used directly as reward signals to train instruction-following agents via off-policy RL. The approach segments trajectories, summarizes them via the VLM, then queries for a 0--3 rating reflecting instruction completion. Experiments in the ALFRED simulator across four environments (Kitchen, Bathroom, Living Room, Bedroom) show V-TIFA outperforms embedding-based reward baselines (CLIP, R3M, RoboCLIP) and approaches ground-truth reward performance in some environments.
 
 ## Strengths
 
-- **Consistent empirical improvement over similarity-based baselines**: V-TIFA achieves higher success rates than CLIP Reward, R3M Reward, and RoboCLIP Reward across all four ALFRED environments (Kitchen, Bathroom, Living Room, Bedroom), and comes closest to the ground-truth reward baseline (Figure 4). This demonstrates that trajectory-level VLM reasoning provides a more informative reward signal than single-image or two-image similarity scores.
+1. **Action information is identified as the key enabler.** The ablation in Figure 5 cleanly isolates that including actions in the summary prompt yields the dominant performance gain over simpler image-only or caption-only representations. This is a concrete, replicable design principle that goes beyond prior work treating trajectories as image sequences.
 
-- **No human data or fine-tuning required**: V-TIFA uses a pretrained VLM with prompting only (Section 4), avoiding reliance on human demonstrations, handcrafted task specifications, or fine-tuning — a concrete practical advantage noted in the limitations paragraph.
+2. **Comprehensive VLM model comparison (Figure 7, Table 1) across five models** (Gemini 1.5 Flash/Pro, GPT-4o/Mini, Qwen2-VL), measuring both accuracy and inference time. This provides practical guidance for practitioners on the cost-performance trade-off in VLM-based reward generation.
 
-- **Robust to diverse, compositional natural language**: The method is evaluated on 80 crowd-sourced instructions across four distinct environments (Section 5.1), demonstrating generalization beyond template-based or single-objective task descriptions that prior VLM reward methods required.
+3. **Empirical investigation of evaluative vs. comparative feedback (Section 6).** The paper identifies a concrete failure mode of comparative feedback—the VLM tends to favor shorter trajectories regardless of task success—and explains why multi-level evaluative ratings mitigate this. This is a non-obvious insight for designing VLM-based RL systems.
 
-- **Informative ablations identify key design choices**: Figure 5 quantifies that including actions in the summary prompt provides the largest performance gain (~80% accuracy in Kitchen and Bathroom), and Figure 6 shows segment length has minimal effect. The VLM comparison (Figure 7, Table 1) across Gemini, GPT-4o, and Qwen2-VL provides practical guidance for deployment.
-
-- **Analysis of feedback types with diagnostic insight**: Section 6 compares evaluative vs. comparative feedback alignment and identifies that comparative feedback systematically favors shorter trajectories — a concrete finding about the structure of VLM preferences, backed by manual inspection.
+4. **Precision analysis (Section 5.3) showing near-perfect precision (~1.0) across all environments.** The VLM virtually never assigns the maximum rating to failed trajectories, which is important for policy safety and provides a clear diagnosis (low recall, not false positives) for where the gap to ground truth originates.
 
 ## Weaknesses
 
@@ -23,59 +21,57 @@ None.
 
 ### Major
 
-- **Claims outrun the baseline set**: The paper claims to "greatly outperform prior VLM-based reward generation methods" but the tested baselines (CLIP, R3M, RoboCLIP) are all similarity-based methods that do not perform trajectory-level reasoning. Stronger competitors exist in the literature — e.g., Wang et al. (2024a) uses VLMs for preference-based reward learning, and Du et al. (2023) fine-tunes a Flamingo for task success detection — which are discussed in Related Work (§2.3) but never compared against. While the paper scopes to methods "without finetuning," the claims are stated broadly ("prior VLM-based reward methods"), and the absence of any reasoning-based VLM baseline makes it difficult to attribute V-TIFA's advantage to its specific design rather than simply to the fact that it uses a powerful VLM to process whole trajectories with actions. At minimum, a zero-shot VLM prompted for binary success prediction (a "does this trajectory succeed?" check) would have been a natural and fairer point of comparison that lies within the paper's own scope.
+1. **The main experimental comparison (Figure 4) uses only weak, embedding-based baselines.** The paper compares V-TIFA against CLIP, R3M, and RoboCLIP rewards—all embedding-similarity methods that the paper itself characterizes as "noisy and temporally impoverished." While the paper cites Wang et al. (2024a) ("the first to use large VLMs to explicitly reason and provide preference labels") and includes a comparative-feedback variant in Section 6, that variant is evaluated only on alignment metrics (accuracy/precision/recall), **not** as a full training baseline in the main results. The core claim—"consistently outperforms previous VLM-based reward methods"—is therefore only demonstrated against methods that lack explicit VLM reasoning over trajectories. Until V-TIFA is compared against a method that also uses a large VLM for reward generation in a comparable training setup, the relative advantage of V-TIFA's specific design is unsubstantiated. Addressing this would require adding at least one training baseline that uses the same VLM (e.g., direct binary success classification per segment, or a learned reward model from VLM preferences as in Wang et al. 2024a).
+
+2. **The alignment analysis (Section 5.3) evaluates VLM accuracy on a distribution that does not reflect online training conditions.** The analysis collects trajectories from GT-Reward-trained agents with an average return of 0.6–0.7—i.e., from a near-competent policy. The VLM's ~80% accuracy on this distribution tells us little about its behavior during early training stages when the policy is largely random and produces qualitatively different trajectories. The VLM could systematically misrate low-quality exploratory trajectories in ways that mislead learning, and this failure mode is not measured. Since the paper itself acknowledges that "occasional inaccuracies" cause the gap to GT reward, measuring VLM accuracy on trajectories sampled from a partially trained V-TIFA policy (e.g., at 10%, 30%, 50% of training) is essential to validate that the reward signal remains reliable under optimization pressure.
 
 ### Minor
 
-- **Comparative feedback analysis is offline-only, but the conclusion is stated in policy-level language**: Section 6 evaluates comparative vs. evaluative feedback alignment on a static dataset and concludes "comparative feedback leads to poorer performance." This is a statement about the feedback signal's alignment with ground-truth success, not about actual policy learning under online RL with exploration dynamics and distribution shift. The finding is interesting and the shorter-trajectory bias diagnosis is valuable, but the conclusion would be stronger with at least one online training experiment using comparative feedback as the reward signal.
+3. **The mapping from VLM rating to RL reward is underspecified.** The paper states that VLM ratings are used "directly" as reward signals but does not specify the temporal assignment: is the 0–3 rating given as a terminal reward? Distributed across steps? Binarized into success/failure? The alignment analysis (line 119) binarizes ratings (1 for max rating, 0 otherwise) for evaluation, but it is unclear whether the same binarization is used during training or whether the raw 0–3 scale is fed into IQL. Since the GT reward is binary (0/1), and IQL is sensitive to reward scale, this ambiguity affects both reproducibility and interpretation of why V-TIFA works.
 
-- **No quantitative table of final success rates with variance**: The learning curves in Figure 4 show training progress across three seeds, but no table reports mean final success rates and standard deviations for each method in each environment. Given that confidence intervals may overlap between V-TIFA and RoboCLIP in some environments, a table with precise numbers and a simple significance test would substantiate the "consistently outperforms" claim.
+4. **The "bypasses the reward modeling process" claim (line 16) is rhetorically overstated.** Using a frozen VLM to output ratings is itself a form of reward model—it just shifts the source of biases from an explicitly learned model to a pretrained one. The paper provides no evidence that VLM ratings are less prone to misspecification than a learned reward model derived from the same VLM's preferences (which is precisely the comparison it does not make). This claim should be removed or supported.
 
-- **Method details underspecified**: The paper states that segment summaries are "concatenated to form the final summary" (line 72) but does not explain how temporal ordering is preserved or what format the concatenated summary takes (list of sentences with timestamps? chronological narrative?). This makes the method harder to reproduce even with the full prompt template.
+5. **The comparative feedback baseline (Section 6) uses a suboptimal protocol.** Pairing each target trajectory with a single uniformly sampled reference trajectory is known to be inefficient; prior work (Christiano et al., 2017; Biyik & Sadigh, 2018) uses active selection strategies or high-volume comparisons. The paper acknowledges this limitation but then draws the conclusion that evaluative feedback is inherently superior based on this weak baseline. The experiment is informative as a preliminary comparison but does not justify strong claims about feedback type superiority.
 
-- **Alignment analysis uses binarized ratings (max→1, else→0)**: Section 5.3 computes precision/recall by thresholding the VLM's 4-level ratings, discarding ordinal information. Reporting rank correlation (e.g., Spearman's ρ) between VLM ratings and ground-truth success would give a more accurate measure of the VLM's ability to rank trajectories.
+6. **Use of a commercial API-gated model (Gemini 1.5 Pro) limits reproducibility.** While the ablation on open-source Qwen2-VL is helpful, Qwen2-VL is noted as being significantly slower. The main results are not reproducible without access to Gemini 1.5 Pro. The paper should release all evaluation trajectories and exact prompts (beyond the template shown) to mitigate this.
 
 ### Trivial
-
-- The alignment analysis (Section 5.3) uses trajectories collected from GT-reward agents "along the training course" (line 119), which partially addresses the concern about early-training distribution, but it is not tested whether accuracy holds for trajectories produced by V-TIFA-trained policies during early training.
-
-- IQL hyperparameters (learning rate, batch size, target update rate) are not reported; the paper references Zhang et al. (2023), but including these would improve standalone reproducibility.
+None.
 
 ## Nice-to-Haves
-
-- A zero-shot VLM baseline prompted for binary success prediction would directly test whether V-TIFA's advantage comes from its rating formulation and prompt structure, or merely from using a powerful VLM to process the whole trajectory.
-- Reporting the number of VLM queries and wall-clock training cost per method would help practitioners evaluate the practical trade-off, especially since inference cost is acknowledged as a limitation.
-- An online training experiment with comparative feedback (even in one environment) would substantiate the claim that evaluative feedback is superior for policy learning, not just for signal alignment.
+- A diagnostic experiment replacing VLM ratings with GT success labels (keeping all other V-TIFA machinery intact) to isolate whether VLM inaccuracy is indeed the primary cause of the gap to GT reward.
+- Ablation comparing binary (2-level) vs. multi-level (4-level) ratings to test whether the graded scale is necessary.
+- Statistical significance tests for the gaps between V-TIFA and baselines in Figure 4.
+- Qualitative breakdown of failure cases: what kinds of successful trajectories receive a rating of 2 instead of 3?
 
 ## Removed Points
-
-These points are flagged to be removed, treat them with caution:
-
-- **Criticism about "no method listed as fine-tuned on task-specific data" (Du et al., 2023)**: The paper explicitly scopes to methods "without finetuning" (line 93). Demanding a fine-tuned baseline is outside the paper's stated scope. The paper discusses Du et al. in Related Work and explains why it differs from their approach. Removed as scope creep.
-
-- **Criticism that "the paper does not analyze whether VLM outputs suffer from misgeneralization"**: The Limitations paragraph (line 154) acknowledges the performance gap due to "occasional inaccuracies in VLM feedback." The paper's goal is to propose the method, not to exhaustively analyze failure modes of the VLM itself. This asks the paper to be a different paper. Removed as scope creep.
-
-- **Criticism about the prompt template being a screenshot**: Instructions specify that formatting artifacts are parser issues; the exact prompts are assumed to be in the appendix. Removed per hard rule on formatting artifacts.
-
-- **Criticism that "the paper does not explain how segment summaries retain temporal ordering"**: Kept as a Minor weakness (it IS underspecified), but the critic's specific phrasing about this making reproduction "harder even if the full prompt is given" is appropriately addressed by keeping this as a minor point, not a major one.
-
-- **Criticism about the claim "bypasses the reward modeling process" being overstated**: The paper's phrasing says V-TIFA "bypasses the reward modeling process" (line 16), referring to the explicit *learned* reward model that RLHF methods build from human feedback. The VLM acts as an evaluator, not a separately trained reward model. This is a defensible distinction. Removed as the criticism misinterprets what "reward modeling process" refers to in the RLHF context.
+- **"No adaptation of Wang et al. (2024a) is included as a baseline"** (Harsh Critic Issue 1, part 1): This is factually incorrect. Section 6 explicitly uses the comparison prompt from Wang et al. (2024a) and compares it against evaluative feedback in Figure 8. The core concern (that this comparison is only on alignment metrics, not full training) is retained in Major weakness #1 above.
+- **"CLIP reward baseline is inappropriate"** (variously framed): The paper's baselines are standard for the embedding-based reward paradigm and are correctly characterized. The issue is not with their inclusion but with the absence of stronger reasoning-based VLM baselines.
+- **"Missing related works"** (implied): Removed per instructions — I cannot verify existence of missing references.
+- **Formatting/style nitpicks** (e.g., "hard-coded" phrasing): Removed per instructions.
 
 ## Novel Insights
-
-The reviews collectively surface an important tension: the paper shows that trajectory-level VLM reasoning outperforms similarity-based reward signals, but does not isolate whether this advantage comes from the VLM's reasoning capability, the action-aware prompting, the segment-summarization structure, or simply from the fact that the VLM sees the full trajectory. The shorter-trajectory bias finding for comparative feedback (Section 6) is a genuinely useful diagnostic that could inform how preference-based VLM reward methods should be designed for instruction-following tasks. The reviews also highlight that the paper would be substantially stronger not by adding more baselines per se, but by including a control that uses the same VLM for a simpler trajectory-level judgment (e.g., binary success) — this would disentangle the contribution of the rating formulation from the contribution of the VLM itself.
+Beyond the paper's own contributions, the most interesting observation from the cross-review analysis is the interaction between the two main weaknesses: the paper's 80% alignment accuracy is measured on a favorable distribution (GT-agent trajectories), and the baseline comparison excludes methods that also use large VLM reasoning. This creates a situation where we don't know whether V-TIFA's performance advantage stems from its specific design (summarization + evaluative rating), from simply using a capable VLM, or from the VLM performing well only when trajectories are already decent. An experiment that simultaneously addresses both weaknesses — training with a direct VLM success/failure classifier while measuring VLM accuracy on online rollouts — would substantially clarify the actual source of gains.
 
 ## Suggestions
-
-- **Add a reasoning-based VLM baseline within the paper's scope**: Prompt the same VLM to output a binary "success/failure" judgment on each trajectory (zero-shot, no fine-tuning), and compare this to V-TIFA's 4-level rating. This would isolate whether V-TIFA's advantage comes from its multi-level rating formulation or simply from using a VLM to look at the full trajectory.
-
-- **Add a table of final success rates with standard deviations** across three seeds for all methods in all environments, with a simple significance assessment (e.g., confidence interval overlap or a paired test). This is a basic evidential gap that is straightforward to fill.
-
-- **Specify exactly how segment summaries are structured** in the final prompt — are they concatenated as a chronological list of sentences with implicit ordering, or is each summary prefixed with a segment number or timestamps? A minimal template example in the main paper (not just the appendix) would improve reproducibility.
+1. **Add at least one training baseline using the same VLM in a different reward framework** (e.g., binary success classification per segment, or preference-based reward model as in Wang et al. 2024a) to the main Figure 4 comparison.
+2. **Measure VLM rating accuracy on trajectories from a partially trained V-TIFA policy** (e.g., at 10%, 30%, 50% of training) rather than only on GT-agent trajectories.
+3. **Explicitly specify the reward assignment rule** — clarify whether the 0–3 rating is used directly as the terminal reward, binarized, or otherwise transformed, and ideally ablate this choice.
+4. **Tone down the "bypasses reward modeling" rhetorical claim** unless direct evidence against learned reward models is provided.
 
 ## Score and Decision
 
-The paper presents a well-motivated and reasonably executed approach with consistent empirical improvements over similarity-based baselines, informative ablations, and an insightful diagnostic analysis of feedback types. However, the claims of superiority over "prior VLM-based reward methods" are broader than what the evaluation supports — the baselines are exclusively similarity-based, and no reasoning-based VLM baseline is tested even within the paper's own zero-shot scope. The missing final-results table and the offline-only comparative feedback analysis are additional evidential gaps. These are addressable weaknesses rather than structural flaws, and the core contribution (trajectory-level VLM rating for instruction-following rewards) is genuinely demonstrated relative to the tested baselines. With the suggested additions, the paper would be a solid contribution.
+**Originality:** The idea of using VLMs to generate rewards is not entirely new (building on Wang et al. 2024a, Du et al. 2023, and rating-based RL), but the specific contribution—a two-stage summarization-and-rating pipeline for multi-step instruction-following without fine-tuning—is a reasonable methodological step forward.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Importance of research question:** Automating reward generation for instruction-following agents is a well-motivated and timely problem. The paper addresses a real bottleneck in LC-RL.
+
+**Claims support:** The central claim ("consistently outperforms previous VLM-based reward methods") is partially supported but weakened by the absence of strong VLM-based baselines in the main comparison and by the alignment analysis being conducted on a non-representative distribution.
+
+**Soundness of experiments:** The ablations and analyses are generally well-designed and informative. However, the main experiment's baseline set is insufficient to support the strength of the claims, and the reward assignment specification is incomplete.
+
+**Clarity:** The paper is clearly written and well-structured. The method and motivation are easy to follow. The main clarity gap is the reward assignment rule.
+
+**Value to community:** If strengthened with better baselines and online-distribution analysis, the method and findings (particularly the importance of action information and the advantage of evaluative over comparative feedback) would be useful to researchers working on VLM-based RL. In its current form, the contribution is solid but the evidence for its relative advantage over other VLM-based approaches is incomplete.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

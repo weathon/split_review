@@ -1,70 +1,87 @@
-Now I have a thorough understanding of the paper and can verify all claims against the actual text. Let me construct the consolidated review.
+Now I have a complete picture of the paper. Let me write the consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes a hierarchical framework for explaining how clean and poisoned training data are encoded in AI models by measuring the diversity of binarized activation patterns (tensor-states) at each computation unit, and using those statistics to characterize class encodings at node, subgraph, and graph levels. The approach is demonstrated qualitatively on a small set of ResNet models from the TrojAI Challenge, with visual comparisons of utilization patterns between clean and backdoored models.
+This paper introduces a hierarchical approach to explaining poisoned AI models by measuring "utilization" — conceptually defined as the ratio of distinct tensor-state outputs over the maximum possible outputs at each computation unit. It analyzes clean vs. backdoored models from the TrojAI Challenge at three granularity levels: full computation graph, subgraph, and individual tensor-states. The paper presents qualitative evidence of discriminative utilization patterns (specific value ranges appearing only in poisoned models) and tensor-state analyses showing near-zero feature overlap between clean and poisoned images for a class with an Instagram-filter trigger.
 
 ## Strengths
 
-- **Multi-resolution explanation framework**: The paper defines and evaluates class encodings at three hierarchical levels (graph, subgraph, tensor-state/node), which goes beyond the single-level analyses common in prior work. Section 4 demonstrates this explicitly: Figure 4 shows graph-level utilization distributions, Figure 5 shows subgraph pattern changes (e.g., broken patterns between layer1.1 and layer1.2), and Figures 6–7 show node-level tensor-state comparisons.
+- **Identification of specific, concrete utilization ranges that discriminate clean from poisoned models**: The experiments pinpoint precise utilization value ranges ([16.0,18.0] ∪ [18.5,19.0] and [29.5,31.5]) that appear in poisoned models but are absent in clean models, and map them to specific computation units (maxpool, conv1, bn1, ReLU, layer1.2.conv2, layer1.2.bn2). This provides an evidence-based, granular characterization of backdoor encoding. (Section 4, lines 70–72)
 
-- **Identification of specific discriminatory computation units**: The paper pinpoints concrete layers whose utilization values differ between clean and poisoned models — e.g., maxpool, conv1, bn1, ReLU show utilization in ranges [16.0, 18.0]∪[18.5, 19.0] only for poisoned models, and layer1.2.conv2/bn2 show values in [29.5, 31.5] (Section 4, paragraph 2). This provides localized, actionable diagnostic information.
+- **Tensor-state analysis revealing nearly disjoint feature representations**: The paper shows that clean and poisoned images share only 35 overlapping high-frequency tensor-state values out of 2500 images each in layer1.2.conv2 (Figure 6 vs. Figure 7, lines 84–89). This quantitative finding offers a mechanistic explanation for how backdoor triggers create independent feature encodings despite perceptual similarity — a non-trivial observation about Trojan encoding in deep networks.
 
-- **Novel observation of tensor-state divergence despite perceptual similarity**: Figures 6–7 demonstrate that at the tensor-state level (layer1.2.conv2 of ResNet101), clean and poisoned images share only 35 high-frequency tensor-state values out of thousands, despite appearing perceptually similar. This is a genuinely interesting finding about how backdoor triggers alter internal representations even when the input images look nearly identical.
+- **Clear differentiation from prior work on concept-based explainability**: The paper explicitly contrasts its approach with Network Dissection (Bau et al.), concept whitening (Chen et al.), and saliency methods (Selvaraju et al.), noting that its binarization-at-zero rule, use of all computation units (not just convolutional layers), and absence of inserted modules are distinctive design choices (Section 2, lines 47–49). This positioning is specific and well-articulated.
 
-- **Application to non-trivial architectures**: The method is applied to ResNet101 with 286 probed computation nodes using 2500 images, and Section 5 reports concrete computational costs (avg. 24.46 min inference, up to 140.6 GB memory), demonstrating feasibility beyond toy models.
+- **Demonstrated scalability to large architectures**: The paper reports computational benchmarks on ResNet101 with 286 probes and 2500 images (24.46 minutes, 140.6 GB), showing the method is feasible for architectures beyond toy models (Section 5, line 96).
 
 ## Weaknesses
 
 ### Fatal
 
-- **Core utilization metrics are not formally defined.** The Summary claims "We defined a mathematical framework for computing three deterministic and statistical AI model utilization metrics" (Section 5), but the Methods section (Section 3) contains no equations, no formal definitions of the three metrics, no algorithm for constructing class encodings or AI model fingerprints, and no specification of how "utilization" is computed. The only description is a conceptual statement: "utilization of any computation unit is related to a ratio of the number of different outputs... over the maximum number of possible outputs" (Section 1). The term "entropy-based utilization" appears in a figure caption (line 74) but is never defined. Without formal definitions, the paper's core methodological contribution cannot be assessed, verified, or reproduced. This is a fatal flaw that prevents the paper from being accepted as a methods contribution.
+None.
 
 ### Major
 
-- **No quantitative validation of the central claim.** The paper's stated objective includes "to identify encoding patterns (motifs) that discriminate AI models without and with hidden classes" (Section 1), and the experiments are "motivated by evaluating our hierarchical utilization-based approach to classifying a large number of AI models" (Section 4). However, no classification experiment is performed — no accuracy, precision, recall, AUC, or detection rate is reported. All evidence is purely visual pattern observation for 4 models (Figure 4) and 2 replicates (Figure 5). While the observed pattern differences are suggestive, the paper does not demonstrate that utilization fingerprints can *reliably* separate clean from poisoned models in a quantitative sense.
+- **Core method (utilization) is not formally defined, undermining reproducibility**. The paper gives a *conceptual* description of utilization ("ratio of the number of different outputs over the maximum number of possible outputs" — line 26) and states that tensor channel values are binarized at zero (line 13), but Section 3 ("METHODS") — which opens by promising a definition — immediately pivots to describing training dataset creation (lines 59–61). No algorithmic specification, mathematical formula, step-by-step procedure, or worked example is provided. The term "entropy-based utilization" appears in Figure 5's caption without any derivation (line 74). A reader cannot determine exactly what computation is performed at each graph node, how "class encodings" or "AI model fingerprints" are numerically constructed, or how the color coding in figures maps to the formulation. Since the paper's stated contributions include "definition, measurement design" (line 36), omitting this definition means the paper's central technical artifact is unavailable for scrutiny, reproduction, or extension. This is the most significant weakness.
 
-- **Extremely limited experimental scope without statistical rigor.** The analysis is restricted to 4 models from one TrojAI round (Round 4), plus 2 replicate models of one architecture (ResNet101). No error bars, confidence intervals, or statistical significance tests are provided. The observation that specific utilization ranges are "present in the poisoned models but are missing in the clean model" (Section 4) is based on a single clean model. Without replication across more architectures, trigger types, and training conditions, there is no evidence that the observed patterns generalize.
+- **No quantitative evaluation of detection capability despite claiming it**. The paper states that utilization-based class encodings are useful for "classifying a large number of AI models as clean or poisoned" (line 26) and that experiments evaluate this approach (line 68). Yet no detection accuracy, AUC, precision/recall, F1-score, or any other quantitative metric is reported. The evidence is purely qualitative: visual inspection of color-coded graphs and side-by-side tensor-state images. No baseline comparison is provided (e.g., Activation Clustering, Neural Cleanse, Spectral Signatures, or any published result from the TrojAI Challenge). Without quantitative validation, the central claim about classification utility is unsubstantiated. The qualitative observations are interesting but do not on their own demonstrate a working detection method.
+
+- **Experimental scope is too narrow to support the paper's generalizations**. The deep tensor-state analysis (Figures 6 and 7) is anchored to a single class (c=25) with a single trigger type (Kelvin Instagram filter) on a single architecture (ResNet101). The graph-level analysis covers only four models from Round 4 (line 70). The paper draws conclusions about "completely independent tensor-states for clean versus poisoned traffic sign images" (line 96) from this narrow foundation, without characterizing variance across classes, trigger types (only two discussed: polygon and Instagram filter), architectures (ResNet18 mentioned in Figure 1 but not analyzed comparably), or poison rates. The reader cannot assess whether the observed patterns are robust and general or specific to the particular configuration examined.
+
+- **Claim-practice gap in the Summary**. Section 5 states that the paper "defined a mathematical framework for computing three deterministic and statistical AI model utilization metrics" (line 96). No such framework or three metrics appear in the visible text. The Summary overstates what was actually delivered.
 
 ### Minor
 
-- **No comparison to any baseline method.** The Related Work section identifies several relevant approaches (network dissection, activation clustering, spectral methods, modular partitioning), but the paper never compares its utilization fingerprints against any of them — neither quantitatively (e.g., detection accuracy comparison) nor qualitatively (e.g., does the hierarchical explanation reveal insights other methods miss?). This makes it difficult to assess what the proposed approach adds over existing techniques.
+- **"Entropy-based utilization" appears without definition or derivation**. Figure 5's legend references "entropy-based utilization" (line 74), but the paper never introduces or derives an entropy-based formulation. This leaves the reader unsure whether the color coding in Figure 5 corresponds to the same metric described conceptually in Section 1 or a different computation.
 
-- **The paper claims more than it delivers.** The phrase "three deterministic and statistical AI model utilization metrics" is only introduced in the Summary, after the Methods and Experiments sections where they should have been defined and used. The Introduction claims the approach supports "classifying a large number of AI models as clean or poisoned" (Section 1), but no classification is performed. The paper's own limitation statement ("visual analyses of subgraph patterns... is the topic of our future work") reinforces that the work is preliminary, yet the framing suggests completed contributions.
+- **Limited rationale for model selection in the experiment**. The paper analyzes "four trained models in Round 4 holdout dataset" (line 70) without explaining how or why these particular models were chosen from the larger TrojAI pool. The description of the TrojAI datasets (number of models per round, trigger types, poison rates, architectures) is scattered and incomplete, making it hard to assess the breadth of the evaluation.
 
 ### Trivial
 
-- The Methods section (Section 3) is inappropriately structured — it is labeled "METHODS" but contains only a description of dataset creation, with no methodological definitions. Readers expecting the method's formal specification will not find it there.
+None.
 
 ## Nice-to-Haves
 
-- A simple classification experiment (e.g., nearest-centroid or threshold-based detector using the utilization fingerprints as features) would directly test the central claim and would substantially strengthen the paper without requiring a fundamentally different approach.
-- A comparison against at least one existing backdoor detection method (e.g., activation clustering, spectral signatures, or neural cleansing) would help the reader understand what the utilization-based approach adds.
-- Statistical tests (e.g., permutation tests comparing utilization distributions) would lend credibility to the visual pattern observations.
+- A formal algorithmic definition (pseudocode or equations) for utilization computation, including: (1) the binarization rule for tensor channels at zero, (2) per-image tensor-state extraction, (3) aggregation over training images in a class (count of unique states, or ratio), and (4) any entropy normalization applied. A brief worked example on a small toy network would greatly aid reproducibility.
+- Quantitative detection results on the TrojAI holdout set (e.g., threshold-based classifier on the identified utilization ranges, or a simple classifier on fingerprint vectors), reported as accuracy/AUC with confidence intervals.
+- A systematic evaluation across multiple classes, trigger types (polygon, Kelvin, other filters), and architectures (ResNet18, ResNet101, and any others in the TrojAI dataset) to establish generalizability of the observed discrimination patterns.
+- A comparison to at least one established backdoor detection baseline to contextualize what utilization adds.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviews were excluded for the following reasons:
 
-- **Harsh critic's claim that "no classification experiment is actually performed" is kept (it is factually correct), but the critic's framing of it as a "structural issue" is accurate and is preserved under Major weaknesses above.**
-- **Critic's complaint that the paper "does not identify any quantitative baseline" in Related Work** — This is a fair observation that is subsumed under Minor weaknesses as a missed opportunity to frame the contribution more sharply. Kept as Minor.
-- **Strength Finder's claim of "scalability to complex, real-world architectures"** — This is somewhat generous: 140.6 GB memory for one model is not obviously "scalable." However, the basic feasibility data (24.46 min, 286 probes) is still a useful data point. Downgraded from supporting strength to a factual observation noted in Strengths (last bullet).
+- *"Related work does not clearly position the proposed utilization metric against existing explainability approaches"* — The paper explicitly contrasts with Network Dissection, concept whitening, saliency maps, and modular partitioning approaches, describing specific differences (binarization at zero, no inserted modules, all computation units, tensor-state space vs. input space analysis). The positioning is present and clear.
+- *"No description of the number of runs, random seeds, data splits, or statistical significance"* — These are desirable but not standard for a primarily qualitative/visualization paper of this kind. The paper's main evidence is visual pattern analysis, not hypothesis testing.
+- *"The paper references a tool ('Neural Network Calculator tool') that is not standard"* — The paper cites it as a tool used for efficiency simulations; its non-standardness is not a weakness unless the paper's claims depend on it being standard, which they do not.
+- *"Table 2 is referenced but not shown"* — The parser strips tables; they exist in the original submission.
+- *"The paper should include a limitations paragraph"* — The paper does include a limitation statement (line 96), though it is brief.
 
 ## Novel Insights
 
-The most genuinely novel insight emerging from these reviews is that the paper's core problem — understanding *how* backdoor triggers alter internal model representations at multiple levels of the computation graph — is worthwhile and underexplored. The observation that clean and poisoned images produce almost entirely disjoint sets of high-frequency tensor-state values despite near-perceptual identity (Section 4, Figures 6–7) is the paper's most striking result and could motivate useful future work. However, this insight is the paper's own contribution; the reviews do not add novel observations beyond it.
+The reviews do not surface any genuinely novel insight beyond the paper's own content. The key observation — that backdoored class encodings produce nearly disjoint tensor-state sets in mid-network layers despite perceptual input similarity — is the paper's own contribution. However, one cross-review observation worth noting: the paper's combination of qualitative richness and quantitative incompleteness places it in an awkward epistemic position. The tensor-state visualizations are compelling evidence that *something* is different about how poisoned classes are encoded, but without a formalized metric or detection protocol, the work cannot move from "there is a difference" to "here is how to use that difference." The paper would be stronger if it explicitly acknowledged this gap and framed itself as a preliminary characterization rather than a deployed method.
 
 ## Suggestions
 
-1. **Formally define the utilization metrics.** Provide equations for how utilization is computed at each node (e.g., normalized count of distinct binarized tensor-state values, or entropy of the distribution of tensor-states). Specify what the "three deterministic and statistical metrics" are and how they differ. Define the algorithm for constructing class encodings and AI model fingerprints. This is the single most important fix — without it, the contribution is unverifiable.
+1. **Provide a complete algorithmic specification of utilization in Section 3**, including: (a) the exact formula (e.g., U_c(n) = |unique_tensor_states(n, D_c)| / max_possible, with any entropy variant defined separately), (b) the binarization rule for tensor channels at zero, (c) how tensor-states are aggregated across images in a class, and (d) how "class encoding" vectors and "AI model fingerprints" are constructed from per-node utilization values. This is the single highest-priority fix.
 
-2. **Add a basic classification experiment.** Even a simple threshold-based detector or nearest-centroid classifier operating on utilization fingerprints across many TrojAI models would provide the quantitative validation the paper currently lacks and directly support the claim that the encodings can discriminate clean from poisoned models.
+2. **Add a quantitative detection experiment**: Use the identified utilization ranges (e.g., [16.0,18.0] ∪ [18.5,19.0] and [29.5,31.5]) as features for a simple threshold-based or one-class classifier on a held-out set of TrojAI models. Report accuracy and AUC. Even a modest result would substantially strengthen the paper's central claim.
 
-3. **Expand the experimental evaluation** to include more models, architectures, and trigger types from TrojAI Rounds 1–4 (since the paper claims to cover them). Report variability across replicates with error bars or effect sizes.
+3. **Expand the evaluation to cover more classes, trigger types, and architectures** in the TrojAI dataset, or explicitly scope the paper's claims to the configuration studied and frame the results as initial evidence rather than validated generalization.
 
-4. **Restructure the Methods section** to actually describe the method. Move the dataset creation description to an appendix or a separate subsection, and devote the main Methods content to the utilization framework, class encoding construction, fingerprint computation, and hierarchical analysis procedure.
+4. **Fix the claim-practice gap in the Summary**: Either remove the reference to "three deterministic and statistical AI model utilization metrics" or define them explicitly in Section 3.
+
+5. **Define "entropy-based utilization"** wherever it first appears (likely in a figure caption) — either derive it or clarify whether it is the same as the utilization metric described conceptually.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>3.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+The paper introduces an interesting conceptual framework and presents compelling qualitative evidence that utilization-based tensor-state analysis can reveal differences between clean and poisoned model encodings. The specific observations — utilization ranges [16.0,18.0] ∪ [18.5,19.0] and [29.5,31.5] that discriminate clean from poisoned models, and the near-zero tensor-state overlap (35/2500) between clean and poisoned images — are genuine empirical contributions.
+
+However, the paper has two structural weaknesses that prevent it from being accepted in its current form. First, the core method is not formally defined: Section 3 ("METHODS") does not contain the method specification, and a reader cannot reproduce the approach. Second, there is no quantitative evaluation: the paper claims utility for classifying clean vs. poisoned models but provides no detection metrics, baselines, or held-out evaluation. The experimental scope (one class, one trigger type for deep analysis) is too narrow to support the paper's generalizations. These are not minor presentation issues; they affect whether the contribution can be evaluated and built upon.
+
+The paper's ideas are worth pursuing, but the submission as it stands does not deliver a substantiated, reproducible contribution. I cannot recommend acceptance.
+
+**MY FINAL SCORE: <pineapple>4.5</pineapple>**
+**MY FINAL DECISION: <orange>Reject</orange>**

@@ -1,22 +1,22 @@
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+
 ## Summary
 
-This paper presents ConcreTizer, the first tailored model inversion attack for voxel-based 3D point cloud feature extractors used in autonomous driving. The key insight is that naive point regression fails due to (1) zero-padding ambiguity (empty voxels and valid points at the origin are indistinguishable) and (2) VoI (Voxels of Interest) dispersion, where non-empty voxels spread into surrounding empty regions through convolution. To address these, ConcreTizer transforms the regression problem into Voxel Occupancy Classification (VOC) and introduces Dispersion-Controlled Supervision (DCS), which partitions the feature extractor at downsampling layers and trains each block individually with occupancy masking. Experiments on KITTI and Waymo with two backbones show consistent outperformance over both a point-regression baseline and the generative model UltraLiDAR.
-
----
+This paper presents the first in-depth study of model inversion attacks on voxel-based 3D point cloud feature extractors. It identifies two unique challenges — semantic ambiguity of zero-padded voxels (which makes point regression cluster points near the origin) and VoI dispersion (non-empty voxels spreading into empty neighboring voxels through convolutions, especially at downsampling layers). To address these, the authors propose ConcreTizer with Voxel Occupancy Classification (VOC, converting regression to binary occupancy classification with focal loss) and Dispersion-Controlled Supervision (DCS, partitioning the feature extractor at downsampling layers and training each block with explicit masking). Experiments on KITTI and Waymo with two backbones show ConcreTizer substantially outperforms both point regression and a generative baseline (UltraLiDAR), and the restored scenes retain 62.6–86.7% of original 3D detection performance.
 
 ## Strengths
 
-1. **First rigorous study of 3D point cloud model inversion, identifying the unique VoI dispersion challenge**: The paper pinpoints a problem specific to voxel-based 3D backbones — that during forward and inverse processes, non-empty voxels spread into empty regions via convolution, creating false VoIs that dominate MSE loss and bias restoration toward the origin (Section 3, Figure 3). This problem has no analogue in 2D inversion and is clearly demonstrated with quantitative evidence.
+1. **First effective inversion attack for 3D point cloud scenes, exposing a real privacy vulnerability.** The paper contradicts the assumption (Hwang et al., 2023) that disseminating 3D features inherently prevents restoration. Table 2 shows restored scenes enable 3D object detection at 62.6–86.7% of original performance, confirming the restored data is practically usable for privacy-compromising tasks.
 
-2. **VOC elegantly resolves the zero-padding ambiguity**: By encoding each voxel as occupied (1) or empty (0), VOC eliminates the confusion between "empty space" and "points at the origin" that plagues naive regression. The ablation study (Figure 7) shows that even VOC with BCE loss enables restoration at layer 6, whereas point regression entirely collapses — validating the core insight that occupancy determination, not coordinate regression, is the real bottleneck.
+2. **Identifies and solves a challenge unique to 3D inversion: VoI dispersion.** The paper pinpoints that non-empty voxels spread into surrounding empty voxels during downsampling, causing false positives and clustering near the origin (Section 3, Figure 3). This phenomenon has no analog in 2D inversion. DCS mitigates this by partitioning at downsampling layers and applying per-block masking (Section 4.3.2, Figure 4). The ablation (Figure 7) validates that only VOC+DCS recovers a distribution matching the original point cloud.
 
-3. **DCS provides a principled solution to VoI dispersion, well-validated by ablation**: DCS partitions the backbone at downsampling layers (where VoI density spikes — Figure 3, right) and trains each inversion block with per-block occupancy masking. Figure 7 shows that only ConcreTizer (VOC + DCS) produces a point distribution matching the original at layer 12, while VOC alone still shows biased restoration. Figure 8 confirms optimal performance with 2–4 DCS instances (aligned with downsampling layers) and degradation with overly fine partitioning (10 instances) due to error accumulation.
+3. **Transforming regression to occupancy classification resolves the zero-padded-voxel ambiguity.** The insight that a zero channel value is semantically ambiguous (empty voxel vs. point at origin) is cleanly addressed by binary occupancy classification (Section 4.3.1). This eliminates the clustering problem that plagues point regression (Figure 5, Table 1). Using Sigmoid Focal Loss correctly handles the severe label imbalance inherent in sparse 3D data.
 
-4. **Consistent outperformance across two major datasets and two backbones**: On KITTI and Waymo, with both VoxelBackbone and VoxelResBackbone, ConcreTizer exceeds UltraLiDAR by 23.4% CD and 12.4% F1 on KITTI, and by 21.1% CD on Waymo at the deepest layer (Table 1, Figure 6). The advantage holds at all layers, not only at the deepest.
+4. **Rigorous evaluation across datasets, backbones, and downstream tasks.** Experiments cover KITTI and Waymo, two major feature extractors (VoxelBackbone, VoxelResBackbone), multiple metrics (CD, HD, F1), and 3D object detection validation (Table 2). ConcreTizer consistently outperforms both point regression and the UltraLiDAR generative baseline across all settings.
 
-5. **Downstream task validation confirms practical threat**: ConcreTizer-restored scenes achieve 75.4–86.7% of original 3D detection AP on KITTI and 62.6–75.7% on Waymo, while point regression yields unusable results and UltraLiDAR drops sharply on Waymo's complex scenes (Table 2). This grounds the privacy threat in a concrete AV-relevant task.
+5. **Informative ablation and analysis of design choices.** The paper systematically ablates VOC vs. VOC+DCS (Figure 7) and studies DCS partitioning policies (Figure 8), finding that 2–4 blocks aligned with downsampling layers works best, while too many blocks accumulate error. This provides clear practical guidance.
 
----
+6. **Analysis of defenses and privacy-utility trade-off.** Experiments with point cloud augmentations and Gaussian noise (Section 5.6, Table 3, Figure 9) show defenses degrade detection accuracy before meaningfully increasing restoration error, highlighting the difficulty of mitigating ConcreTizer without harming utility.
 
 ## Weaknesses
 
@@ -24,63 +24,50 @@ This paper presents ConcreTizer, the first tailored model inversion attack for v
 None.
 
 ### Major
-None.
+None. The paper's core claims are well-supported by experiments. The issues below are about clarity and depth, not validity of results.
 
 ### Minor
 
-1. **DCS training procedure is underspecified** (§4.3.2). The paper states that inversion blocks are trained "in block units" and that error accumulates with too many blocks, but it does not clarify whether blocks are trained sequentially (each block trained independently before being chained), jointly (end-to-end with gradient flow through all blocks), or iteratively (trained one at a time and then fine-tuned). The loss function (L_cls + β·L_reg) is given per block, but the inference-time wiring between blocks during training is not described. This ambiguity affects reproducibility. The paper should at minimum state: "Blocks are trained sequentially: block N is trained to restore f_{N-1} from f_N, then block N-1 is trained to restore f_{N-2} from the output of block N, etc." — or whatever the actual protocol is.
+1. **DCS training procedure is underspecified.** The paper states DCS "trains each segment individually" (Section 1) and "performs restoration progressively" (Section 4.3.2), and that "the restoration error of each block accumulates" (Section 5.5), which suggests a cascaded architecture. However, the exact training protocol is ambiguous: are blocks trained independently in sequence (with ground-truth features serving as targets at each partition point), or is the entire cascade trained jointly? The paper provides the per-block loss but does not specify whether gradients flow through multiple blocks, how ground-truth intermediate features are obtained, or whether blocks share weights. This matters for reproducibility and for understanding whether DCS's benefit comes from multi-stage supervision or from architectural partitioning alone. The main text should clarify the training procedure; if it is deferred to supplementary materials, this should be explicitly stated and the key protocol summarized.
 
-2. **The point-regression baseline is minimal and the comparison slightly overstates the advantage of classification over regression**. The paper compares against the regression method from Hwang et al. (2023) as-is: no learned occupancy filtering, no architectural improvements. The paper's own analysis correctly identifies the core failure mode (zero-padding ambiguity), but a regression approach augmented with a simple binary classification head (which would essentially be a regression-based VOC variant) is not tested as a control. This is not a structural flaw — the generative baseline (UltraLiDAR) is the more demanding comparison, and DCS is the more novel component — but the "regression fails, classification works" narrative would be stronger with an explicit control showing that what really matters is the combination of classification *and* dispersion control, not classification alone.
+2. **The UltraLiDAR generative baseline adaptation lacks sufficient detail.** The paper states it "modified the encoder part of UltraLiDAR to accept voxel features as an input" (Section 5.2) but does not describe what changes were made, whether the model was re-trained from scratch or fine-tuned, or what hyperparameters were used. Since UltraLiDAR was originally designed for unconditional or 2D-conditioned generation, the modification is non-trivial. The paper correctly identifies that UltraLiDAR converts 3D sparse features to 2D dense features and loses detail — which is a plausible explanation — but without knowing the quality of the adaptation, a reader cannot assess whether UltraLiDAR could perform better with a more tailored conditioning mechanism. The comparison is informative as-is (the gap is large and consistent), but the paper would benefit from a brief description of the adaptation or a candid acknowledgment of this limitation.
 
-3. **No classification accuracy metrics reported for VOC** (§5.2, §5.4). The paper reports only final CD, HD, and F1 scores, but never reports VOC's precision, recall, or F1 for occupancy prediction at any layer. Reporting these would (a) directly validate that VOC correctly identifies which voxels are occupied, (b) help diagnose whether remaining errors come from classification mistakes or coordinate estimation, and (c) strengthen the claim that "once classification is achieved, localization is straightforward." Given that the entire method hinges on accurate occupancy prediction, this is a notable omission.
+3. **VoI dispersion is characterized only qualitatively.** The paper's entire motivation hinges on VoI dispersion (Section 3, Figure 3), stating "the density of VoI spikes significantly at downsampling layers" and "increases exponentially." Yet no quantitative measurement is provided — e.g., the number of non-zero voxels at each layer, the true-to-false VoI ratio, or how DCS reduces these counts. While the final restoration metrics (Table 1) and ablation (Figure 7) empirically validate the approach, directly measuring VoI dispersion would strengthen the causal narrative and distinguish DCS's mechanism from other forms of multi-stage training. A diagnostic plot showing voxel counts per layer in forward/inversion passes with and without DCS would be a clean addition.
 
-4. **The detector used for the main detection results (Table 2) is not specified**. The paper names SECOND only in the context of the augmentation experiments (Table 3, Figure 9) but does not state which detection model was used for the KITTI and Waymo detection benchmarks in Table 2. Since detection AP depends heavily on the detector architecture, this should be stated explicitly.
-
-5. **UltraLiDAR baseline is not fine-tuned for the inversion task**. The paper acknowledges this (the encoder was modified to accept voxel features, then trained from scratch), but UltraLiDAR was originally designed for unconditional LiDAR scene generation. Some form of task-specific adaptation or fine-tuning of the generative backbone could have been explored. This does not invalidate the comparison — even without tuning, ConcreTizer outperforms consistently — but the advantage may be less extreme against a fully optimized generative baseline.
+4. **Computational cost of DCS vs. end-to-end is not discussed.** The paper does not address whether partitioning increases training time (if blocks are trained sequentially) or memory footprint (if trained jointly). For practitioners evaluating the method, this is useful context.
 
 ### Trivial
 
-- The paper does not state the voxel resolution or coordinate ranges used for voxelization (§4.2), which would aid reproducibility.
-- The intermediate regression targets c_i (channel values at non-first blocks) are described as "normalized" but the normalization scheme is not specified.
-- The paper defers several training hyperparameters (learning rate, optimizer, batch size, inversion network architecture) entirely to supplementary material. While this is common practice, a brief summary in the main text would be helpful.
-
----
+1. The terms "VoI" (Voxel of Interest) is defined primarily as non-empty voxels in the inversion process, but the paper sometimes uses it to refer to originally non-empty voxels vs. voxels that become non-empty during inversion. A consistent distinction between "true VoI" (originally non-empty) and "false VoI" (originally empty but non-zero during inversion) — the paper already introduces this in Section 3 but could use it more consistently throughout.
 
 ## Nice-to-Haves
 
-- **Direct measurement of VoI suppression per layer**: The paper infers DCS's effect from final CD/AP. Computing the number of active voxels in restored intermediate features with and without DCS would directly demonstrate the suppression mechanism quantitatively (e.g., "DCS reduces false VoIs by X% at downsampling layer 2").
-- **Privacy-specific leakage analysis**: Detection AP is a coarse proxy. Showing person re-identification or trajectory recovery from restored scenes would concretely demonstrate the privacy threat the paper warns about.
-- **Cross-dataset generalization test**: Does the inversion model trained on KITTI transfer to Waymo without retraining? This would test the attack's generality and robustness to domain shift.
-- **Runtime comparison**: For an attack method, computational cost matters. A brief comparison of training/inference time vs. baselines would be informative.
-
----
+- A quantitative plot of non-zero voxel count per layer for forward pass, inversion without DCS, and inversion with DCS, directly validating that DCS suppresses VoI spread.
+- An ablation comparing (a) end-to-end VOC training with a single deep model vs. (b) VOC with intermediate auxiliary losses at downsampling points *without partitioning*, to isolate the effect of architectural partitioning from the effect of additional gradient signals.
+- A brief discussion of the relationship between voxel size and the practical localization error of placing points at voxel centers, noting cases where large voxels could reduce attack precision.
 
 ## Removed Points
 
-These points are flagged to be removed per guidelines; treat them with caution:
+These points are flagged to be removed; treat them with caution.
 
-- **"Domain of coordinates not specified"** (Harsh Critic §4.2): The paper describes voxelization of a 3D point cloud in ℝ^(k×3) with x,y,z channelized — coordinates are clearly in the original metric space. This is a misreading.
-- **"Training hyperparameters not in main text"** (Harsh Critic §5.1): Per guidelines, undisclosed hyperparameters are a reproducibility nitpick and should be removed as a weakness. The paper appropriately references supplementary material.
-- **"Missing appendix content"**: The reviewer mentions supplementary may clarify DCS training. Per guidelines, appendix-stripping by the parser is not an author error.
-
----
+- **DCS training ambiguity about "learning rates per block" and other hyperparameters:** The reviewer demanded specific learning rates, batch sizes, optimizer, etc. Per the hard rules, these are reproducibility nitpicks that are standard to defer to supplementary materials.
+- **Missing training costs of UltraLiDAR relative to ConcreTizer:** Request for training time/data requirements is a reproducibility detail per hard rules.
+- **"Missing appendix / proofs / references":** The paper references supplementary materials for structural details and further experiments; the parser strips appendix sections. The paper's structure is standard for this class of submission.
+- **Generic framing of "the paper should also cover Y / domain Z / additional tasks":** The paper clearly scopes itself to voxel-based feature extractors for autonomous driving scenes. Demands for broader coverage (e.g., non-voxel representations beyond a future work mention) are scope creep.
 
 ## Novel Insights
 
-The most interesting insight from the reviews is about the relationship between classification accuracy and final restoration quality. Both the Harsh Critic and Strength Finder converge on the observation that the paper's strongest evidence is the ablation study (Figure 7) showing progressive improvement from BCE→SF loss→DCS. What is *not* clear from the current evaluation is whether the remaining gap to the original point cloud is dominated by classification errors (VOC false positives/negatives) or by residual localization errors in deeper blocks — and decomposing these two sources would sharpen the paper's contribution considerably. A second cross-cutting insight is that the tradeoff analysis (§5.6) reveals a fundamentally asymmetric vulnerability: empty-centric noise barely affects the attack while degrading utility, whereas feature-centric noise affects both, which suggests that defense strategies must target the non-empty voxels specifically — a finding that could guide future defense work.
-
----
+Beyond the paper's own contributions, the reviews surface one novel observation that the paper itself does not fully articulate: **the paper's approach reveals a fundamental asymmetry in inversion difficulty between 2D and 3D data.** In 2D, inversion attacks succeed because pixel values are dense and regression targets are unambiguous. In 3D, the extreme sparsity turns the naive regression approach into a pathological problem — the loss is dominated by empty voxels, and convolution-induced spread of non-zero values creates false positives at scale. The paper's key insight is that for sparse 3D data, *existence* is the hard problem and *localization* is the easy one (bounded by voxel size), which is the reverse of the dense 2D setting. This observation could guide future work on inversion attacks for other sparse modalities (e.g., event cameras, sparse radar).
 
 ## Suggestions
 
-1. **Clarify the DCS training protocol explicitly in §4.3.2**: state whether blocks are trained sequentially, jointly, or iteratively, and how ground-truth intermediate features are provided during training.
-2. **Add a table reporting VOC precision/recall/F1 at each layer** to the ablation study or restoration performance section — this would directly validate the core claimed mechanism.
-3. **State the detector model used for Table 2** in §5.3.
-4. **Add a brief note on voxel resolution and coordinate ranges** in §4.2.
-
----
+1. Clarify the DCS training protocol explicitly in the main text: are blocks trained independently (each with ground-truth intermediate features as targets), sequentially (output of one block fed as input to the next during training), or jointly? State the training order and whether blocks share weights.
+2. Add a 2–3 sentence description of the UltraLiDAR adaptation (what was modified, how it was trained) so readers can assess baseline fairness.
+3. Include a simple diagnostic figure showing non-zero voxel counts per layer in forward/inversion passes with and without DCS, to directly validate the VoI dispersion claim quantitatively.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>3.5</pineapple>
+The paper makes a clear contribution to an underexplored problem. The core ideas (VOC and DCS) are well-motivated, the experimental evaluation is thorough, and the results are convincing. The weaknesses are about clarity and depth of analysis, not about validity of the claims. The paper can be strengthened with relatively minor revisions.
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

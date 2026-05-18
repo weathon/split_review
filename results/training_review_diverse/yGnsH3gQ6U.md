@@ -1,96 +1,79 @@
-Here is my final consolidated review.
-
----
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes BSQ-ViT, a transformer-based image and video tokenizer combining Binary Spherical Quantization (BSQ) with a ViT encoder-decoder. BSQ projects latent embeddings to a lower-dimensional hypersphere and applies binary quantization, yielding a parameter-free implicit codebook with bounded quantization error and factorized entropy computation. The transformer architecture uses block-wise causal masking to unify image and video tokenization. On ImageNet-1k 256×256, BSQ-ViT achieves rFID 0.41 (beating SDXL-VAE's 0.72 by 43%) at 2.4× higher throughput. On UCF-101 video reconstruction, it achieves rFVD 4.10 (halving MAGVIT-v2's 8.62). The paper also demonstrates competitive video compression and masked LM-based image generation.
+This paper proposes Binary Spherical Quantization (BSQ), a parameter-free quantization method that projects visual embeddings onto a hypersphere and applies binary quantization. Combined with a Vision Transformer encoder/decoder using blockwise causal masking, BSQ-ViT achieves a unified architecture for both image and video tokenization. The method delivers state-of-the-art reconstruction quality on ImageNet (rFID 0.41, 43% better than SDXL-VAE) and UCF-101 (rFVD 4.10 vs 8.62 for MAGVIT-v2) with 2.4× higher throughput, while the bounded quantization error and factorized entropy computation enable stable training and efficient codebook usage.
 
 ## Strengths
 
-1. **State-of-the-art image reconstruction with higher throughput.** Table 1 shows BSQ-ViT (36 bits) achieves rFID 0.41 on ImageNet-1k, a 43% reduction over SDXL-VAE (0.72), while running 2.4× faster (45.1 vs 18.9 images/s). This directly supports the core claim of superior reconstruction efficiency.
+1. **State-of-the-art reconstruction quality with higher speed**: BSQ-ViT achieves rFID 0.41 on ImageNet-1k val (36-bit), a 43% reduction compared to SDXL-VAE (0.72), while being 2.4× faster (45.1 vs 18.9 images/s per GPU, Table 1). On video, it reduces rFVD on UCF-101 from 8.62 (MAGVIT-v2) to 4.10 with L=36 (Table 2).
 
-2. **State-of-the-art video reconstruction.** Table 2 shows BSQ-ViT (36 bits) achieves rFVD 4.10 on UCF-101 train and 6.21 on val, more than halving the previous best (MAGVIT-v2, 8.62). LPIPS is also nearly halved (0.0159 vs 0.0537).
+2. **Simple, parameter-free quantizer with clear advantages over VQ/LFQ**: BSQ's implicit codebook on the hypersphere grows exponentially with L with no learned parameters. The ablation (Table 4) shows BSQ consistently improves with larger L (rFID 2.66 at L=18 vs 4.51 at L=10), while VQ saturates beyond 16K entries (rFID worsens from 4.27 to 6.61). LFQ collapses with ViT (0.6% code usage, rFID 30.7), while BSQ maintains 93.8% code usage.
 
-3. **Efficient entropy computation via dimension-wise factorization.** Section 4.1 (Eq. 5–7) derives a factorized approximation for soft BSQ entropy, reducing complexity from O(2^L × L) to O(L). Table 5b shows this approximation achieves nearly identical rFID and code usage to group-based approaches while being the fastest (0.212 ms).
+3. **Efficient factorized entropy computation**: The soft quantization probability factorizes into independent Bernoulli distributions per dimension (Eq. 5), reducing entropy computation from O(2^L × L) to O(L). The ablation (Table 6b) shows the factorized approximation (0.212 ms) achieves nearly identical rFID (2.86 vs 2.76 for group size 6) while running fastest.
 
-4. **Bounded quantization error with theoretical guarantee.** Eq. 8 bounds BSQ's quantization error below √2. Table 4 shows BSQ (L=18) achieves 93.8% code usage and rFID 2.66, while the LFQ-equivalent baseline collapses to 0.6% usage and rFID 30.7. This provides clear evidence for BSQ's training stability advantage.
+4. **Unified image/video architecture with practical speed advantages**: The blockwise causal masking (Section 4.2) allows joint training on mixed image/video data and variable-length video inference without padding overhead. Fine-tuning an ImageNet-pretrained tokenizer on videos yields dramatic improvements (rFVD drops from 342 to 11.62, Table 2). On 1920×1080 video, BSQ-ViT achieves 6.1 FPS (encode+entropy coding+decode), outperforming VCT (1.4 FPS) and H.264 (2.6 FPS) (Table 4).
 
-5. **Clean theoretical formulation with practical payoff.** BSQ's projection to the hypersphere enables both the bounded error guarantee and the factorized entropy computation — two properties that are theoretically well-motivated and empirically validated.
-
-6. **Unified image/video architecture.** The block-wise causal masking (Section 4.2) allows a single architecture to handle both images and variable-length videos, a practical benefit over prior 2D→3D CNN inflation approaches.
+5. **Thorough ablation studies**: The paper systematically ablates losses (commit, entropy components, LPIPS, GAN), group sizes for entropy approximation, and the role of ℓ2 normalization, providing good insight into what makes BSQ work.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
-
-1. **Compression evaluation uses only a single quality level.** Figure 1 shows the proposed method at exactly one distortion level (33.7 dB PSNR on MCL-JCV, 37.34 dB on UVG) at two bitrates (with and without arithmetic coding). The comparison baselines (H.264, HEVC, VCT) are shown as full rate-distortion curves with multiple operating points. A single point cannot demonstrate that the method "achieves comparable results with state-of-the-art video compression standards" across the operating range, and the "better tradeoff than H.264 and HEVC" claim (line 550) rests on just this one point. On UVG, the method's single point falls below the HEVC curve anyway. The paper needs multi-quality ablation (e.g., via different L or different quantization levels) to substantiate the compression claims.
-
-2. **Bit-rate comparison between discrete and continuous models is not apples-to-apples.** In Table 1, the "# bits" for KL-regularized models (SD-VAE, SDXL-VAE) is computed as latent_dim × 16 (FP16 storage). This is not a meaningful measure of compression efficiency: continuous latents are typically further quantized or entropy-coded in practice, and using raw FP16 precision overcounts their effective bit cost. The comparison of "bits per token" between discrete tokenizers (VQ, BSQ) and continuous VAEs on a single axis is misleading. A proper rate-distortion comparison (bpp vs. distortion, or variable-bitrate evaluation) would be more appropriate if the paper wants to claim superior compression of the discrete bottleneck.
+None.
 
 ### Minor
 
-3. **The LFQ comparison is a controlled ablation for ℓ2 normalization, but the paper's framing overclaims.** The paper shows that removing ℓ2 normalization from BSQ (which it calls "equivalent to LFQ") collapses to 0.6% code usage (Table 4). This is a valid controlled experiment showing ℓ2 normalization is critical in their ViT framework. However, the original LFQ paper (MAGVIT-v2) achieves strong results with 3D CNNs, so the general claim "BSQ is better than LFQ" conflates the quantizer with the architecture. The finding should be stated more precisely: "BSQ substantially outperforms the LFQ quantization strategy in a ViT-based tokenizer."
+1. **The bounded quantization error (Eq. 6) is asserted without derivation or citation.** The bound $\mathbb{E}_\vu[d(\vu,\hat\vu)] < \sqrt{2 - 2/\sqrt{L}} < \sqrt{2}$ is stated as fact, and the paper claims this leads to better gradient fidelity during training. While the bound itself is plausible and the empirical results independently validate the method, a brief derivation (or at minimum a citation to a known result) would allow readers to verify the claim. This is a real gap in the theoretical argument, but it does not undermine the paper's empirical contributions.
 
-4. **The throughput advantage (2.4× vs SDXL-VAE) is not fully disentangled from architecture.** The comparison in Table 1 is BSQ-ViT (ViT-B, 174M params, 45.1 img/s) vs SDXL-VAE (ConvNet, 84M params, 18.9 img/s). The ViT backbone is likely responsible for much of the speedup due to parallelization, not BSQ specifically. The paper presents BSQ-ViT as a complete system, so the throughput claim is valid at that level, but it conflates quantization and architecture.
+2. **The video compression evaluation is limited.** The paper shows only a single bitrate operating point for the proposed method on each benchmark, and the comparison to standards has mixed results: competitive with H.264 and HEVC on MCL-JCV MS-SSIM, but clearly behind HEVC and VCT on UVG PSNR. The paper acknowledges the UVG gap and attributes it to training data limitations (line 868), which is reasonable but not substantiated. Additionally, no rate-distortion curve is presented for the learned method across multiple bitrates. The abstract's claim of "comparable results on video compression with state-of-the-art video compression standards" is largely supported but would benefit from more precise scoping.
 
-5. **Video reconstruction comparison does not control for training data differences.** In Table 2, MAGVIT-v2 is trained on Kinetics-600 (~400K clips) while the paper's model initializes from ImageNet and fine-tunes on UCF-101 (~9K clips). The paper acknowledges this for compression (line 868) but not for reconstruction, where the comparison is presented as apples-to-apples. The reported gains are large enough to likely survive controlling for data, but the lack of acknowledgment weakens the presentation.
+3. **The image generation experiment lacks architectural and training details.** The paper reports FID 5.44 at 128×128 (Table 3) using a masked LM following MaskGIT, but does not specify the model architecture size, training recipe, masking schedule, or whether the tokenizer was frozen or jointly fine-tuned. The number of decoding steps differs (32 vs 12 for VQ/FSQ baselines), which complicates comparison. While the goal of this experiment is to demonstrate BSQ's viability for generation, the missing details make the result difficult to interpret or reproduce.
 
-6. **Image generation comparison is limited.** Table 3 compares BSQ-based masked LM to VQ and FSQ results from a single reference, plus BigGAN and ADM. The paper does not compare to MaskGIT's own 128×128 results or more recent masked models (e.g., MUSE). The FID 5.44 is competitive but the comparison set is narrow.
+4. **The throughput comparison (Table 1) does not report hardware configuration.** The paper reports images/s per GPU for all methods but does not specify the GPU model or software environment. While the paper does re-run most baselines on its own hardware (line 418), the omitted hardware details limit the informativeness of the comparison. This is standard to disclose.
 
 ### Trivial
-
-7. **"Up to 100× compression" claim in the abstract is vague.** The paper never computes or justifies this number. For video compression at 0.14 bpp (with AC), this is roughly consistent with raw 8-bit video (24 bpp → ~171×), but for image reconstruction the ratio is closer to ~43×. The claim is not false but is unsupported by any explicit calculation in the paper.
-
-8. **Minor presentation issues.** Throughput in Table 1 is reported without specifying hardware/batch size details (though the paper does say "per GPU"). Some STDs in tables are labeled as computed "across samples instead of multiple runs" (line 376), which is proper but the single-run caveat for small metric differences (e.g., rFID 0.41 vs 0.45 between BSQ variants) is worth noting.
+- None.
 
 ## Nice-to-Haves
 
-- A multi-point rate-distortion evaluation for compression (varying L or using rate control) would substantially strengthen the compression claim.
-- A controlled video experiment comparing VQ vs BSQ after fine-tuning on the same backbone, controlling for bit budget (matching #bits), would isolate BSQ's contribution in the video setting.
-- Releasing the model and code would increase impact and reproducibility.
+- A brief diagnostic (e.g., plotting latent norms or gradient magnitudes during training) of **why LFQ fails with ViT** would strengthen the claim that BSQ's normalization is the crucial factor. The current comparison is convincing but not fully explained.
+- An analysis of the **compression efficiency trade-off** between blockwise causal and non-causal attention masks would be directly relevant to the compression use case. The paper notes non-causal works slightly better but does not examine whether the causal variant uses fewer bits.
+- Exploring **intermediate L values** (e.g., 24, 28) to show the rFID vs. L scaling trend more granularly would strengthen the scaling argument.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+These points were flagged by reviewers but are removed or downgraded per the review guidelines. They are included here for completeness and should be treated with caution.
 
-- **"Unfair / non-robust comparison to LFQ"**: The harsh critic characterized this as a structural flaw, arguing the LFQ baseline is "stripped-down" and "untuned." This is overblown. The paper's ablation (Table 4) is a valid controlled experiment: removing ℓ2 normalization from BSQ yields LFQ-equivalent behavior, showing the specific contribution of normalization. While it's true the paper doesn't reproduce the full MAGVIT-v2 training recipe on ViT, that is a different experiment. The ablation as run is informative and methodologically sound. The issue is more about how the finding is framed (see Minor weakness #3 above), not about the validity of the evidence.
-
-- **"Missing ablation of video fine-tuning protocol"**: The critic claims the paper doesn't ablate whether gains come from fine-tuning vs. BSQ. Table 2 actually does show this: image tokenizer results (top rows) vs. fine-tuned results (bottom rows), and VQ vs BSQ within each. The gains from fine-tuning are clear across both quantizers. The critic's request for a finer-grained ablation (VQ fine-tuned on the same backbone with same #bits) is a nice-to-have, not a missing critical experiment.
-
-- **"Statistical significance"**: The critic complains about single training runs. Single-run evaluation is standard for large-scale tokenizer training. Not a real weakness.
-
-- **"The paper should also cover..." suggestions** about additional baselines or methods: these are scope-creep demands for breadth beyond the paper's stated direction.
-
-- **Formatting/style nitpicks** from the original critic are removed per instructions.
+- **"LFQ comparison is not apples-to-apples because entropy losses may differ"** — The paper's ablation (lines 907-909) removes ℓ2 normalization from BSQ while keeping everything else identical, producing a clean test of normalization. This is in fact a *better* comparison for isolating the effect of normalization than using the original MAGVIT-v2 LFQ (which uses a different entropy approximation). The naming "LFQ" is slightly imprecise but the ablation itself is valid.
+- **"VCT is excluded from MCL-JCV, making comparison inconsistent"** — Including VCT only where it has published results (UVG) is standard practice. Not a weakness.
+- **"Paper conflates compression standards with learned codecs"** — The paper consistently distinguishes between standards (H.264/HEVC) and learned codecs (VCT), e.g., lines 9, 48, 867.
+- **"No analysis of computational cost for entropy approximation"** — The paper provides Table 6b showing speed (ms) for each group size, including the factorized approximation, and discusses the O(L) vs O(2^L×L) complexity.
+- **"Missing ablation on L for BSQ"** — The paper already shows L ∈ {10, 14, 18} at 128×128 and L ∈ {18, 36} at 256×256, demonstrating clear scaling trends.
 
 ## Novel Insights
 
-The reviews surface a useful tension: the paper's strongest evidence for BSQ (the controlled Table 4 ablation showing ℓ2 normalization prevents codebook collapse) is also its most easily contested framing (the LFQ baseline is not the original MAGVIT-v2 implementation). The real insight is that the hypersphere projection does two things simultaneously — it bounds the STE gradient error and it enables factorized entropy computation — and both properties appear to matter for ViT-based tokenizers. Whether these benefits would persist with 3D CNN backbones or with the exact MAGVIT-v2 training recipe is an open question the paper does not (and need not) answer, but it cleanly establishes the advantage for the ViT setting.
+The most interesting observation emerging from the reviews is that BSQ's advantage over LFQ is *multiplicative* rather than additive: the bounded quantization error (due to sphere projection) and the factorized entropy computation (due to the sphere's geometry) reinforce each other during training. The bounded error makes the straight-through estimator more faithful, which in turn allows the clean factorized entropy loss to take full effect. This synergy explains why removing normalization alone causes LFQ-style collapse (code usage 0.6%), and why the simple factorized entropy (group size 1) works as well as more complex group-based approximations. An ablation that jointly ablates normalization and entropy approximation type would cleanly confirm this synergy hypothesis.
 
 ## Suggestions
 
-1. **Replace the single-point compression figure with a multi-point rate-distortion curve.** Train the model at different bottleneck sizes (e.g., L=10, 14, 18, 36) and show the full RD tradeoff. This single addition would substantially strengthen the compression claim.
-
-2. **Re-frame the LFQ comparison more precisely.** Change "BSQ outperforms LFQ" to "BSQ's ℓ2 normalization is critical for stable training with ViT-based tokenizers; LFQ-equivalent quantization collapses without it."
-
-3. **Acknowledge the training data difference in the video reconstruction section** (Table 2), as the paper already does for compression (line 868).
-
-4. **Clarify the "100× compression" claim** either by removing it or by adding a brief computation showing how it is derived.
+- Add a short derivation of the bounded quantization error (Eq. 6) in the appendix. The bound follows from the geometry of the hypersphere's inscribed hypercube and would take 5-10 lines to derive.
+- Expand the compression evaluation to include multiple bitrate operating points (e.g., by varying L or adding a rate-distortion loss). If this is impractical, qualify the claims more precisely (e.g., "competitive with H.264 on selected benchmarks").
+- Specify the hardware used for all throughput measurements (GPU model, CUDA version).
+- Provide architectural details of the masked LM used for generation: model size (parameters/layers/width), training recipe, masking schedule, and whether the tokenizer was frozen.
 
 ## Score and Decision
 
-**Originality**: Good. BSQ's combination of hypersphere projection + binary quantization with bounded error and factorized entropy is a clean, non-obvious contribution.
+**Originality**: 7/10 — BSQ is a simple but elegant combination of spherical projection and binary quantization. The factorized entropy insight is clean.  
+**Importance**: 8/10 — Visual tokenization is a critical component for generative models and compression. The unified image/video architecture is practically valuable.  
+**Claims**: 7/10 — Main claims are well-supported empirically. The compression claim is slightly overbroad relative to the evidence. The theoretical bound claim lacks derivation.  
+**Soundness**: 8/10 — Experiments are well-designed with thorough ablations. The comparisons are generally fair.  
+**Clarity**: 7/10 — Generally well-written. The main ideas are clearly conveyed. Some experimental details are missing (generation setup, hardware).  
+**Value**: 8/10 — BSQ-ViT provides a strong, practical tokenizer that unifies images and videos. The method is simple enough to be widely adopted.
 
-**Importance**: High. Visual tokenization is a bottleneck for generative modeling and compression; simpler, more scalable quantizers are of broad interest.
+The paper presents a clean and effective method with strong empirical support. The weaknesses identified are minor and addressable — none threaten the core contribution. The bounded quantization error derivation is the most substantive gap, but the empirical evidence independently validates the method's effectiveness. I recommend acceptance.
 
-**Claims support**: Mostly well-supported for reconstruction. The compression claims are under-supported due to thin RD evaluation.
-
-**Soundness**: The core experiments are sound. The LFQ ablation is properly controlled.
-
-**Clarity**: Well-written and organized. The theoretical derivations are clear.
-
-**Value**: The method is likely to be practically useful given its simplicity, strong results, and efficiency.
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

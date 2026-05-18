@@ -1,18 +1,18 @@
-Now I have all the information needed. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper and can authoritatively evaluate the reviewer claims against the actual paper content. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes using polynomial zonotopes — a non-convex set representation — to propagate perturbations through transformer layers for formal verification, with the key technical contribution being exact matrix-set multiplication in the attention mechanism (softmax × value), which preserves nonlinear dependencies that convex relaxations lose. The approach generalizes prior zonotope-based transformer verification (Bonaert et al., 2021), introduces a tunable parameter ρ_lim to trade off precision for runtime, and demonstrates up to 6.7× larger verified embedding volumes on small transformer classifiers.
+This paper proposes a non-convex, set-based verification approach for transformers using polynomial zonotopes. The core technical contribution is preserving nonlinear dependencies across attention heads through exact matrix-set multiplication (Proposition 2), which generalizes prior convex-relaxation approaches (Bonaert et al., 2021) via a tunable precision parameter ρ_lim. The method is evaluated on four small binary-classification transformer models (medical safety and Yelp datasets), demonstrating 1.33×–1.82× larger verified embedding spaces than the zonotope baseline.
 
 ## Strengths
 
-- **Exact set multiplication in attention preserves nonlinear dependencies**: The paper shows (Eq. 11, Proposition 2) that the product of softmax and value sets can be computed exactly using polynomial zonotopes, avoiding the precision loss inherent in convex relaxation methods. This is the unique advantage over prior work and is visually confirmed in Figure 3b, which shows a tighter enclosure for a single attention head compared to the zonotope baseline.
+1. **Exact nonlinear dependency preservation in attention is novel and principled.** Unlike prior convex-relaxation methods that lose dependencies at each nonlinearity, Proposition 2 (Sec. 3.3) shows that the set-multiplication in attention (Eq. 11) is computed exactly using polynomial zonotopes. This is a genuine technical advance — the attention mechanism is the hardest part of transformer verification, and preserving its nonlinear structure is the right direction.
 
-- **Tunable precision via a single parameter that generalizes prior work**: Setting ρ_lim = 1 recovers the zonotope approach of Bonaert et al. (2021) exactly, making this a direct generalization (Section 3.5). This allows graceful degradation from higher-precision non-convex to lower-precision convex verification within a single algorithmic framework.
+2. **Clean generalization of prior work with tunable precision.** The parameter ρ_lim controls how many higher-order terms are retained (Sec. 3.5, Algorithm 1). Setting ρ_lim=1 recovers the zonotope method of Bonaert et al. (2021), while increasing ρ_lim yields progressively tighter enclosures. Table 2 shows this monotonic improvement across all models and datasets, directly supporting the claim of a precision–speed trade-off.
 
-- **Substantially larger verified input sets than prior methods**: Table 2 shows polynomial zonotopes achieve up to 6.7× larger verified embedding volumes (model M4, ρ_lim = 100) than the zonotope baseline, and orders of magnitude more than interval bound propagation. These results directly support the paper's central claim of tighter enclosures.
+3. **Provable complexity bounds.** Theorem 1 (Sec. 3.5) bounds overall computational complexity by O(t·h·d_V·d_model·g_max·κ), while Lemma 3 shows that without order reduction the generator count would grow as O(g_𝒳^{3^κ}). The paper then introduces g_max to keep this tractable, providing clear theoretical justification for the practical algorithm.
 
-- **Scales to regimes where enumeration is infeasible**: Figure 3a shows that a sentence with 96 synonym words (over 2 billion synonym sentences) can be verified in seconds using the proposed approach, whereas enumeration would require hours or days.
+4. **Demonstrated improvement across multiple models and datasets.** The evaluation covers four models trained on two different datasets, with up to 27 tokens per sentence (Table 2). In every configuration, the polynomial-zonotope approach with ρ_lim≥2 achieves a larger verified embedding volume than both interval bound propagation and the zonotope baseline.
 
 ## Weaknesses
 
@@ -21,52 +21,52 @@ None.
 
 ### Major
 
-- **Evaluation mismatch with LLM framing**: The paper's title, abstract, introduction, and conclusion frame the contribution as verifying "large language models," but the experiments are on very small transformer classifiers (trained from scratch for binary classification on medical safety and Yelp datasets). The authors honestly acknowledge in the Limitations (Section 6) that "all methods are not yet applicable to modern-size large language models," but the central narrative throughout the paper consistently refers to "large language models" rather than "small transformers" — e.g., "We evaluate our approach on four large language models" (line 260) for models trained from scratch. This framing mismatch between the claimed significance and the actual evaluation substantially weakens the paper's impact. The contribution is a step toward LLM verification, but the paper overstates this throughout.
+1. **The connection between ℓ∞-ball verification and the motivating synonym-substitution threat model is assumed, not validated.** The paper motivates verification as a safety shield against adversarial synonym substitution, and Table 1 lists 96 synonym words for an example sentence. However, no experiment tests whether those synonyms actually lie inside the verified ℓ∞ ball at the reported radii, nor whether the ℓ∞ ball excludes non-synonymous embeddings. The paper acknowledges this assumption in the Limitations section ("we cannot guarantee that we capture all synonyms"), but this acknowledgment does not substitute for empirical validation. Since the paper's title and abstract frame the contribution as a step toward verifying LLM safety, the gap between the formal guarantee (no unsafe point in an ℓ∞ ball) and the intended safety property (no synonym sentence is unsafe) weakens the practical relevance of the results. This is not fatal — the core methodological contribution stands independently — but it limits what the evaluation can claim.
 
 ### Minor
 
-- **ℓ∞-ball to synonym mapping is assumed, not validated**: The paper constructs ℓ∞ balls in embedding space to capture synonyms, citing distributional semantics literature (Harris 1954; Li & Yang 2018). The Limitations section honestly acknowledges "we cannot guarantee that we capture all synonyms" and that the unsafe region "might also not correspond to an actual synonym sentence as it is sparsely populated." However, no empirical validation is provided for how well the ℓ∞ radius used in experiments corresponds to actual synonym replacement or semantic equivalence for the specific models tested. This limits the practical interpretability of "verified embedding volume" as a proxy for synonym robustness.
+2. **Model architecture details are absent from the main text.** The paper does not report the number of transformer blocks (κ), embedding dimension (d_model), number of attention heads (h), hidden dimensions of feedforward layers, or the activation function used for the four models evaluated. "Up to 27 tokens" is the only architectural detail provided. These details may reside in the appendix (which was not available in the parsed submission), but their absence from the main text makes it difficult for readers to assess the experimental setup or compare with future work. The paper would also benefit from a controlled ablation varying κ or d_model to show how the method scales along these axes.
 
-- **Limited comparison baselines**: The experimental comparison includes only the zonotope baseline (ρ_lim = 1, claimed equivalent to Bonaert et al., 2021) and interval bound propagation. While ρ_lim = 1 plausibly recovers Bonaert et al.'s method, there is no comparison to other transformer verification approaches (Wei et al., 2023; Shi et al., 2020, 2024) or to alternative non-convex verification methods. The paper cites these works for softmax bound improvement (line 187) but does not ablate or compare against them.
+3. **The softmax enclosure error is not isolated from the order-reduction error.** The paper's central advantage is exact matrix-set multiplication, but the softmax layer (Lemma 2) necessarily introduces outer approximation. The paper states "we found that, in practice, our method works well as long as the dependencies between dimensions are sufficiently well preserved" — this is asserted, not demonstrated. An ablation comparing (a) polynomial zonotopes with no order reduction, (b) polynomial zonotopes with ρ_lim=1 (convex relaxation), and (c) zonotopes as in Bonaert et al. would isolate where the precision gain comes from. Without this, it is unclear how much of the improvement is due to dependency preservation vs. other factors.
 
-- **Precision impact of order reduction not quantitatively analyzed**: The paper addresses exponential generator growth (Lemma 3: O(g_X^{3^k})) via order reduction parameterized by ρ_lim and g_max, and provides asymptotic complexity (Theorem 1). However, the precision loss incurred by each order reduction step is not quantitatively characterized — e.g., how much volume is lost, or how the choice of ρ_lim affects the tightness of the final output bounds for different input sizes. This makes it difficult to assess the precision-runtime tradeoff beyond the specific values tested.
+4. **The zonotope baseline implementation could be better documented.** The paper states that setting ρ_lim=1 recovers the zonotope approach, which is a reasonable way to implement the baseline within the same framework. However, the paper does not confirm whether key parameters (g_max, order-reduction strategy) were held consistent between the zonotope and polynomial-zonotope runs, or describe how operations from Bonaert et al. were mapped to the CORA framework.
 
 ### Trivial
-None.
+- The reformulated softmax equation (Eq. 12) contains a notational issue: `1/(Σ_i exp(l_(i)) − l_(j))` appears to be missing parentheses in the exponential argument.
 
 ## Nice-to-Haves
-
-- An empirical validation of the ℓ∞-to-synonym mapping (e.g., checking what fraction of actual synonym substitutions fall within the ℓ∞ ball at the tested radii) would strengthen the connection between the verification results and the motivating synonym-safety application.
-
-- An ablation study isolating the benefit of exact set multiplication from the benefit of using a richer (non-convex) set representation would help attribute improvements more precisely.
+- **Validate the synonym-ℓ∞ link empirically.** For a handful of sentences, compile actual synonym lists and check whether the verified ℓ∞ ball at the reported radius covers them. This would ground the formal guarantee in the real-world threat model.
+- **Report actual generator counts after order reduction** (g_max was not reported in the main table), which is a key parameter for understanding the precision–time trade-off.
+- **Vary κ (number of blocks) and report the fraction of time spent in order reduction vs. layer operations.** This would clarify practical bottlenecks.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution:
-
-1. **"The theoretical contribution is incremental — the only non-convex element is the exact matrix multiplication"**: This is a description of the contribution, not a weakness. The paper is transparent about what is exact (multiplication) vs. approximate (softmax enclosure). Exact set multiplication for attention is the key differentiator, and the paper correctly identifies it as its unique advantage. Not removed for being wrong, but downgraded from a claimed weakness to a factual characterization.
-
-2. **"No comparison to existing transformer verifiers (e.g., Bonaert et al.'s original implementation)"**: The paper does compare to Bonaert et al. (2021) via the ρ_lim = 1 setting, with a clear claim that this recovers their method exactly (Section 3.5). Whether the implementation matches is a reproducibility detail, not a missing comparison.
-
-3. **"Self-implemented zonotope baseline"**: The paper implements the zonotope method within its own framework (CORA toolbox) because it needs to interface with the same pipeline. This is standard practice in verification papers where methods share infrastructure. The ρ_lim = 1 setting is claimed to be mathematically equivalent.
+These points were raised by reviewers but are removed with justification:
+- **"Softmax enclosure needs a validity condition"** — The paper explicitly states (line 187) that the inverse function requires positive inputs and references Singh et al. (2018, Thm. 3.2) for ensuring this via the exp enclosure. The paper already addresses this.
+- **"Unfair baseline comparison / timeout discrepancy"** — The paper implements the baseline within the same CORA framework by setting ρ_lim=1, which is a standard and fair approach. Timeouts on the baseline (if they occurred) would disadvantage the baseline, not the proposed method.
+- **"Exposition assumes familiarity with CORA"** — The paper targets the neural network verification community, for whom set-based computing and the CORA toolbox are standard. This is a stylistic preference, not a weakness.
+- **"Complexity bound is suspiciously clean"** — Theorem 1 bounds Alg. 1's forward pass, which is standard practice. The order-reduction cost is a separate concern.
+- **Not applicable to modern-size LLMs** — The Limitations section explicitly states this, and the title uses "Towards." The paper is a proof-of-concept on small models, which is an honest scope.
 
 ## Novel Insights
 
-The reviews surface one genuinely useful observation beyond the paper's own contributions: the tension between the paper's ambitious "LLM verification" framing and its modest small-model evaluation is structural rather than cosmetic. The paper would be substantially stronger if it either (a) re-framed the contribution as "tighter transformer verification" rather than "LLM verification," matching the actual evaluation, or (b) evaluated on at least one publicly available pre-trained transformer of meaningful size to demonstrate scalability. The current framing leads reviewers to expect experiments the paper cannot deliver, which distracts from the genuine technical contribution.
+The most interesting observation emerging from the reviews is that the paper's core technical contribution (exact polynomial-zonotope multiplication for attention) is compelling enough to stand on its own merits, but its packaging — as a safety shield against synonym substitution — creates an expectations gap. The evaluation convincingly shows tighter enclosures for ℓ∞ balls, which is the standard metric in neural network verification. However, the paper would be stronger if it either reframed the contribution more narrowly ("tighter transformer verification") or invested in validating the synonym-embedding connection. This tension between verification precision and real-world threat-model relevance is not unique to this paper; it reflects a broader challenge in the formal verification of language models.
 
 ## Suggestions
 
-1. **Reframe the paper's scope honestly in the title and throughout**: Replace "Towards Formally Verifying LLMs" with language that matches the actual evaluation, e.g., "Tighter Transformer Verification via Polynomial Zonotopes" or "Non-Convex Dependency Preservation for Transformer Formal Verification." Reserve claims about "LLMs" for the discussion and future work.
-
-2. **Add at least one experiment on a pre-trained (not trained-from-scratch) transformer** of modest size (e.g., a small BERT variant) to demonstrate that the method works on learned parameters and embeddings, not just randomly initialized or custom-trained models.
-
-3. **Provide empirical evidence connecting ℓ∞ radii to actual synonym substitution** — e.g., show what fraction of WordNet or token-level synonym replacements fall within a given ℓ∞ radius for the embedding space used.
-
-4. **Include a precision-runtime Pareto analysis** varying ρ_lim on a few fixed inputs, showing how the verified volume grows (and runtime grows) as ρ_lim increases, to help users understand the tradeoff quantitatively.
+1. Add a small-scale validation experiment: for 3–5 sentences, compile synonym lists and compute the minimal ℓ∞ radius that covers all synonyms of each token, then report how the verified radius compares. Even a negative result (some synonyms fall outside the verified ball) would be informative and more honest than silence.
+2. Report architecture details for all four models (κ, d_model, h, d_ff, activation function) and actual generator counts after order reduction.
+3. Conduct a single-block ablation (κ=1) with and without the softmax enclosure to isolate the precision contributions from different components.
 
 ## Score and Decision
 
-This paper makes a technically sound contribution — the exact set multiplication for attention is a genuine advance over convex relaxation methods, and the results on small models convincingly demonstrate tighter bounds. The tunable precision parameter elegantly generalizes prior work. However, the persistent framing mismatch between "LLM verification" and the small-scale evaluation weakens the paper's impact significantly. With honest reframing and modestly expanded evaluation, this work could be a solid contribution. In its current form, the overclaiming prevents acceptance.
+**Originality:** The use of polynomial zonotopes for transformer verification is novel and extends the prior art in a non-trivial way.  
+**Importance:** Formal verification of LLMs is an important and timely problem.  
+**Claims support:** The core claim (tighter enclosures via dependency preservation) is well supported. The practical claim (verification against synonym substitution) is less well supported.  
+**Soundness:** The methodology is sound; the softmax enclosure follows prior work; the complexity analysis is rigorous.  
+**Clarity:** The writing is clear for its target audience, though some details (model architectures) are missing.  
+**Value:** The paper makes a solid methodological contribution to the transformer verification literature.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+The paper presents a technically sound and novel method for preserving nonlinear dependencies in transformer verification. The evaluation demonstrates consistent improvements over strong baselines. The main weakness is a gap between the motivating application (synonym-substitution safety) and what is actually evaluated (ℓ∞-ball volume). This gap is acknowledged by the authors but not addressed. With relatively modest additions (validating the synonym-ℓ∞ link empirically, reporting architecture details), the paper would be significantly stronger. In its current form, the technical contribution is solid and the paper is a good fit for the venue.
+
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

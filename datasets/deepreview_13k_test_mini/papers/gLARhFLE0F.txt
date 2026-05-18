@@ -1,0 +1,454 @@
+\title{LUT-GEMM: Quantized Matrix Multiplication based on LUTs for Efficient Inference in Large-Scale Generative Language Models}
+
+\begin{abstract}
+Recent advances in self-supervised learning and the Transformer architecture have significantly improved natural language processing (NLP), achieving remarkably low perplexity.
+However, the growing size of NLP models introduces a memory wall problem during the generation phase.
+To mitigate this issue, recent efforts have focused on quantizing model weights to sub-4-bit precision while preserving full precision for activations, resulting in practical speed-ups during inference on a single GPU.
+However, these improvements primarily stem from reduced memory movement, which necessitates a resource-intensive dequantization process rather than actual computational reduction.
+In this paper, we introduce LUT-GEMM, an efficient kernel for quantized matrix multiplication, which not only eliminates the resource-intensive dequantization process but also reduces computational costs compared to previous kernels for weight-only quantization.
+Furthermore, we proposed group-wise quantization to offer a flexible trade-off between compression ratio and accuracy.
+The impact of LUT-GEMM is facilitated by implementing high compression ratios through low-bit quantization and efficient LUT-based operations.
+We show experimentally that when applied to the OPT-175B model with 3-bit quantization, LUT-GEMM substantially accelerates token generation latency, achieving a remarkable 2.1$\times$ improvement on a single GPU when compared to OPTQ, which relies on the costly dequantization process
+\end{abstract}
+
+\section{Introduction}
+
+
+
+Recent years have observed large-scale language models (LLMs) presenting state-of-the-art performance on various natural language process (NLP) tasks.
+Such rapid progress in NLP performance has been highly facilitated by the self-supervised learning methods, avoiding expensive manual labeling \citep{BERT, wav2vec2, simCLR}.
+Leveraging extensive training datasets, these models benefit from efficient sequence-to-sequence architectures like the Transformer model \citep{transformer_original}, leading to notable increases in model parameters.
+
+Previous studies \citep{brown2020language, scaling_laws_openai, chinchilla} have reported that LLM performance follows a predictable power-law scaling as a function of model size.
+Accordingly, in recent years, several large-scale generative language models, including GPT-3 (175B) \citep{brown2020language}, HyperCLOVA (204B) \citep{kim2021changes}, Gopher (280B) \citep{gopher}, Chinchilla (70B) \citep{chinchilla}, Megatron Turing NLG (530B) \citep{smith2022using}, PaLM (540B) \citep{palm}, and LLaMA (65B) \citep{touvron2023llama}, have been proposed to further advance state-of-the-art performance.
+However, models with billions of parameters cannot be accommodated on a single GPU due to the limited memory size of GPUs, which is sacrificed to enhance memory bandwidth \citep{tensorRT, scalpel2017}.
+To address such a concern, researchers have proposed to use model parallelism, which distributes computations over multiple GPUs through GPU-to-GPU communication \citep{shoeybi2019megatron, narayanan2021efficient}.
+Nevertheless, it is worth noting that model parallelism introduces additional overheads, stemming from the inter-GPU communication.
+Consequently, the performance gains achieved through model parallelism exhibit a sub-linear relationship with the number of GPUs employed.
+
+
+
+To mitigate the challenges related to model parallelism, parameter quantization \citep{xu2018alternating,limitquant2017,resnet_quan} presents a practical solution for minimizing model size, reducing the number of GPUs required for inference.
+Among the various quantization schemes, the preferred choice is quantizing both activations and weights to exploit integer-based arithmetic units \citep{jacob2018quantization, wu2018, lin2016fixed}.
+Nonetheless, this quantization method is practically limited to 8 bits, and non-linear operations (e.g., softmax and normalization) may yield imprecise results \citep{i-bert, int8_transformer}.
+Moreover, to fully utilize integer arithmetic units, it is essential to implement on-the-fly activation quantization and dequantization, along with an accurate estimation of the activation distribution \citep{yao2022zeroquant, llmint8}.
+
+Recent research has proposed 4-bit weight-only quantization as an approach for memory compression \citep{gptq, awq, dettmers2023spqr, kim2023squeezellm}, involving on-the-fly conversion to full-precision.
+While this sacrifices the computational benefits of using integer arithmetic,
+empirical findings in LLMs suggest that weight-only quantization can achieve significantly higher compression ratios for a given target accuracy compared to quantizing both weights and activations \citep{glm130b}.
+Various weight-only quantization methods have been proposed to improve the compression ratio while preserving accuracy, often accompanied by dedicated kernels for practical acceleration through quantization \citep{biqgemm, gptq, awq}.
+
+\begin{figure}[t]
+  \centering
+ \includegraphics[width=0.9\linewidth]{./figures_iclr/Fig1_Dequant_v2.eps}
+  \caption{Three matrix multiplication schemes for W8/A8 or W4/A16 (i.e., weight-only) quantization format. Our proposed LUT-GEMM can adopt W4 and A16 without requiring an additional dequantization step.}
+  \label{fig:dequant_overview}
+\end{figure}
+In this paper, we present LUT-GEMM, a kernel designed to facilitate quantized matrix multiplications with quantized weights and full-precision activations.
+As shown in Figure~\ref{fig:dequant_overview}, LUT-GEMM addresses two issues prevalent in previous quantization approaches: 1) accuracy degradation due to quantized activations and 2) the need for additional dequantization implementation.
+LUT-GEMM inherently accommodates quantized weights and full-precision activations, enabling the acceleration of the inference process while preserving the desired level of precision.
+Specifically, LUT-GEMM employs the binary-coding quantization (BCQ) format \citep{rastegariECCV16} to capitalize on simple arithmetic operations.
+It is worth noting that BCQ was initially proposed to support non-uniform quantization, which relies on customized hardware for bit-level operations.
+To our knowledge, we are the first to show that prior uniform quantization can be reformulated in the form of BCQ, allowing LUT-GEMM to support both non-uniform and uniform quantization formats.
+Consequently, LUT-GEMM can execute a wide range of weight-only quantization schemes for matrix multiplications, achieving low inference latency and eliminating the need for on-the-fly dequantization.
+
+Our major contributions in this work include the following:
+\textbf{1)} We verify that BCQ is capable of representing both uniform and non-uniform weight quantization.
+\textbf{2)} We show that LUT-GEMM, using the BCQ format, offers a broad spectrum of latency and accuracy trade-offs, leveraging GPU-specific hardware utilization methods to implement various BCQ configurations efficiently.
+\textbf{3)} For LLMs, we demonstrate that LUT-GEMM, which utilizes quantized weights \textit{without a dequantization process}, can considerably accelerate matrix multiplications with small quantization bits while power consumption is greatly saved by reducing the number of GPUs.
+\textbf{4)} Assuming a 3-bit BCQ format for weights of OPT-175B served by a single GPU, experimental results show that LUT-GEMM accelerates token generation latency by 2.1$\times$ compared to the OPTQ \citep{gptq}.
+
+
+\section{Background}
+
+
+
+
+
+
+\subsection{GPU-Accelerated Generative LMs}
+
+For large LMs, the processing time of matrix multiplications dominates the entire inference latency because of higher time complexity compared to activation functions, normalization layers, and so on \citep{llmint8}.
+ 
+Note that due to the limited memory capacity of a single GPU, large LMs may need multiple GPUs, resulting in increased communication latency.
+GPUs are commonly adopted to accelerate inference as GPUs embed lots of arithmetic units and support multiple threads, critical for speeding up matrix multiplications \citep{narayanan2021efficient, tensorRT}.
+However, extracting high performance from GPUs depends on arithmetic intensity, and therefore, the batch size should be large enough to ensure a high reuse ratio from main memory \citep{tensor_core}.
+
+
+
+\subsection{Quantization Methods and Limitations}
+
+Various research efforts have been made to enhance the serviceability of large and heavy deep neural networks by improving their latency and throughput.
+These efforts include quantization \citep{rastegariECCV16, jacob2018quantization, adaround, xu2018alternating, Extremely_low_quant_emnlp2020}, pruning \citep{deepcompression, suyog_prune, gale2019state}, knowledge distillation \citep{distillation, distillation2018}, and low-rank approximation \citep{SVD2013, GroupReduce, edalati2021kronecker}. 
+Among these, quantization is the most extensively researched field, which involves using faster and more efficient computing units and reducing memory usage.
+Uniform quantization using an INT8 operator is particularly well-studied among the various quantization formats and is currently being actively applied in LLMs \citep{yao2022zeroquant, llmint8, smoothquant}.
+
+INT8 arithmetic units, commonly found in contemporary computing systems, offer reduced latency (thanks to their low hardware complexity) and decreased memory usage of up to 50\% compared to FP16.
+Thus, present NVIDIA GPUs employ Tensor cores that support INT8 operations to accelerate computations \citep{tensor_core}.
+However, the utilization of INT8 mandates the quantization of activations, which can pose a significant challenge in achieving compressed and accelerated models employing INT8 units.
+For instance, when scaling factors are determined offline, activation quantization may lead to a considerable reduction in model accuracy as outliers are approximated.
+
+To address declining accuracy in quantizing LLMs, token-based dynamic quantization has emerged as a crucial technique \citep{yao2022zeroquant,llmint8}. 
+The LLM.int8() method \citep{llmint8} addresses the systematic appearance of outliers in LLMs by proposing a decomposition method that conducts most computations in INT8 and dequantizes a limited number of outliers to FP16, resulting in only a marginal latency decrease in LLMs.
+SmoothQuant \citep{smoothquant} takes an advanced approach by mathematically transferring activation variance (challenging to quantize due to outliers) to weights, which are relatively easier to quantize.
+This technique enables efficient computation using INT8 arithmetic units (i.e., W8A8), even when employing static quantization of activations.
+However, it should be noted that applying SmoothQuant in novel LLMs is necessary to empirically observe and validate the occurrence of outliers before applying the migration technique.
+The utilization of INT8 precision introduces variability in its efficacy, primarily influenced by the specific characteristics of each phase within LLM inference.
+While the summarization phase exhibits a high likelihood of weight reuse, resulting in a compute-bound operation, the generation phase, due to its autoregressive nature, primarily involves a memory-bound workload.
+This intrinsic memory limitation restricts hardware throughput even with INT8 precision.
+Consequently, services generating a large number of tokens may experience only marginal performance gains with INT8 adoption.
+
+Recent studies have focused on the inefficiency of the generation step and, in response, proposed the utilization of the W4A16 format \citep{gptq, glm130b, dettmers2023spqr, kim2023squeezellm}, which compresses model weights into 4-bit integers without quantizing the activations as weights typically dominate memory size compared to activations.
+Given that current computing systems cannot accelerate the W4A16 format, OPTQ \citep{gptq} and AWQ \citep{awq} solve such an issue by dynamically dequantizing weights to FP16 and then performing matrix multiplication.
+Leveraging the memory-bound nature of the generation step, this approach enhances generation latency by reducing memory movement despite the dequantization overheads.
+
+
+\subsection{Binary-Coding Quantization}
+
+
+Binary-coding quantization (BCQ) initially introduced by \cite{xu2018alternating}, presents a compelling alternative to conventional uniform quantization methods.
+For instance, when a weight vector $\vw$ (of size $n$) is quantized into $q$-bit by BCQ, $\vw$ is approximated to be $\sum_{i=1}^{q}\alpha_i \vb_i$ where $\alpha_i \in \R^+$ is a scaling factor and $\vb_i \in \{-1,+1\}^n$ is a binary vector.
+In this paper, we have chosen to employ BCQ as our primary quantization technique for weights while retaining activations in full precision to address the challenges mentioned earlier.
+Moreover, we introduce an extension to BCQ, enhancing its capabilities to encompass both uniform quantization and group-wise quantization.
+This extension, outlined in the subsequent section, not only broadens BCQ's utility but also enables the applicability of LUT-GEMM to various quantization methods.
+
+
+
+\section{Design Methodology of LUT-GEMM}
+
+
+LUT-GEMM is devised to develop high-performance, energy-efficient inference systems for LLMs.
+To achieve this objective, LUT-GEMM incorporates several innovative approaches.
+Firstly, we employ a lookup table (LUT) based computation technique to mitigate redundant calculations caused by digitized binary weights after BCQ.
+Furthermore, since most non-uniform quantization methods involve complex operations with limited parallelism and often lack hardware support, we design LUT-GEMM to efficiently support BCQ formats.
+Our proposed kernel, LUT-GEMM, directly utilizes BCQ formats without additional overhead, such as dequantization.
+Secondly, we expand conventional BCQ methods by introducing a bias term, significantly enhancing representational capability.
+This simple yet profound enhancement enables the representation of both non-uniform and uniform quantization methods within the extended BCQ format, providing us with the flexibility to leverage various quantization techniques based on the specific requirements of LLMs.
+Finally, We further refine the implementation details of the binary-coding quantization scheme, enabling a trade-off between compression ratio and quantization error to better exploit the characteristics of LLMs.
+As a result, LUT-GEMM demonstrates reduced latency and/or a decreased number of GPUs required for LLM inference while inherently accommodating various weight-only quantization methods.
+
+\subsection{LUT based Quantized Matrix Multiplication}
+
+Our quantization scheme, which utilizes BCQ format for weight-only quantization while maintaining full precision for activations, leads to duplicate and redundant partial computations in naive matrix multiplications.
+To illustrate, assume that a binary matrix $\mB \in \{-1,+1\}^{4 \times 6}$ and an activation vector $\vx \in \R^6$ are given as
+\begin{equation}
+\label{eq:matmul}
+    \mB =
+    \begin{bmatrix}
+    +1 & +1 & -1 & -1 & -1 & +1 \\
+    +1 & +1 & -1 & +1 & +1 & -1 \\
+    +1 & +1 & -1 & -1 & -1 & -1 \\
+    -1 & -1 & +1 & -1 & -1 & +1
+    \end{bmatrix}
+    , \quad \vx =
+    \begin{bmatrix}
+    x_1 & x_2 & x_3 & x_4 & x_5 & x_6
+    \end{bmatrix}.
+\end{equation}
+Then, computing $\mB \vx^\top$ (that is to be multiplied by scaling factors) would repeat $(x_1+x_2-x_3)$ three times and $(-x_4-x_5+x_6)$ two times.
+Such redundant computations are caused by digitized elements of $\mB$, and thus, we expect more duplicated computations as the size of matrices increases according to the growth of model size.
+Moreover, loading each element of $\mB$ requires bit-level memory accesses that can be slow for commercial CPUs and GPUs.
+To efficiently perform $\mB \vx^\top$ while avoiding bit-level memory accesses, we can pre-compute all possible combinations of full-precision activations and binary patterns.
+Note that a LUT has been widely used to save processing time when numerous computations yield outputs within a restricted set \citep{LUT_filter, LUT_optimization, biqgemm, LUT_CNN_Inference}.
+LUT-based computation is justified, especially when retrieving a value from a LUT is much faster than carrying out the original calculations.
+BCQ format (without quantizing activations that require heavy modifications in training codes and model structure \citep{wu2018, jacob2018quantization}) is also useful to be implemented by LUT-based approaches.
+To construct a LUT, a hyperparameter $\mu$ is introduced, representing the sub-vector length of $\vx$.
+For example, to address redundant computation observed in Equation~\ref{eq:matmul}, we can pre-compute 8 (=$2^3$) possible values with every three elements in $\vx$ and store those values in a LUT.
+Hence, $\mu$ is 3 in this example.
+Once $2^{\mu}$ values of a LUT are generated by using a sub-vector of $\vx$, arithmetic operations to obtain partial dot products (of $\mB\vx^\top$) are replaced with LUT retrieval operations while a key is given by concatenating $\mu$ binary elements of $\mB$.
+To complete $\mB\vx^\top$ computation, as the final step, those partial products are summed and then multiplied by scaling factors. When the row dimension of $\mB$ is enlarged (as generative LMs get larger), the utilization of a LUT increases due to more occurrences of redundant computations.
+
+To quantify the reduction in computation, assume that a $q$-bit quantized ($m \times n$) binary matrix $\mB_i$ (for $i = 1, 2, 3, \ldots, q$) is multiplied with an ($n \times 1$) input vector $\vx$ using $\mu$-width LUTs.
+The computational complexity of the LUT-based approach can be described as follows, when $mq \gg 2^{\mu}$:
+\begin{equation}
+C = C_{build} + C_{read} = \mathcal{O}\left( 2^{\mu} \cdot \cfrac{n}{\mu} + m \cdot \cfrac{n}{\mu} \cdot q \right) \approx \mathcal{O}\left(m \cdot \cfrac{n}{\mu} \cdot q \right),
+\label{eq:comput}
+\end{equation}
+where $C_{build}$ and $C_{read}$ represent the complexity of building the LUT and reading a value from the LUT, respectively.
+Consequently, compared to the complexity of conventional matrix multiplication $\mathcal{O}(mn)$, LUT-GEMM can achieve a computational savings of $\frac{q}{\mu}$ times by leveraging LUTs.
+
+
+\subsection{LUT Based implementation on GPU}
+\label{sec:kernel_implementation}
+
+In addition to the LUT-based scheme (eliminating redundant computations and bit-level memory accesses), our strategy for optimizing single-batch operations on GPUs is as follows:
+1) To improve parallelism, we create as many threads as possible while each thread is allowed to perform independent LUT accesses.
+2) Binary weights accessed by a thread can share a common scaling factor such that operations related to scaling factors do not degrade the performance of a thread.
+3) If we allocate too small resources to a thread, then LUT utilization can be low, and synchronization overhead can increase. As such, we need to optimize thread configurations empirically.
+
+Figure~\ref{fig:nuQmm_overall_example} illustrates the overall LUT-GEMM implementation scheme on GPUs.
+For the sake of simplicity, we formulate the proposed quantized matrix multiplication as $\mathbf{y} = \sum_{i=1}^{q}\left(\mA_i \circ \left( \mB_i \cdot \vx\right)\right)$, where $\mA$ is an $(m \times 1)$ FP16 scaling matrix, $\mB$ is an $(m \times n)$ FP16 binary matrix, $\vx$ is an FP16 input vector of size $n$, and the operator $\circ$ indicates element-wise multiplication.
+For LUT-GEMM, we assign $l$ LUTs to a thread block (TB) of GPU.
+Then, the size of submatrix of $\mB$ allocated to each TB becomes $(t_h \times t_w)$ where $t_w = l \times \mu$.
+Small $t_h$ can increase the number of available threads while large $t_h$ enhances LUT utilization inside a TB.
+Thus, $t_h$ is empirically determined (2048 is a practical number for large-scale LMs).
+For $q>1$, the entire process of Figure~\ref{fig:nuQmm_overall_example} can be iterated $q$ times while intermediate results are accumulated.
+ 
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{./figures_iclr/Fig2_Kernel_Overview.eps}
+  \caption{The overview of LUT-GEMM implementation on GPUs. In this example, we assume $\mu=8$, $t_h=4$, $l=4$, $t_w=32$, and $q=1$. ``$\circ$" denotes element-wise multiplication and ``$\cdot$'' indicates a tensor product.}
+  \label{fig:nuQmm_overall_example}
+\end{figure*}
+
+\subsection{Representational Capability of LUT-GEMM}
+
+LUT-GEMM extends the BCQ format to support both non-uniform and uniform quantization methods, which are widely used in compressing LLM.
+In this section, we introduce extended BCQ format to enhance representational capability of LUT-GEMM.
+\paragraph{Asymmetric Binary-Coding Quantization}
+
+Conventional BCQ methods are basically limited to exhibiting symmetric quantization shape with respect to the zero point.
+Another constraint of BCQ methods stems from their inability to represent the value of zero due to the symmetric quantization properties.
+To enhance the representational capability of BCQ, we extend the conventional BCQ method by including a bias term $z$ as follows:
+\begin{equation}
+    \hat{\vw} = \sum_{i=0}^{q-1}( \alpha_i \cdot \vb_i) + z,~\vb_i \in [-1,+1]^n,
+    \label{eq:bcq}
+\end{equation}
+where a weight vector (of size $n$) is decomposed into binary vector $\vb_i$ with associated scaling factors $\alpha_i$.
+As a result, the modified BCQ format, along with the inclusion of the bias term, can represent asymmetry quantization centered around z, as illustrated in Figure~\ref{fig:bcq}(a).
+
+\paragraph{Uniform Quantization}
+
+Incorporating a bias term into the BCQ format, we have discovered that the extended BCQ format can effectively represent uniform quantization by carefully adjusting the scaling factors and bias term, as visually depicted in Figure~\ref{fig:bcq}(b).
+
+In Figure~\ref{fig:bcq}, we can see that for $q$-bit quantization, the uniform quantization method employs a single scaling factor, while the non-uniform quantization technique calls for the use of $q$ distinct scaling factors.
+Consequently, due to the incorporation of the extended binary-coding quantization format, our proposed LUT-based matrix multiplication scheme is applicable to both uniform quantization and binary-coding-based non-uniform quantization methods.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=1.0\linewidth]{./figures_iclr/Fig3_BCQ_Extension.eps}
+  \caption{Extension of binary-coding quantization to support both non-uniform and uniform quantization formats, achieved by including a bias term ($q=3$).}
+  \label{fig:bcq}
+\end{figure}
+\subsection{Latency-Accuracy Trade-Off for Improved Applicability}
+
+
+
+As the hidden size increases rapidly (e.g., $d_{\textrm{model}}=12288$ for GPT-3 175B) according to the advent of large-scale LMs, it would be more difficult to compute a proper scaling factor shared by a larger number of weights.
+As an alternative to row-wise quantization, group-wise quantization in which a scaling factor can be shared by an arbitrary number of weights is widely used to minimize quantization error \citep{gptq, awq}.
+To examine the latency variance of LUT-GEMM with respect to group size $g$, we perform matrix multiplications (using an $(m \times n)$ matrix and an $(n \times 1)$ matrix) when $g$ values vary as shown in Figure~\ref{fig:alpha_latency_main}(a).
+We observe a sufficiently large $g$, such as 128 and 256, can result in fast LUT-GEMM while accuracy improvement by group-wise is substantial.
+To gain insights into the underlying mechanisms, we analyze the memory footprint of LUT-GEMM because single-batch operations are primarily memory-bound and latency is proportional to the memory footprint.
+Let $S_{b}$ and $S_{\alpha}$ represent the space complexity of binary weights and scaling factors, respectively.
+Then the overall space complexity $S$ can be described as
+\begin{equation}
+\begin{split}
+S = S_{b} + S_{\alpha} & = \mathcal{O}\left(1 \cdot m \cdot n \cdot q + 16 \cdot m \cdot \cfrac{n}{g} \cdot q\right) = \mathcal{O}\left(m \cdot n \cdot q \left(1+\cfrac{16}{g}\right)\right).
+\end{split}
+\label{eq4}
+\end{equation}
+As a consequence, when $g \gg 16$, $S$ becomes independent of $g$ and can be approximated as $\mathcal{O}\left(m \cdot n \cdot q\right)$.
+To verify our claim that latency of LUT-GEMM is proportional to memory footprint (when running single-batch operations), we explore various $(q,g)$ pairs and their corresponding compression ratios and measure matrix multiplication latency when $m=n=12288$ as depicted in Figure~\ref{fig:alpha_latency_main}(b).
+Note that even if the number of quantization bits $q$ is smaller, the memory footprint can be large when the group size $g$ is small (i.e.
+Therefore, the additional search parameter $g$ allows a fine-grained search space of compression ratio that is not available by $q$ alone.
+Across all available compression ratios, latency is a function of compression ratio.
+For instance, if two different pairs $(q_1,g_1)$ and $(q_2,g_2)$ exhibit a similar memory footprint, then we can expect similar latency by LUT-GEMM.
+
+\begin{figure}[h]
+  \centering
+  \includegraphics[width=1.0\linewidth]{./figures_iclr/Fig4_Latency_Overhead.eps}
+  \vspace*{-20pt}
+  \caption{(a) Normalized LUT-GEMM latency when a ($m \times n$) weight matrix is quantized by 3-bit with different $g$ values. (b) Relationship between latency and compression ratio when LUT-GEMM performs quantized matrix multiplications with $m=n=12288$ and various ($q$, $g$) pairs.}
+  \label{fig:alpha_latency_main}
+\end{figure}
+
+
+
+\section{Experimental results}
+
+
+
+In this section, we present the experimental results obtained by utilizing LUT-GEMM across various levels of complexity, ranging from a single-layer experimental setup to the complete model level.
+Initially, we examine the influence of LUT-GEMM on a specific layer, followed by an investigation into the inefficiency of tensor parallelism.
+Finally, we analyze the end-to-end latency of OPT models \citep{OPT-model} to determine the overall effect of LUT-GEMM on performance.
+
+\subsection{Kernel Evaluation}
+
+\paragraph{Latency Comparisons with Various Kernels}
+
+Table~\ref{tab:diff_quants} shows latency measurements for the first layer of the Feed-Forward Network (FFN) in the OPT-175B model \citep{OPT-model}.
+The measured kernels include cuBLAS (for FP-FP or INT-INT), OPTQ \citep{gptq}, AWQ \citep{awq} (for FP-INT), and LUT-GEMM (for FP-INT or FP-BCQ).
+Note that OPTQ and AWQ kernels involve dequantization followed by GEMM, while LUT-GEMM accepts quantized weights directly, eliminating the need for dequantization.
+We can observe that the latency of the INT8-INT8 (with cuBLAS) implementation only slightly improves latency over FP-FP since cuBLAS is not well-optimized for single batch operations.
+While OPTQ and AWQ achieve lower latency than cuBLAS due to reduced memory movement but are slower than LUT-GEMM due to dequantization overhead.
+Moreover, LUT-GEMM exhibits 2.6$\times$ reduction in computation compared to the previous GEMM kernels.
+Thus, the proposed LUT-GEMM kernel, which operates directly on quantized weights and reduces computational complexity, achieves the lowest latency among the kernels considered.
+\begin{table}[h]
+\caption{Latency comparison of the first FFN layer on OPT-175B model with various precision and corresponding kernel selections with $m = 12288$ and $g=128$ on A100-80GB-GPU.}
+\centering
+\small
+\label{tab:diff_quants}
+\begin{threeparttable}[t]
+\begin{tabular}{lcccc}
+\hline
+\multirow{3}{*}{Kernel} & \multicolumn{3}{c}{Precision for Data Type} & \multirow{3}{*}{\begin{tabular}[c]{@{}c@{}}Latency (ms)\\ (Speed up)\end{tabular}} \\
+                        & Weight   & Input   & Output   &                     \\ 
+                        & $(4m \times m)$   & $(m \times 1)$   & $(4m \times 1)$    &                               \\ \hline
+cuBLAS                  & FP32    & FP32     & FP32     & 1.4015 ($\times$0.52)                      \\
+cuBLAS                  & FP16    & FP16     & FP16     & 0.7256 ($\times$1.00)                       \\
+cuBLAS                  & INT8    & INT8     & INT32    & 0.6345 ($\times$1.14)                      \\
+LUT-GEMM                & INT8*    & FP16     & FP16     & 0.4620 ($\times$1.57)                 \\ \hline
+OPTQ \citep{gptq}        & INT3    & FP16     & FP16     & 0.3599 ($\times$2.02)                     \\
+AWQ \citep{awq}          & INT4    & FP16     & FP16     & 0.3238 ($\times$2.24)                       \\
+LUT-GEMM                & INT4*    & FP16     & FP16     & 0.2688 ($\times$2.70)                      \\
+LUT-GEMM                & INT3*    & FP16     & FP16     & 0.2250 ($\times$3.22)                      \\ \hline
+\end{tabular}
+\begin{tablenotes}[flushleft]
+\item [*] LUT-GEMM supports both non-uniform and uniform quantization.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+
+\paragraph{Comparison with FP16 Tensor Parallelism}
+
+Table~\ref{tab:tp_comparison} summarizes the profiling results of matrix multiplications performed by using cuBLAS (with tensor parallelism) or LUT-GEMM.
+GPU power and other metrics are collected by using $\textit{nvidia-smi}$ utility \citep{tiwari2015reliability, alievaluation}.
+We notice that tensor parallelism with additional GPUs in cuBLAS brings about a significant decrease in GPU utilization, memory bandwidth (BW) utilization, and computation latency ratios.
+As evidenced by the increase in the latency ratio of communication, such reductions in utilization indicate that some GPUs can be temporarily idle until all GPUs are synchronized.
+Accordingly, the speed-up that can be obtained by tensor parallelism is a lot smaller than the number of GPUs.
+As a result, cuBLAS with more GPUs causes increased energy consumption for matrix multiplications.
+On the other hand, LUT-GEMM (with one GPU) can offer high speed-up (that cannot be achieved by tensor parallelism) while retaining high GPU/memory utilization.
+Combining low latency and a reduced number of GPUs, thus, LUT-GEMM substantially saves energy consumption for matrix multiplications.
+
+\begin{table}[h]
+\centering
+\small
+\caption{Profiling results of matrix multiplications (with an $(4m \times m)$ matrix and an $(m \times 1)$ matrix). For LUT-GEMM, $g=m$ and $q$ is 2 or 4.}
+\label{tab:tp_comparison}
+\begin{tabular}{lcccccr}
+\hline
+Kernel-GPUs-$m$-$q$           & \begin{tabular}[c]{@{}c@{}}Comm.\\ Ratio ($\%$)\end{tabular} & \begin{tabular}[c]{@{}c@{}}Speed\\ Up\end{tabular} & \begin{tabular}[c]{@{}c@{}}GPU BW\\ Util. ($\%$)\end{tabular} & \begin{tabular}[c]{@{}c@{}}Memory\\ Util. ($\%$)\end{tabular} & \begin{tabular}[c]{@{}c@{}}Avg. Power\\ (W/GPU)\end{tabular} & \begin{tabular}[c]{@{}c@{}}Total\\ Energy (mJ)\end{tabular} \\ \hline
+cuBLAS-1-12288-16           & 0.00                                                         & 1.00                                               & {96.57}                                                      & {98.37}                                                         & {215.70}                                                       & {161.85} ($\times 1.00$)                                      \\
+cuBLAS-8-12288-16           & 38.58                                                        & {3.45}                                               & {52.48}                                                      & {24.27}                                                          & {172.44}                                                       & {299.96 ($\times 1.85$)}                                       \\
+LUT-GEMM-1-12288-2 & 0.00                                                         & {\textbf{4.85}}                                      & {88.63}                                                       & {58.38}                                                          & {280.85}                                                        & {43.49 ($\times \textbf{0.27}$)}                                \\
+LUT-GEMM-1-12288-4 & 0.00                                                         & \textbf{{3.23}}                                      & {92.51}                                                      & {77.98}                                                         & {292.76}                                                       & {68.09 ($\times \textbf{0.42}$)}                              \\ \hline
+\end{tabular}
+\end{table}
+\subsection{End-to-end latency}
+
+We now evaluate the end-to-end latency of inference with a single batch size, considering various LLaMA models with quantized weights while preserving full precision activations.
+Table~\ref{tab:e2e_rtn_main} illustrates the end-to-end latency per token and perplexity when weights are uniformly quantized using AWQ method \citep{awq} .
+
+Latency measurements are conducted within the FasterTransformer framework, exploring different GPU configurations to assess potential speed-up gains from model parallelism.
+
+In the case of LUT-GEMM, where matrix multiplications are accelerated, relative GPU-to-GPU communication overheads become more pronounced compared to cuBLAS, making model parallelism less effective.
+This highlights the prominence of communication overheads for high-performance matrix multiplication engines.
+However, for the LLaMA-65B model with FP16 weights, the model size exceeds the memory capacity of a single GPU (80GB for A100), necessitating model parallelism techniques.
+Nevertheless, when the weights of the LLaMA-65B model are quantized to 3 or 4 bits, as demonstrated to be a viable solution in \citep{gptq}, inference can be accommodated on a single GPU.
+Assuming 3-bit quantization and the implementation of LUT-GEMM with $g$=128, a speed-up of 2.41$\times$ for LLaMA-30B (using one GPU) and 2.04$\times$ for LLaMA-66B (using two GPUs) is achievable.
+
+The efficacy of LUT-GEMM is further enhanced when combined with advanced quantization methods to reduce the number of quantization bits.
+\begin{table*}[h]
+\centering
+\small
+\caption{{Comparison of perplexity and end-to-end latency per token with cuBLAS and LUT-GEMM implementations with AWQ quantization method and model parallelism on multiple GPUs.}}
+\label{tab:e2e_rtn_main}
+\begin{tabular}{ccccccccc}
+\hline
+\multirow{2}{*}{Model} & \multirow{2}{*}{Kernel-$q$-$g$} & \multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Quant.\\ method\end{tabular}} & \multicolumn{1}{c}{Perplexity}  & \multicolumn{3}{c}{Latency (ms)} \\
+                       &                      &                                                                                & Wiki2                            & 1-GPU     & 2-GPU     & 4-GPU    \\ \hline
+\multirow{3}{*}{\begin{tabular}[c]{@{}c@{}}LLaMA\\ 30B\end{tabular}}                       
+                                          & cuBLAS-16-N/A                     & FP16                               & 4.10                     & 43.6      & 25.1      & 16.9     \\
+                                           & LUT-GEMM-4-128                   & AWQ                                & 4.23                     & 20.7      & 15.5      & 12.2     \\
+                                           & LUT-GEMM-3-128                   & AWQ                                & 4.88                     & 18.1      & 13.7      & 11.2     \\ \hline
+\multirow{3}{*}{\begin{tabular}[c]{@{}c@{}}LLaMA\\ 65B\end{tabular}}                       
+                                          & cuBLAS-16-N/A                     & FP16                               & 3.53                     & \textbf{OOM}    & 46.9      & 29.1     \\
+                                           & LUT-GEMM-4-128                   & AWQ                                & 3.67                     & 35.7            & 25.4      & 19.9     \\
+                                           & LUT-GEMM-3-128                   & AWQ                                & 4.24                     & 31.3            & 23.0      & 18.3     \\ \hline
+\end{tabular}
+\end{table*}
+
+
+
+
+\section{Accelerating Quantized OPT-175B}
+
+
+
+
+Table~\ref{tab:OPT_latency_end_to_end} provides a comparison of the end-to-end latency for generating a token in OPT-175B, a representative large-scale LM, using the FasterTransformer framework.
+LUT-GEMM demonstrates its ability to decrease the number of GPUs needed for running inference, while concurrently reducing latency as $q$ diminishes or as the number of GPUs rises.
+For OPT-175B with FP16, a minimum of 8 GPUs is necessary for executing inference.
+However, upon utilizing the BCQ format for quantization, LUT-GEMM is able to perform inference using just a single GPU, while maintaining a comparable overall latency.
+It should be noted that, when comparing identical 3-bit (weight-only and row-wise) quantization scenarios, the latency for token generation using LUT-GEMM is 2.1$\times$ lower than that of the OPTQ library.
+This significant reduction in latency can be primarily attributed to LUT-GEMM's ability to directly accept quantized weights, thereby eliminating the need for dequantization.
+\begin{table}[h]
+\small
+\caption{End-to-end latency per token for OPT-175B model. The latency is measured on A100 80GB.}
+\centering
+\label{tab:OPT_latency_end_to_end}
+\begin{threeparttable}
+\begin{tabular}{ccccccc}
+\hline
+\multirow{3}{*}{GPUs} & \multicolumn{6}{c}{Latency per token (ms)}                                                 \\ 
+                      & \multicolumn{1}{c}{Baseline}   & \multicolumn{1}{c}{OPTQ} & \multicolumn{4}{c}{LUT-GEMM} \\
+                      & \multicolumn{1}{c}{FP16} & \multicolumn{1}{c}{3-bit}   & 1-bit  & 2-bit  & 3-bit & 4-bit \\ \hline
+1                     & \multicolumn{1}{c}{\textbf{OOM}}  & \multicolumn{1}{c}{106.5}   & 30.4   & 40.1   & 51.6  & OOM   \\
+2                     & \multicolumn{1}{c}{\textbf{OOM}}  & \multicolumn{1}{c}{N/A}        & 25.2   & 30.1   & 35.8  & 41.2  \\
+4                     & \multicolumn{1}{c}{\textbf{OOM}}  & \multicolumn{1}{c}{N/A}        & 20.3   & 23.8   & 27.2  & 30.1  \\
+8                     & \multicolumn{1}{c}{42.4} & \multicolumn{1}{c}{N/A}        & 20.1   & 22.4   & 24.2  & 25.8  \\ \hline
+\end{tabular}
+\end{threeparttable}
+\end{table}
+
+Let us demonstrate that the flexible features of LUT-GEMM (attributable to the extended BCQ format) can accelerate existing uniform quantization methods.
+
+The table also displays the corresponding latency (per generated token) achieved by LUT-GEMM (excluding FP16).
+The results clearly indicate that LUT-GEMM provides lower latency as $q$ decreases, although an excessively small $g$ may have a marginal adverse impact on latency.
+All in all, by integrating LUT-GEMM and OPTQ at the expense of an acceptable increase in perplexity, it is possible to reduce the number of GPUs required for running OPT-175B inference from eight GPUs to a single GPU while ensuring comparable latency.
+It is crucial to note that such an improvement in performance cannot be achieved when dequantization is included.
+
+\begin{table}[h]
+\caption{Perplexity of quantized OPT-175B using OPTQ and end-to-end latency per token by LUT-GEMM for various $q$ and $g$ configurations. $g$ of `-' indicates row-wise quantization.}
+\centering
+\small
+\label{tab:175b_group}
+\begin{threeparttable}[t]
+\begin{tabular}{ccccrc}
+\hline
+Kernel                 & $q$ & $g$ & PPL\tnote{*} & \begin{tabular}[c]{@{}r@{}}Model size(GB)\\ (Comp. Ratio)\end{tabular} & Latency(ms) \\ \hline
+cuBLAS& 16   & N/A  & 8.34 & 347.9 ($\times$1.00)                                                    & 42.4 (8-GPU) \\ \hline
+                      \multirow{5}{*}{LUT-GEMM} & {4}    & -  & {8.37} & {87.0 ($\times$\textbf{4.00})}                                                     & {\textbf{OOM} (\textbf{1-GPU})} \\
+                      & 3    & -  & 8.68 & 65.3 ($\times$\textbf{5.33})                                                     & 51.6 (\textbf{1-GPU}) \\
+                      & 2    & 32  & 8.94 & 54.4 ($\times$\textbf{6.40})                                                     & 55.2 (\textbf{1-GPU}) \\
+                      & 2    & 64  & 9.18 & 48.9 ($\times$\textbf{7.11})                                                     & 47.5 (\textbf{1-GPU}) \\
+                      & 2    & 128 & 9.58 & 46.2 ($\times$\textbf{7.53})                                                     & 46.5 (\textbf{1-GPU}) \\ \hline
+\end{tabular}
+\begin{tablenotes}[flushleft]
+\item [*] PPL numbers are extracted from the OPTQ reference \citep{gptq}.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}
+
+
+
+
+\section{Summary and Limitations}
+
+
+
+In this paper, we introduce LUT-GEMM, a highly efficient matrix multiplication kernel designed to operate directly on quantized weights, thereby eliminating the need for an additional dequantization step.
+Leveraging an extended BCQ format, LUT-GEMM exhibits the capability to process both uniformly and non-uniformly quantized models, achieving 2.1$\times$ speedup over GPTQ.
+However, it is important to note some limitations: 
+Our method primarily focuses on single-batch inference and exhibits diminishing performance gains as the batch size increases.
+This limitation is primarily attributed to the constrained memory bandwidth between core and LUTs in the shared memory.
+Nevertheless, we anticipate that this constraint will gradually diminish in significance with the advent of advanced hardware solutions.
+
+
+
+
+\section{Reproducibility Statement}
+
+
+In the Supplementary Materials, we furnish code for replicating our ``Kernel Evaluation" experiments. Specifically, this entails:
+\begin{itemize}
+    \item Offering our CUDA kernel alongside a concise benchmarking script for single matrix-vector products.
+    \item Supplying a README document that presents example commands and instructions for executing all the scripts.
+\end{itemize}
+
+
+
+
+

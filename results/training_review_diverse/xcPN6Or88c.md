@@ -1,20 +1,17 @@
-Now I have all the information I need. Let me compose the final review.
+Now I have thoroughly verified the paper content against every claim. Let me compose the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes ImputeINR, a time series imputation method that uses implicit neural representations (INR) to learn continuous functions from sparse observations. The method decomposes the imputation function into trend (polynomial), seasonal (Fourier series), and residual components, using a transformer encoder to predict the function parameters. A multi-scale feature extraction module captures patterns at different temporal scales, and an adaptive group-based MLP architecture (with groups determined by variable clustering) models the residual across variables with similar distributions. Experiments on 7 datasets with mask rates from 10% to 90% show consistent improvements over 9 baselines, with the claimed advantage growing at higher missing rates.
+This paper proposes ImputeINR, an approach to time series imputation that learns a continuous implicit neural representation (INR) function mapping timestamps to multivariate values. The INR function is decomposed into trend (polynomial), seasonal (Fourier series), and residual (group-based MLP) components. An adaptive grouping mechanism clusters variables by distributional similarity, assigning each cluster its own MLP parameters in the residual component. A transformer encoder predicts the INR parameters from multi-scale convolutional features of the observed data. Experiments on seven datasets across five mask rates (10%–90%) show consistent improvement over nine baselines, with a 69.2% average MSE reduction at 90% masking.
 
 ## Strengths
 
-- **Effective at extreme missing rates (the paper's central claim)**: Across 7 datasets, ImputeINR consistently outperforms baselines at 70% and 90% mask rates, where most comparison methods degrade severely. At 90% masking, the average MSE reduction over the second-best method is 69.2% (Section 4.2, Table 2). This directly addresses an under-explored regime in the imputation literature.
-
-- **Novel adaptive group-based architecture**: The paper introduces a principled approach to modeling cross-channel correlations by clustering variables with similar distributions and assigning each cluster a dedicated group of MLP layers. The ablation study (Table 3) confirms that combining variable clustering with the group architecture produces the largest performance gain. The motivation is empirically grounded (Figure 2).
-
-- **Comprehensive and well-designed evaluation**: 7 datasets spanning healthcare, weather, air quality, and solar energy; 5 mask rates (10%–90%); 9 baselines covering statistical, RNN, CNN, MLP, and transformer families. Results are reported with both MSE and MAE. The patterns are consistent across diverse settings.
-
-- **Strong performance on small datasets**: ImputeINR achieves notably large gains on IAQ (96.1% average MSE reduction), BAQ (54.9%), and Solar (16.6%) — datasets with limited training samples — suggesting the method is not dependent on large-scale data and generalizes to data-scarce scenarios.
-
-- **Ablation and robustness analyses**: Section 4.3 systematically ablates the three key modules (multi-scale features, clustering, group architecture), confirming each contributes. Section 4.4 shows performance across mask rates and numbers of variables.
+- **Consistent and large-margin improvements under extreme missingness**: At 90% mask rate, ImputeINR achieves a 69.2% average MSE reduction over the second-best baseline (Section 4.2, line 210). The improvement increases monotonically with mask rate (Figure 3a), validating the core claim that the continuous INR function handles sparse observations effectively.
+- **Ablation studies confirm each design choice**: Table 3 shows that all three modules (multi-scale features, variable clustering, adaptive group-based MLP) contribute positively, and the combination of clustering and group-based architecture yields the largest gain. This directly supports the motivation for the adaptive grouping design.
+- **Robustness across diverse data characteristics**: Performance is consistently strong across small datasets (IAQ, BAQ, Solar) and larger ones (ETT, Weather, Phy2012/2019), across varying numbers of variables (Figure 3b), and across all five mask rates (Figure 3a). This breadth supports the claim that the architecture adapts to diverse dataset properties.
+- **Well-motivated decomposition**: The decomposed INR function (trend polynomial + seasonal Fourier + residual group MLP) is a principled adaptation of time series decomposition to the INR framework, and the synthetic experiment in Figure 2 provides clear intuition for why group-based residual modeling is necessary.
 
 ## Weaknesses
 
@@ -23,57 +20,50 @@ None.
 
 ### Major
 
-- **No variance reporting for any experimental result**: All results in Tables 2 and 3 are point estimates with no standard deviations, confidence intervals, or indication of the number of random mask seeds used. Since the evaluation protocol randomly masks values, a single run's results can vary depending on which positions are masked. Without error bars, the reader cannot assess whether the reported improvements (e.g., 62.7% average MSE reduction) are robust or reflect a particular random draw. This is the most significant evidential gap in the paper. The paper should report results over at least 3 random seeds.
-
-- **Ablation studies only conducted at 50% mask rate**: Table 3 specifies that the ablation uses a 50% mask rate. The paper's core claim is that ImputeINR excels at *extremely high* missing rates (70%/90%). Showing that each module helps at 50% does not tell us whether the multi-scale features, clustering, or group architecture are responsible for the performance gap at 90% masking. The ablations should be repeated at 70% and 90% to directly support the main thesis.
-
-- **Mapping from INR tokens to function parameters is underspecified**: The paper states that "INR tokens … serve as the parameters for the INR continuous function" (Section 3.2) but never explains *how* these tokens are mapped to the heterogeneous parameters of the three components: polynomial coefficients α_i (trend), Fourier coefficients β_i, γ_i (seasonal), and the MLP weights W, b (residual). Are the tokens split across components? Are weights predicted via a linear projection from tokens, or are the tokens themselves the weights? Without this description, the method cannot be reproduced. The residual component equations (lines 152–175) describe forward computation but do not clarify how the INR tokens produce the W and b matrices used in those equations.
+- **The mapping from transformer outputs to INR parameters is underspecified, harming reproducibility.** The paper states that "INR tokens" are predicted by the transformer encoder and "serve as the parameters" for the INR continuous function (lines 67, 127). However, the INR function has three distinct components (trend polynomial coefficients α_i, seasonal Fourier coefficients β_i/γ_i, and group MLP weights W, b) with different types and dimensionalities. The group MLP weights themselves vary in output dimension across datasets because the group count K and per-group variable counts |C_k| depend on clustering. The paper does not specify: (a) how many INR tokens are used, (b) what dimensionalities they have, (c) whether a decoder/projection head converts tokens to each parameter type, or (d) how the architecture handles the variable-sized group MLP parameters. Prior hyper-network works (Chen & Wang, 2022; Zhang et al., 2024) are cited but the specific adaptation to this decomposed form is not described. Without these details, the method cannot be faithfully reproduced or distinguished from an unworkable design.
 
 ### Minor
 
-- **Similarity metric and linkage criterion for variable clustering not specified**: Section 3.3 defines the clustering objective function with S(x_i, x_j) representing similarity between variables, but never defines what S is (e.g., Pearson correlation, cosine similarity, Euclidean distance). The experimental settings mention "agglomerative clustering" (line 197) but do not specify the linkage criterion. This omission affects reproducibility of the clustering step, which is central to the group architecture.
+- **The similarity metric and linkage criterion for variable clustering are not specified.** Section 3.3 defines a similarity matrix S and uses agglomerative clustering, but never states what similarity measure is used (Pearson correlation? Euclidean distance? mutual information?) or what linkage criterion (e.g., Ward, average, complete) is applied. Since the clustering output determines the architecture's group structure, and the ablation study shows clustering is crucial for performance, this omission affects both reproducibility and interpretability.
 
-- **Multi-scale convolution details incomplete**: Section 3.4 specifies kernel sizes (3, 5, 7; line 197) but does not report stride or padding values. The output shape formula (line 105) shows each convolution produces a different temporal length (T − k_l + 2p_l + 1), yet the concatenation mechanism for aligning outputs of different lengths is not explained. Without these details, the multi-scale extraction module cannot be reproduced.
+- **No error bars or variance estimates are reported.** All results in Tables 2 and 3 are reported as point estimates without standard deviations over different mask seeds or trials. On small datasets like IAQ (886 training samples), variance could be substantial. This makes it difficult to assess whether the reported advantages over the second-best method are statistically significant.
 
-- **Baseline tuning and adaptation protocol vague**: The paper states "We apply the same data processing techniques and parameter settings" (line 197) but does not clarify whether baseline hyperparameters were tuned for the imputation task or taken as defaults from original papers. Several baselines (Transformer, TimeMixer, iTransformer, FPT) were originally designed for forecasting, not imputation, and the paper does not describe how they were adapted (e.g., output head, loss function, training procedure). This makes it difficult to assess whether the comparison is fair, especially at extreme mask rates where method-specific sensitivities may matter.
+- **No comparison against continuous-time or interpolation-based imputation methods.** The paper's core claim is that INR's continuous function enables superior performance under extreme sparsity. While the comparison against nine discrete-time baselines is appropriate, the absence of comparisons against methods designed for sparse/irregularly-sampled data (e.g., neural ODE approaches, interpolation-based methods) weakens the claim that the specific INR design—rather than any continuous-time method—is responsible for the gains. This is a notable gap for a paper that repeatedly emphasizes the advantages of continuous over discrete representations.
 
-- **Robustness analysis aggregation not described**: Section 4.4 reports "average MSE" across datasets in Figure 3a without specifying the aggregation method (e.g., simple average across datasets vs. pooled MSE). Since datasets differ substantially in scale, the aggregation choice matters for interpreting the robustness claims.
+- **No runtime or parameter count comparison.** ImputeINR uses a 6-block transformer encoder, multi-scale convolutions, and a per-dataset architectural adaptation via clustering. A comparison of computational cost against baselines would help contextualize the performance improvements.
 
 ### Trivial
-
-- The convolution output shapes in Section 3.4 are written as ℝ^{c_l × (T−k_l+2p_l+1)} — the concatenation notation ℝ^{Σ_{l=1}^{L} c_l × (T−k_l+2p_l+1)} is ambiguous as a tensor shape since each term has a different temporal dimension. Clarifying the alignment (padding to same length, or interpolation) would resolve this.
+None.
 
 ## Nice-to-Haves
 
-- Report average ranks (across datasets) alongside or instead of the 62.7% average MSE reduction claim, which would be less sensitive to dataset magnitude differences.
-- Include a runtime or parameter count comparison to give a sense of ImputeINR's computational cost relative to baselines.
-- Consider mentioning whether a smaller truncation of Fourier terms was used in practice, since ⌊T/2−1⌋ for T=96 gives 47 terms (94 coefficients per channel).
+- A sensitivity analysis for the clustering: varying the similarity metric and checking whether the number of groups and final performance are stable would strengthen the method.
+- An experiment varying the masking pattern (e.g., block missingness vs. random) to probe whether the continuous function truly captures the signal structure or exploits random gaps.
+- A visualization of the learned trend and seasonal components for a few variables, demonstrating that the decomposition separates meaningful temporal patterns.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"Fourier terms produce a very large output"** — The number of Fourier terms is explicitly stated in the formula (⌊T/2−1⌋). This is a design choice the paper makes transparently, not an error. Large output heads from transformers are standard. Removed as a non-issue.
-- **"Improvement percentages should use weighted average"** — The paper's aggregation (average of per-cell percentage reductions across all dataset×mask-rate cells) is a standard reporting practice. Suggesting an alternative format is a preference, not a weakness. Moved to Nice-to-Haves.
-- **"Figure axes not labeled"** — Cannot be verified from the text extract; possibly a rendering artifact. If real, it is a presentation fix.
-- **"DLinear is a baseline that needs adaptation"** — DLinear appears in the related work section (line 30) as general context, but is NOT included as a baseline in Section 4.1. The actual MLP baseline is TimeMixer. The broader point about forecasting-model adaptation applies to Transformer and TimeMixer, but the specific mention of DLinear is factually incorrect.
+- **Criticism that the 62.7% improvement lacks context / is inflated by small datasets.** The paper already breaks this down by dataset (line 208: "average MSE reduced by 16.6%, 54.9% and 96.1% on Solar, BAQ and IAQ respectively") and discusses why baselines struggle on small data. The reviewer's concern is partially addressed by the paper itself.
+- **Criticism about window size differences between datasets.** The paper explicitly states (line 197) that "these settings follow those used in previous work (Wu et al., 2023; Du, 2023)."
+- **Criticism about loss function not specifying whether observed values are used.** The loss is clearly defined over missing values only (line 52); the model uses observed values as input through the transformer, which is standard.
+- **Criticism about INR token initialization being unclear.** The paper states INR tokens are "learnable vector parameters" that are "initialized" and then refined by the transformer (line 67), analogous to DETR-style queries. This is sufficiently clear.
+- **Criticism about "infinite resolution" being limited to the window.** The INR function is learned per sliding window and queried within that window; "infinite sampling frequency" means the continuous function can be evaluated at arbitrary coordinates within its domain. This is standard and correctly described.
 
 ## Novel Insights
 
-The reviews surface an interesting tension: the paper's strongest empirical results are at extreme missing rates (70%/90%), yet the ablation study — which should isolate which components drive that success — is only performed at 50%. This creates a disconnect between the claimed regime of strength and the evidence for design choices. Additionally, the underspecification of how transformer-predicted "INR tokens" map to heterogeneous function parameters (polynomial, Fourier, MLP weights) suggests the paper might benefit from a more explicit formulation of this mapping, perhaps as a structured output head with separate projections for each component.
+The exchange between the two reviews surfaces a useful observation that neither review makes explicitly: the paper's decomposed INR form (polynomial + Fourier + group MLP) creates an unusually structured target for hyper-network prediction. Unlike typical INR hyper-network setups where the target is a single MLP (all parameters of the same type), here the transformer must produce parameters of three fundamentally different types, with the MLP parameters having data-dependent shapes. This structural heterogeneity is what makes the current underspecification genuinely problematic — it is not a routine omission but a point where the method's feasibility depends on a non-obvious architectural decision that the paper should document.
 
 ## Suggestions
 
-1. **Add variance**: Report results over at least 3 random mask seeds (or more for small datasets) with standard deviations in Tables 2 and 3.
-2. **Run ablations at 70% and 90%** to verify that each architectural component is necessary under the conditions the method is designed for.
-3. **Clarify the INR token→parameter mapping**: Provide explicit equations or a diagram showing how the transformer's output tokens are decoded into the polynomial coefficients α_i, Fourier coefficients β_i/γ_i, and the MLP weight matrices W and b for the residual component.
-4. **Specify the similarity metric** used in variable clustering (e.g., correlation, cosine) and the linkage criterion for agglomerative clustering.
-5. **Report stride and padding** for the multi-scale convolutional layers, and describe how outputs of different temporal lengths are aligned for concatenation.
-6. **Describe baseline adaptation**: State how each forecasting-adapted baseline (Transformer, TimeMixer, iTransformer, FPT) was configured for imputation (output head, loss function, any architectural modifications) and whether hyperparameters were tuned or default.
+1. **Specify the INR parameter prediction mechanism completely.** Provide a diagram or pseudocode showing: how many INR tokens are used, their dimensionality, any projection heads that decode them into α, β/γ, and the full set of W, b for each group, and how the architecture handles per-dataset variation in group count. If the tokens are directly reshaped into weights, state this explicitly.
+2. **State the similarity metric and linkage criterion used for clustering.** Report whether any distance/similarity normalization is applied before clustering.
+3. **Add standard deviations to at least the main results** (Table 2), ideally over multiple random mask seeds.
+4. **Add a brief runtime and parameter count comparison** to help readers assess the efficiency trade-off.
+5. **Consider adding at least one continuous-time baseline** (e.g., a simple interpolation-based method or an ODE-RNN variant) to strengthen the claim that the INR formulation specifically — not just any method not tied to discrete sampling — drives the improvement.
 
 ## Score and Decision
 
-The paper proposes a genuinely novel approach to a well-motivated problem (imputation under extreme missingness), with thoughtful architectural design and extensive empirical evaluation. The group-based adaptive residual modeling is a principled contribution, and the results across 7 datasets and 9 baselines show a consistent advantage that grows with mask rate. However, the absence of any measure of statistical reliability and the ablation only at 50% — when the method's raison d'être is high missing rates — are significant evidential gaps. The architectural underspecification of the INR token→parameter mapping is a reproducibility concern. These are fixable weaknesses, but in the current form they prevent full confidence in the results.
+This paper presents a well-motivated approach to time series imputation that achieves consistently strong results across diverse benchmarks, particularly under extreme missingness. The decomposed INR design and adaptive group-based architecture are novel and validate well through ablation. The main weakness is the underspecification of how the transformer outputs map to the INR parameters, which must be addressed for reproducibility. The other issues are minor and typical for a paper of this scope.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

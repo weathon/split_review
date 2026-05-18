@@ -1,78 +1,74 @@
-Here is my final consolidated review.
-
----
+Now I have everything I need. Let me compose the consolidated review.
 
 ## Summary
 
-This paper proposes the first defense against convolution-based unlearnable examples (UEs). It introduces EPD, an edge-pixel-based detector to identify convolution-based UEs, and COIN, a defense that applies random bilinear interpolation to disrupt class-wise multiplicative noise. The paper also introduces two new convolution-based UEs (VUDA and HUDA) for broader evaluation. On CIFAR-10 against CUDA, COIN achieves 72.41% average test accuracy versus 47.04% for the next best defense (AT), a 25.37% absolute improvement. The detection scheme EPD achieves 89.21% ACC and 0.891 AUC on CIFAR-10.
+This paper addresses the problem of defending against convolution-based unlearnable examples (UEs) — a threat that prior defenses fail against. The authors propose COIN, a defense that applies random bilinear interpolation to corrupt the class-wise multiplicative noise pattern, and EPD, an edge-pixel based detection scheme. They also introduce two new convolution-based UEs (VUDA and HUDA). Extensive experiments across CIFAR-10/100 and ImageNet subsets with four architectures demonstrate that COIN dramatically outperforms 11 existing defenses (e.g., 72.41% vs. 47.04% next-best on CIFAR-10 with CUDA), and EPD achieves strong detection accuracy (89.21% on CIFAR-10, 99.91% on ImageNet20).
 
 ## Strengths
 
-- **First effective defense against convolution-based UEs, with strong empirical results.** Table 1 shows that 11 prior defenses all fail against CUDA (marked ✗), while COIN succeeds (✓). In Table 2, COIN's 72.41% average on CIFAR-10 against CUDA dwarfs the next best defense AT (47.04%), and similar margins hold on CIFAR-100 (47.41% vs. 33.85%). These are genuine, large-margin improvements over existing methods that were specifically designed for bounded UEs.
+- **First effective defense against convolution-based UEs with large, consistent margins.** COIN raises test accuracy on CUDA-attacked CIFAR-10 from 24.92% (undefended) to 72.41%, outperforming the next best defense (AT at 47.04%) by over 25 percentage points (Table 1). On CIFAR-100 the advantage is 47.41% vs. 33.85%. This advantage holds across all three convolution-based UEs, four architectures, and four datasets (Tables 1–3, ImageNet results in Table 2).
 
-- **Principled theoretical motivation via GMM analysis.** The paper defines two quantitative metrics (Θ_imi for intra-class matrix inconsistency and Θ_imc for inter-class matrix consistency), validates the hypothesis that increasing these improves accuracy in a low-dimensional GMM setting (Figure 3), and designs a random matrix A_r that achieves this. This formal grounding distinguishes the work from ad-hoc trial-and-error approaches.
+- **Novel detection scheme EPD with strong empirical performance.** EDP leverages the observation that convolution-based UEs bias edge pixels toward black, achieving ACC of 89.21% (AUC 0.891) on CIFAR-10 and 99.91% (AUC 0.998) on ImageNet20 across seven diverse UE mixture settings (Table 4). The method is simple yet effective for the tested attack configurations.
 
-- **Expands the attack landscape with two new convolution-based UEs (VUDA and HUDA).** The paper designs vertical and horizontal filter-based convolution UEs, providing broader evaluation benchmarks. COIN achieves 72.44% and 73.05% average accuracy against VUDA and HUDA respectively on CIFAR-10 (Table 5), while all existing defenses remain near or below 50%, confirming generalization.
+- **Analysis of the defense mechanism via GMM provides a clear conceptual motivation.** The paper formalizes convolution-based UEs as multiplicative matrix perturbations in a GMM, defines metrics Θ_imi (intra-class inconsistency) and Θ_imc (inter-class consistency), and empirically validates that increasing these metrics mitigates the attack in the low-dimensional setting (Figure 3). This provides a clean conceptual framework that motivates the defense design, even if the connection to real images is heuristic.
 
-- **Simple yet effective detection scheme (EPD).** EPD uses only summed edge pixel values across RGB channels with a linear SVM. On CIFAR-10 it achieves 89.21% ACC and 0.891 AUC across four diverse UE combinations; on ImageNet20 it achieves 99.91% ACC and 0.998 AUC (Table 4). The detection is computationally efficient and directly motivated by a clear visual observation.
+- **Extensive evaluation against a wide range of baselines.** The paper compares against 11 SOTA defenses (AT, ISS-J/G, ECLIPSE, AVATAR, AA, OP, DP-SGD, Cutout, Mixup, CutMix) across four datasets and four architectures. The consistent advantage of COIN across all settings convincingly demonstrates the failure of existing approaches and the effectiveness of the proposed method.
 
 ## Weaknesses
 
+### Fatal
+
+None.
+
 ### Major
 
-- **Missing comparison against generic random augmentations.** COIN applies random bilinear interpolation with per-pixel offsets sampled from U(−α, α). Many well-known transformations produce similar effects: random affine, random perspective, elastic deformation, random displacement fields, or RandAugment. The paper compares only against fixed defense methods (AT, ISS, AVATAR, ECLIPSE, etc.) but never against any simple random-warp baseline. If generic random augmentations achieve comparable defense against CUDA, then COIN's specific bilinear-interpolation design is not the cause — heavy randomization is. This gap directly affects the paper's claim that COIN represents a *novel* defense mechanism rather than the rediscovery that strong random warps break convolution-based UEs. The paper's core empirical result (COIN works) remains, but the novelty of the *specific design* is unsubstantiated without this comparison.
-
-- **The theoretical GMM analysis is not shown to connect to the actual COIN operation on real images.** The paper defines Θ_imi and Θ_imc in a low-dimensional GMM space, validates the hypothesis there, designs a random matrix A_r that increases these metrics, and then "regards the previous process … as a random linear interpolation process" to motivate bilinear interpolation on images (Section 3.2 → Section 4.1). However, the paper never measures whether COIN actually increases Θ_imi or Θ_imc on real images (those metrics are defined for matrices, not for bilinear interpolation coefficients), nor does it empirically verify that the mapping from the GMM construction to bilinear interpolation is more than an analogy. The GMM analysis serves as plausible motivation but is not a demonstrated justification for the specific design. The paper should either (a) approximate the equivalent linear operation of bilinear interpolation and measure its effect on class-conditional variance, or (b) explicitly reframe the GMM section as an intuition/ablation rather than a theoretical grounding.
+- **The theoretical GMM analysis is not formally connected to the real-image defense COIN.** The paper derives a random matrix A_r in the low-dimensional GMM space and shows it increases Θ_imi and Θ_imc. However, the actual defense (COIN) uses bilinear interpolation in the image domain, and the paper's argument for the connection is a single sentence: "we regard the previous process of multiplying A_r as a random linear interpolation process" (line 261). This is a heuristic analogy, not a derivation. The paper does not compute Θ_imi or Θ_imc for the image-domain defense, nor does it show that bilinear interpolation preserves the mathematical properties of A_r. COIN works well empirically, but the paper's framing gives the impression of a principled derivation when in reality the GMM analysis serves as inspiration. This gap is not fatal — the empirical results stand on their own — but the paper should be honest about this (e.g., frame COIN as inspired by the GMM analysis rather than following from it).
 
 ### Minor
 
-- **No end-to-end evaluation of the EPD + COIN pipeline.** EPD detection accuracy and COIN defense accuracy are reported separately. A false negative means a convolution-based UE goes undefended; a false positive means COIN is applied to non-convolutional samples (potentially degrading them). The paper acknowledges that COIN "cannot be effective for all types of UE" but does not quantify the harm. An end-to-end experiment that applies EPD first, then COIN only on detected samples, and reports final test accuracy is needed to demonstrate practical effectiveness.
+- **No confidence intervals or multiple-seed runs for a randomized defense.** COIN's bilinear interpolation parameters are drawn from a uniform distribution, yet all results are reported as single numbers without standard deviations or ranges. For a method with inherent randomness, reporting variability across seeds (≥3–5) is standard practice and would help the community assess the stability of the defense. The large margins of improvement suggest the conclusion is robust, but the methodological rigor is incomplete.
 
-- **VUDA and HUDA are relatively weak attacks, which tempers the significance of defending against them.** The w/o-defense baseline for VUDA is ~41% and for HUDA ~40% on CIFAR-10 (Table 5), compared to ~25% for CUDA (random guessing is 10%). These attacks are effectively blurring filters that still leave the model far above chance. COIN's strong performance against them is partly because the attacks are weak. This does not invalidate the results but should be interpreted with caution.
+- **No evaluation of COIN on clean (unattacked) data.** The paper does not report test accuracy when COIN is applied to clean training data without any UEs. This makes it difficult to assess the "collateral damage" of the defense — i.e., how much COIN degrades normal training. Since practical deployment would require knowing this cost, its absence is a gap.
 
-- **Overclaiming on ImageNet100 results.** The abstract claims "a significant improvement on the CIFAR and ImageNet datasets." On ImageNet100 (Table 2), COIN's average (37.48%) is only 0.88% above AT (36.60%), and on ResNet18 specifically, AT (37.82%) slightly outperforms COIN (37.80%). The claim of "significant improvement" is accurate for ImageNet20 (60.9% vs. 52.5%) and CIFAR datasets, but overstated for ImageNet100.
+- **No consideration of adaptive adversaries.** The evaluation assumes a static threat model where the attacker generates UEs without knowledge of the defense. The paper does not test whether an attacker aware of COIN could craft convolution-based UEs robust to random bilinear interpolation (e.g., by simulating the defense during attack generation or using kernels designed to survive such transforms). For a paper claiming the "first defense," this limits the strength of the claim. An experiment with a simple adaptive variant would significantly strengthen the paper.
 
-- **The experimental protocol for Figure 3 (hypothesis validation) is underspecified.** The paper states that the top row varies Θ_imc while Θ_imi remains constant, and the bottom row varies Θ_imi while Θ_imc remains constant — both "via changing parameter a_y." How does changing a single parameter (a_y, the CUDA tridiagonal matrix parameter) independently control one metric while holding the other fixed? The paper does not explain this protocol, making the validation difficult to interpret or reproduce.
+- **Hyperparameter analysis for α is limited to CUDA.** The impact of α is only shown for CUDA on CIFAR-10 (Figure 5a). It is not shown for VUDA, HUDA, or the ImageNet experiments, so it is unclear whether the chosen α=2.0 is near-optimal across settings.
+
+- **EPD's reliance on black-edge artifact is not analyzed for generality.** The paper observes that convolution-based UEs (CUDA, VUDA, HUDA) have biased edge pixels but does not analyze why this artifact occurs or whether it is a necessary property of convolution-based UEs. An attacker using different kernels (e.g., with periodic padding or learned kernels) might evade detection. The empirical results are strong for the tested attacks, but the detection mechanism is fragile in principle.
 
 ### Trivial
 
-- **Typo in equation:** In Section 4.1, line 281 shows `{\omega_y}_i = {s_x}_i - {m_y}_i` when it should be `{s_y}_i - {m_y}_i` (using `s_x` instead of `s_y`).
+- VUDA and HUDA are simply vertical/horizontal stripe kernel variants of CUDA. While they serve a useful purpose for evaluation breadth, they are not conceptually novel. This does not detract from the paper's main contributions but inflates the contribution list.
 
 ## Nice-to-Haves
 
-- A quantitative characterization of the edge-pixel bias that EPD relies on (histograms of edge pixel values for convolution-based vs. bounded UEs) would strengthen the detection motivation.
-- Clarifying the boundary effects of the modulo-arithmetic-based shift (the random matrix A_r uses circular shifts, which is not standard for image interpolation) would aid reproducibility.
-- Reporting standard deviations across multiple runs for the main results would increase confidence, though single-run evaluation is common in this benchmark setting.
+- An ablation study on the detection threshold θ in EPD to show robustness to reasonable variations.
+- A discussion of the computational cost of applying random bilinear interpolation per image during training (e.g., throughput impact).
+- Evaluation of EPD on a wider variety of convolution kernels (e.g., random kernels, Gaussian kernels) to test generalization of the edge artifact assumption.
 
 ## Removed Points
 
-- **"Learning rate is listed as 0."** — This is a parser artifact from PDF extraction (the actual value is 0.1). Per rules, formatting artifacts are not author errors.
-- **"Figure 5 axis labels missing"** — The figure caption states it shows "The impact of α," and the resolution issue is likely a PDF extraction artifact.
-- **Generic strengths from the Strength Finder** — The summary paragraph of strengths is duplicative of the bulleted strengths above; no unique content was lost.
-- **Criticism that the paper's GMM analysis is "ornamental" (in the strong sense)** — The paper explicitly frames the GMM-to-image connection as an analogy/intuition, not a formal proof. The concern about the gap is valid (kept above as a major weakness), but the characterization "ornamental" overstates the issue.
-- **Criticism that VUDA/HUDA column headers in Table 1 are "redundant"** — This is a presentational non-issue.
+- The harsh critic's claim that "the paper claims COIN is effective against some bounded UEs (URP, OPS) in a single sentence, but no numbers are given" — this is factually incorrect. Line 456 explicitly states: "improves test accuracy from 16.8%, 28.4% to 81.1%, 80.1%." The numbers are present.
 
 ## Novel Insights
 
-The key novel insight from the reviews is a framing question that the paper does not adequately address: is the mechanism that makes COIN effective *specific to its bilinear interpolation design*, or is it simply the general principle that strong random pixel-level warping breaks class-wise convolutional perturbations? The paper's own GMM analysis suggests the latter (any random matrix that increases Θ_imi/Θ_imc works), which implies that many random transformations should work. The absence of a comparison against simpler random augmentations leaves this question open and weakens the paper's claim about the specific design being meaningful.
+None beyond the paper's own contributions. The reviewers identified the theory-method gap and missing methodological rigor (confidence intervals, adaptive adversaries), which are standard concerns rather than novel observations.
 
 ## Suggestions
 
-1. **Add baseline comparisons against generic random augmentations.** Test random affine, random perspective, elastic deformation, and random displacement fields with comparable distortion magnitude (tuned to match COIN's α=2.0). If these achieve similar defense, the paper should reframe its contribution as "random warping suffices to break convolution-based UEs" and focus on the detection scheme and the characterization of why warping works. If COIN outperforms these baselines, the specific bilinear design is validated.
+1. **Reframe the GMM analysis as inspiration, not derivation.** The empirical results are strong enough to stand on their own. A more honest framing would increase, not decrease, the paper's credibility. Remove claims that COIN "follows from" or "extends" the GMM analysis without formal connection.
 
-2. **Evaluate the EPD + COIN pipeline end-to-end.** Train on a mix of convolution-based and bounded UEs, apply EPD detection, apply COIN only to detected samples, and report final test accuracy along with false positive/negative rates.
+2. **Add multi-seed results.** Re-run the main experiments (or at least a representative subset, e.g., CIFAR-10 with ResNet18) with 5 random seeds and report mean ± std.
 
-3. **Clarify the GMM-to-image connection.** Either (a) approximate the linear operation of bilinear interpolation and measure its effect on Θ_imi/Θ_imc, or (b) explicitly state that the GMM analysis provides intuition but does not formally constrain the image-domain design.
+3. **Add clean-data accuracy with COIN.** Report test accuracy when COIN is applied to clean datasets to quantify the defense's impact on normal training.
 
-4. **Tone down the "significant improvement" claim for ImageNet100** or qualify it with the specific margins.
+4. **Add at least one simple adaptive attack experiment.** For example, generate CUDA UEs while simulating COIN's interpolation during the attack optimization, or design a convolution kernel less affected by random interpolation, and report whether COIN's accuracy degrades significantly.
 
-5. **Fix the typo in Equation (ω_y)** and explain the protocol for independently varying Θ_imc and Θ_imi in Figure 3.
+5. **Expand the hyperparameter analysis of α** to include VUDA and HUDA settings.
 
 ## Score and Decision
 
-The paper tackles an important problem and presents the first empirical demonstration of an effective defense against convolution-based UEs, with impressive margins over 10 existing methods. The core empirical finding is genuine and valuable. However, the paper has significant gaps: it does not compare against simple random augmentation baselines that could produce the same effect, the theoretical framing is not substantiated for real images, and the detection+defense pipeline is not evaluated as a whole. The missing baseline comparison is the most serious issue, as it leaves unclear whether COIN's specific design matters or whether heavy randomization alone is responsible.
+This paper tackles an important and timely problem (defending against convolution-based UEs, where no prior defense works) and provides strong empirical evidence that COIN is dramatically more effective than 11 existing defenses across diverse settings. The core empirical contribution is real and significant. The main weaknesses are: (1) the theoretical motivation is not formally connected to the actual defense method, creating an overclaimed "principled design" narrative, and (2) the evaluation lacks statistical rigor (no confidence intervals) and adaptive adversary analysis — standard expectations for a defense paper. These weaknesses are addressable in revision and do not invalidate the core empirical finding. The paper makes a genuine contribution to the field and deserves a fair hearing, but the presentation overclaims the theory-method connection and the evaluation needs stronger rigor.
 
-These gaps are addressable in a major revision. On balance, the empirical contribution is strong enough to warrant acceptance pending the addition of the missing baselines and pipeline evaluation.
-
-**MY FINAL SCORE:** <pineapple>6.0</pineapple>
-**MY FINAL DECISION:** <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

@@ -1,75 +1,92 @@
-Now I have all the information needed. Let me compose the final review.
+Now I have a thorough understanding of the paper and can verify the reviewer claims. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper proposes AdT-HyGCL, a hypergraph contrastive learning framework with three components: noise-enhanced augmentation, a dual-level contrast mechanism (node-level + community-level), and an adaptive temperature schedule. The community-level contrast captures group-wise collective behaviors within hyperedges by concatenating hyperedge embeddings with averaged node embeddings, addressing a limitation of prior node-only or hyperedge-only contrastive objectives. The adaptive temperature adjusts dynamically based on pairwise distances among negative samples. Experiments on eight benchmark datasets show the method achieves top-1 or top-2 accuracy on 7 of 8 datasets against six supervised HyGNNs and three contrastive baselines.
+This paper proposes AdT-HyGCL, a hypergraph contrastive learning framework with three components: (i) noise-enhanced augmentations that add random noise to node features, (ii) a dual-level contrastive objective that operates on node embeddings and "community" embeddings (concatenations of hyperedge embeddings with the mean of node embeddings within that hyperedge), and (iii) an adaptive temperature schedule that decreases the temperature based on the pairwise distances among negative pairs. Experiments are conducted on eight benchmark hypergraphs with six HyGNNs and three hypergraph contrastive learning baselines.
 
 ## Strengths
 
-1. **Novel dual-level contrast mechanism that captures group-wise collective behaviors.** The community-level contrast (Section 4.2.2) is a genuine architectural contribution. Unlike prior hypergraph contrastive methods that operate on node embeddings or hyperedge embeddings in isolation, the community embedding concatenates the hyperedge embedding with the averaged node embeddings within that hyperedge. Proposition 1 provides a concrete example showing why this representation better distinguishes negative pairs that share many nodes. This directly addresses the identified limitation of prior work.
+1. **Novel community-level contrast mechanism.** The paper introduces community embeddings (Equation 3) that concatenate hyperedge embeddings with the mean of node embeddings within the hyperedge. Proposition 1 provides a concrete example showing these community embeddings are more discriminative than plain hyperedge embeddings for distinguishing negative pairs — a genuine design contribution that addresses a limitation of prior methods like TriCL, which only contrasts hyperedge-level embeddings.
 
-2. **Strong empirical performance across diverse benchmarks.** Table 1 shows that AdT-HyGCL with NT-Xent loss achieves the best or runner-up accuracy/Macro-F1 on 7 of 8 datasets. The JSD variant also performs competitively, demonstrating that the dual-level contrast and adaptive temperature work across loss functions. The paper reports means over five runs with standard deviations, providing reasonable statistical grounding.
+2. **Consistent empirical results across diverse benchmarks.** AdT-HyGCL achieves best or runner-up performance on 7 out of 8 datasets for node classification (Table 1), under two different contrastive losses (NT-Xent and JSD), indicating the framework is reasonably robust and generalizable.
 
-3. **Noise-enhanced augmentation is a principled, lightweight addition.** Section 4.1 introduces additive random noise (uniform distribution) to node features after augmentation, motivated by the finding that harder contrastive tasks improve representation learning. This is a concrete, well-motivated module that is simple to implement and ablation-friendly.
+3. **Comprehensive robustness evaluation.** The paper evaluates under two types of adversarial attacks (minmax and nettack) across four hypergraphs (Table 2), showing that AdT-HyGCL suffers smaller performance drops than baselines.
 
-4. **Adaptive temperature schedule shows empirical benefits.** Figure 4 demonstrates that the proposed adaptive schedule outperforms any fixed temperature value and that the lower bound ($\tau_{low}$) prevents collapse. While the theoretical framing is overclaimed (see Weaknesses), the empirical evidence that the schedule works better than static alternatives is a useful finding.
+4. **Systematic study of hypergraph augmentations.** Experiments in Figures 2–3 provide useful practical insights about hyperedge removal being an effective augmentation for hypergraphs and about synergistic effects of combining different augmentation types.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None that threaten the core claims.
+
+1. **Overstated "theoretical justifications."** The abstract and conclusion claim "theoretical justifications … demonstrate the rationality … of AdT-HyGCL," but the theoretical content does not warrant this framing.
+   - Proposition 1 is an illustrative example, not a general proof. It shows one case where community embeddings help but does not establish a general theoretical guarantee.
+   - Propositions 2–3 are standard knowledge from established contrastive learning literature (Chen et al., 2020; Wang & Isola, 2020) — the gradient analysis in Proposition 2 reproduces known properties, and Proposition 3 (lines 125–127) contains a "Proof Sketch" heading with no actual content following it. Claiming these as novel "theoretical justifications" is misleading.
+   - Proposition 4 is a description of the adaptive temperature mechanism, not a proof of its optimality.
+   
+   The paper should drop these claims or reframe them as analysis/motivation rather than theoretical contributions. This is the most significant issue because the paper's self-presentation inflates its contribution.
+
+2. **No ablation of the noise enhancement module.** The noise enhancement (adding random noise to node features, Section 4.1) is presented as a core design element, described as generating "challenging augmented hypergraph pairs." However, there is no experiment anywhere in the paper comparing AdT-HyGCL with and without this noise. Its standalone contribution is entirely unsubstantiated, and we cannot tell whether it helps, hurts, or does nothing.
+
+3. **The adaptive temperature schedule is introduced as a heuristic without principled justification for its specific form.** Equation (5) defines a particular decreasing schedule (inverse-log of a Gaussian-weighted sum of pairwise distances), but the paper offers no rationale for why this functional form should be preferred over alternatives (e.g., cosine-based decay, quantile-based reduction, exponential annealing). The schedule introduces three additional hyperparameters (η, ρ, τ_low) whose sensitivity is not analyzed. Figure 4's comparison against static temperatures is limited to three datasets and a handful of fixed values without error bars or statistical testing, and in some cases (e.g., τ=0.5 on Zoo) the static temperature appears competitive. The claim that adaptive temperature yields the "best performances" is not convincingly supported.
 
 ### Minor
 
-1. **Overclaiming of theoretical contribution for the temperature module (methodological framing gap).** Propositions 2 and 3 state that "contrastive loss is a hardness-aware loss" and that "temperature controls penalties on hard negatives." These are well-known properties of the NT-Xent loss established in prior work (e.g., Wang & Liu, 2021; Chen et al., 2020) and are not cited or contextualized as such. The paper presents them as proofs in support of the adaptive temperature design, but they add no new insight. Proposition 4 merely verifies that the update rule in Equation 5 behaves as designed—it is a description, not a theoretical justification. The adaptive schedule itself is a reasonable heuristic, and the paper would be stronger if it positioned it as such rather than framing it as a theoretical advance.
+4. **Empirical gains are modest and statistical significance is not established.** The improvements over the best baselines are often small and within one standard deviation (e.g., AdT-HyGCL's 73.17±0.49 on Citeseer vs. TriCL's 72.93±0.54; 56.93±1.27 on Walmart vs. AllDeepSets' 56.22±0.94). On Cora, TriCL (78.92±0.60) actually outperforms AdT-HyGCL JSD (78.43±0.39). The paper reports "best or runner-up on 7/8 datasets" which is a consistent pattern, but falls short of being a decisive improvement. No per-run rankings or significance tests are reported.
 
-2. **Robustness evaluation lacks detail on attack adaptation (incomplete methodology).** The paper applies minmax attack (Sun et al., 2020) and nettack (Zügner et al., 2018) to hypergraphs without describing how these graph-specific attacks are adapted to hypergraph structures. It is not stated whether attacks are applied to the incidence matrix, a clique expansion, or a line graph expansion. Without this detail, the validity of the robustness claims cannot be fully assessed. This does not undermine the main classification results (Table 1), but the robustness experiments (Table 2) are incompletely specified.
+5. **Proposition 3's "Proof Sketch" is content-free.** At line 125–126, Proposition 3 reads: "Proposition 3. Temperature index τ controls the penalties on hard negative contrastive pairs. Proof Sketch." with no content following. While this may be a parser artifact, it is a real gap in the submitted text as parsed — a reader cannot evaluate what was intended to be shown.
 
-3. **Missing ablation isolating the dual-level contrast's contribution.** The paper compares AdT-HyGCL against external methods, but does not include an internal ablation comparing (a) node-level contrast only, (b) community-level contrast only, and (c) both, using the same encoder and same temperature. This would directly quantify the value added by the community-level design. The current evidence for the dual-level contribution is indirect—performance gaps against baselines could partly reflect other differences.
-
-4. **Overgeneralization in one experimental claim.** Section 5.2 states that "all contrastive learning methods outperform the corresponding hypergraph encoder" across all datasets. The reviewer notes that on NTU2012, CHGNN and TriCL perform worse than AllDeepSets (the encoder). If true (the table is an image and exact values cannot be verified from the text), this claim is factually incorrect and should be qualified.
-
-5. **Clarity of baseline encoder fairness.** The paper states: "We adopt AllDeepSets as the encoder over all datasets" (Section 5.1). This strongly implies that all compared methods use the same encoder, enabling fair comparison. However, the paper does not explicitly state whether CHGNN and TriCL were re-implemented with AllDeepSets or whether original implementations (which use their own encoders) were used. Making this explicit would remove ambiguity. As written, the statement is likely sufficient but warrants clarification.
-
-6. **No limitations or future work discussion.** The paper concludes with only strengths. Given the heuristic nature of the temperature module, the need for explicit attack adaptation, and the lack of hyperparameter sensitivity analysis ($\eta$, $\rho$, $\tau_{low}$ are set globally), a candid limitations paragraph would strengthen the paper's positioning.
+6. **Insufficient differentiation of the "community-level" contrast from TriCL's group-level contrast.** The paper claims TriCL "fails to comprehensively depict the group-wise collective behaviors" but the primary difference (beyond the concatenation formula in Equation 3) is not clearly explained. A more direct comparison highlighting when and why the proposed community embeddings yield measurably different behavior would strengthen the claimed novelty.
 
 ### Trivial
-- The notation in Equation 5 is somewhat cluttered (PDF rendering artifacts), making the formula harder to parse than necessary. The authors should rewrite it cleanly.
-- Proposition 1 is illustrated with an example rather than a formal proof; labeling it a "proof sketch" is generous.
+
+None worth enumerating beyond what is already covered above.
 
 ## Nice-to-Haves
-- Sensitivity analysis on $\eta$, $\rho$, and $\tau_{low}$ for one or two datasets would increase confidence that the adaptive schedule is not brittle.
-- A brief computational cost comparison (runtime of community-level vs. node-level only) would help practitioners assess the overhead.
-- Comparing against a learned temperature (e.g., making $\tau$ a trainable parameter) could further justify the heuristic schedule.
+
+- **Code release** would strengthen reproducibility for this training-procedure method.
+- **Sensitivity analysis** for the three new hyperparameters (η, ρ, τ_low) introduced by the adaptive temperature schedule.
+- **A per-dataset static temperature grid search** to compare the best fixed τ against the adaptive version, supporting the claim that adaptive temperature avoids dataset-specific tuning.
+- **A discussion of limitations** — the paper currently lacks any frank assessment of scenarios where the method might underperform or of its computational overhead.
 
 ## Removed Points
-These points were raised by reviewers but are removed or downgraded for the following reasons:
 
-- **"Unfair baseline comparison is a critical evidential issue"** (Harsh Critic #1): Downgraded from Major to Minor. The paper *does* explicitly state "We adopt AllDeepSets as the encoder over all datasets" in the Experimental Settings. The statement is unambiguous enough to imply fair comparison, though the paper could be more explicit about whether CHGNN/TriCL were re-implemented. The reviewer's framing as a fatal evidential flaw is disproportionate to the actual clarity gap.
-- **"Garbled text in Section 4.1"**: This is a PDF parsing artifact, not an author error. Removed per hard rules.
-- **"Generalization contribution bullet is generic"**: This is a matter of opinion about what constitutes a contribution. Many contrastive frameworks share this property. Not a genuine weakness.
-- **"AllDeepSets encoder is skeletal/underspecified"**: Equation 1 provides the standard formulation. The paper cites the original work (Chien et al., 2022) for details. This is not a real weakness.
-- **"Does not compare community embeddings with alternative definitions (attention pooling, etc.)"**: This is a scope-creep demand. The paper proposes one reasonable design and validates it empirically. Suggesting alternative designs is a nice-to-have, not a weakness.
-- **"Faster training loss descent doesn't correlate with better performance"** (Harsh Critic, augmentation study): This is correct in general but the paper does not claim it correlates—it uses the observation to contrast same-type vs. mixed-type augmentation behavior. The point is peripheral.
+The following points from the Harsh Critic are flagged for removal with justification:
+
+- **"No code availability statement"** — This is a suggestion for future work, not a weakness of the submitted paper. Moved to Nice-to-Haves.
+- **"Modifying baseline methods to use AllDeepSets may disadvantage baselines"** — The paper explicitly states it follows HyperGCL's established setting. Using a common encoder for fair comparison is standard practice; the reviewer's concern is speculation about disadvantage without evidence.
+- **"The adaptive temperature formula contains unclear notation... extra brackets, missing parentheses"** — These are parser artifacts from PDF extraction, not author errors. The mathematical content is interpretable.
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews surface a useful tension: the community-level contrast is a genuine architectural contribution with clear empirical backing, while the adaptive temperature module is a heuristic dressed in theoretical language. The value of the paper lies primarily in the dual-level design; the temperature schedule is a secondary, empirically-driven addition.
+
+None beyond the paper's own contributions. The reviews surface the gap between the paper's claimed "theoretical justifications" and what is actually provided, and the missing ablation of the noise module — both of which are standard reviewer observations that the paper's authors should address.
 
 ## Suggestions
-1. **Add an internal ablation** comparing node-level-only, community-level-only, and both within the AdT-HyGCL framework, using the same encoder and temperature schedule. This is the single most impactful missing experiment.
-2. **Reposition the temperature module** as a well-motivated heuristic with empirical validation, and condense Propositions 2-4 into a discussion paragraph that cites prior analyses (e.g., Wang & Liu, 2021) rather than presenting them as new proofs.
-3. **Clarify the attack adaptation** for the robustness experiments: describe how minmax and nettack are applied to hypergraphs (e.g., incidence matrix perturbation, clique expansion, or line graph).
-4. **Add a limitations paragraph** discussing the heuristic nature of the temperature schedule, the hyperparameter sensitivity, and the scope of the robustness evaluation.
-5. **Correct or qualify the overgeneralization** in Section 5.2 regarding contrastive methods outperforming the encoder on all datasets.
+
+1. **Reframe the theoretical sections honestly.** Drop the "theoretical justification" framing for Propositions 2–3 (which are standard knowledge). Either provide genuine analysis (e.g., showing the adaptive schedule optimizes a meaningful objective) or present these as motivation/analysis, not contributions.
+2. **Run a full ablation study** decomposing the three components: (a) noise enhancement alone, (b) community-level contrast alone (node-level only as baseline), (c) adaptive temperature alone (static τ as baseline). Report with confidence intervals across seeds.
+3. **Perform a per-dataset grid search over static temperatures** (e.g., {0.05, 0.1, 0.2, 0.5, 1.0}) and compare the best static result to the adaptive version. Show that adaptive temperature performs comparably or better without dataset-specific tuning.
+4. **Provide statistical significance testing** or per-run rankings to quantify whether the observed improvements are robust beyond single-std overlaps.
+5. **Clarify the empirical comparison with TriCL** — show specifically where and why the community embeddings provide measurable advantages over plain hyperedge embeddings.
 
 ## Score and Decision
 
-The paper makes a genuine architectural contribution with the dual-level contrast mechanism, supported by strong empirical results across 8 benchmarks. The main weaknesses are framing overclaims (temperature module presented as a theoretical advance), missing details (attack adaptation), and one overgeneralized experimental claim. None of these invalidate the core contribution; all are addressable in revision. The comparison fairness concern is partially addressed by the existing encoder statement, though clarity would benefit from explicit wording.
+**Originality:** The dual-level contrast using community embeddings is a genuine architectural contribution, though the adaptive temperature mechanism is a heuristic modification of a standard idea.
 
-**Overall: Novel contribution with solid empirical validation; presentation issues that require revision but do not undermine the central claims.**
+**Importance of question:** Improving hypergraph representation learning is a meaningful research direction.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Claims support:** The core empirical claims are directionally supported but overstated. The "theoretical justifications" claim is misleading. The noise module's contribution is untested.
+
+**Soundness of experiments:** Adequate breadth (8 datasets, 9 baselines) but lacks critical ablations and significance testing. The temperature analysis is limited.
+
+**Clarity of writing:** Generally clear in describing the methodology, though the theoretical sections overclaim.
+
+**Value to community:** The community-level contrast design and the systematic augmentation study provide useful insights. The framework is modular and could be built upon.
+
+The paper has genuine contributions (particularly the community-level contrast) and consistent empirical results. However, the overstated theoretical claims, the missing ablation of the noise module, the heuristic and unprincipled adaptive temperature schedule, and the modest gains (often within one standard deviation) collectively prevent the paper from meeting the acceptance bar at a competitive venue. The core ideas have merit but need substantial strengthening in evidence and honest reframing of contributions.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

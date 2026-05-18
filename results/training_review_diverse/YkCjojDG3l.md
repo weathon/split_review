@@ -1,20 +1,26 @@
-Now I have a thorough understanding of the paper. Let me produce the consolidated review.
+Now I have a thorough understanding of the paper and all the reviewer claims. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-PolySketchFormer replaces softmax attention with degree-4 polynomial attention approximated via polynomial sketches (Ahle et al., 2020) from randomized numerical linear algebra. Combined with a block-based algorithm for causal masking, the method achieves exact linear-time complexity in context length \(n\). The paper evaluates on language modeling (Wiki-40B, PG-19) at various context lengths up to 32k, showing that Polysketch attention achieves perplexities close to softmax (2–3 point gap at 110M scale, 0.2 points at 730M) while being significantly faster than FlashAttention at long contexts (4.5× at 32k).
+This paper proposes PolySketchFormer, a transformer architecture that replaces softmax attention with a polynomial kernel (degree 4) and approximates it using randomized polynomial sketches (Ahle et al., 2020). The authors introduce two main technical contributions: (1) using sketches from the randomized numerical linear algebra literature to reduce the per-token cost from \(O(h^p)\) to \(O(r)\) where \(r \ll h^p\), with a tensoring trick to ensure non-negative attention weights (Theorem 2.5); and (2) a block-based lower-triangular multiplication algorithm for causal masking that avoids the sequential dependencies of Performer's cumulative sum approach. Experiments show that polynomial attention nearly matches softmax perplexity, and that PolySketchFormer achieves significant training speedups over FlashAttention at context lengths of 8k and beyond (up to 4.5× at 32k).
+
+---
 
 ## Strengths
 
-1. **Genuine linear-time attention with theoretical grounding.** The paper provides a clear path from polynomial attention (exact but impractical due to \(h^p\) dimensions) to a sketched approximation that runs in \(O(n r (b+d))\) time (Theorem 3.1). Figure 1 convincingly demonstrates that Polysketch's attention latency per token stays flat across context lengths 512–16k, while FlashAttention and vanilla softmax grow linearly. This is strong evidence that the method achieves its claimed complexity in practice.
+1. **Principled circumvention of known hardness barriers.** The paper explicitly acknowledges the SETH-based impossibility result (Alman & Song, 2023) for sub-quadratic softmax approximation and shows that polynomial kernels circumvent this barrier, enabling exact linear-time computation of the polynomial attention matrix (Section 1, equations (1) and following). This is a clean theoretical motivation.
 
-2. **Concrete speed advantage over FlashAttention at long contexts.** Table 2 reports training steps/sec showing Polysketch is 2.18 vs. 0.70 at 16k (3.1×) on 12-layer models, and 1.54 vs. 0.34 at 32k (4.5×) on 4-layer models. These are meaningful practical speedups that directly address the quadratic bottleneck that FlashAttention still faces.
+2. **Block-based lower-triangular multiplication for practical speed.** Section 3 introduces a block algorithm (Theorem 3.1, \(O(n r(b+d))\) operations) that reduces the severe sequential dependencies and HBM read/write overhead of the cumulative sum algorithm used by Performer. This directly addresses a practical bottleneck noted by Hua et al. (2022) about why linear transformers are slow in autoregressive training.
 
-3. **Perplexity tracks softmax reasonably well, especially at scale.** Table 1 shows Polysketch within 2–3 points of softmax at 110M parameters across multiple context lengths and datasets. Critically, the 730M-parameter experiment shows only a 0.2-point gap (14.6 vs. 14.4), suggesting the quality gap may shrink with scale.
+3. **Non-negative attention via tensoring with provable guarantees.** Theorem 2.5 proves that applying the tensoring trick to polynomial sketches yields a non-negative approximate attention matrix while preserving the Frobenius-norm approximation guarantee. This solves a key issue where naive polynomial sketches can produce negative attention weights.
 
-4. **Non-negative attention via tensoring trick (Theorem 2.5).** Squaring the sketched vectors ensures non-negative attention weights without requiring the restrictive non-negative feature maps of Performer, while preserving provable approximation guarantees under JL-moment conditions. This is a clean theoretical contribution.
+4. **Empirical speed advantage over FlashAttention at long contexts.** Table 2 and Figure 1 demonstrate that PolySketchFormer's per-token latency stays nearly constant with context length while FlashAttention's grows linearly. At 8k and 16k, PolySketchFormer trains faster than FlashAttention, and at 32k it achieves a 4.5× speedup (1.54 vs. 0.34 steps/sec for a 4-layer model).
 
-5. **Candid self-assessment of limitations.** The paper explicitly acknowledges (line 67) that the practical sketch sizes are "not very good at preserving the dot products for vectors that have negative entries" and that the implementation is "essentially to be seen as an attention mechanism that is inspired by polynomial attention." This transparency is valuable.
+5. **Scalability to larger models.** A 730M-parameter PolySketchFormer achieves 14.6 perplexity vs. softmax's 14.4 on Wiki-40B, showing the gap narrows with scale (from ~1-2 points at 110M to 0.2 points at 730M).
+
+---
 
 ## Weaknesses
 
@@ -23,53 +29,60 @@ None.
 
 ### Major
 
-1. **Missing empirical comparison against Performer / cumulative sum algorithm.** The paper claims (abstract, Section 3) that the block-based algorithm gives "significant speedups over the cumulative sum algorithm used by Performer," yet no wall-clock or step-time comparison against any correct Performer implementation is provided. The open-sourced Performer is dismissed due to a "data leak" bug, but the authors do not implement their own corrected Performer (which would be straightforward given the simpler feature maps). Without this baseline, the claimed advantage over Performer's cumulative sum approach is unsubstantiated, and a key aspect of the paper's positioning relative to prior kernel-based efficient transformers cannot be evaluated.
-
-2. **"Provable guarantees" in the abstract overclaim relative to practical choices.** The abstract promises "provable guarantees," but the practical algorithm uses a fixed sketch size of 32 (tensored to 1024) without specifying the accuracy parameter \(\varepsilon\), and the same sketch is reused across all training steps for a given head/layer. The theoretical AMM guarantee (Theorem 2.5) applies to a single use of a fresh random sketch under JL-moment conditions that are not verified for the chosen sketch size. The paper itself acknowledges (line 67) that the implementation is "essentially to be seen as an attention mechanism that is inspired by polynomial attention." This gap between the advertised "provable guarantees" and the heuristic reality is larger than the abstract suggests.
+1. **No quality (perplexity) results at the context lengths where the speed advantage is claimed.** The paper's main argument for PolySketchFormer is that it preserves softmax-level quality while being faster at long contexts. But the two halves of this claim are demonstrated at *different* context lengths: quality is shown only up to 4k (where PolySketchFormer is *slower* than FlashAttention, as stated in line 194), while speed is shown at 8k+ (where no perplexity numbers are reported for any model). Table 1 explicitly notes that softmax and polynomial models OOM at 8k/16k, but the paper could have compared PolySketchFormer's own perplexity at 8k+ against FlashAttention's perplexity (since FlashAttention can train at these lengths, per Table 2). Without verifying that the approximation fidelity holds at long contexts — where the denominator of the attention computation involves summing over many more terms, potentially amplifying approximation errors — the central claim that PolySketchFormer "matches softmax performance while being faster" is incompletely validated. The 730M experiment (14.4 vs. 14.6) is reassuring, but the context length for that experiment is not specified, and it does not substitute for the missing 8k/16k data on the primary 110M model.
 
 ### Minor
 
-3. **Perplexity gap at 110M scale is non-trivial and not analyzed.** The 2–3 point gap (e.g., Wiki-40B at 4k: softmax 16.7, Polysketch 18.7) is material for language modeling, but the paper provides no analysis of its source. Is it due to sketch approximation error, the limited expressiveness of the degree-4 polynomial, or optimization dynamics? Without this analysis, a reader cannot assess whether the gap is fundamental or addressable via tuning (larger sketch size, higher degree, more training steps). The 730M result (0.2 point gap) is encouraging but reported as a single run without variance.
+2. **Block-based algorithm claim is not directly validated against the cumulative sum alternative.** The paper claims (abstract and Section 3) that the block-based algorithm yields "significant speedups over the cumulative sum algorithm used by Performer." However, no experiment directly compares the block algorithm vs. the cumulative sum algorithm for the same sketch dimension and model configuration. The observed speedups vs. FlashAttention conflate the benefits of sketching (reducing O(n²) to O(nr)) with the block algorithm's savings. An ablation isolating the block algorithm's contribution would substantiate this claim.
 
-4. **No variance or confidence intervals.** Perplexities and step times are reported as point estimates without variance across seeds or runs. At 125k training steps, differences within ~0.5 points could be noise. While this is common in large-scale training papers, it weakens confidence in the reported numbers, especially for the single-run 730M and 32k experiments.
+3. **The perplexity gap at 4k for the 110M models is non-trivial and warrants more analysis.** The paper reports that PolySketchFormer perplexities remain "within 2-3 points of softmax Transformer" (line 192). For the 110M model on Wiki-40B at 4k, the gap is approximately 1.27 points; on PG-19, approximately 0.91 points. Describing these as "comparable" is mildly overstated for the 110M scale, though the 730M result (0.2 point gap) is more reassuring. The paper would benefit from discussing whether this gap is fundamental to the sketch approximation or could be closed with hyperparameter tuning, larger sketch sizes, or different training strategies.
 
-5. **Limited empirical comparison against other linear-time transformers.** The paper discusses Hua et al. (2022) at length in the introduction and motivates Polysketch partly as addressing limitations of their chunked mechanism, but provides no empirical comparison. Similarly, linear transformers (Katharopoulos et al., 2020) are cited but not compared. The evaluation is focused on softmax and FlashAttention, which is reasonable for the paper's core claims, but the positioning relative to the broader efficient-transformer landscape is left at the conceptual level.
+4. **No comparison against a corrected Performer implementation.** Performer is the most directly related kernel-based linear transformer, but the paper dismisses it due to a "data leak" in the open-sourced code (line 192). While code bugs are legitimate obstacles, the authors could have fixed the issue or re-implemented the FAVOR+ mechanism, making this omission a missed opportunity to contextualize the quality/speed trade-offs of PolySketchFormer against the most relevant prior work.
+
+5. **Memory consumption is not reported.** Given the paper's emphasis on practical training efficiency and its use of rematerialization, a comparison of memory footprint between PolySketchFormer and FlashAttention at various context lengths is standard and informative but absent.
 
 ### Trivial
-None.
+
+- The theoretical \(\varepsilon\) implied by the chosen sketch size (\(r=32\), leading to an effective feature dimension of 1024 after tensoring) is not discussed. A brief comment on whether this aligns with the observed perplexity gap would bridge theory and practice.
+- The trade-off between the tensoring approach (which squares the sketch dimension from \(r\) to \(r^2\)) and directly sketching at degree 4 with a larger sketch size \(r' < r^2\) is not explored.
+
+---
 
 ## Nice-to-Haves
 
-- **Ablation on block size.** The block size is fixed at 256 (matching Hua et al.'s chunk size). Showing steps/sec for different block sizes (64, 128, 256, 512) would justify the choice and provide practical guidance.
-- **Ablation on sketch size.** The sketch size is fixed at 32 (tensored to 1024). Showing how perplexity and speed vary with sketch size (16, 32, 64, 128) would directly address the approximation–throughput tradeoff.
-- **Memory consumption comparison.** The paper claims memory efficiency via rematerialization but reports no numbers. Peak memory usage between FlashAttention, softmax, and Polysketch would be informative for practitioners.
-- **Synthetic evaluation on recall tasks.** A test on tasks requiring sharp attention patterns (e.g., the synthetic recall task from Schlag et al.) could illuminate whether the polynomial kernel has blind spots not captured by perplexity.
+- An ablation on sketch size and block size choices, showing how these affect the perplexity/speed trade-off, would provide practical guidance.
+- Reporting the relative Frobenius-norm approximation error between the sketched and exact polynomial attention matrices for different sketch sizes would directly connect the theory to the empirical results.
+- A note on statistical significance or variance across training runs would strengthen the reliability of the perplexity comparisons.
+
+---
 
 ## Removed Points
 
-- **Criticism that "breaking the SETH barrier" is overstated.** Removed because the paper explicitly says "by replacing softmax with a polynomial function" (line 4). The paper does not claim to approximate softmax in sub-quadratic time; it bypasses the SETH barrier by changing the attention function. The reviewer's criticism misreads the claim.
-- **Criticism about the block algorithm derivation being unclear / missing appendix details.** Removed per hard rules: the parser strips appendix content; missing derivation details that would be in the appendix are not evaluable.
-- **Criticism that the paper should add more related works to the discussion.** Removed per hard rules: the reviewer does not have external sources to confirm missing references, and the paper already discusses the most relevant prior work (Performer, Hua et al., FlashAttention, Katharopoulos et al.).
-- **Weakness about "implementing their own Performer is straightforward."** This is a suggestion, not a verified flaw in the paper's methodology. The weakness that remains (Major #1) is the factual absence of the Performer speed comparison; the "fixability" of the gap is an opinion.
-- **Strength Finder's claim that the block algorithm "yields significant speedups in practice, as reflected in the training throughput numbers in Table 2."** This is overclaimed because Table 2 does not compare against the cumulative sum algorithm or Performer — it compares against softmax, polynomial, and FlashAttention. The speedups shown are for the full Polysketch method vs. FlashAttention, not for the block algorithm vs. cumulative sum specifically. Dropped to Removed Points.
+- **Criticism about missing comparison with Linear Transformers (Katharopoulos et al.) and RFA:** These methods use different kernel functions (ReLU-based, exponential-based) and the paper's scope is specifically polynomial attention. Demanding comparisons against every linear-time attention variant is scope creep; the paper's choice of FlashAttention and Performer as the most relevant baselines is defensible. (Rule: scope creep / wrong class of expectations.)
+- **Pure formatting, typos, or parser-artifact complaints:** None were present in the critic's review that need removal.
+- **Criticism that the paper should cover additional domains/tasks:** Not present in the critic's review.
+
+---
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the most striking observation from the reviews is that the paper's strongest evidence (4.5× speedup over FlashAttention at 32k) coexists with a complete absence of empirical validation against the one baseline (Performer) most relevant to its secondary claims. This asymmetry is unusual: the paper is very strong where it compares against the current practical standard (FlashAttention) and very weak where it compares against its own intellectual predecessor. This suggests the authors prioritized demonstrating practical impact over scholarly completeness. The 730M result (0.2 perplexity gap) is notable because it hints that the quality degradation may be an artifact of model scale rather than a fundamental limitation of polynomial attention — a point the paper itself does not make explicitly.
+None beyond the paper's own contributions. The reviews surface the trade-off between the paper's theoretical ambitions and its incomplete empirical validation, but do not identify a fundamentally new observation about the method or the problem domain.
+
+---
 
 ## Suggestions
 
-1. **Implement and evaluate a corrected Performer baseline.** This is the single most impactful addition. A corrected Performer using the same training setup would directly validate (or refute) the claim that the block-based algorithm beats the cumulative sum approach, and would contextualize the perplexity–speed tradeoff against the most closely related prior work.
+1. **Run perplexity experiments at 8k and 16k context lengths.** Compare PolySketchFormer's perplexity against FlashAttention's perplexity at the same lengths. Since FlashAttention can train at these lengths (Table 2), this directly validates the paper's central claim that quality is preserved at long contexts.
+2. **Ablate the block-based algorithm.** Compare the same PolySketchFormer configuration using (a) the cumulative sum algorithm and (b) the block-based algorithm, measuring steps/sec. This isolates the block algorithm's contribution from the sketching's contribution.
+3. **Report memory usage.** Add a table or figure showing peak memory consumption of PolySketchFormer vs. FlashAttention at various context lengths.
+4. **Discuss the 4k perplexity gap more carefully.** Acknowledge the gap more explicitly for the 110M model, discuss potential causes (e.g., sketch approximation error, denominator noise), and note whether it can be closed with larger sketch sizes or longer training.
+5. **Add variance or multi-seed results.** For at least one configuration (e.g., 4k on Wiki-40B), report mean and standard deviation across multiple seeds to give readers a sense of statistical reliability.
 
-2. **Clarify the framing of "provable guarantees" in the abstract.** Replace or qualify the phrase to reflect that the provable guarantees hold under JL-moment conditions that are not verified for the chosen sketch size, and that the practical implementation is best described as "inspired by polynomial attention" (as the paper itself acknowledges in Section 1).
-
-3. **Add variance estimates or at minimum a note about run-to-run variability for the key experiments (Table 1 and Table 2).** Even a brief statement about single-run vs. multi-seed reporting would improve reproducibility.
-
-4. **Provide a brief analysis of the perplexity gap.** A simple experiment comparing exact polynomial attention vs. sketched polynomial attention on a held-out batch would isolate whether the gap comes from sketching error or from the polynomial approximation itself.
+---
 
 ## Score and Decision
 
-The paper makes a genuine contribution: a theoretically grounded linear-time attention mechanism that is practically faster than FlashAttention at long contexts while maintaining reasonable model quality. The core claims are supported by clear experiments. However, the missing Performer comparison undermines a secondary but important claim about outperforming the cumulative sum algorithm, and the abstract overstates the "provable guarantees" relative to the heuristic implementation. These are real but addressable weaknesses. The paper merits acceptance with requests for revision.
+The paper presents a conceptually clean and theoretically grounded approach to linear-time attention, with clear algorithmic novelty in both the polynomial sketching framework and the block-based causal multiplication. The experimental evidence for speed improvements at long contexts is convincing, and the 730M scalability result is encouraging. However, the empirical evaluation has a significant gap: **quality is demonstrated only at context lengths where the method is slower than FlashAttention, while speed is demonstrated only at context lengths where no quality metrics are provided.** This gap prevents full validation of the paper's central claim. The remaining weaknesses (missing ablation of the block algorithm, no corrected Performer baseline, absent memory comparison) are individually minor but collectively widen the gap. With additional experiments, the paper could be strong; in its current form, the validation is incomplete.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**MY FINAL SCORE: <pineapple>5.0</pineapple>**
+**MY FINAL DECISION: <orange>Reject</orange>**

@@ -1,71 +1,81 @@
-Now I will write the final consolidated review.
+Now I have all the information needed. Let me compose the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes a two-stage controllable text-to-speech system that uses a masked autoencoder (MAE) to learn a discrete, content-disentangled style representation. The first stage is an autoregressive transformer (style LM) that generates style tokens conditioned on phonemes and discrete control labels (pitch, emotion, age, gender, SNR, etc.), trained on large-scale data (GigaSpeech-xl, ~10k hours). The second stage (acoustic LM) generates codec tokens from phonemes and style tokens, trained on high-quality but smaller data (LibriTTS, ~500h). The system supports both fully discrete-label-based control and control with a reference speaker embedding. Classifier-free guidance (CFG) is applied to the style token generation to improve control accuracy for fine-grained attributes.
+This paper proposes a two-stage controllable TTS system built around a masked-autoencoded style representation. A style MAE learns content-disentangled prosodic/timbre features, which are discretized into style tokens via RVQ. The first-stage LM generates style tokens from phonemes and discrete control labels (binned style attributes like pitch, emotion, age, gender, SNR, C50); the second-stage LM generates codec tokens from phonemes and the style tokens. Classifier-free guidance is applied to the discrete labels to improve fine-grained control. Experiments show the two-stage system outperforms a one-stage baseline in robustness and control accuracy, and the style tokens carry rich speaker and prosodic information with low content leakage.
 
 ## Strengths
 
-- **Two-stage architecture enables data scaling for style modeling.** Figure 3 shows a clear and significant advantage: the two-stage model maintains stable WER (~5–10%) and UTMOS (~3.5–4.0) across increasing CFG scales on in-domain and out-of-domain test sets, while the one-stage baseline (trained on LibriTTS only) degrades sharply. This validates the core system-level claim that separating style generation (trainable on large, diverse data) from acoustic generation (needing high-quality data) improves robustness.
+- **Two-stage design that decouples style generation from acoustic generation, enabling scalable training.** The style LM is trained on 10k hours of data while the acoustic LM only needs ~585 hours of high-quality data. Figure 3 shows the two-stage model maintains stable WER and UTMOS across CFG scales where the one-stage model degrades sharply on out-of-domain test sets. This empirically validates the practical benefit of the architecture.
 
-- **Fine-grained control via discrete labels with CFG is effective.** Figure 4 demonstrates that CFG substantially improves control accuracy for fine-grained attributes (pitch std, age) from below 60% to over 80% on several test sets. Figure 5 shows the two-stage model outperforms the one-stage baseline on emotion attributes (arousal, dominance, valence) by 10–20 percentage points across all three test sets. These results support the paper's claim about precise attribute control.
+- **Fine-grained control via discrete attribute labels is demonstrated quantitatively.** Figures 4 and 5 show soft control accuracy in the 70–90% range for attributes including pitch mean, pitch std, age, gender, emotion dimensions, SNR, and C50. Spectral examples (Figures 6 and 7) confirm audible acoustic changes when manipulating pitch and emotion labels.
 
-- **Flexible control combining speaker embedding with discrete labels is demonstrated.** Table 3 shows that when using a reference speaker embedding together with pitch and emotion labels, the two-stage model achieves speaker similarity (0.82–0.86 cosine) comparable to the discrete-label-only setting while maintaining high control accuracy (e.g., 88.83% for arousal on GigaSpeech). This demonstrates a practically useful capability.
+- **The style MAE produces content-disentangled representations with rich style information.** Table 2 shows reconstruction from ground-truth style tokens matches zero-shot TTS in speaker similarity (0.86–0.91 cosine similarity) while achieving much lower MCD (4.03–4.07 vs. 6.25+), indicating precise prosody reconstruction. The qualitative swapping experiment further supports content disentanglement.
 
-- **The MAE-based style representation captures rich style information.** Table 2 shows that reconstruction with ground-truth style tokens achieves substantially lower MCD than zero-shot TTS systems (5.59 vs. 7.94 on LibriTTS), confirming that the style tokens encode fine-grained prosodic and acoustic detail beyond speaker identity. The spectrograms in Figure 2 visually support this.
+- **Classifier-free guidance applied specifically to discrete labels improves control for ambiguous fine-grained attributes.** Figure 4 shows CFG raises control accuracy for attributes like pitch std and age from ~65% to ~80% on Gigaspeech, while the paper correctly observes that applying CFG to speaker embeddings degrades quality.
+
+- **Flexible control interface combining speaker embeddings with discrete labels.** Table 3 demonstrates the ability to control emotion and pitch variation for a specified reference speaker, achieving speaker cosine similarity above 0.78 with control accuracy comparable to the fully-discrete-label setting.
+
+- **Systematic analysis of attribute correlations with practical mitigation methods.** Table 4 quantifies correlations among attributes (e.g., gender and pitch mean, emotion dimensions and pitch variation), and Section 4.4 proposes both statistical and learned approaches for consistent label sampling, with learned predictors achieving >80% soft accuracy.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **The one-stage vs. two-stage comparison is confounded by training data scale.** The one-stage baseline is trained on LibriTTS (~500h), while the two-stage model's style LM is trained on GigaSpeech-xl (~10k hours) — a 20× difference. The paper attributes the two-stage model's superior content accuracy and robustness under CFG to the two-stage design, but the massive data disparity is a far more plausible explanation for much of the observed gap. A clean ablation (training both models on the same data, e.g., training the two-stage style LM on LibriTTS or training the one-stage model on GigaSpeech) is needed to isolate the architectural contribution from the data-scale contribution. This is the paper's central experimental claim, and the confound undermines its support.
+- **The data-scarcity claim confounds architecture with training-data scale.** The paper argues that the two-stage design addresses data scarcity because the style LM can be trained on abundant data while the acoustic LM needs less high-quality data. However, the key comparison (Figure 3, Figure 5) contrasts the two-stage model (style LM trained on ~10k hours of Gigaspeech) against a one-stage baseline trained only on ~585 hours of LibriTTS. This conflates the benefit of the two-stage architecture with the benefit of having 17× more training data for the style LM. Without an ablation where the style LM is trained on the same small high-quality corpus (LibriTTS) to isolate the architectural contribution, the reader cannot tell how much of the robustness improvement comes from the two-stage design itself versus simply having more training data. The paper's narrative frames this as a data-scarcity solution, but the evidence is not tight enough to support that specific framing.
 
-- **No experimental comparison to existing controllable TTS systems.** The paper evaluates control accuracy only against its own one-stage baseline. Several published systems (PromptTTS, TextrolSpeech, InstructTTS, PromptTTS 2) also target style control, and TextrolSpeech uses an interface (discrete labels) that is directly comparable. Without any external comparison on shared metrics (UTMOS, WER, or control accuracy on a common test set), the significance of the proposed system's performance relative to prior art cannot be assessed. This is a critical omission that limits the paper's contribution claim.
-
-- **The correlation-handling methods (Section 4.4) are not validated in the TTS pipeline.** The paper identifies the important problem of correlated labels and proposes both statistical sampling and MLP-based prediction to resolve conflicts. However, these methods are never integrated into the main TTS pipeline or evaluated for their effect on control accuracy, WER, or naturalness. As presented, they remain suggestions rather than demonstrated components of the system.
+- **No comparison to natural-language-conditioned TTS systems, despite motivating against them.** The paper opens by arguing that natural language prompts are "broad and coarse-grained" and that this limits fine-grained control, then proposes discrete labels as an alternative. However, all experiments compare against a one-stage model that also uses discrete labels — validating the two-stage architecture but not the claimed advantage of discrete labels over natural language. A comparison to a natural-language-controlled system (e.g., PromptTTS 2, TextrolSpeech, Audiobox) on the same control tasks would either confirm the advantage or reveal that current language-conditioned models are already competitive for fine-grained control. Without this, the paper's motivation for replacing natural language with discrete labels remains an assertion rather than an empirically supported advantage. This is a gap in the experimental framing, not a technical flaw in the proposed system, but it weakens the narrative.
 
 ### Minor
 
-- **The swap test reasoning is not airtight.** The paper claims that the failure of cross-sample phoneme/style-token swapping "demonstrates that our style representation does not result in significant content information leakage." However, if style tokens were fully content-disentangled, the model *should* be able to synthesize speech from any phoneme/style pair. The failure is equally consistent with content leakage OR with the style tokens encoding utterance-level prosodic structure (timing, rhythm) that is inherently tied to specific content. The paper should either provide a quantitative disentanglement metric (e.g., WER when decoding from style tokens alone) or soften the claim.
+- **Only relaxed control accuracy is reported; strict accuracy is not shown.** The paper counts labels off by one bin as correct (Section 4.2). While this is reasonable for ordinal attributes, reporting strict accuracy would let readers judge how often the model hits the exact intended bin. The relaxed accuracy figures (70–90%) could mask substantially lower strict accuracy, especially for fine-grained attributes with many bins.
 
-- **No human evaluation.** All reported metrics are objective (UTMOS, WER, speaker cosine similarity, MCD, label accuracy). For a controllability claim, human listening tests (e.g., AB preference on attribute control or naturalness) are standard practice in the TTS community and would significantly strengthen the paper's evidence. The demo page is a helpful supplement but does not replace formal subjective evaluation.
+- **Content-leakage evaluation is only qualitative.** The paper shows that swapping phonemes and style tokens produces meaningless speech, which is a reasonable qualitative check. However, no quantitative measure (e.g., WER from style-token-only reconstruction, or mutual information estimation) is reported. A simple quantitative experiment would make the disentanglement claim more solid, especially since style tokens are used as conditioning in the full pipeline where any content leakage could cause problems.
 
-- **The one-bin tolerance for control accuracy should be supplemented with raw accuracy.** The paper relaxes control accuracy to include predictions within one bin of the target. While this relaxation is reasonable, the raw bin-level accuracy should also be reported to allow readers to gauge the difficulty of the control task and the model's precision.
+- **Correlation-aware label selection (Section 4.4) is discussed but not evaluated in the main controllable TTS pipeline.** The paper proposes methods to infer low-level labels from high-level labels to avoid conflicting conditions, but does not test whether this improves control accuracy or naturalness in the TTS output. The MLP accuracy figures (~40% strict, >80% soft for pitch prediction) are reported, but how this translates to downstream TTS control is not shown. This limits the completeness of that contribution.
 
 ### Trivial
-None.
+
+- None that survive filtering.
 
 ## Nice-to-Haves
 
-- An analysis or discussion of the effect of phone-level merging on sub-phoneme prosodic detail (e.g., micro-variation in pitch within a phoneme). The paper acknowledges the design choice but does not discuss its possible limitations.
-- A simple random or majority-class baseline to contextualize control accuracy numbers.
+- An ablation training the style LM on the same small dataset as the acoustic LM (LibriTTS) to isolate the contribution of the two-stage architecture from the contribution of larger training data.
+- A comparison to natural-language-based TTS on the same control tasks, e.g., by converting discrete label combinations to natural-language descriptions for the baseline.
+- Strict (exact bin) control accuracy alongside the relaxed metric.
+- A quantitative content-leakage metric (e.g., WER from style-token-only decoding).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
-
-- **"Zero-shot TTS comparison for reconstruction is unfair"** — The purpose of this comparison is to show that style tokens capture richer information than speaker embeddings alone (which is informative and expected given the proposed method has access to ground-truth style features). The comparison is informative for its stated goal and does not constitute a methodological error. The codec compression row is also present in Table 2, contrary to the claim that it is "not discussed."
-- **"One-bin tolerance hides poor performance"** — The relaxation is standard practice for fine-grained control and is transparently stated. Requesting raw accuracy is reasonable but does not rise to a weakness.
-- **"Phone-level merging discards sub-phoneme prosodic detail"** — This is a design choice, not a flaw. The reconstruction results demonstrate that this level of granularity is sufficient for the paper's goals.
-- **"No random baseline for control accuracy"** — A minor wishlist item that would not change the paper's conclusions.
-- **"The paper overstates the data issue as unique to natural-language interfaces"** — The paper does not claim uniqueness; it motivates the issue and proposes a specific solution. This is an opinion, not a weakness.
+- The harsh critic's framing that the missing natural-language baseline is "fatal" and that the paper "cannot be assessed relative to the existing literature" — this overstates the issue. The paper's core technical contributions (style MAE, two-stage architecture, CFG for discrete labels) are validated by appropriate baselines; the natural-language comparison would tighten the motivation but is not required to validate the proposed system's capabilities.
+- The critic's suggestion that the data-scarcity comparison "completely undermines the paper's central motivation" — the comparison does show the practical benefit of the approach, just doesn't fully isolate the source of improvement. This is a gap in the ablation design, not a fatal flaw.
+- The critic's suggestion about the relaxed metric "may overestimate performance" — the paper provides an explicit, standard justification for this relaxation ("Considering the challenges of achieving precise control with fine-grained labels") and it is a common practice in this line of work.
 
 ## Novel Insights
 
-The harsh critic's observation about the swap test being inconclusive rather than supportive is a useful methodological caution, but the more interesting insight from the reviews is the tension between the paper's two main claims: the two-stage architecture enables data scaling (which is real), versus the claim that the architecture itself is responsible for the quality improvement (which is confounded). The most novel observation from the review process is that the paper's central strength — the data-scaling advantage — is simultaneously its core methodological weakness in terms of experimental rigor. Addressing this tension (e.g., by adding a controlled ablation) would significantly strengthen the paper.
+None beyond the paper's own contributions. The reviews identify gaps in experimental framing but do not introduce conceptual novelty beyond what the paper itself presents.
 
 ## Suggestions
 
-1. **Unconfound the one-stage vs. two-stage comparison** by training at least one of the following: (a) the one-stage baseline on a similarly large dataset (GigaSpeech-xl), or (b) the two-stage model's style LM on LibriTTS (same data as the one-stage baseline). This would isolate the architectural contribution from the data-scale contribution.
-2. **Include at least one external baseline** (e.g., TextrolSpeech or PromptTTS 2) on a shared evaluation set using the same metrics. Even if the proposed method only equals or slightly outperforms on a subset of attributes, this would contextualize the contribution.
-3. **Integrate the correlation-handling methods** (Section 4.4) into the main TTS pipeline and report results with and without conflict resolution. Demonstrate that using predicted pitch labels from the MLP improves control accuracy or WER.
-4. **Quantify content-disentanglement** directly (e.g., WER of a recognizer on reconstructions from style tokens alone, or mutual information between style tokens and phoneme transcriptions).
-5. **Add human evaluation** — at minimum an AB preference test for naturalness and a controllability rating task — to complement the objective metrics.
+1. **Add an ablation isolating data scale from architecture.** Train the style LM on the same small high-quality corpus (LibriTTS) as the acoustic LM, and compare the resulting two-stage variant against the full two-stage system. This would directly quantify the benefit of scaling up style LM training data and tighten the data-scarcity argument.
+
+2. **Add a natural-language-conditioned baseline.** Even a single comparison on one test set (e.g., LibriTTS) between the proposed discrete-label system and a representative natural-language-controlled TTS system (e.g., TextrolSpeech, PromptTTS 2) on the same control tasks would substantially strengthen the paper's motivation.
+
+3. **Report strict control accuracy alongside the relaxed metric** in the main figures or a supplementary table, so readers can gauge exact-bin hit rates.
+
+4. **Add a quantitative content-leakage experiment** — e.g., decode speech from style tokens alone (without phonemes) and compute WER, or compute mutual information between style tokens and phoneme sequences.
+
+5. **Evaluate the correlation-aware label selection** (Section 4.4) in the controllable TTS pipeline, showing whether it improves control accuracy or naturalness compared to ignoring attribute correlations.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+The paper presents a technically solid and well-motivated system with genuine contributions: a content-disentangled style MAE, an effective two-stage LM pipeline, and a practical CFG-based approach for discrete-label control. The experiments are generally thorough, covering reconstruction quality, control accuracy on multiple attributes, speaker similarity, and robustness to CFG scale across three test sets. The audio quality and control accuracy results are competitive.
+
+However, two significant gaps weaken the paper's narrative: (1) the data-scarcity claim is not properly isolated from data-scale effects, and (2) the central motivation (discrete labels over natural language) is not empirically validated against any natural-language baseline. These are framing and ablation-design issues rather than technical flaws — the system does what it claims to do, but the experiments don't fully support the narrative framing. The paper would be strengthened considerably by addressing these gaps.
+
+Given the genuine technical contributions and the presence of addressable (rather than fatal) weaknesses, the paper merits a borderline acceptance.
+
+**MY FINAL SCORE:** <pineapple>6.0</pineapple>
+**MY FINAL DECISION:** <orange>Accept</orange>

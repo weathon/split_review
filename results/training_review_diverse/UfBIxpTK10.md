@@ -1,61 +1,57 @@
-Now I have thoroughly read the paper and verified claims. Let me produce the final consolidated review.
+Now I have all the information needed. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper tackles the problem of generalization in blind molecular docking. It makes three contributions: (1) **DockGen**, a new benchmark using ECOD domain classification that rigorously tests generalization to unseen binding domains and reveals that existing ML docking methods severely underperform when faced with novel pockets; (2) **DiffDock-L**, a scaled model integrating additional MOAD training data, larger architectures, and a van der Mer (vdM) synthetic data augmentation strategy, setting new SOTA on DockGen (22.6% vs. 7.1%); and (3) **Confidence Bootstrapping**, a self-training method that uses a confidence model's feedback to fine-tune a diffusion model on target protein clusters using only binding knowledge (no ground-truth poses), improving success from 9.8% to 24.0% on the DockGen-clusters subset.
+This paper tackles the problem of poor generalization in machine-learning-based blind docking to unseen protein domains. It makes three contributions: (1) **DockGen**, a new benchmark based on ECOD protein domain classification that more rigorously tests generalization than existing PDBBind-based splits; (2) a **scaling-law analysis** showing that increasing model size (to 30M parameters), training data (+52% from MOAD), and synthetic van der Mer (vdM) augmentations jointly improve DockGen success rate from 7.1% to 22.6% (DiffDock-L); and (3) **Confidence Bootstrapping**, a self-training method that uses a confidence model to re-weight generated poses and fine-tune early diffusion steps, improving DiffDock-S from 9.8% to 24.0% on a held-out subset of 8 protein clusters.
 
 ## Strengths
 
-1. **DockGen benchmark meaningfully exposes generalization failures.** The paper demonstrates that existing benchmarks (PDBBind) suffer from pocket similarity contamination even with low global sequence similarity (Figure 1-A shows 22% sequence identity yet nearly identical pockets). By building splits on ECOD domain classification and sourcing a held-out test set from Binding MOAD (179 ECOD clusters unseen in PDBBind), the paper convincingly shows that all prior ML methods drop dramatically: DiffDock (10 samples) falls from 35.0% on PDBBind to 7.1% on DockGen-full (Table 1). This is a valuable community resource.
+- **DockGen benchmark properly isolates generalization to unseen binding domains.** The paper demonstrates that existing splits (UniProt-ID, global sequence similarity) allow train–test leakage because binding pockets can be conserved even when global sequence identity is low. Using ECOD domain classification, the authors show that PDBBind's 2019 test set adds only 8 new clusters (15 complexes), whereas DockGen introduces 179 unseen ECOD clusters from MOAD. Figure 1B quantifies the lower train–test binding-site similarity in DockGen vs. PDBBind. This is a well-motivated and practically useful benchmark for the community.
 
-2. **Scaling analysis with DiffDock-L demonstrates that data, model size, and synthetic augmentations can narrow the generalization gap.** The systematic investigation (Section 4.1, Figure 3) shows gains from adding ∼52% more training data, increasing the score model from 4M to 30M parameters, and incorporating vdM synthetic complexes. The resulting DiffDock-L surpasses the best search-based method (GNINA exhaustivity 64: 17.5%) at 22.6% on DockGen-full (Table 1), supporting the claim that scaling can substantially improve generalization.
+- **Clear identification of a real failure mode.** The paper shows stark performance drops on DockGen: regression methods (EquiBind, TankBind) achieve 0% success, and DiffDock falls from 35.0% on PDBBind to 7.1% on DockGen-full. This quantitatively validates that existing methods overfit to seen binding domains and motivates the need for better generalization.
 
-3. **Confidence Bootstrapping is a novel and well-motivated self-training paradigm for diffusion models.** The idea of using confidence feedback from a separate model to update early diffusion steps is conceptually novel and grounded in a connection to Monte Carlo tree-search / RL (Section 3.2). The empirical result on DockGen-clusters — raising DiffDock-S from 9.8% to 24.0% success — demonstrates real practical value for adapting to new protein domains without requiring structural data, and the per-cluster analysis (Figure 4) shows consistent improvements across most clusters.
+- **Systematic scaling-law analysis provides actionable insights.** Figure 3 shows clear trends across model size (4M→30M parameters), training data (adding MOAD +52%), and synthetic vdM data. The combined DiffDock-L raises performance from 7.1% to 22.6%, even outperforming search-based methods (GNINA at 17.5%). These results are useful for guiding community efforts on data collection and model scaling.
+
+- **Confidence Bootstrapping is a novel and well-motivated training paradigm.** The idea of exploiting the multi-resolution structure of diffusion models — using the confidence model to guide early diffusion steps while preserving fine-grained denoising via training data — is grounded in a clear insight: checking a pose is easier than generating one. The formulation with separate weighting functions λ(t) and λ'(t) is principled.
+
+- **Bootstrapping results are promising despite limited evaluation scope.** On the DockGen-clusters subset, fine-tuning DiffDock-S raises success rate from 9.8% to 24.0%, with half of clusters exceeding 30%. The method achieves this using only binding affinity information (not structural data) from unseen domains, which is a non-trivial demonstration.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Confidence Bootstrapping lacks controlled baselines and ablations.** The method is compared only to standard DiffDock and search-based tools, with no comparison to simpler self-training alternatives — e.g., retraining on generated poses *without* confidence weighting, using a hard confidence threshold, or uniform weighting of all generated samples. Without these baselines, the observed improvement cannot be cleanly attributed to the specific mechanism of confidence-weighted, time-differentiated bootstrapping rather than to the generic effect of any fine-tuning on additional domain-specific data (even noisy). Furthermore, the key design choice of using different λ(t) and λ′(t) schedules to target early diffusion steps is not ablated. The paper states (line 138) that different schedules "direct the bootstrapping feedback principally to update the initial steps," but no experiment compares this to using identical schedules. This is a significant evidential gap: the paper's core method may be no more than a noisy self-training scheme, and the claimed exploitation of the multi-resolution structure is not empirically demonstrated.
+- **The evaluation of Confidence Bootstrapping is too limited to fully support its claimed generality.** The method is evaluated only on a subset of 8 clusters (85 complexes) using only the small DiffDock-S model. It is not tested on DiffDock-L, nor on the full 189-complex DockGen test set. The paper also does not include any ablation of its key design choices — e.g., comparing the proposed λ(t) vs λ'(t) weighting against uniform weighting, or against simpler self-training alternatives such as standard pseudo-labeling or direct confidence-based filtering of generated poses. Without these, it is difficult to attribute the observed improvements specifically to the multi-resolution feedback mechanism, which is presented as the core contribution.
 
-2. **Confidence model is fixed and its calibration is unexamined.** The formalization (lines 129-136) only updates θ (the generator), not φ (the confidence model). This means the generator could overfit to the potentially flawed preferences of an out-of-distribution confidence model as it moves away from the original training distribution. The paper provides no analysis of whether the confidence model's scores remain calibrated or even correlate with RMSD on the target clusters *before* bootstrapping. If the confidence model is systematically wrong on the new cluster, bootstrapping could drive the generator toward incorrect solutions.
+- **Lack of statistical rigor for central claims.** The bootstrapping results (Figure 4) are averages over only two fine-tuning runs with no error bars, per-run breakdown, or variance discussion. The scaling law for the largest model (30M parameters) is based on a single run (acknowledged as cost-prohibitive). For a method that involves stochastic sampling, confidence reweighting, and iterative fine-tuning, readers cannot assess whether the observed gains (e.g., 9.8%→24.0%) are robust or within the noise of a single training seed. This weakens the paper's central claims about both scaling and bootstrapping.
 
 ### Minor
 
-1. **The λ(t)/λ′(t) schedules are not specified.** While the paper correctly formalizes the use of separate weighting functions (lines 131-133, line 138), it never specifies the actual schedules used in experiments. This under-specification harms reproducibility and makes it impossible to verify the claimed mechanism of targeting early diffusion steps. Readers cannot tell whether this design choice is critical to the method's success or a minor detail.
+- **The bootstrapping experimental pipeline is described ambiguously.** The paper states it fine-tunes "on protein domain clusters ... without access to their structural data" and the method formalization mentions using known binders from BindingDB (line 121, 127). However, the experiment description (Section 5.2) only says "we fine-tune a model on each protein domain cluster" without explicitly stating that the binders per cluster came from BindingDB rather than from the test complexes' structural data. While the intended interpretation is clear from the method section, this ambiguity is unnecessary and raises reproducibility concerns.
 
-2. **No statistical significance or variance is reported for any metric.** The DockGen test set contains 189 complexes; the clusters subset has 85 complexes. Per-cluster analysis (Figure 4) involves clusters that may contain as few as 6-10 complexes each, where a single correct/failed prediction shifts percentages by >10 points. The paper reports only "two fine-tuning runs per cluster" with averaged results but no error bars, confidence intervals, or significance tests. This does not invalidate the results but substantially weakens the reliability of the numerical comparisons.
+- **The contribution of the vdM augmentation is never isolated.** The paper combines vdM synthetic data with increased training data and model scaling, but provides no controlled experiment measuring vdM's effect alone. The text only notes it "seems to provide some improvements when scaling to larger model sizes" — a qualitative statement without supporting ablation.
 
-3. **The scaling analysis confounds three interventions.** The improvement from 7.1% to 22.6% (DiffDock-L) simultaneously increases data (+52% from MOAD), model size (20M→30M parameters), and adds vdM synthetic augmentations. While Figure 3 likely shows multiple configurations (based on the caption mentioning "different colors"), the text (line 162) only qualitatively states "some improvements" from vdM. A controlled ablation isolating each factor's contribution (e.g., 30M model with and without vdM, or 20M model with and without additional MOAD data) would substantially strengthen the analysis. The paper's stated goal of "analyzing the scaling laws" is only partially fulfilled without these disentangled comparisons.
+- **No compute cost reported for bootstrapping.** Given that the method is presented as a practical alternative to large-scale data collection, the lack of any quantification of the computational overhead (number of diffusion rollouts per iteration, total GPU hours) is a gap.
 
-4. **Failure cases are acknowledged but not analyzed.** Three of the eight test clusters show no improvement from bootstrapping (line 177). The paper does not discuss why — whether due to poor initial generator, insufficient binding data, wrong pocket regions, or confidence model failure. Understanding these failures would strengthen the method's credibility and guide future improvements.
-
-5. **Computational budget is under-reported.** The paper does not specify the total number of diffusion rollouts per bootstrapping iteration, the buffer size, or the number of SGD steps per iteration. This information is important for reproducibility and for practitioners evaluating the method's cost.
+- **No comparison to alternative self-training or semi-supervised baselines.** The paper compares bootstrapped DiffDock-S against non-bootstrapped baselines (SMINA, GNINA, DiffDock). But it does not compare against standard pseudo-labeling, confidence-threshold filtering without the multi-resolution weighting, or other generic self-training heuristics applied to the same setting. This makes it hard to isolate the benefit of the proposed mechanism over simpler alternatives.
 
 ### Trivial
 
-- The vdM augmentation section does not report how many synthetic complexes were generated or whether adding them degrades performance on the standard PDBBind test set.
-- The caption note "† more details in Section 4" (Table 1) references a section whose content may have been partially lost in parsing.
-- Line 162 has a stray "}." artifact: "The vdM augmentation strategy also seems to provide some improvements when scaling to larger model sizes.}."
+- The paper states that DiffDock-L achieves 27.6% on DockGen-clusters while the bootstrapped small model reaches 24.0% on the same subset. This is reported in Table 1 but the relationship between scaling and bootstrapping is not discussed. A brief explicit comparison would help readers understand the trade-offs.
 
 ## Nice-to-Haves
 
-- A cross-cluster generalization experiment (fine-tune on one set of clusters, test on a disjoint set) would strengthen the "unseen domains" narrative, though the current per-cluster evaluation is valid for the paper's stated setting of fine-tuning with binding-only data.
-- Reporting how vdM synthetic data affects performance on the standard PDBBind test set would help calibrate concerns about potential degradation.
-- An analysis of whether confidence scores correlate with RMSD on target clusters before bootstrapping would clarify whether the confidence model's feedback signal is trustworthy.
+- Running bootstrapping on DiffDock-L or the full DockGen test set would strengthen the claim that the method generalizes beyond compensating for a small model's limitations.
+- Reporting per-cluster statistics on how many BindingDB binders were available would improve reproducibility and help assess the method's data requirements.
+- A discussion of how the small test set size (85 complexes, 8 clusters) affects the reliability of reported success rates (e.g., confidence intervals via bootstrapping over complexes) would be a useful addition.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **Criticism about "domain adaptation, not generalization to unseen domains" (Harsh Critic Point 1).** The paper's claim (lines 19-20, 185) is about fine-tuning "on classes of proteins where binding structural data is not available." The experiment fine-tunes on complexes from target clusters *without using their structural data* (only binding knowledge) and tests on held-out complexes from the same cluster. This is exactly what the claim describes: the model is adapted to a previously unseen domain using only binding data, not crystal structures. The critic's expectation of zero-shot cross-cluster generalization is a *stronger* claim than what the paper makes. The experimental setup is appropriate for the stated contribution. A clarified framing would help, but this is not a structural flaw.
-
-- **"The method is expensive (one model per cluster)."** The paper explicitly addresses this (lines 121-122): "docking screens are usually run on a very large number of complexes... using a restricted set of proteins. Therefore, any time that one would spend fine-tuning... would be largely amortized." This is a reasonable mitigating argument.
-
-- **"The paper does not describe how the models are aggregated."** Line 165 says "fine-tune a model on each protein domain cluster," which clearly indicates separate models.
+1. **"Data leakage / test complexes used during fine-tuning would invalidate results"** — Removed because it misunderstands the paper: the method explicitly operates "without access to structural data" (line 19) and uses binding affinity data (BindingDB, line 121, 127) rather than ground-truth poses from the test complexes. The ambiguity is in presentation, not in methodology.
+2. **"The stated vdM drawback about weak binders is not addressed"** — Removed because the paper explicitly acknowledges this drawback (line 151: "The drawbacks are that these synthetic complexes are of unknown affinity (many could be weak binders)"). Acknowledging a limitation is not the same as ignoring it, and the paper is not required to experimentally resolve every acknowledged limitation.
 
 ## Novel Insights
 
@@ -63,21 +59,12 @@ None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Add ablated baselines for Confidence Bootstrapping.** At minimum, compare against (a) self-training with uniform weighting of generated poses (no confidence weighting), and (b) self-training with hard thresholding on confidence (keep only top-k poses above a fixed score). This would isolate whether the specific mechanism of exponential confidence weighting matters.
-
-2. **Ablate the λ(t)/λ'(t) design.** Compare the full method against a version where λ(t) = λ'(t) for all t. This directly tests whether the multi-resolution targeting is responsible for the improvement.
-
-3. **Report the actual λ(t)/λ'(t) schedules used in experiments** to ensure reproducibility.
-
-4. **Add error bars or confidence intervals** for all main metrics, especially the per-cluster results in Figure 4.
-
-5. **Provide a controlled decomposition of the scaling analysis** showing the effect of each intervention (data only, vdM only, model size only) in at least a 2×2 comparison.
-
-6. **Discuss the three failing clusters** — analyze whether failure correlates with cluster size, initial confidence scores, or specific domain properties.
+1. Clarify the bootstrapping experimental pipeline in Section 5.2 by explicitly stating: (a) binders per cluster came from BindingDB (or another affinity database), (b) how many binders were available per cluster, and (c) that no structural pose information from the test complexes was accessed at any point during fine-tuning.
+2. Add at least one ablation study — either comparing λ(t) vs λ'(t) weighting against uniform weighting, or comparing against a simpler pseudo-labeling baseline without the multi-resolution targeting. This is critical to validate the claimed mechanism.
+3. Run the bootstrapping procedure with at least 3 independent seeds and report error bars (or per-seed performance) to give readers a sense of variance.
+4. Report the computational cost of bootstrapping (GPU hours, number of diffusion rollouts per iteration, total iterations) to support the claim that it is a practical method.
 
 ## Score and Decision
-
-The paper makes three distinct contributions, each with value to the community. The DockGen benchmark is well-constructed and exposes a genuine limitation of existing evaluations. The scaling analysis, while not fully decomposed, demonstrates useful trends. Confidence Bootstrapping is a novel idea with promising empirical results. However, the core method lacks the controlled baselines and ablations needed to definitively attribute the improvement to its stated mechanism. The paper as a whole has enough independent merit — particularly the benchmark and the scaling analysis — to warrant acceptance, but the Confidence Bootstrapping contribution requires significant strengthening to fully support its claims. With revisions addressing the ablations and baselines, this would be a strong paper.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

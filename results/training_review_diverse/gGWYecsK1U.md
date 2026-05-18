@@ -1,85 +1,85 @@
-Now I have all the information needed. Let me synthesize the final review.
+I have thoroughly read the paper and verified all claims against the actual text. Let me now produce the final consolidated review.
+
+---
 
 ## Summary
 
-Integrative Decoding (ID) is a decoding strategy that improves factuality in open-ended text generation by: (1) sampling multiple responses to a prompt, (2) constructing inputs that each prepend a sampled response before the original prompt, (3) processing these inputs concurrently in batch and selecting the next token by summing their logit predictions at each step. The method is evaluated across six LLM families on three benchmarks (TruthfulQA, Biographies, LongFact) spanning sentence- to document-level generation, showing consistent gains of +11.2%, +15.4%, and +8.5% respectively, with performance scaling log-linearly with the number of sampled responses.
+This paper presents **Integrative Decoding (ID)**, a decoding algorithm that improves factuality in open-ended text generation by aggregating predictions across multiple in-context "re-readings" of sampled responses. For each sampled response \(r_j\), ID prepends it to the original prompt \( [\mathbf{x}; r_j; \mathbf{x}] \), processes all such inputs concurrently in a single batch, and selects each next token by summing the logits across the batch. Experiments across six LLM families and three benchmarks (TruthfulQA, Biographies, LongFact) show consistent and often substantial factuality gains (up to +15.4%) with reasonable inference cost, and the gains scale log-linearly with the number of sampled responses.
 
 ## Strengths
 
-1. **Consistent and substantial factuality gains across diverse models and tasks**: ID yields absolute improvements across all six tested LLM families (LLaMA-2/3, Mistral, Qwen, Gemma, GLM) on three benchmarks with different generation lengths, as reported in Table 1. This breadth demonstrates genuine generality beyond a single model or evaluation setting.
+1. **Simple, novel, and effective decoding strategy with broad applicability.** The core idea—prepending a sampled response and aggregating logits across concurrently processed inputs—is elegant and avoids the task-format constraints of exact-match self-consistency methods (e.g., Self-Consistency, USC). It also avoids the iterative LLM calls of fact-checking approaches (SE-SL, SE-RG, FSC). The method applies to any open-ended generation task without requiring task-specific prompt engineering or additional training.
 
-2. **Clear log-linear scaling with repeated sampling**: ID's performance improves progressively as k increases (k=1→4→8→12→16), while USC and SR plateau or degrade beyond k=4 (Figure 3). This is the paper's most distinctive empirical finding — it shows that ID can harness additional compute at inference time in a way prior open-ended SC methods cannot.
+2. **Consistent and substantial factual improvements across diverse models and benchmarks.** ID achieves absolute gains of +3.7–10% on TruthfulQA (%Truth), +1.1–15.4% on Biographies (%Accuracy), and +1.6–8.5% on LongFact (F1@128) across six LLM families (LLaMA-2/3, Mistral-v0.2, Qwen2, Gemma2, GLM4). Unlike baselines (DoLa, USC, SR) that show mixed or degraded results on some models or datasets, ID improves factuality on every model–benchmark combination tested (Table 1).
 
-3. **Robust effectiveness on long-form generation**: On LongFact (document-level), ID improves F1@128 by up to 8.5% without sacrificing recall, whereas baseline ensemble methods (SR, FSC, SE-RG) cause sharp drops in recall (Table 1). This addresses a genuine limitation of prior SC approaches that struggled with longer outputs.
+3. **Scalable inference-time improvement with more sampled responses.** ID's accuracy improves log-linearly with the number of integrated responses \(k\) (Figure 2), while USC and SR plateau or degrade. This is because ID adds only one sampled response per branch, avoiding context-length saturation, and mirrors the inference-time scaling laws observed for exact-match self-consistency.
 
-4. **Favorable inference efficiency**: At k=4, ID achieves 1.13 ms/token latency (vs. USC's 0.93 ms/token) and is an order of magnitude faster than SE-SL (8.37 ms/token) and SE-RG (7.28 ms/token), per Table 3. This efficiency stems from ID's single-pass batch processing without explicit verification steps.
+4. **Robustness across model scales (3B–72B) and sampling strategies.** ID consistently improves factuality on Qwen-2.5 (3B/7B/14B/32B/72B), LLaMA-2 (13B/70B), and Mistral variants (Figure 4), with gains generally larger at larger scales. It also works robustly with temperature (0.3–0.7) and nucleus sampling (p=0.9/0.95) (Figure 5).
 
-5. **Preservation of language coherence**: In head-to-head GPT-4 comparisons with greedy decoding across six LLMs, ID wins or ties in 84–95% of cases (Table 2), demonstrating that factuality gains do not come at the cost of fluency.
-
-6. **Robustness to sampling strategies and model scales**: ID improves factuality across temperature (T=0.3–0.7) and nucleus sampling (p=0.9, 0.95) with similar gains (Figure 5), and the improvement grows with model size across Qwen-2.5 (3B→72B), LLaMA-2 (7B→70B), and Mistral series (Figure 2).
+5. **Competitive inference efficiency.** ID's latency (1.13 ms/token on a single A100) is only ~11× greedy decoding and substantially faster than fact-checking baselines like SE-SL (8.37 ms/token) and SE-RG (7.28 ms/token) (Table 5), while delivering better or comparable factual accuracy.
 
 ## Weaknesses
 
 ### Fatal
-
-None.
+None. The paper's central empirical claim—that ID improves factuality—is well supported by the experimental results.
 
 ### Major
 
-None. The paper's core empirical claims are well-supported by the evidence presented.
+1. **The assumed decomposition bridging the formal objective to the algorithm (Eq. 4) is unvalidated, and the paper overstates its theoretical grounding.** The paper assumes \(\log p_\theta(\mathbf{y} \mid [\mathbf{x}; r_j; \mathbf{x}]) \propto \bar{f}(\mathbf{y}, r_j) + \alpha \cdot G(\mathbf{x}, \mathbf{y})\) with the justification that the model's in-context learning abilities "naturally incline it" toward consistency and coherence. This is a heuristic, not a validated decomposition. The probability could capture many other factors, and the sum over \(r_j\) of these log-probabilities does not necessarily correspond to the claimed self-consistency objective. The paper's narrative that ID "implicitly incorporates self-consistency in its decoding objective" is a framing supported by intuition but not by evidence of the mechanism. **This does not invalidate the empirical findings**—the method works regardless—but the paper claims more for its theoretical derivation than it demonstrates. The analysis in Section 3.4 checks output-level properties (coherence, self-consistency) but does not validate the mechanism itself.
+
+2. **The evaluation protocols for the coherence analysis (Table 3) and self-consistency analysis (Table 4) are critically underspecified, making these analyses uninterpretable.**
+   - **Self-consistency metric (Table 4):** The "self-consistency score" is never defined. The table shows numeric values (0.598–0.759), but the reader cannot determine whether this is ROUGE-L, BERTScore, a learned classifier score, or something else. Without this definition, the claim that ID achieves "significantly better" self-consistency than baselines cannot be evaluated or reproduced.
+   - **Coherence evaluation (Table 3):** The Win/Tie/Lose judgments are presented as percentages, but the protocol is absent: Were these human judgments? GPT-4 evaluations? With what prompt and criteria? On which dataset? How many samples? The reader cannot assess whether the coherence claim is reliable.
+   
+   These omissions are consequential because Section 3.4 ("Analysis of Decoding Objective") is the paper's primary attempt to link the method's behavior back to its claimed objective. As presented, this section is not reproducible.
 
 ### Minor
 
-1. **The central theoretical assumption is unvalidated.** The paper constructs a formal apparatus (Eqs. 1–3) to frame the decoding objective as maximizing output support across sampled responses. The key bridge — Eq. 7's assumption that `log p(y | [x; r_j; x]) ∝ f̄(y, r_j) + α·G(x, y)` — is stated as an assumption (line 100: "Formally, we assume that:") and motivated by plausibility (in-context learning inclines the model toward consistency with r_j), but never empirically validated. No correlation analysis, sanity check, or ablation is provided to confirm that this log-probability actually correlates with human- or GPT-judged support. The method very likely works (the empirical results are strong), but possibly for reasons closer to "ensemble over diverse contextualized prompts" than the specific self-consistency mechanism claimed. The derivation should be reframed as intuition/heuristic motivation rather than a formal derivation, or the assumption should be validated.
+3. **No statistical significance or confidence intervals reported.** The main results (Table 1) are presented as point estimates. Given variability from both LLM sampling and GPT-4-based evaluation, confidence intervals would substantially strengthen the reliability of the conclusions. The improvements are large enough that the main claims are likely robust, but finer-grained claims (e.g., "more pronounced at larger scales," scaling patterns for specific models) would benefit from uncertainty quantification.
 
-2. **No equal-k comparison on LongFact.** In Table 1 (LongFact results), ID operates at k=16 while USC, SR, and FSC are limited to k=4 because their prompts would exceed context length. The paper is transparent about this (line 166), and the scaling plots on Biographies (Figure 3) show ID at k=4 already outperforming baselines at k=4 on that dataset. However, the headline LongFact numbers (ID at k=16 vs. baselines at k=4) conflate ID's method advantage with its sample-count advantage. Reporting ID at k=4 on LongFact alongside the baselines would give readers a clean comparison and strengthen the paper.
+4. **Missing a simple "sample-then-score" baseline.** The paper compares against several baselines but does not include a natural control: sample multiple responses and select the one with the highest average log-probability under the model. This would help isolate whether the improvement comes from token-level aggregation specifically, or simply from having more candidate responses to choose from.
 
-3. **No variance or statistical significance reported.** The paper reports only point estimates from single runs. Given that GPT-4 evaluation has stochasticity and that ID uses temperature sampling upstream, confidence intervals or significance tests across at least 3 seeds (evaluation + sampling) would substantially strengthen the reliability of the reported gains.
-
-4. **The self-consistency evaluation (Table 4) is partially circular.** ID is designed to maximize agreement between its output and the sampled responses, so finding that it achieves the highest SC score is expected. The comparison against other methods (USC, SR, etc.) is still informative, but the paper over-interprets this result as validating the method's mechanism. A more revealing analysis would show the *correlation* between SC scores and actual factuality, or compare ID's SC against baselines *before they optimize for it*.
-
-5. **No dedicated limitations section.** The paper does not explicitly discuss: (a) the total computational budget (sampling k responses + batch generation), (b) the reliance on GPT-4 as the evaluator across all three benchmarks, (c) the possibility that ID might amplify consensus errors (consistent but wrong answers), or (d) the theoretical gap in the derivation. Adding a limitations paragraph would improve the paper's scholarly completeness.
+5. **The claim that "performance gains become more pronounced at larger model scales" (Figure 4) is based on a visual trend, not a statistical test.** Larger models have higher baselines and thus more headroom, so the observed pattern may partly reflect this ceiling effect rather than a genuine interaction.
 
 ### Trivial
 
-- The transition from `F(y) + λG` to `Σ[f̄(y, r_j) + αG]` in the derivation is notationally sloppy — α appears to absorb the 1/|R| factor with no explanation. A brief note would clarify.
-- The proportionality constant in Eq. 7 (line 101) is unquantified; if it is output-dependent (which it likely is), it would affect the argmax. The paper should either bound this or acknowledge the limitation.
+6. **Latency characterization.** ID is described as having "comparable" inference cost to USC (1.13 vs. 0.93 ms/token), but it is actually ~21% slower. While the absolute difference is small and ID still dominates the other baselines, the wording slightly understates the gap. 
 
 ## Nice-to-Haves
 
-- **Ablate the context construction**: A natural control would replace the prepended sampled response with a random or unrelated text of similar length, or simply decode from parallel instances of the original prompt without any prepended response and average logits. This would disentangle whether the benefit comes from the *specific content* of sampled responses (supporting the self-consistency narrative) or from logit averaging across any diverse contexts.
-- **Quantify copying behavior**: The case study shows semantic-level consistency, but the paper does not measure how often ID's output contains verbatim excerpts from sampled responses. A simple n-gram overlap metric would clarify whether ID is genuinely integrating or effectively selecting.
-- **Include perplexity as an auxiliary coherence metric**: The coherence evaluation (ID vs. Greedy) relies solely on GPT-4 judgment. Supplementing with an automatic metric like perplexity would provide a model-agnostic check.
+- **Validate the bridging assumption (Eq. 4).** The authors could compute the left-hand side (\(\log p_\theta(\mathbf{y} \mid [\mathbf{x}; r_j; \mathbf{x}])\)) and right-hand side (using an external consistency checker + coherence metric) for a set of outputs and measure their correlation.
+- **Failure case analysis.** A few examples where ID degrades performance or produces overly generic outputs would help calibrate expectations and reveal limitations.
+- **Quantitative analysis of semantic vs. lexical self-consistency.** The case study suggests ID achieves semantic-level consistency, but a quantitative comparison (e.g., n-gram overlap vs. semantic similarity) would strengthen this claim.
+- **Discussion of when the consistency–factuality correlation may break.** The paper builds on the assumption that consistent statements are more factual, but does not discuss settings where this may fail (e.g., uniformly hallucinated outputs).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"Inconsistency about USC/SR optimal k search on LongFact"**: The critic claimed an inconsistency about k search on LongFact. The paper clearly states (lines 165–167) it did not search k on LongFact due to cost and explains why baselines were capped at k=4. The paper is transparent; no inconsistency exists.
-- **"The derivation should be invalidated because the proportionality constant matters"**: The paper labels Eq. 7 explicitly as an assumption. While the unquantified constant is a valid technical nitpick, calling it a "structural weakness" overstates its impact — the method's empirical success does not hinge on the exactness of this proportionality. This is better placed as a Trivial issue or Nice-to-Have.
-- **"Missing appendix, proofs"**: Removed per instructions — these are parser artifacts.
-- **"Formatting/style nitpicks"**: Removed per instructions.
-- **Strength about "Explicitly higher self-consistency than alternatives"**: Partially conflicts with the verified weakness (circularity). The comparison against other methods remains valid, but the strength's language ("validates that the decoding objective effectively realizes the intended implicit self-consistency") overstates the interpretability. Moved here to avoid overclaiming.
+- **"Not yet released / cannot be independently verified" type concerns:** None raised.
+- **Criticism about related work positioning (logit-level ensembling):** This is a presentation preference, not a weakness. The paper already discusses contrastive decoding in related work. **Reason for removal:** Does not affect validity of claims.
+- **"The method's name is fine" / generic commentary:** Not a weakness.
 
 ## Novel Insights
 
-The reviews surface a key tension that the paper itself does not fully resolve: ID's strong empirical performance could arise from at least two different mechanisms — (a) the claimed "implicit self-consistency" where the model is steered toward facts consistently supported across sampled responses, or (b) a simpler ensemble effect where averaging logits from diverse contextualized prompts (each containing a different factual example) naturally shifts probability mass toward factually grounded tokens regardless of consistency computations. The paper's formal derivation assumes (a), but the empirical tests do not distinguish (a) from (b). An ablation feeding random/irrelevant prepended text (rather than sampled responses) would be the cleanest test. This ambiguity does not diminish the method's practical value but does weaken the theoretical novelty claimed in the title and abstract.
+The key observation that emerges from the reviews, beyond what the paper explicitly states, is that ID's empirical robustness actually makes a stronger case for the method than its theoretical derivation does. The paper would be more honest—and ultimately more persuasive—if it presented ID as a well-motivated heuristic that works well empirically (with an intuitive but unvalidated theoretical sketch), rather than as a method whose objective it has formally derived and validated. The consistent gains across six models, three output-length regimes (sentence to document), and varying scales collectively suggest the method is capturing something real about how prepended in-context examples steer generation toward consistent, factual outputs—but the mechanism deserves dedicated study rather than asserted derivation.
 
 ## Suggestions
 
-1. **Reframe the theoretical motivation.** Replace the claimed proportionality (Eq. 7) with a clearly labeled heuristic intuition. The method's value is empirical and does not require this formal grounding.
-2. **Add ID at k=4 to the LongFact table** alongside the baselines, and present the k=16 results as a demonstration of scalability rather than the headline comparison. The scaling plots on Biographies already suggest ID at k=4 would be competitive, but show it explicitly.
-3. **Report variance** across at least 3 evaluation seeds (for GPT-4) and 3 sampling seeds (for the initial response generation). Even a single sentence stating the range would help.
-4. **Add a limitations paragraph** covering: total inference cost (sampling + batch decoding), evaluator model bias, the theoretical gap, and the risk of amplifying consensus errors.
-5. **Run the context ablation** suggested above (prepend irrelevant text instead of sampled responses) to distinguish the self-consistency mechanism from a generic ensemble effect.
+- Define the self-consistency metric used in Table 4 explicitly (metric name, formula, implementation) and describe the coherence evaluation protocol (judge model, prompt, dataset, number of samples) in full.
+- Tonally recalibrate the theoretical claims from "this proves the method incorporates self-consistency in its objective" to "this offers an intuitive motivation for the method, supported by output-level analysis."
+- Add confidence intervals (e.g., bootstrap) to at least the main results table.
+- Add a "sample-and-select-by-log-prob" baseline.
+- If Table 4's self-consistency scores are computed from a standard metric (e.g., ROUGE-L, BERTScore, NLI probability), this should take <5 lines of text to clarify.
 
 ## Score and Decision
 
-This is a solid empirical paper with a simple, novel, and effective method. The core claims — ID improves factuality across models and tasks, scales with k, and preserves efficiency — are well-supported by extensive experiments. The main weaknesses are about framing (overclaimed theoretical derivation) and presentation completeness (no equal-k LongFact comparison, no variance, no limitations section), none of which undermine the empirical contribution. The paper makes a useful practical contribution to inference-time factuality improvement.
+**Originality:** Good. The idea of prepending sampled responses and aggregating logits during decoding is novel and non-obvious.  
+**Importance of research question:** High. Improving factuality in open-ended generation is a central problem in LLM research.  
+**Claims well-supported:** Partially. The core empirical claim (ID improves factuality) is well-supported. The theoretical/narrative claim about "implicitly incorporating self-consistency" is not supported in its current presentation, but this can be addressed by recalibrating the framing.  
+**Soundness of experiments:** Moderate. The experimental design is sound, but the missing evaluation protocols (self-consistency metric, coherence judgment protocol) reduce reproducibility.  
+**Clarity of writing:** Good overall, with clear exposition of the method and results.  
+**Value to community:** High. The method is simple, effective, and immediately usable by practitioners.
 
-**Score**: 7.0
+The paper makes a solid empirical contribution. The identified weaknesses are real but addressable: the missing evaluation protocols can be described in a few lines, and the theoretical claims can be tonally adjusted without changing any results. The method itself is practically useful and the experimental evidence for its effectiveness is strong and broad.
 
-**Decision**: Accept
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

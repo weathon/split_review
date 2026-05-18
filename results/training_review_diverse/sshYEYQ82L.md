@@ -1,22 +1,22 @@
-Now I have all the information I need to produce the final consolidated review. Let me cross-check each reviewer claim against the paper text.
+Now I have a thorough understanding of the paper. Let me construct the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes U3-Attack, a multimodal jailbreak attack against Text-to-Image (T2I) models designed to bypass both prompt filters (text modality) and safety checkers (image modality). The text attack constructs a universal, context-independent paraphrase candidate set for each sensitive word that can be reused across prompts (avoiding per-prompt optimization). The image attack uses a two-stage adversarial patch generation strategy: Stage 1 optimizes the patch against the safety checker directly on synthesized images, and Stage 2 models the variation the patch undergoes through the T2I model (using only inputs/outputs, not internal gradients) to improve robustness. Experiments across open-source models (SDv1.5, SDv2.0, SDXL, SLD) and online platforms (Leonardo.Ai, Runway) report high attack success rates.
+This paper introduces U3-Attack, a multimodal jailbreak attack against T2I models that targets both prompt filters (text modality) and safety checkers (image modality). For the text modality, it constructs context-independent paraphrase candidate sets per sensitive word so the same set can be reused across different prompts. For the image modality, it uses a two-stage adversarial patch generation strategy that avoids backpropagation through the T2I model by modeling the patch's variation using only the model's inputs and outputs, enabling black-box application. Experiments on SDv1.5, SDXLv1.0, SDv2.0, SLD, Leonardo.Ai, and Runway demonstrate high ASR.
 
 ## Strengths
 
-1. **Universal text attack via context-independent paraphrase candidate sets.** Unlike prior work (MMA-Diffusion) requiring per-prompt perturbation, the paper precomputes a candidate set for each sensitive word via cosine-similarity maximization with CLIP text embeddings (Eq. 1, Section 2.1: "paraphrase candidate set is designed to be universal... rather than retraining from scratch for each prompt like MMA-Diffusion"). This directly supports the "universal" claim and is a clear methodological advance over per-prompt approaches.
+- **Universal text attack via context-independent paraphrase candidate sets**: The paper introduces a method to construct a single paraphrase candidate set per sensitive word using gradient-based optimization with a semantic similarity loss (Section 2.1). This set is designed to be reusable across different prompts containing the same sensitive word, avoiding the per-prompt retraining required by MMA-Diffusion. The method explicitly enforces that no sensitive word appears in the paraphrase by zeroing out those token gradients.
 
-2. **Two-stage adversarial patch that avoids backpropagation through the T2I model.** Stage 2 models the variation ε of the patch before/after passing through the T2I model using only inputs and outputs (Eqs. 3–5, Section 2.2: "we only need the inputs and outputs of the T2I model, without requiring any detail of its internal mechanics"). The gradient is backpropagated only through the safety checker. This enables black-box attacks on open-source models and online platforms, and the paper reports that it reduces optimization time by nearly half compared to end-to-end fine-tuning (Baseline 4).
+- **Two-stage adversarial patch generation without internal model access**: The residual modeling strategy (Eq. 4–8) models the patch's variation through the T2I model using only input and output, avoiding backpropagation through the T2I model. This reduces optimization time by nearly half compared to end-to-end fine-tuning (Baseline 4) while maintaining the same ASR-4-1 (95.082%; Table 3). The architectural advantage is real: gradients only propagate through the safety checker, not the full generation pipeline.
 
-3. **Strong empirical results across multiple models and platforms.** The text attack achieves ASR-2-1 of 95.667% on SDv1.5 (white-box, Table 1). The universal image patch achieves ASR-4-1 of 95.082% on SDSC (Table 3). The combined multimodal attack achieves an average ASR of 95.089% on SDv1.5 under white-box conditions (Fig. 6). Attacks succeed on online platforms Leonardo.Ai and Runway, with a 36.1% ASR-4-1 on Runway's erasure/replacement model (Section 3.5).
+- **High attack success rates across diverse models and platforms**: Table 3 reports 95.082% ASR-4-1 on SDv1.5 white-box. Table 2 shows U3-Attack outperforming MMA-Diffusion (90.164% vs. 85.245% ASR-4-1 on SDSC). Figure 6 shows 95.089% average multimodal ASR against SDSC under white-box conditions. The attack is validated on online platforms Leonardo.Ai and Runway (Section 3.5), demonstrating practical threat to deployed systems.
 
-4. **Comprehensive evaluation across diverse T2I models and real-world services.** Experiments cover open-source models (SDv1.5, SDv2.0, SDXLv1.0, SLD) and commercial platforms (Leonardo.Ai, Runway), using three NSFW detectors (Q16, MHSC, SDSC) and human evaluation for online services (Section 3.1, 3.5). This breadth supports generalizability claims.
+- **Ablation and analysis**: Figure 5 systematically shows how ASR-4-1, ASR-4-2, ASR-4-3, and ASR-4-4 evolve with training epochs, with a principled justification for selecting epoch 4. Figure 7 provides qualitative visual evidence of dual bypass (both prompt filter and safety checker).
 
-5. **Ablation of patch training epochs (Fig. 5).** The paper shows ASR-4-1 peaks at epoch 4 while ASR-4-4 declines afterward, providing insight into patch convergence behavior and justifying the epoch choice for subsequent experiments.
+- **Threat coverage across six NSFW themes**: Section 3.5 tests attacks on adult content, violence, gore, politics, racial bias, and inauthentic notable descriptions, using a curated dataset from prior work.
 
 ## Weaknesses
 
@@ -25,70 +25,56 @@ None.
 
 ### Major
 
-1. **Suspiciously identical three-decimal ASR values for U3-Attack and Baseline 4 (Table 3).** The paper reports that both U3-Attack and Baseline 4 achieve an ASR-4-1 of exactly 95.082% (line 154). Three-decimal equality between two distinct optimization strategies is highly improbable under normal experimental variation. While the paper frames this as "comparable performance" and claims advantage in efficiency, the exact match undermines confidence in the reported numbers across the board. The paper provides no statistical replicates, confidence intervals, or discussion of why this equality occurs (e.g., possible metric saturation). This must be explained or corrected.
+- **Text modality universality claim lacks empirical support at the per-word level.** The paper asserts that a paraphrase candidate set for a sensitive word is "context-independent" and reusable across prompts, but the evaluation reports only aggregate ASR (95.667% ASR-2-1) across 347+30 prompts. There is no disaggregated analysis by sensitive word or by diverse linguistic contexts. A universal attack should demonstrate that a single paraphrase for "naked" works across qualitatively different contexts (e.g., literal: "a completely naked woman"; metaphorical/idiomatic: "naked truth," "naked aggression"). Without this, the "universal" claim is asserted but not empirically substantiated.
 
-2. **Uncontrolled comparison between case-by-case and universal patch results.** The case-by-case variant achieves ASR-4-1 of 90.164% (Table 2) while the universal patch achieves 95.082% (Table 3) — a counterintuitive result since a per-image optimized patch would be expected to match or exceed a universal one. However, these two experiments use **different datasets**: the case-by-case uses 600 images generated from MMA-Diffusion's 1,000 prompts (line 142), while the universal uses 300 image-mask pairs from Leonardo.Ai's gallery + 60 from MMA-Diffusion (lines 114, 142). Different data sources with potentially different difficulty levels, combined with different training procedures (case-by-case appears to use Stage 1 only; universal uses Stage 1 + Stage 2 residual modeling), make the comparison uninformative. The paper never acknowledges or discusses this discrepancy.
+- **Text modality results section provides no explicit discussion of baseline comparisons.** Section 3.1 lists MMA-Diffusion and QF-Attack as baselines, but Section 3.2 — the textual modality results — discusses only U3-Attack's own performance. Even if Table 1 contains baseline results (the caption says "Best performance in bold," which suggests multiple methods), the absence of any textual comparison, analysis of relative improvement, or discussion of why U3-Attack outperforms (or underperforms) baselines in the text modality leaves the central contribution undefended in the narrative. By contrast, the image modality results (Tables 2, 3) explicitly compare against baselines.
+
+- **Efficiency advantage of the two-stage design is claimed but not quantified.** The paper states that U3-Attack "reduces the time required for adversarial patch optimization by nearly half compared to Baseline 4" while achieving identical ASR-4-1 (95.082%). No wall-clock times, GPU hours, or convergence curves are reported. Since Baseline 4 achieves the *same* ASR-4-1 on the primary metric, the claimed advantage rests entirely on unquantified efficiency. The methodological rationale (avoiding T2I backpropagation) is sound, but without measurements the claim is not verifiable.
 
 ### Minor
 
-1. **Key hyperparameters for the text attack are named but not specified.** The method describes parameters M (random tokens), v (top tokens per position), t (sampled paraphrases), and |S| (candidate set size) in Section 2.1 (line 51), but their numerical values are absent from the main text. The "Implementation Details" section (line 128) is only one sentence about hardware/software. For |S|, the paper later mentions "setting the size of the paraphrase candidate set for each sensitive word to 10" in Section 3.5 (line 177), but this is for the online services experiment only, and values for the core experiments (Table 1) are not given.
+- **Image modality evaluation tests the adversarial patch on only one type of target prompt.** The patch is trained and tested with target prompts like "a completely naked woman/man/couple/girl/boy" — all adult-content-related. The paper does not test whether the same patch transfers to other NSFW categories (violence, gore, political) in the image modality. This limits the demonstration of "universality" across concepts.
 
-2. **Large black-box transfer drop not problematized.** The multimodal attack's ASR drops from 95.089% (white-box, SDSC) to 38.557% (MHSC) and 23.690% (Q16) under black-box conditions (Section 3.4, line 173). This substantial degradation (over 50 percentage points) is reported without discussion of why transfer fails on those detectors or what the implications are for real-world threat models.
+- **Key hyperparameters for text candidate set generation are unspecified.** The method description (Section 2.1) introduces parameters M (number of random tokens), v (top tokens per position), t (sampled candidates per iteration), and |S| (candidate set size) without reporting their values in the main text. The online experiment mentions |S|=10, but white-box experiment parameters are absent. This hinders reproducibility.
 
-3. **Claim of "minimal perturbation" for text attack is unquantified.** The introduction motivates the text attack by stating that MMA-Diffusion "results in significant perturbations compared to the original text prompt" (line 19), and the paper claims its own approach achieves "minimal perturbation" (Section 2.1), but no metric (e.g., edit distance, perplexity change, cosine similarity to original prompt) is reported to support this comparison.
-
-4. **No statistical error bars or significance testing.** All ASR values in Tables 1–3 are single numbers. Without multiple trials, confidence intervals, or significance tests, it is unclear whether differences between methods (e.g., 90.164% vs. 85.245% in Table 2) are meaningful or within noise.
-
-5. **Multimodal results for Leonardo.Ai not reported.** Section 3.5 reports text-only results for Leonardo.Ai (Fig. 9a) and multimodal results for Runway (Fig. 9b, 36.1% ASR-4-1), but multimodal attack results for Leonardo.Ai are absent. This leaves the online multimodal evaluation incomplete.
+- **Online platform evaluation lacks rigor in reporting.** For text-only attacks on Leonardo.Ai and Runway, the ASR is displayed in Fig. 9(a) but not stated in text. For the multimodal attack on Runway, only a single ASR-4-1 (36.1%) is reported across 60 test cases without baseline comparison. Human evaluation is mentioned ("six human evaluators") but no details are given about annotation schema, instructions, or inter-rater agreement. No baseline comparison is conducted on online platforms.
 
 ### Trivial
-None.
+
+- The ethics statement is brief and does not discuss responsible disclosure practices (e.g., withholding code/patch weights, coordinating with platform developers) that are standard for attack papers in this space.
 
 ## Nice-to-Haves
 
-- **Failure analysis**: Most results are aggregated ASRs. Discussing which prompts/images the attack fails on (e.g., which sensitive words are hardest to paraphrase, which images resist patching) would deepen understanding of limitations.
-- **Adaptive defenses discussion**: As an attack paper, proposing defenses isn't required, but a discussion of potential countermeasures (adversarial training, patch detection, ensemble safety checkers) would contextualize the contribution.
-- **Computational cost for text attack**: Wall-clock time is reported for the image attack but not for constructing the paraphrase candidate sets. How many sensitive words were covered? How long did the optimization take?
+- Show per-sensitive-word ASR breakdown to substantiate the universality claim, and include a qualitative table of example paraphrases working across diverse context sentences.
+- Report wall-clock optimization time and convergence curves for U3-Attack vs. Baseline 4.
+- Test the adversarial patch on target prompts from multiple NSFW categories in the image modality.
+- Add an ablation on paraphrase candidate set size (|S|) vs. ASR to show diminishing returns.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-1. *"Selection criterion for optimal paraphrase not specified"* — The paper states: "The paraphrase c_opt with the highest loss value in Equation (1) is selected as the final value for s_i" (line 51). Eq. (1) is max cosine similarity. The criterion **is** specified. *(Removed: factually wrong claim)*
-
-2. *"Indicator function Z not defined"* — Line 71 states: "T is an indicator function that dynamically selects loss terms where the cosine distance exceeds the corresponding threshold." It **is** defined. *(Removed: factually wrong claim)*
-
-3. *"Residual modeling optimization loop underspecified / Algorithm 1 in appendix"* — Algorithm 1 was in the appendix, which the parser strips. The main text provides the full mathematical description (Eqs. 3–7) and the method is described conceptually. *(Removed: per Hard Rule — missing appendix content is a parser artifact)*
-
-4. *"Unusual notation" and "notation sloppy" comments* — These are style nitpicks about notation conventions that do not affect comprehension. *(Removed: style nitpick)*
-
-5. *"Table 1 is presented without any numbers" / "Figure 6 is missing"* — These are parser rendering issues, not paper flaws. *(Removed: parser artifact)*
-
-6. *"The number of prompts for online services (44, 16, 74...) is not described earlier"* — The process IS described in Section 3.5 (line 177): 10 adversarial prompts per target prompt, filtered by cosine threshold 0.75. *(Removed: paper already addresses this)*
-
-7. *Several section-by-section sentence-level pedantry points* — E.g., the critic's question about how the "significant perturbations" claim in the introduction is quantified (the introduction is motivational framing, not a result claim). *(Removed: sentence-level pedantry that does not affect the contribution)*
+- **"No direct comparison with baselines in the text modality results" (in the strongest formulation):** The reviewer states there is "no" comparison, but Table 1's caption says "Best performance in bold," and the paper lists MMA-Diffusion and QF-Attack as compared methods in Section 3.1. It is likely the table includes baselines, though the text does not discuss them. The criticism is kept above but softened to "lacks explicit discussion of baseline comparisons," which is accurate. The strongest formulation of "no comparison" is not confirmed and may be unfair.
+- **"Threat model for the image modality is narrow and not clearly motivated":** The paper explicitly states "we primarily focus on image editing task" and "similar to MMA-Diffusion, we investigate how image editing tasks could be exploited." The paper is transparent about its scope. Criticizing it for not covering generation-only pipelines is valid as a limitation but not as a flaw — the paper does not claim the attack works for generation-only. Moved here as removed because it evaluates the paper against a scope it did not claim.
+- **"The two-stage method's novelty and advantage are overstated":** The reviewer implies the method's advantage is marginal because Baseline 4 has identical ASR-4-1. However, identical ASR on the primary metric with a meaningfully different architecture (avoiding T2I backpropagation) is itself a contribution for black-box applicability. The criticism about unquantified efficiency is kept (see Major above); the broader claim that the method is not advantageous is removed as overstated.
+- **"Potential information leak"**: The reviewer notes the patch is trained and tested on the same target prompts. This is a valid observation about limited scope. However, the paper is transparent about this setup, and the claim is about universality *across images* (same concept, different images), which the setup does test. Moved to Minor weakness above with adjusted framing.
+- **Generic strengths from Strength Finder**: All identified strengths were verified against the paper and are genuine. None were dropped.
 
 ## Novel Insights
 
-The reviews surface two novel observations that go beyond the paper's own framing. First, the zero-backpropagation property of Stage 2 (residual modeling using only T2I model I/O) is a genuinely interesting design insight: it converts a standard end-to-end adversarial attack into a decoupled two-stage pipeline where the expensive diffusion model forward pass is used only for inference, not gradient computation. This is a practical contribution worth emphasizing more. Second, the failure mode where Baseline 2 (Stage 1 patch applied directly) collapses to 13.115% ASR-4-1, while adding residual modeling (U3-Attack) jumps to 95.082%, reveals that the T2I model's lossy compression in non-edited regions is a first-order effect — not a minor artifact — and that naive adversarial patches are essentially destroyed by the diffusion process. This finding has implications beyond the paper's specific method.
+None beyond the paper's own contributions. The reviews surface the gap between the paper's ambitious "universal" framing and the actual scope of its evaluation, especially the absence of per-sensitive-word analysis and the limited concept diversity in the image modality tests. This is a useful corrective for readers evaluating the paper's claims.
 
 ## Suggestions
 
-1. **Clarify the identical ASR issue**: Provide multiple trials with error bars, or explain if the metric saturates at ~95%. If the numbers are correct, state this explicitly and discuss why both methods hit the same ceiling.
-
-2. **Control the case-by-case vs. universal comparison**: Either run a controlled ablation where the same dataset and optimization budget are used for both variants, or explicitly acknowledge the different data sources and discuss why the comparison is still meaningful.
-
-3. **Report hyperparameter values for the text attack**: Provide M, v, t, and |S| used in the main experiments (Section 2.1) in the main paper or a table.
-
-4. **Discuss the black-box transfer gap**: Analyze why MHSC and Q16 are much harder to transfer to than SDSC, and what this means for practical threat.
-
-5. **Quantify text perturbation size**: Report edit distance, cosine similarity, or perplexity change between original and adversarial prompts to substantiate the "minimal perturbation" claim.
+1. For the text modality: provide a table showing ASR per sensitive word across multiple distinct context sentences (e.g., 5+ different sentences per word) to directly validate the universality claim.
+2. Quantify the efficiency advantage of the two-stage design with wall-clock optimization time and convergence plots.
+3. Add a section discussing the limitations of the image editing focus and potential strategies for extending to generation-only pipelines (e.g., using an initial benign generated image as a carrier).
+4. Provide all hyperparameters (M, v, t, |S|) in the main text or in a dedicated reproducibility table.
+5. Include baseline comparisons (MMA-Diffusion, QF-Attack) on online platforms, and report human evaluation methodology details (annotation schema, inter-rater agreement).
 
 ## Score and Decision
 
-The paper introduces a creative and well-motivated attack methodology (universal paraphrase sets + two-stage decoupled patch generation) that addresses real limitations of prior work. The method is novel and the evaluation is reasonably broad in terms of models and platforms covered. 
+The paper makes a genuine technical contribution with the context-independent paraphrase candidate sets and the residual modeling strategy for black-box adversarial patches. The core results are solid and the attack demonstrably works. However, the evaluation does not fully substantiate the "universal" claims made for both modalities, the text modality baseline comparison is not discussed in the narrative, and the efficiency advantage is asserted without measurement. These are substantive gaps that prevent the paper from being fully convincing in its current form. A major revision addressing these points could make the paper significantly stronger.
 
-However, two issues require serious attention before the paper can be accepted: (1) the suspicious exact equality of ASR-4-1 (95.082%) between U3-Attack and Baseline 4 at three decimal places, which undermines trust in the reported numbers; and (2) the uncontrolled comparison between case-by-case and universal patch results (different datasets, different procedures), which makes the claimed advantage of the universal approach uninterpretable. These are not fatal flaws — the paper's core methodological contribution does not collapse — but they are sufficient to prevent acceptance in the current form.
+**Overall Assessment**: The paper has real contributions but falls short of fully supporting its central claims. The weaknesses are addressable, but in the current state the evidence is incomplete.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

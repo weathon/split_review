@@ -1,20 +1,20 @@
-Now I have all the information I need. Let me write the consolidated review.
+Now I have all the information needed. Let me synthesize the consolidated review.
+
+---
 
 ## Summary
 
-The paper proposes JCPMH, a partial multi-modal hashing method that completes missing modalities via a generator jointly guided by (1) an autoencoder capturing global cross-modal structural information from fully-paired samples, and (2) multi-modal classifiers extracting discriminative information from all available data (including partial samples). The method is evaluated on MIRFlickr and NUS-WIDE, showing consistent improvements over prior partial MMH methods (NCH, GCIMH, SAPMH) across multiple partial-data scenarios.
+This paper proposes JCPMH, a partial multi-modal hashing method that completes missing modalities using joint guidance from two sources: (1) global structural information extracted by a GCN-based autoencoder operating on fully-paired samples, and (2) discriminative category-level information extracted by modality-specific classifiers operating on all available data (including partial samples). A generator is trained with a joint loss incorporating both sources, and the completed samples are passed through a hashing network. The method handles missing modalities in both training and query stages.
 
 ## Strengths
 
-- **Novel joint-guidance framework with empirical validation via ablation.** The idea of combining global structural information (autoencoder) and category-level discriminative information (classifiers) to guide missing-modality completion is novel relative to prior work like NCH, which relies solely on same-label neighbors from fully-paired anchors. The ablation study (Table 3) confirms that removing either guidance module degrades performance at PDR=50%, providing direct evidence that both components contribute.
+- **Joint-guidance mechanism is a principled direction**: The paper identifies a genuine limitation of prior partial MMH methods (NCH uses only neighbor information from same-label complete samples, ignoring discriminative signal from different-label and partial samples). The dual-guidance design — global structure from an autoencoder on fully-paired data + discriminative information from classifiers on all data — is well-motivated and addresses a real gap. The loss function (Eq. 14) formally integrates both sources of guidance.
 
-- **Consistent improvements across diverse partial-data settings.** Table 2 shows JCPMH outperforms NCH, GCIMH, and SAPMH under all three partial-data scenarios (incomplete training only, incomplete query only, both incomplete) at PDR=70% on both datasets. Figure 3 further demonstrates smooth mAP degradation under increasing PDR up to 90%, whereas competitors show fluctuations — indicating stability.
+- **Quantitative justification of data utilization**: The paper provides a concrete numerical rationale for the classification module (Section 3.2): at 70% PDR, an autoencoder alone can use only 30% of samples, while the classification module enables utilizing the remaining 70% of partial samples. This directly supports the claim of improved data utilization and is specific enough to be meaningful.
 
-- **More efficient data utilization than prior methods.** As explicitly quantified in §3.2, at PDR=70% the autoencoder can only use 30% of samples (fully-paired), but the classification module can leverage the remaining 70% of partial samples. This is a concrete advantage over NCH, which also relies on fully-paired anchors.
+- **Consistent improvements across multiple partial-retrieval settings**: JCPMH shows mAP improvements over the strongest competitor NCH across all three partial-retrieval scenarios (partial training, partial query, both partial) on two datasets, at multiple hash code lengths. The most challenging setting (both train and query at 70% PDR) yields an average 1.37% improvement over NCH on NUS-WIDE (Table 2). The ablation study (Table 3) confirms that both the autoencoder and classification module contribute to the final performance.
 
-- **Qualitative evidence of completion quality.** Figure 4 visualizes completed data on NUS-WIDE, showing JCPMH's completed samples closely follow the distribution of original fully-paired data, while zero-imputation, mean-imputation, and NCH produce concentrated or misaligned distributions.
-
-- **Hyperparameter robustness demonstrated.** Figure 5 shows mAP varies within a small range as λ₁ and λ₂ change, indicating the method does not require meticulous tuning.
+- **Robustness to high partial-data ratios**: Figure 3 shows that as PDR increases from 30% to 90%, JCPMH's mAP declines slowly and stably, while competitors like GCIMH and SAPMH exhibit more fluctuation. This is practically relevant for real-world scenarios with high rates of missing modalities.
 
 ## Weaknesses
 
@@ -22,67 +22,50 @@ The paper proposes JCPMH, a partial multi-modal hashing method that completes mi
 None.
 
 ### Major
-
-- **No variance or statistical significance reported for mAP results.** All mAP values in Tables 1 and 2 are reported as single numbers with no error bars, confidence intervals, or indication of multiple runs. Given that many improvements over NCH are modest (e.g., 0.7% average on the fully-paired setting, 1.37% on NUS-WIDE at 70% PDR), the reader cannot assess whether these differences reflect genuine superiority or random variation. This directly undermines the paper's central claim that JCPMH "outperforms other existing models." The absence of variance reporting is a standard expectation for experimental papers and is not a field-specific norm that can be waived.
-
-- **The autoencoder's role in guiding completion is not conceptually justified.** The autoencoder is trained exclusively on fully-paired samples (§3.3). In §3.5, its reconstruction loss (ℒ₂) is applied to data that is either fully-paired *or completed by the generator*. Since the autoencoder's weights are frozen during generator training, its reconstruction error on generated (out-of-distribution) data functions merely as a monitor, yet the paper treats minimizing this loss as a meaningful training signal without explaining *why*. This is a non-trivial gap: the autoencoder has never observed the distribution of generator outputs, so low reconstruction error on unobserved data is not automatically a reliable proxy for completion quality. The paper should at minimum discuss why this loss drives meaningful completions (e.g., if the autoencoder is treated as a learned prior / regularizer akin to a GAN discriminator, that analogy needs to be made explicit).
+None.
 
 ### Minor
 
-- **Test-time pipeline is not explicitly described.** The paper states JCPMH "can handle incomplete multi-modal samples during online retrieval" (abstract, §1) and defines the generator as taking partial modality as input to produce the missing modality (§3.5). However, it never explicitly states whether the generator is invoked at query time, or how the completed query is then hashed and matched against the precomputed database codes. This is inferable but should be stated explicitly. (Note: the critic's claim that invoking the generator at query time would make this "not an offline-trained hashing model" is incorrect — database hash codes are precomputed offline; query hash codes are always computed online in any hashing method.)
+- **Method description has several imprecisions that hinder reproducibility**. Three specific issues:
+  1. **The input to the generator ($I_p$) is not formally defined.** Section 3.5 introduces the generator as $f_g(I_p;\Theta_g)$ taking "partial modality $I_p$ as input" (line 154), but never specifies what $I_p$ denotes symbolically or what its dimensionality is. While the experimental section (line 185) clarifies that two MLP generators each take one modality and output the other, the method section should define this upfront.
+  2. **The classifier loss term $\mathcal{L}_3$ (Eq. 13) is ambiguous.** The paper trains separate image and text classifiers, but does not specify which classifier produces $\hat{L}^*$ for a completed sample that has both modalities. Line 154 says $\hat{L}^*$ is the output "after passing through the autoencoder or classification module" — this "or" leaves unclear whether one classifier is used, both are averaged, or some other aggregation is applied.
+  3. **The GCN-based autoencoder design is not well justified.** The paper uses a GCN-style propagation (Eq. 4–5) with a label-similarity adjacency matrix for reconstruction, but does not explain why a graph-convolutional encoder is the right choice for reconstructing concatenated multimodal features on what is effectively a fully-connected label-similarity graph. The claim that it captures "global structural information" (lines 79–80) remains operationalized only vaguely, and no comparison against a simpler MLP autoencoder is provided to validate the design choice.
 
-- **Missing implementation details for reproducibility.** The paper does not specify the optimizer, learning rate, batch size, or actual epoch numbers (T₁, T₂, T₃ are defined in Algorithm 1 but never given numerical values). The generator architecture is described as "MLP hidden dimensions 2048" but no layer count or activation details are provided. These gaps make the work difficult to reproduce.
+  None of these ambiguities are fatal — the overall framework is clear — but they make it harder to assess whether the joint-guidance mechanism works as claimed and to reproduce the method exactly.
 
-- **Ablation study scope is narrow.** The ablation (Table 3) only tests at PDR=50% with two variants. Varying the PDR (e.g., 30%, 70%) would provide stronger evidence about when each guidance module matters most.
+- **No statistical error bars on main results.** The reported improvements over NCH are modest (e.g., 1.37% on NUS-WIDE at 70% PDR). While the ablation study shows consistent drops when either module is removed, the main experimental tables (Table 1, Table 2) report only a single run without standard deviations or confidence intervals. Given that the differences between JCPMH and NCH are on the order of 1–2%, it is not possible to assess whether these improvements are statistically significant. Multiple random seeds with error bars would substantially strengthen the evidence.
 
-- **Hyperparameter sensitivity sweep range is narrow.** Figure 5 sweeps λ₁ and λ₂ only from 0.0–0.3; a wider range would be more convincing.
-
-- **Baseline hyperparameter configuration not discussed.** The paper does not state whether baseline methods (SAPMH, NCH, GCIMH, etc.) were re-tuned or used with their reported configurations. For a field where baseline tuning can significantly affect results, this omission weakens the fairness claim.
+- **The GCN autoencoder is not ablated against a simpler alternative.** The ablation study removes the entire autoencoder (JCPMH-A) or the entire classification module (JCPMH-B), but never replaces the GCN-based autoencoder with a standard MLP autoencoder. This means the paper cannot separate the benefit of the autoencoder's *existence* (i.e., any form of reconstruction-based completion guidance) from the benefit of its *specific GCN architecture*. Given that the GCN adds architectural complexity, this ablation gap weakens the justification for the design choice.
 
 ### Trivial
-None.
+
+- **The t-SNE visualization (Figure 4) is qualitative only.** While it suggests JCPMH's completed data better matches the original distribution, no quantitative measure (e.g., reconstruction error on held-out complete samples, MMD between completed and original distributions) is provided. This does not affect the paper's core claims but would strengthen the completion-effectiveness argument.
 
 ## Nice-to-Haves
 
-- A limitations section discussing when JCPMH might fail (e.g., extremely high PDR >90%, few classes with few samples per class, modalities with radically different dimensionality).
-- Runtime or complexity comparison with baselines, since the method requires multiple modules (autoencoder + classifiers + generator + hashing network) at inference time.
-- Wider hyperparameter sweeps and ablation across PDR levels.
-- Sensitivity analysis to the generator architecture choices.
+- A simple baseline of imputing missing modalities with zeros or per-class means and then training a standard MMH method (e.g., FGCMH) on the completed data would help isolate the contribution of the learning-based completion from the overall pipeline. This is not necessary for the paper's validity, but would strengthen the experimental isolation.
+- Reporting training time or convergence behavior would be helpful given the sequential training of three modules (autoencoder, classifiers, generator+hash network).
+- A brief discussion of limitations — e.g., how the method behaves when labels are noisy, or when the label set is large relative to the number of fully-paired samples — would strengthen the paper.
 
 ## Removed Points
 
-These points from the harsh critic were removed with justification:
-
-1. **"The method is not an offline-trained hashing model if the generator is invoked at query time."** — Removed as factually wrong. Database hash codes are precomputed offline in all hashing methods; query processing (including completion) is always done online. This is standard for information retrieval.
-
-2. **"The classifier was trained on original (corrupted) data, yet used on completed samples."** — Removed. The paper clearly states (§3.2) that the classifier is trained on *available* samples per modality, i.e., `[X^c, X^i]` for images and `[Y^c, Y^t]` for text, which explicitly includes partial-modality samples. The classifier is designed precisely to handle partial data.
-
-3. **"The forward propagation in Eq. 3 is unclear: how node features and adjacency matrix interact."** — Removed. The GCN propagation `H^(l+1) = ReLU(Ã^c H^l W^l)` is standard and well-understood in the field. The adjacency matrix specifies inter-sample relationships; node features are transformed through the layers. No confusion exists for readers familiar with GCNs.
-
-4. **"ReLU activation is unusual for a reconstruction autoencoder."** — Removed. ReLU is a standard choice in GCN-based autoencoders and is not unusual.
-
-5. **"X^* and Y^* notation conflates training data with generated data."** — Removed. The paper unambiguously defines `X^*` and `Y^*` as "fully-paired samples or samples completed by the cross-modal generator" (§3.5). This is clear notation.
-
-6. **Formatting/style nitpicks, missing appendix references, and other parser artifacts.** — Removed per hard rules.
-
-7. **"The paper should cover more domains/tasks."** — Removed as scope creep.
-
-8. **Claim that FGCMH comparison is unfair** — Removed. The paper explicitly notes it applies the same PDR treatment to comparable methods. The comparison is clearly scoped.
+- **"Generator architecture details are absent"**: The reviewer claimed architecture, input/output dimensions, and training procedure are absent. However, Section 4.2 (line 185) specifies "two MLPs as generators. Each takes one modality (either image or text) as input and generates the other modality. The hidden layer dimensions are 2048." While Section 3.5 is sparse, the information exists in the paper. Removed because it is factually incorrect to say these details are absent; the valid concern (sparse method section) is preserved in Minor weaknesses above.
+- **"No justification for GCN autoencoder"**: The paper provides justification, albeit thin (lines 79–80: "extract this overall structural information"; lines 85–87: "to extract information from the labels"; lines 99–100: "reflects the correlation"). The claim of "no justification" is factually incorrect; the actual concern (thin justification, no comparison against simpler MLP) is preserved in Minor weaknesses above.
 
 ## Novel Insights
 
-The most interesting point emerging from this review is the conceptual tension between the paper's two guidance modules. The autoencoder captures *global structural* information but can only train on fully-paired data (a small subset at high PDR). The classifiers capture *discriminative* information but can train on all available (including partial) data. The paper claims these are complementary, but doesn't discuss the fundamental asymmetry: the autoencoder's prior is narrower (trained on fewer, cleaner samples) while the classifier's prior is broader (trained on more, noisier samples). A deeper paper might analyze how this asymmetry affects the quality of guidance at different PDR levels. Additionally, the autoencoder guidance (ℒ₂) uses an L₂/MSE loss on reconstructions of generated data, which is conceptually similar to a GAN discriminator but without adversarial training — this implicit connection is worth making explicit to justify the approach.
+The most interesting observation from these reviews is the tension between the paper's *conceptual* contribution and its *evidential* contribution. The dual-guidance idea (autoencoder for global structure + classifiers for discriminative signal) is well-motivated and the data-utilization argument (30% vs. 100% at 70% PDR) gives a clear quantitative reason for the design. Yet the experimental evidence is surprisingly fragile for the claims being made: the improvements are small, unreplicated, and the ablation tests the *existence* of modules rather than the *specific design choices* within them. This pattern — a good idea with thin execution — is common in papers that identify a clear gap but rush to claim a solution before rigorously validating it. The paper would be substantially stronger if it invested in statistical rigor and architectural ablation rather than any additional algorithmic innovation.
 
 ## Suggestions
 
-1. Run all experiments with at least 3–5 random seeds and report mean ± std. This is essential given the small margins over NCH.
-2. Add a paragraph in §3.5 explicitly justifying why the autoencoder's reconstruction loss on generated data is a meaningful training signal (e.g., treat the frozen autoencoder as a learned prior whose reconstruction error measures how "natural" a completion looks from the perspective of the fully-paired data manifold).
-3. Explicitly describe the test-time pipeline in one sentence: "At test time, if a query has a missing modality, the generator f_g is first invoked to complete it; the completed multimodal sample is then passed through the hashing network to produce the query hash code, which is matched against precomputed database codes."
-4. Provide numerical values for T₁, T₂, T₃, optimizer, learning rate, and batch size.
+1. **Clarify the method ambiguities**: Define $I_p$ formally, specify which classifier(s) produce $\hat{L}^*$ in $\mathcal{L}_3$, and describe the generator architecture in Section 3.5 (not just in the experimental section).
+2. **Report error bars**: Run main experiments with at least 3–5 random seeds and report mean ± std for the key partial-retrieval results (Table 2).
+3. **Ablate the autoencoder architecture**: Replace the GCN-based autoencoder with a simple MLP autoencoder (same reconstruction losses) to determine whether the graph-convolutional design or just the autoencoder itself drives the improvement.
+4. **Provide a quantitative completion metric**: Add reconstruction error on held-out complete samples or MMD between completed and original distributions to complement the t-SNE visualization.
 
 ## Score and Decision
 
-The paper addresses a meaningful problem with a novel framework and presents generally positive empirical results. However, the lack of variance reporting makes the claimed improvements over baselines unverifiable, and the core guidance mechanism (autoencoder loss on generated data) is not conceptually justified. These are significant issues that prevent acceptance in the current form.
+The paper addresses a genuine problem with a reasonable solution, and the experimental evidence, while modest, is consistent and supported by ablation. The main weaknesses are (1) imprecise method description that should be tightened, (2) lack of statistical error bars on the main results, and (3) insufficient justification/ablation of the GCN autoencoder design choice. None of these is fatal — they are all addressable — but they collectively prevent the paper from being a strong contribution in its current form. The core idea is worth pursuing; the execution needs refinement.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

@@ -1,22 +1,22 @@
-Now I have thorough understanding of the paper and the reviews. Let me compile my final review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ---
 
 ## Summary
 
-ComputAgeBench proposes the first systematic, open-access benchmark for evaluating blood-based epigenetic aging clocks. It collects and harmonizes 66 public DNA methylation datasets covering 19 aging-accelerating conditions across 9 disease classes, defines four standardized evaluation tasks (AA2, AA1, chronological age accuracy, prediction bias) plus a cumulative score, and tests 13 published clock models. The paper is a benchmark contribution — it does not propose a new method, and its value lies in the quality of its dataset harmonization, evaluation methodology, and fairness of comparisons.
+This paper introduces ComputAgeBench, the first systematic open-access benchmark for validating blood-based epigenetic aging clocks. It harmonizes 66 public DNA methylation datasets covering 19 aging-accelerating conditions across nine disease classes, defines evidence-based criteria for condition and dataset selection, proposes four benchmarking tasks (relative acceleration, absolute acceleration, age prediction accuracy, bias), and evaluates 13 published clock models with a cumulative score that penalizes positive prediction bias. The benchmark reveals that second-generation clocks (PhenoAgeV2, GrimAge variants) outperform first-generation ones, and that no clock reliably detects acceleration in cardiovascular/metabolic conditions.
 
 ## Strengths
 
-1. **First systematic, large-scale benchmark for epigenetic aging clocks.** The paper fills a genuine gap: "no systematic open access benchmark… has been proposed to date" (Section 2.2). ComputAgeBench's collection of 66 datasets across 19 conditions (Section 3.3) is far more comprehensive than prior single-disease or small-scale comparisons (e.g., Porter et al. 2021; Ying et al. 2024).
+- **Large-scale, principled dataset harmonization**: The paper aggregates 66 datasets from over 50 studies across nine disease-class categories (Section 3.3, Fig. 2E). This is, to my knowledge, the largest open-access panel assembled specifically for clock benchmarking, directly addressing the lack of standardized validation sets noted in prior work (Section 2.2).
 
-2. **Principled, evidence-based criteria for selecting aging-accelerating conditions.** The three AAC criteria (decreased life expectancy, chronic, systemic; Section 3.1) are clearly defined and go beyond ad-hoc selection in prior work. Population-based evidence for each condition is cited (Table A3), ensuring reproducibility and clinical relevance.
+- **Evidence-based criteria for AAC selection**: Three explicit, reproducible criteria (decreased life expectancy, chronic nature, systemic manifestation) are defined for selecting aging-accelerating conditions (Section 3.1, Fig. 2B). This grounds the benchmark in biology rather than ad hoc condition selection, making the methodology reusable and defensible.
 
-3. **Composite benchmarking score that addresses known pitfalls.** The cumulative score (Section 3.6, Eq. 2) explicitly penalizes the AA1 task score by the magnitude of positive prediction bias (Med(Δ) on HC). This mitigates the known issue that first-generation clocks with high chronological age accuracy may fail to detect acceleration while second-generation clocks may appear strong in AA1 due to systemic bias — a problem prior ad-hoc comparisons did not address.
+- **Multi-task evaluation framework with bias-aware cumulative score**: The four tasks (AA2, AA1, age prediction accuracy, bias) and the cumulative score (Eq. 2) explicitly address the biomarkers paradox — the fact that high chronological age prediction accuracy can mask poor biological age estimation. The bias penalty demonstrably corrects inflated AA1 scores (e.g., GrimAgeV2, Table 1), and the framework differentiates first- from second-generation clocks in interpretable ways.
 
-4. **Comprehensive evaluation with 13 diverse clock models across four tasks.** The benchmark tests both first-generation (HorvathV1, Hannum, etc.) and second-generation clocks (PhenoAge, GrimAge) using tasks that measure relative acceleration (AA2), absolute acceleration (AA1), age prediction accuracy, and systematic bias (Section 3.5, Table 1).
+- **Demonstrated utility through evaluation of 13 published clocks**: The benchmark produces concrete, actionable findings: second-generation clocks (PhenoAgeV2, GrimAge variants) lead on the cumulative score; all clocks fail to detect acceleration in cardiovascular/metabolic diseases (Fig. 3E); and most clocks perform best on immune-mediated conditions, likely reflecting biases in their training data (Section 4). These results generalize prior smaller-scale findings and expose previously unquantified limitations.
 
-5. **Open-access and harmonized data with clear reproducibility commitment.** All datasets are from GEO with open access, no data access requests required (Section 3.2). The paper provides a Google Colab notebook and promises code/dataset repositories after review (Section 7), with metadata harmonization described (Section 3.3).
+- **Reproducibility and open access**: The pipeline is available as a Google Colab notebook, and all data sources are public GEO datasets (Section 7). No data in the benchmark was used to train any of the evaluated clocks (Section 3.4), ensuring no data leakage.
 
 ## Weaknesses
 
@@ -25,60 +25,66 @@ None.
 
 ### Major
 
-1. **Unsubstantiated claim of no data leakage between clock training sets and benchmark datasets.** Section 3.4 states "we also ensured that no data in the benchmark was used to train any of the selected clocks," but provides no verification methodology, no list of GEO IDs used in each clock's original training, and no analysis of overlap. This is critical because several evaluated clocks (especially Horvath's multi-tissue clock and its variants) were trained on large compilations of public GEO data spanning many years. If overlap exists, performance results could be inflated and comparisons unreliable. The paper should either: (a) provide a direct verification (e.g., listing the GEO series or sample IDs used in each clock's training and confirming no overlap), or (b) acknowledge that overlap cannot be fully ruled out and discuss how this might affect the results. Without this, the core benchmarking results (Table 1, Figure 3E-F) rest on an assumption that may be false.
+1. **The global bias measure may mask dataset-specific covariate shifts.** The bias task (fourth task) computes a single median Δ across *all* HC samples in the panel. A clock could have opposing positive and negative biases across different datasets that cancel out, yet the AA1 scores for individual datasets could still be misleading. The paper acknowledges covariate shift as a potential confound (Section 5) but does not analyze how much per-dataset bias varies across the panel. The AA1 task is the less rigorous of the two acceleration tasks (the paper says so), but because it is explicitly used to expand coverage to datasets lacking HC samples — exactly the setting where one *cannot* control for dataset-specific bias — this gap is nontrivial. The authors should at minimum report the distribution of per-dataset Med(Δ) for HC samples and discuss whether global bias is a reasonable summary.
 
-2. **AAC assumption not critically examined.** The three criteria (decreased LE, chronic, systemic) are reasonable, but the paper treats all 19 included conditions as equally valid proxies for accelerated *biological aging*. Some conditions (e.g., HIV) increase mortality through immunodeficiency and comorbidities, and evidence that they accelerate the intrinsic aging process per se is mixed. The benchmark's logic depends on the assumption that failing to detect a clock difference (or detecting one) can be interpreted as a property of the clock. If some conditions do not accelerate aging in the biologically relevant sense, interpreting clock successes/failures becomes ambiguous. The paper should discuss this limitation and consider a sensitivity analysis excluding conditions with weaker evidence for aging acceleration to test whether rankings are robust.
+2. **Per-dataset results for the AA1 and AA2 tasks are not shown in the main paper.** Figure 3 aggregates scores by condition class, and Table 1 gives cumulative numbers, but the reader cannot see which specific datasets each clock gets right or wrong, or whether a high class-level score is driven by a few datasets. The paper mentions that "some datasets were evaluated incorrectly by all models" (Section 5), but does not name them or analyze why. For a benchmark paper, making per-dataset scores available (at least in supplementary material) is important for transparency, replication, and understanding failure modes. Without this, the claim that most clocks perform best on immune-related conditions remains a qualitative statement.
 
 ### Minor
 
-1. **Known-groups validity vs. property validation framing could be more precise.** The paper defines four properties of biological age (Section 1), then claims to "validate the 1st and the 2nd properties in epigenetic aging clocks" (line 32). What the benchmark actually does is test whether *specific clock predictions* can distinguish AAC from HC cohorts — i.e., known-groups validity of the clocks, not direct validation of the latent BA construct. A clock could fail this test due to measurement noise or tissue specificity even if BA is truly accelerated; conversely, it could pass due to confounding. The paper's framing is not wrong (it does test whether clocks satisfy property 2), but it risks overstatement. Explicitly framing the benchmark as testing *known-groups validity* using AACs as proxies would align claims more precisely with the evidence.
+3. **The asymmetric bias penalty in the cumulative score is principled but under-justified.** The formula `max(0, Med(Δ)) / Med(|Δ|)` penalizes only positive bias. This is actually well-motivated: the AA1 task tests H_A: Δ_AAC > 0 (one-sided), so positive bias inflates the score (creating false-positive risk), while negative bias deflates it (already a natural penalty). The critic's concern that negative bias "could produce spurious positive results" is incorrect — negative bias makes positive detection *harder*, not easier. However, the paper does not explicitly argue this rationale, leaving the asymmetry open to interpretation. A brief justification or acknowledgment that a symmetric penalty is a design choice would improve clarity.
 
-2. **AA1 batch-effect sensitivity not fully mitigated.** The AA1 task (one-sample test that Δ > 0 in AAC cohorts) lacks within-study controls. The paper acknowledges AA1 is less rigorous (Section 3.5) and penalizes global positive bias in the cumulative score, but this global bias measure may not capture dataset-specific technical offsets. AA1 scores could be inflated by batch effects that happen to align with the test's direction in particular datasets. The paper should discuss this limitation more explicitly and consider reporting results with and without per-dataset normalization.
+4. **No confidence intervals or uncertainty estimates for scores in Table 1.** Given the modest number of datasets per condition class (ranging from ~3 to ~12), the leading ranks could shift with the addition or removal of a few datasets. Bootstrap intervals or similar would help calibrate how much trust to place in the ranking.
 
-3. **No confidence intervals or variance reported for benchmark metrics.** Table 1 presents Med(|Δ|), Med(Δ), AA2, AA1, and cumulative score as point estimates without confidence intervals or measures of variance across datasets. Since the number of datasets per condition varies, scores may be sensitive to condition class balance. Reporting variability (e.g., bootstrap confidence intervals for the cumulative score, or per-dataset effect sizes) would strengthen the reliability of model comparisons.
+5. **The third AAC criterion (systemic manifestation) is operationalized only qualitatively.** The paper provides examples of excluded conditions (bone fractures, some malignancies — Section 3.1) but does not give a systematic procedure. A more explicit decision rule or acknowledgment of the inherent uncertainty would strengthen the methodology.
 
-4. **"Some datasets were evaluated incorrectly by all models" — unquantified.** The paper mentions this observation (Section 5) and offers plausible explanations, but does not quantify how many datasets, which conditions, or the magnitude of failure. This would strengthen the claim and enable comparisons with future benchmarks.
-
-5. **Missing CpG imputation impact not reported.** The paper imputes missing beta values using gold-standard means from SeSAMe (Section 3.4), but does not report how many CpGs per clock were missing across datasets, or how imputation affects predictions. This is relevant because different clocks use different CpG sets, and some may not be covered by all microarray platforms.
+6. **The single saliva dataset is treated identically to blood datasets without discussion of tissue-specific covariate shifts.** Given that all other datasets are blood-based, combining tissues could introduce additional batch effects. A brief note on why this is reasonable or what checks were performed would help.
 
 ### Trivial
-- The sample-size thresholds (10 per dataset, 5 AAC per dataset) are stated without power analysis justification.
-- The AAC condition table with evidence is in the appendix; having it in the main text would improve readability, but citing the appendix is standard practice.
+None.
 
 ## Nice-to-Haves
-- Per-dataset bias distributions (boxplot across HC samples) would make the heterogeneity visible that the cumulative score averages over.
-- A sensitivity analysis excluding conditions with weaker evidence for aging acceleration (e.g., HIV, specific metabolic conditions) would test robustness of the rankings.
-- Reporting AA2 and AA1 with effect sizes (not just significance flags) would allow readers to assess the magnitude of acceleration detection, not just binary pass/fail.
+
+- Provide per-dataset AA1 and AA2 results (with p-values before and after FDR correction) in a supplementary table, along with dataset characteristics (sample size, condition, platform). This would make the benchmark transparently reusable and enable readers to identify failure patterns.
+- Report the distribution of per-dataset median Δ for HC samples to empirically assess whether the global bias measure is adequate or whether dataset-specific bias varies enough to distort AA1 scores.
+- Add a brief power analysis showing how sample size per dataset affects the sensitivity of the two-sample and one-sample tests, to help calibrate expectations for small datasets.
+- Name and analyze the specific datasets that "all models" get wrong (Section 5) — this could yield concrete insights about whether failures are due to small sample size, strong batch effects, or genuine lack of an aging signal for that condition.
 
 ## Removed Points
 
-These points were removed per guidelines; treat with caution:
+The following points from the harsh critic were removed after verification against the paper:
 
-- **Conflation between BA properties and known-groups validity (original Critical Issue 1)**: The paper's statement is more careful than the reviewer implies. Section 3.5 describes testing "aging clock ability to distinguish AAC from healthy control samples" and the abstract says "reliable aging clocks must be able to distinguish between healthy individuals and those with aging-accelerating conditions." The paper tests whether clocks satisfy property 2, which is precisely what a benchmark for clocks should do. The reviewer's philosophical distinction (validating properties of BA vs. known-groups validity of clocks) overstates the problem. The remaining framing suggestion is kept as a Minor weakness above.
-- **"comprehensive benchmarking...can resolve the controversy" is overconfident**: The paper says "comprehensive benchmarking of aging clocks can resolve the controversy regarding their robustness and utility" — this is a reasonable statement about what a benchmark *can* contribute, not a claim of single-handed resolution.
-- **Missing related works**: Not included per policy — no external sources to confirm existence.
-- **Formatting/presentation nitpicks**: Removed per policy (parser artifacts).
-- **Appendix content requests framed as missing**: The paper references appendix content explicitly; the appendix exists in the original submission.
+- **"The authors do not state reasons for excluding kidney/liver datasets"** — *Removed because the paper explicitly states: "All five dataset selection criteria were met by none of the found kidney- and liver-related AAC datasets" (Section 3.3). The reason is stated: they did not meet the five dataset-selection criteria.*
+- **"No mention of train/validation split or data leakage"** — *Removed because the paper states: "we also ensured that no data in the benchmark was used to train any of the selected clocks" (Section 3.4).*
+- **"Negative bias could produce spurious positive AA1 results"** — *Removed because this is factually incorrect. The AA1 test is H_A: Δ_AAC > 0. Negative bias (systematic underprediction) makes Δ smaller, reducing statistical power to detect positive acceleration — it cannot produce spurious positives. The asymmetry in the penalty is actually principled.*
+- **"AA2 one-sided test should be two-sided"** — *WEAKENED and moved to Minor. The one-sided test is justified because the benchmark is constructed around AACs (aging-accelerating conditions). The alternative hypothesis is directional by design.*
+- **Reproducibility concern based on missing implementation details** — *Not applicable; the paper provides a Colab notebook and cites all public data sources.*
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the key novel insight from the reviews is the asymmetry between the paper's *claim* of being a benchmark for validating properties of biological age versus its actual methodology of known-groups validation. This tension is present in many biomarker papers but is particularly acute here because the benchmark explicitly discusses BA's latent, unmeasurable nature. The suggestion to frame the contribution more precisely around known-groups validity would not weaken the paper — it would strengthen it by aligning claims more tightly with the evidence, making the benchmark harder to dismiss on philosophical grounds. Additionally, the data leakage concern highlights a systemic vulnerability in retrospective benchmarking of widely-used models: the community should establish norms for verifying training/benchmark separation when the training data are public but their exact composition is poorly documented.
+The two reviewer inputs, read together, reveal a subtle tension in the paper's methodology that is worth articulating: the benchmark is explicitly designed to compensate for the absence of mortality data (which would be the gold standard), but its core innovation — the AA1 task as a means to expand dataset coverage — introduces a reliance on a global bias correction that may be insufficient precisely in the settings where AA1 is most needed (datasets without HC samples where per-dataset covariate shifts cannot be directly measured). This is not a fatal flaw, but it means the AA1 results should be interpreted as the more speculative half of the benchmark, and the paper would benefit from making this caveat more prominent. Conversely, the AA2 task, which is more rigorous because it controls per-dataset shifts via a within-dataset control group, is the more trustworthy signal in the evaluation, and it is encouraging that the cumulative score's ranking aligns with the AA2 ranking (both place PhenoAgeV2 first), lending convergent validity to the overall conclusions.
 
 ## Suggestions
 
-1. **Highest priority**: Provide explicit verification of no data leakage — list the training data sources for each evaluated clock (or at least the major ones like Horvath's multi-tissue clock) and confirm none of the 66 benchmark datasets overlap. If verification is impossible for some clocks, transparently acknowledge the limitation and discuss the directional impact on results.
-2. Rephrase the benchmark's purpose from "validating properties of BA" to "evaluating known-groups validity of clocks using a pre-specified AAC panel" to align claims with methodology.
-3. Add a sensitivity analysis excluding conditions with the weakest evidence for aging acceleration to test ranking robustness.
-4. Report confidence intervals or bootstrap estimates for the cumulative score and key per-dataset effect sizes.
-5. Quantify the "some datasets evaluated incorrectly by all models" claim with specific counts and conditions.
+1. Provide a supplementary table of per-dataset results (AA1 hits/misses, AA2 hits/misses, per-dataset HC bias, p-values) to improve transparency and reusability.
+2. Add a figure or table showing the distribution of per-dataset Med(Δ) for HC samples to empirically justify (or revise) the global bias correction.
+3. Explicitly justify the asymmetry of the bias penalty in the main text (i.e., that negative bias naturally penalizes the AA1 score via the one-sided test, while positive bias does not).
+4. Add bootstrap confidence intervals for the cumulative scores in Table 1.
 
 ## Score and Decision
 
-The paper makes a significant and timely contribution — a systematic, large-scale benchmark for epigenetic aging clocks has been clearly missing from the field, and the dataset harmonization, AAC criteria, and cumulative score are well-conceived. The weaknesses identified are real but addressable: the data leakage concern is the most serious and must be verified, but it is an evidential gap rather than a structural flaw. The other issues (framing precision, batch effects, variance reporting) are standard matters of rigor that strengthen the paper without requiring redefinition of the contribution. The paper is a solid contribution that, with the suggested revisions, would be a valuable resource for the aging clock community.
+**Originality**: 7/10 — The benchmark methodology itself is novel in its systematic, evidence-based approach, though individual tasks (AA1, AA2) build on prior work (Porter et al., 2021; Ying et al., 2024).
 
-**Score**: 7.0 / 10
+**Importance**: 8/10 — Addresses a real gap: the absence of standardized validation for epigenetic clocks, which has direct relevance for clinical trial design.
 
-**Decision**: Accept
+**Claims support**: 7/10 — The main claims are supported, but the lack of per-dataset transparency and the unexamined dataset-specific bias weaken the evidentiary floor for the AA1-based conclusions.
+
+**Soundness**: 7/10 — The experimental design is generally sound. The cumulative score is clever, the AA2 task is rigorous, and the dataset harmonization is careful. The gaps (global bias assumption, no per-dataset results) are fixable but real.
+
+**Clarity**: 8/10 — Well-structured, clear motivation, good figures.
+
+**Value**: 8/10 — The benchmark panel and methodology are likely to be reused by the community.
+
+This is a solid benchmark paper with real contributions. The weaknesses are real but not fatal — they concern transparency and the strength of one component of the methodology, not the overall soundness of the contribution. The paper would benefit from more detailed reporting but does not need a methodological overhaul. I recommend acceptance with the expectation that the authors provide per-dataset results and analyze dataset-specific bias variation in the final version.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

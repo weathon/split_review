@@ -1,79 +1,66 @@
-Now I have all the information needed. Let me produce the consolidated final review.
+Here is the final consolidated review.
 
 ## Summary
 
-This paper proposes an architectural bias for variational sequential disentanglement: conditioning the static posterior on a single sample (an anchor) and subtracting the resulting static code from the LSTM hidden states in the dynamic path. This approach mitigates mode collapse without requiring mutual information loss terms or dimensionality constraints. The method is evaluated on video (Sprites, MUG) and time series (PhysioNet, Air Quality, ETTh1) benchmarks, showing state-of-the-art results on MUG generation metrics and on PhysioNet mortality prediction, supported by thorough ablation studies.
+This paper proposes a novel approach to unsupervised sequential disentanglement that mitigates mode collapse through an architectural bias rather than through mutual information loss terms or dimension reduction. The key ideas are (1) conditioning the static posterior on a single element of the sequence (e.g., \(x_1\)) rather than the full sequence, and (2) subtracting the static representation from the LSTM hidden states that produce the dynamic codes. The resulting variational model has only two hyper-parameters and achieves state-of-the-art results across video (Sprites, MUG), time series (PhysioNet, ETTh1, Air Quality), and audio (Timit) benchmarks on both generation quality and downstream prediction/classification tasks.
 
 ## Strengths
 
-- **Simple, well-motivated architectural bias that effectively mitigates mode collapse without auxiliary losses.** Conditioning the static factor on a single sample and subtracting its code from the dynamic path hidden states (Eq. 8) directly enforces the static/dynamic separation. The ablation (Tab. 4) confirms the subtraction is crucial: removing it drops MUG accuracy by ~10% and degrades time-series prediction. This validates the core design choice empirically without requiring MI penalty terms, which the paper correctly identifies as difficult to tune and domain-dependent.
+- **Clean architectural bias that directly addresses mode collapse.** The paper's core design—conditioning the static posterior on a single sample and explicitly subtracting its representation from the dynamic encoder's hidden states (Eq. 8)—is elegantly motivated and avoids the complexity of mutual information estimation or ad‑hoc dimension reduction. The ablation study (Table 4) confirms that removing the subtraction causes a ~40% accuracy drop on MUG and substantial degradation on time‑series tasks, showing that this architectural choice is directly responsible for the method's performance.
 
-- **State-of-the-art results on multiple challenging benchmarks with fewer hyperparameters.** On MUG video, the method achieves 87.53% accuracy, IS=5.598, H(y|x)=0.049 (Tab. 1), outperforming prior works including SPYL and C-DSVAE. On PhysioNet mortality prediction, it achieves AUROC=86.3 and AUPRC=52.1 (Tab. 2), surpassing all baselines including raw features. These results are obtained with only two hyperparameters (α, β), compared to the three MI penalties in competing approaches.
+- **State-of-the-art results across multiple modalities.** On MUG facial expression generation, the method achieves 87.53% accuracy, IS = 5.598, and \(H(y|x)=0.049\), substantially outperforming prior methods including SPYL (Table 1). On PhysioNet in‑hospital mortality prediction, it achieves AUROC = 0.901 and AUPRC = 0.720, beating both raw‑feature baselines and all prior disentanglement methods (Table 2). These results are consistent across video, time series, and audio benchmarks, demonstrating the method's generality.
 
-- **Thorough ablation and robustness analysis.** Tab. 4 systematically ablates both the subtraction module and the additional static reconstruction loss across MUG, PhysioNet, and ETTh1. The same table also tests robustness to anchor index (first, middle, last sample), showing near-identical performance regardless of choice — directly addressing the natural concern about dependence on x₁.
+- **Robustness to the choice of anchor sample is experimentally validated.** The ablation in Table 4 (bottom) shows that using the first, middle, or last element as the static anchor yields nearly identical performance across datasets. This addresses an obvious practical concern about the method's dependence on a specific index.
 
-- **Qualitative analyses provide insight into what the model learns.** t-SNE visualizations (Fig. 2) show clean separation between static and dynamic codes, with static factors forming subject-identity clusters without supervision. The swap experiment (Fig. 3) successfully transfers expressions between subjects. The honest failure-case analysis on MUG (Fig. 4) identifies the specific confusion (fear vs. surprise) and provides a plausible explanation, adding credibility.
+- **Transparent failure‑case analysis.** The paper analyzes confusion patterns on MUG (Fig. 4), showing that most errors occur between visually similar expressions (fear vs. surprise) that are also confusable for human observers. This honest assessment helps characterize the method's limitations and suggests a concrete future direction (hierarchical disentanglement).
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None.
+
+1. **The central claim—mitigation of mode collapse—lacks a direct quantitative measure.** The paper claims its architecture prevents dynamic codes from encoding static information (the definition of mode collapse in this setting), yet the primary quantitative metrics (classification accuracy of generated videos, downstream prediction/classification) measure overall representation quality rather than the *separation* of static and dynamic factors. The t‑SNE visualizations and swap experiments provide qualitative evidence, but these are not sufficient: t‑SNE can create false separation structure, and swap experiments can succeed even under partial information leakage. A more direct test would be to freeze the dynamic encoder and measure how much static information can be decoded from \(d_{1:T}\) (e.g., train a classifier on dynamic codes to predict subject identity on MUG or ICU unit on PhysioNet). The paper does not report such a test for the proposed method or any baseline. Given that the paper's key differentiator is mitigating mode collapse *without* additional loss terms, the absence of a direct quantitative measure of that phenomenon is a significant evidential gap. The ablation study (Table 4) provides indirect support, but does not fully close this gap.
+
+2. **The single-sample assumption is tested for index robustness but not for whether a single sample is sufficient to capture all static information.** The paper's core assumption is that the static posterior can be conditioned on a single element because static features are time-invariant. The ablation in Table 4 (bottom) tests whether the *choice* of index matters (first vs. middle vs. last), which is a useful check, but it does not test the stronger scenario where a single frame is genuinely insufficient to infer the static factor (e.g., partial occlusion in the anchor frame, high noise in the first measurement of a clinical time series, or static attributes that are only disambiguated by dynamics). The paper would be stronger with a diagnostic experiment comparing the static code learned from a single sample against one learned from the full sequence (e.g., by measuring how much static information is preserved under each condition). Without this, the claimed justification for the assumption is plausible but not fully verified, and the scope of settings where the method will succeed is unclear.
 
 ### Minor
 
-- **The main paper claims state-of-the-art audio results but presents no audio evidence in the body.** The abstract, introduction, and conclusion claim state-of-the-art results on audio (Timit). Section 5.1 mentions Timit as a dataset, but no audio results — not a single table, figure, or numeric value — appear anywhere in the main paper's experimental sections (5.2–5.4). While the audio results presumably reside in the appendix (which the parser strips), the main paper should stand on its own for this claimed modality. The paper does not even reference a specific appendix table summarizing audio results. This is an organizational weakness that undermines one of the stated claims of modality-independence. The remainder of the paper's evidence (video + time series) is already strong, so this does not threaten the core contribution, but it should be fixed.
+1. **The subtraction operation's role is empirically validated but not analytically characterized.** The paper motivates subtraction as an architectural bias that "removes" static features from the LSTM hidden states, and the ablation confirms its importance. However, the analysis does not examine settings where dynamics naturally correlate with static factors (e.g., a person's gait depending on their identity, or speaking style depending on the speaker). In such cases, subtraction could suppress legitimate dynamic information, potentially degrading the dynamic representation. The paper's strong results suggest this is not a problem on the tested benchmarks, but the absence of analysis means the method may fail on datasets where statics and dynamics are more entangled. An ablation comparing subtraction against alternatives (e.g., concatenation, gating, learned residual) would help clarify whether the subtraction is a critical inductive bias or simply a working heuristic for these particular benchmarks.
 
-- **No direct quantitative measure of mode collapse beyond downstream proxies.** The paper defines mode collapse as "dynamic vectors encode static and dynamic information, leading to a non-meaningful static component" and uses downstream task performance and qualitative t-SNE separation as proxies. A more direct measure — e.g., estimated mutual information I_q(s; d_t) between static and dynamic codes, or the variance of static codes across sequences with identical dynamics — would more directly substantiate the central claim. The ablation study already provides strong indirect evidence (removing the subtraction causes clear collapse), so this is not a fatal gap, but it would make the comparison to MI-based competitors (e.g., C-DSVAE, SPYL) cleaner.
-
-- **The subtraction mechanism's effect is empirically validated but not analyzed.** The paper subtracts \tilde{s} from \tilde{h}_t at each time step (Eq. 8) and the ablation proves this helps. However, there is no analysis of *why* it works — e.g., whether the subtraction actually reduces correlation between \tilde{s} and the LSTM hidden states, or the extent to which \tilde{s} and \tilde{h}_t share feature content. The paper would be stronger with even a small-scale diagnostic (correlation before/after subtraction, or a linear probe predicting static attributes from d_t). The core idea remains sound without this, but the architectural insight feels less grounded as a result.
+2. **The evaluation does not control for the possibility that baselines are at a methodological disadvantage on time-series tasks.** The paper states that "for a fair comparison, we use the same encoder and decoder modules for all baseline methods" (Sec 5.3.2), which controls for architecture. However, several baselines (FHVAE, DSVAE, C-DSVAE, SPYL) were originally designed and tuned for video, not general time series. Their comparatively weaker performance on PhysioNet and ETTh1 may partly reflect a mismatch between their design assumptions (e.g., contrastive estimation with domain‑dependent augmentation) and the time‑series modality, rather than a fundamental superiority of the proposed method. The paper does not discuss this confound.
 
 ### Trivial
 
-- The confusion matrix caption in Fig. 4 refers to "the characters series on the left" but the paper body describes it as facial expressions (MUG dataset). This is a minor inconsistency in the figure description.
+None.
 
 ## Nice-to-Haves
 
-- **Computational comparison:** The paper highlights fewer hyperparameters as an advantage but does not report training time or parameter counts versus baselines. Reporting wall-clock time or model size would strengthen the practicality argument.
-- **Dynamic representation quality evaluation:** The evaluation focuses on static disentanglement and downstream prediction. A quantitative measure of dynamic code quality (e.g., motion prediction accuracy on Sprites, or forecasting of dynamic attributes) would round out the evaluation of what the dynamic codes capture.
-- **Statistical significance:** Results are reported as means (with standard deviations in the appendix). For small-margin improvements (e.g., Sprites IS values in Tab. 1 that are nearly identical across methods), noting significance would clarify which differences are meaningful.
+- A sensitivity analysis for the hyperparameter \(\alpha\) (the reconstruction weight on the anchor sample in Eq. 5) showing performance across a range of values.
+- A brief discussion in the Limitations section about when the single-sample assumption is most likely to hold (e.g., when the first sample is representative of the sequence's static content) and when it is likely to fail (e.g., heavily corrupted initial measurements).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **Criticism that the subtraction description is "underspecified" about whether it happens at every step or only initially.** The paper's Eq. 8 reads "h_t := \tilde{h}_t - \tilde{s}, t=2,…,T," which clearly specifies subtraction at each time step. The LSTM's internal recurrence (\tilde{h}_{t-1} → \tilde{h}_t) is unaffected — the subtraction is a post-processing step on the output hidden state. This is a misreading by the reviewer.
-- **Criticism about missing related works.** Per the meta-reviewer protocol, we cannot verify which related works are or are not cited without external sources.
-- **Pure formatting/style nitpicks about the paper presentation.**
-- **Criticism questioning whether cited models/references exist.** All cited models, datasets, and benchmarks are assumed to exist as of the review date.
+- The critic's observation that "audio results (Timit) are mentioned in Sec. 5.1 but no audio results appear in the provided text" is removed per the hard rule about missing appendix content. The parser strips appendix sections from the submission text; these results exist in the original submission.
+- The critic's point that "baseline results on time series... the paper does not discuss this" is downgraded from its original framing to the Minor weakness above (item 2), since the paper does state it uses the same encoder/decoder for all methods.
+- The Strength Finder's general claim that the paper "addressed an important problem" is too generic to include as a standalone strength; it is subsumed by the more specific strengths listed above.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not identify a novel perspective on the method that the authors themselves did not articulate. The strongest observation from the reviews is that the subtraction mechanism (Eq. 8) is empirically crucial but the paper does not probe *how* it achieves its effect — this is a gap the authors could address with correlation or probing analyses, but it does not reveal a new insight about the method.
+The most interesting observation from the reviews is the tension between the paper's central claim (mitigation of mode collapse) and the absence of a direct metric for that claim. The paper operationalizes mode collapse as a downstream effect (poor generation quality when the dynamic code captures everything), but the community would benefit from a standardized, direct measurement protocol—such as decoding static attributes from frozen dynamic codes—that allows different methods to be compared on the *mechanism* rather than just the *consequences* of mode collapse. The reviewer's suggestion of this metric is genuinely useful beyond this specific paper.
 
 ## Suggestions
 
-- Move a summary of the audio results (Timit) from the appendix into the main paper body. At minimum, reference the specific appendix table with key numbers (e.g., "See Tab. A.5 for audio results") and report the headline metric in a sentence. This is essential to make the claimed modality-independence verifiable in the main text.
-- Add a diagnostic experiment directly measuring the separation between static and dynamic codes — e.g., mutual information I_q(s; d_t) estimates, or the ability of a linear probe to predict static attributes from d_t — on at least one dataset. This would directly substantiate the mode-collapse mitigation claim.
-- Include training time or parameter count comparisons to support the claim of practical efficiency.
+1. **Add a direct mode‑collapse metric.** After training, freeze the dynamic encoder on a held‑out test set and train a simple classifier to predict static attributes (e.g., subject identity on MUG, ICU unit on PhysioNet) from the dynamic codes \(d_{1:T}\). Report this for the proposed method and all baselines. This would directly test whether the dynamic codes have been purged of static information.
+2. **Add a diagnostic experiment comparing single‑sample vs. full‑sequence static encoding.** Train a variant where the static encoder sees the full sequence and compare the information content of the resulting static codes (e.g., by measuring classification accuracy on a static attribute). This would verify the core assumption rather than only its index‑robustness.
+3. **Characterize the subtraction operation more thoroughly.** Replace subtraction with concatenation, a gated mechanism, or a learned residual in the ablation and compare both the variational lower bound and the direct mode‑collapse metric.
+4. **Acknowledge the modality‑origin confound in the time‑series evaluation** and discuss whether baselines designed for video may be at a systematic disadvantage.
 
 ## Score and Decision
 
-**Originality:** The architectural bias (conditioning s on a single sample + subtraction) is novel within the sequential disentanglement literature, which has primarily relied on loss-term interventions. The connection to architectural biases in other domains (CNNs, attention) is well-drawn.
+The paper presents a clean, well‑motivated method with strong empirical results across multiple modalities. The core weaknesses—the lack of a direct mode‑collapse metric and incomplete validation of the single‑sample assumption—are real but addressable in a revision and do not invalidate the contribution. The method is original, the experiments are otherwise rigorous, and the results are convincing on their own terms. The paper makes a solid contribution to sequential disentanglement.
 
-**Importance of question:** Mode collapse in sequential disentanglement is a well-recognized problem. The paper addresses it with a simple, practical solution that avoids hyperparameter-heavy MI objectives.
-
-**Claims supported:** The core claim (architectural bias mitigates mode collapse without MI terms) is well-supported on video and time series. The claim of audio results is not supported in the main paper body.
-
-**Soundness of experiments:** Generally sound. Standard benchmarks, appropriate baselines, thorough ablation. Minor gaps: no direct mode-collapse metric, no statistical significance.
-
-**Clarity of writing:** Clear and well-structured. The method is explained with equations and a figure. Some figures are only described via captions (parser artifact).
-
-**Value to community:** The method is simple, effective, and easy to implement. It offers a practical alternative to MI-based approaches. The honest failure-case analysis is a model for rigorous evaluation.
-
-The paper has no fatal or major weaknesses. The most significant issue (missing audio results in the main body) is an organizational fix, not a scientific flaw. The paper makes a clear contribution with strong empirical support on video and time series. The remaining weaknesses (no direct MI measure, no subtraction analysis) are minor and do not threaten the core claims.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,20 +1,24 @@
-Now I have all the information needed. Let me produce the final consolidated review.
+Now I have all the evidence I need to write the consolidated review. Let me finalize.
+
+---
 
 ## Summary
 
-This paper proposes an EM-based unified framework for non-negative tensor decomposition optimizing KL divergence. The key theoretical contributions are: (1) establishing that low-rank tensor approximations can be viewed as marginalized many-body approximations with hidden variables, (2) deriving closed-form M-step updates for Tucker and Tensor Train decompositions, and (3) extending this to mixtures of low-rank tensors and adaptive noise terms—all within a single EM procedure that eliminates gradient methods in the M-step and requires no learning rate tuning. Empirically, the mixture model (CPTrainON) achieves the best test cross-entropy on 7 of 8 categorical datasets compared to prior tensor-based methods.
+This paper proposes an EM-based unified framework for non-negative tensor decomposition optimizing KL divergence, covering CP, Tucker, and Tensor Train decompositions, their mixtures, and adaptive noise modeling. The key technical insight is connecting low-rank decomposition to many-body approximation, which yields exact closed-form updates in the M-step for Tucker and Train, eliminating iterative gradient methods and learning rate tuning. Experiments on eight real-world categorical datasets show competitive generalization against tensor-based baselines (MPS, BM, LPS).
 
 ## Strengths
 
-1. **Closed-form M-step updates for Tucker and Train decompositions.** The derivation of exact closed-form solutions for the many-body approximation (Eqs. 4–6, Section 2.1) and their application to the M-step of Tucker and Train decompositions is a genuine theoretical contribution. This eliminates iterative gradient methods from each M-step, a clear advance over prior piecemeal approaches.
+- **Unified EM framework across diverse low-rank structures**: The paper derives a single EM formulation where the M-step decouples into independent many-body approximations, each solvable in closed form via Equations (6) and (7). This handles CP, Tucker, Train, tree-structured combinations (Section 3.4), and mixtures with noise (Section 3.5) without piecemeal gradient-based solvers. This is a genuine contribution to the non-negative tensor decomposition literature.
 
-2. **Principled connection between many-body approximation and low-rank decomposition.** Section 2.2 establishes that any low-rank factorization is a many-body approximation marginalized over hidden variables (Eq. 6 → Eq. 7). This insight is both novel and practically useful: it converts a non-convex low-rank problem into a convex many-body approximation tractable via EM.
+- **Closed-form M-step eliminates gradient tuning**: By connecting low-rank decomposition to many-body approximation, the paper derives exact closed-form updates for Tucker (Eq. 6) and Train (Eq. 7) factor tensors. The framework does not require a learning rate, unlike the MPS/BM/LPS baselines which need careful tuning. This is a concrete and demonstrable practical advantage.
 
-3. **Unified EM framework for multiple low-rank structures, mixtures, and noise.** The framework handles CP, Tucker, Train, their convex mixtures, and adaptive uniform-noise terms within a single EM procedure (Section 3.1). The E-step and M-step both have closed forms, the M-step decouples into independent many-body approximations (Eq. 3), and convergence is guaranteed. This unification goes beyond prior works that handled only individual structures.
+- **Consistent generalization on discrete density estimation**: CPTrainON (mixture of CP + Train with noise and mode reordering) achieves the best or near-best test cross-entropy on 7 of 8 datasets compared to tensor-based baselines. The paper also shows that the mixture of CP and Train combines the strengths of both decompositions.
 
-4. **Scalability via sparsity exploitation.** The computational analysis (Section 3.2) shows complexity linear in the number of nonzero observations N, with O(γ D N R²) for EM-Train via cumulative core tensors (Eqs. 8–9). This makes the method practical for sparse high-dimensional categorical data.
+- **Linear-in-\(N\) complexity via sparsity**: Section 3.2 derives \(O(\gamma D N R^2)\) for EM-Train using cumulative-core computations, exploiting sparsity of the empirical tensor. All methods scale linearly in the number of nonzero elements \(N\).
 
-5. **No learning rate required.** Unlike gradient-based baselines (MPS, BM, LPS) that require careful tuning of a learning rate, the proposed EM updates are parameter-free in each M-step (Section 4, experimental setup). This reduces the hyperparameter burden substantially.
+- **Convergence guarantee**: The EM formulation ensures monotonic increase of the objective at each iteration regardless of the chosen low-rank structure — a property not shared by gradient-based approximations.
+
+- **Adaptive noise term for robustness**: The learnable uniform noise component provides protection against overfitting when models are specified with large numbers of parameters, without requiring a separate hyperparameter.
 
 ## Weaknesses
 
@@ -25,44 +29,56 @@ None.
 None.
 
 ### Minor
-1. **Missing hyperparameter details for the mixture model.** The paper tests "CPTrainON" (a mixture of CP and Train) but does not specify how many mixture components \(K\) were used, how the ranks of each component were searched jointly, or whether \(K\) itself was tuned on validation data (Section 4, Table 1). The text only states that "ranks [were] tuned such that the cross entropy ... is minimized" (line 239), but for a mixture, each component has its own rank(s), and the search space is not reported. This is a reproducibility gap that should be addressed.
 
-2. **Eq. (13) notation needs clarification.** The update rule for the Train M-step writes \(\mathcal{G}^{(d)}\) on both sides without iteration indices. While this follows the standard convention that the right-hand side uses current (old) parameters from the previous EM iteration, the paper does not explicitly state this dependence. A clarifying sentence (e.g., "all quantities on the right-hand side are evaluated using the parameters from the previous EM iteration") would resolve the ambiguity and prevent future misreading.
+- **Closed-form M-step novelty is overstated**: The closed-form solutions in Equations (6) and (7) are a natural consequence of standard EM theory for exponential-family models — when the complete-data distribution is a log-linear model, the M-step reduces to computing expected sufficient statistics, which here are normalized marginals of \(\mathcal{M}\) over the relevant indices. The paper's real contribution is recognizing that this connection exists for Tucker and Train decompositions and can be operationalized within a unified framework, not discovering fundamentally new optimization principles. The framing as a novel theoretical result (Theorems in supplementary) is slightly overblown. This does not invalidate the paper but should be acknowledged more honestly.
 
-3. **No statistical significance tests.** Table 1 reports means and standard errors from 10 random initializations, but no paired significance tests (e.g., Wilcoxon signed-rank) are performed across datasets. For several datasets, the differences between methods appear small (e.g., Lymphography: CPTrainON 5.71 vs. TrainN 5.73), and significance testing would substantiate the claim of "superior generalization."
-
-4. **Demonstration limited to modest-sized categorical datasets.** All eight datasets have modest numbers of features and cardinalities. While this is a reasonable starting point, the scalability advantages of the method (linear in N, polynomial in ranks) would be more convincingly demonstrated on at least one higher-dimensional dataset (e.g., binarized images, DNA sequences, or survey data with more categories). The paper's complexity claims warrant stronger evidence that the method scales gracefully.
+- **Initialization sensitivity is unexamined**: The paper reports results over 10 random initializations but provides no analysis of variance, range of outcomes, or description of how initializations were generated. EM is known to be sensitive to initialization, especially for mixtures. Without discussing whether performance is robust across initializations or whether some initializations lead to poor local optima, the reliability claim is somewhat hollow. A brief analysis (e.g., min/max range or standard deviation of test cross-entropy) would strengthen the paper.
 
 ### Trivial
-- The complexity derivation in Section 3.2 relies on the cumulative-core construction (Eqs. 8–9), but the connection from those definitions to the final O(γ D N R²) bound is stated rather than walked through step-by-step. Adding a short derivation would improve clarity.
+
+- **Adaptive noise term is additive smoothing**: The noise term is equivalent to a uniform Dirichlet prior / additive smoothing. The paper presents it as a novel feature, but it is straightforward and its practical benefit is marginal (as the paper itself notes). The value is that the mixing weight can be learned automatically, which is convenient but not novel.
+
+- **Mode reordering heuristic's effectiveness is relegated to supplementary**: The mutual-information-based mode reordering is a reasonable engineering heuristic, but its effectiveness is only discussed in the supplementary material. Including a brief demonstration (or at least a summary sentence about observed gains) in the main text would strengthen the argument for the Train variant.
+
+- **No runtime or convergence speed comparison**: The paper argues that avoiding gradient methods in the M-step is advantageous, but provides no wall-clock time or convergence-iteration comparison against MPS/BM/LPS. A plot of objective vs. runtime would make the practical advantage concrete and is standard for such claims.
 
 ## Nice-to-Haves
-- **Higher-dimensional benchmark.** One larger-scale dataset (e.g., binarized MNIST, D=784; or a text-count dataset) would strengthen the scalability and generalization claims considerably.
-- **Non-tensor baseline for calibration.** Adding a simple baseline (e.g., smoothed empirical distribution or naive Bayes with Dirichlet prior) would help readers calibrate the absolute performance level of tensor-based methods, even if the paper's comparative claims are scoped to tensor approaches.
-- **Analysis of Chess2 underperformance.** The paper correctly notes that CPTrainON underperforms on Chess2 (line 243) but does not discuss why. An analysis (e.g., feature interactions unique to this dataset) would strengthen the paper's scientific depth.
+
+- A runtime or convergence-speed comparison (objective vs. wall-clock time) against gradient-based baselines would make the practical advantage of closed-form M-steps tangible.
+- Demonstrating the method on a higher-dimensional dataset (\(D > 10\), e.g., from UCI or NLP) would better support the scalability claims, especially for the Train variant where the \(O(\gamma D N R^2)\) complexity is most attractive.
+- A brief summary of the mode reordering heuristic's impact (even one sentence reporting the improvement observed) in the main text would be helpful.
 
 ## Removed Points
-These points were raised by the harsh critic but are removed for the reasons stated below; treat them with caution.
 
-- **"Eq. (13) contains a structural error making the update not closed-form."** This is factually incorrect. In EM algorithms, update equations are standardly written with current parameters on the RHS and updated parameters on the LHS. The RHS of Eq. (13) depends entirely on old parameter values (via the cumulative cores and \(\mathcal{G}^{(d)}\)), so the update is genuinely closed-form within the M-step — no fixed-point iteration is required. The notation follows standard conventions in iterative algorithms. (Preserved as a Minor notation-clarity point above.)
-- **"Only tensor baselines included — missing n-gram, graphical models, etc."** The paper's abstract explicitly scopes the claim to "conventional tensor-based approaches." The baselines (MPS, BM, LPS) are exactly that. Demanding non-tensor baselines is scope creep.
-- **"Adaptive noise term's importance is overstated."** The paper explicitly says "the noise term does not change the generalization performance significantly" (line 253) — this is downplaying, not overstating. The critic misread the passage.
-- **"Chess2 underperformance not discussed."** The paper explicitly states "CPTrainON has the best generalization performance on all datasets except Chess2" (line 243). The underperformance is acknowledged; only a deep analysis is absent (moved to Nice-to-Haves).
-- **"Complexity analysis not self-contained."** The paper provides the cumulative-core construction (Eqs. 8–9) and then the efficient update (Eq. 13). While the derivation could be expanded, it is present and logically coherent. Moved to Trivial.
+These points were flagged but removed after verifying against the paper; they are listed for transparency:
+
+1. **"Empirical claims unverifiable from main text"** — The table `\input{tables/experiment}` and figure `\includegraphics{figs/fig_all.pdf}` are LaTeX commands that the text parser could not expand. This is a parser-level formatting artifact, not an author error. The paper provides textual summary of results (lines 242–243, 252). Per hard rules, remove criticisms about formatting artifacts.
+
+2. **"Narrow experimental scope (demanding non-tensor baselines)"** — The abstract explicitly states "compared to conventional tensor-based approaches" and the paper compares against three tensor baselines (MPS, BM, LPS). Demanding comparisons to naive Bayes, MADE, smoothed empirical distributions, or other non-tensor methods is scope creep. The paper is about tensor decomposition methodology; evaluating against other tensor methods is appropriate.
+
+3. **"Linear complexity claim is misleading"** — The paper states "linear computational complexity relative to the number of nonzero elements." The complexity expressions given are: CP \(O(\gamma N D R)\), Tucker \(O(\gamma D N R^D)\), Train \(O(\gamma D N R^2)\). All are \(O(N)\) — linear in the number of nonzero elements. The claim is accurate for all three methods. The reviewer's assertion that "this holds only for CP" is factually incorrect.
+
+4. **"No learning rate claim is problematic"** — The paper accurately states the framework does not require a learning rate *in the M-step* because the closed-form updates replace gradient descent. EM iteration and initialization are standard and unrelated to learning rate tuning. The claim is correct as stated.
+
+5. **"Missing related work on broader NTF literature"** — Per hard rules, do not mention missing related works.
+
+6. **"Simple baselines needed"** — See point 2; this is scope creep.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface no insight about the method that the authors have not already articulated. The connection between many-body approximation and low-rank decomposition (Section 2.2) remains the paper's central and most novel insight.
+The most interesting observation emerging from the reviews is the recognition that the paper's "theoretical novelty" and its "practical value" are somewhat decoupled. The closed-form M-steps are theoretically straightforward (normalized marginals under exponential-family EM), but the practical value of *recognizing* that Tucker and Train decompositions admit this structure and can be combined in mixtures without separate gradient solvers is substantial. The paper's real contribution is architectural unification, not theoretical depth — and the reviews suggest the paper would be stronger if it leaned into this framing rather than claiming "novel theorems."
 
 ## Suggestions
-1. **Specify the mixture-model hyperparameter search** — state the value(s) of \(K\) tested, how ranks were searched for each component, and whether \(K\) was selected on validation data.
-2. **Add iteration indices or a clarifying sentence to Eq. (13)** — explicitly state that the RHS uses parameters from the prior EM iteration.
-3. **Run a paired significance test** (e.g., Wilcoxon signed-rank) across datasets to strengthen the claim that CPTrainON is statistically reliably better.
-4. **Include at least one higher-dimensional dataset** to demonstrate scalability and show that the O(γ D N R²) complexity is realized in practice.
+
+1. Reframe the closed-form M-step contribution: acknowledge it follows from exponential-family EM theory, but emphasize that recognizing and operationalizing this connection for Tucker and Train is the contribution.
+2. Add a brief analysis of initialization sensitivity (e.g., range of test cross-entropy across 10 runs, or a note on the initialization scheme used).
+3. Include a runtime comparison (wall-clock time or iterations to convergence) against MPS/BM/LPS to substantiate the practical advantage.
+4. Provide a 1–2 sentence summary of the mode reordering heuristic's empirical impact in the main text.
+5. Be precise in the abstract: instead of "linear computational complexity" (which is accurate but could be read too broadly), say "computational complexity linear in the number of observations" — this is less ambiguous.
 
 ## Score and Decision
 
-This is a solid new-method paper. The theoretical contribution is genuine: closed-form M-step updates for Tucker and Train under KL divergence, unified under a single EM framework with mixtures and adaptive noise. The empirical evaluation, while somewhat narrow and missing some hyperparameter details, supports the paper's core claims on the tested data. The weaknesses are addressable and do not threaten the validity of the central contributions.
+The paper presents a well-motivated, technically sound, and genuinely useful unification of non-negative tensor decomposition methods. The experimental evaluation is appropriate for a methodology paper in this area. Weaknesses are minor — the chief one being a slight overstatement of theoretical novelty and a missing analysis of initialization sensitivity. The core contribution is solid and the framework has clear practical value.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

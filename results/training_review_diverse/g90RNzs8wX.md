@@ -1,79 +1,76 @@
-Now I have all the information needed. Let me compose the final consolidated review.
-
----
+Now I have thoroughly read and cross-checked the paper against all the reviewer claims. Let me write the final consolidated review.
 
 ## Summary
 
-This paper introduces UGOLD, the first unified benchmark that bridges unsupervised graph-level anomaly detection (GLAD) and unsupervised graph-level out-of-distribution detection (GLOD) under a common formulation of "generalized OOD detection." It compares 16 representative methods across 35 datasets spanning four practical scenarios (intrinsic anomaly, class-based anomaly, inter-dataset shift, intra-dataset shift) and analyzes them along four dimensions: effectiveness, generalizability, robustness, and efficiency. The paper's key findings include that near-OOD samples are consistently harder to detect than far-OOD, most methods degrade significantly under training-set contamination, and end-to-end methods generally outperform two-step pipelines.
+This paper introduces UB-GOLD, the first unified benchmark bridging unsupervised Graph-Level Anomaly Detection (GLAD) and Graph-Level Out-of-Distribution Detection (GLOD) under a common "generalized graph-level OOD detection" framework. It compares 16 methods across 35 datasets spanning four realistic scenarios (intrinsic anomaly, class-based anomaly, inter-dataset shift, intra-dataset shift) and provides multi-dimensional analysis covering effectiveness, generalizability (near-OOD vs. far-OOD), robustness (training set contamination), and efficiency.
 
 ## Strengths
 
-- **First unified evaluation framework bridging GLAD and GLOD.** The paper defines a generalized graph-level OOD detection problem encompassing both tasks and assembles 35 datasets across four distinct scenarios to enable direct comparison of 16 methods that were previously evaluated in isolation (Section 3.1, Table 1). This addresses a genuine gap in the literature: researchers in each sub-area previously had no common ground for method comparison.
+- **First unified benchmark bridging GLAD and GLOD.** The paper explicitly identifies that these two research areas "have been studied independently in the literature and have distinct evaluation setups" (Section 1, paragraph 2). It provides a formal generalized problem definition (Section 2) and systematically compares methods from both fields under one framework — a contribution no prior work has provided. This unification is the paper's central and genuine contribution.
 
-- **Multi-dimensional analysis beyond leaderboard rankings.** The benchmark evaluates methods across effectiveness (RQ1), generalizability to near- vs. far-OOD (RQ2), robustness to training-set contamination (RQ3), and computational efficiency (RQ4). This yields actionable insights — e.g., near-OOD awareness as a concrete research target, and the vulnerability of most methods to even 10–30% contamination — that go deeper than a single ranking table.
+- **Multi-dimensional analysis yields actionable insights beyond a leaderboard.** The benchmark evaluates generalizability (near-OOD vs. far-OOD, Fig. 4), robustness (training set contamination at 0–30%, Fig. 5), and efficiency (time and memory, Fig. 6) — not just a performance table. The finding that "near-OOD samples are harder to detect" (Observation 186) and that "end-to-end methods outperform 2-step methods in both performance and computational costs" (Observation 190) provide concrete guidance for practitioners.
 
-- **Empirically grounded challenges for the field.** Observations such as "no universally superior method" (Observation 183), "near-OOD samples are harder to detect" (Observation 186), and "performance degrades with increasing contamination" (Observation 188) are directly supported by the experimental design and provide clear motivation for future work. The paper also translates these findings into specific future directions (Section 5).
-
-- **Evidence that end-to-end methods outperform two-step pipelines.** The benchmark shows that end-to-end methods achieve better average rankings and also deliver competitive or better time/memory efficiency (Observation 185, Fig. 5), giving practitioners a clear practical recommendation.
+- **Controlled robustness analysis models realistic data contamination.** The perturbation experiment (0%, 10%, 20%, 30% OOD contamination in the training set) is a practical stress test rarely performed in existing GLAD/GLOD evaluations. The differential sensitivity documented across methods (e.g., GLADC shows minimal degradation, OCGTL declines sharply on PROTEINS) is a useful finding for method selection under noisy training conditions.
 
 ## Weaknesses
 
 ### Fatal
 
-None.
+None. The test-set tuning issue (detailed below) is a major methodological concern but does not invalidate the paper's core contribution — the unification framework, the four-scenario taxonomy, and the multi-dimensional analysis structure remain valuable. The key qualitative findings (near-OOD harder than far-OOD, end-to-end > 2-step, performance degrades with contamination) are relative patterns likely robust to the tuning protocol.
 
 ### Major
 
-- **Hyperparameter search conducted on the test set (Section 3.3).** The paper explicitly states: *"we conduct a random search to find the optimal hyperparameters w.r.t. their performance on the testing set"* (line 118). This is a significant methodological concern for a benchmark paper. Tuning on the test set leaks label information, produces optimistically biased results, and may favor methods with more flexible hyperparameter spaces (who can overfit more aggressively to test set noise). All quantitative results in Table 1 and the associated observations (182–185) are affected. The paper frames this as obtaining "upper bounds," which is a transparent justification, but for a benchmark that aims to provide reliable comparisons the community can build on, standard practice requires holding out a validation split from the training (ID) set for hyperparameter selection. The reported AUROC/AUPR/FPR95 numbers cannot be taken at face value as achievable performance estimates.
+- **Hyperparameter tuning performed directly on the test set (Section 3.3, line 118).** The paper states: "we conduct a random search to find the optimal hyperparameters w.r.t. their performance on the testing set." This violates standard benchmarking practice: reported performance numbers reflect fit to test labels rather than genuine generalization. The paper frames this as obtaining "performance upper bounds" and cites OpenOOD as precedent, which is transparent but does not resolve the issue. Methods with more hyperparameters or higher tuning sensitivity are systematically advantaged. This concern propagates across all four research questions (RQ1–RQ3) since the same tuned models are used. The absolute rankings and performance claims in Table 1 and the key observation that "SOTA GLAD/GLOD methods show excellent performance" rest on numbers whose reliability as a benchmark for future comparison is compromised. The efficiency analysis (RQ4) is less affected as it uses default settings.
 
-  That said, this flaw is not fatal because: (a) the authors are transparent about the procedure, (b) the key *qualitative* insights (near-OOD > far-OOD difficulty, vulnerability to contamination, no universal method) are relative comparisons that are unlikely to be reversed by proper validation, and (c) the relative rankings across methods, while possibly biased by differential hyperparameter flexibility, may still carry signal. However, the paper's central quantitative claims — the specific numbers in tables and the precise rankings — require re-running with a proper validation split before they can be trusted.
-
-- **Ambiguity about hyperparameter selection in RQ2 (generalizability) and RQ3 (robustness).** The paper does not state whether hyperparameters were re-tuned for the near/far-OOD splits (RQ2, Section 4.2) or for each contamination level in the robustness study (RQ3, Section 4.3). If the test-set-tuned hyperparameters from RQ1 were reused, they may be suboptimal under different distribution shifts; if they were re-tuned on each new test set, the overfitting compounds; if default parameters were used, the conditions are inconsistent with RQ1. This ambiguity undermines the interpretability of these experiments.
+  *Why this is not fatal:* The paper is transparent about the practice; the core contribution (unification framework) is separate from the absolute numbers; and the relative qualitative findings (e.g., near-OOD > far-OOD difficulty, end-to-end > 2-step) are likely robust. The paper's value as a unified evaluation *framework* remains, even though the specific results need to be taken as upper bounds rather than realistic assessments.
 
 ### Minor
 
-- **Inconsistency between hyperparameter strategies across research questions.** RQ1 uses test-set-tuned hyperparameters (framed as "upper bounds"), while RQ4 uses default hyperparameters (line 232). This makes it difficult to triangulate findings across dimensions — e.g., the claim that end-to-end methods are superior in *both* effectiveness and efficiency (Observation 190) rests on comparisons that used different hyperparameter selection strategies for each dimension.
+- **Standard deviations / confidence intervals not reported.** The paper states "5 runs of experiments" and reports averages (Section 4, line 143), but no measure of variability is given. This makes it difficult for readers to assess whether observed performance gaps between methods are meaningful. Adding std or error bars would substantially strengthen the benchmark's utility.
 
-- **No statistical significance analysis.** The paper's observations and rankings (e.g., "end-to-end methods have average rankings below 8, while 2-step methods rank above 8") are reported without any statistical test (e.g., paired Wilcoxon, Bayesian ranking). Given the variance across 35 datasets, some rankings may be fragile. This is addressable and would strengthen the conclusions.
+- **Inconsistency between performance and efficiency evaluation protocols.** The main performance comparison uses test-set-tuned hyperparameters, while the efficiency analysis (Section 4.4, line 232) uses default settings. This means the efficiency numbers do not exactly correspond to the models whose effectiveness is reported. The efficiency observations about architectural properties (e.g., kernel methods being slower) are likely robust, but the paper should clarify this mismatch.
 
-- **The random search budget (20 trials or one day per method per dataset) may favor methods with fewer hyperparameters.** Methods with larger search spaces may not converge to good settings within 20 trials, while methods with smaller search spaces may fully explore theirs. This interacts with the test-set tuning issue to create additional unfairness. Reporting actual trial counts per method per dataset would help.
+- **Only two unsupervised GLOD methods are included (GOOD-D and GraphDE).** The paper acknowledges this limitation (Section 3.2) and scopes itself to unsupervised methods, excluding post-hoc approaches and label-dependent methods. This is a defensible scope choice, but the framing as a "comprehensive" benchmark for "GLAD and GLOD" should be read with this caveat — the GLOD coverage is thin relative to GLAD (6 methods).
 
-- **Lack of discussion about whether injected OOD samples in the robustness study (RQ3) are representative of real-world contamination.** The paper uses OOD data from the same splits as the main experiment; real contamination might come from different sources. This is a minor limitation worth acknowledging.
+- **Near-OOD definition partially recycles existing dataset types.** Setting A for the generalizability experiment defines intra-dataset samples with different class labels as near-OOD — this is effectively the class-based anomaly scenario (Type II) already part of GLAD. While the near-OOD vs. far-OOD comparison is still informative, it does not introduce a fundamentally new challenge beyond what the main evaluation already covers.
 
 ### Trivial
 
-None (all formatting/typo issues are parser artifacts).
+- None.
 
 ## Nice-to-Haves
 
-- The paper would benefit from a recommended train/validation/test split protocol for future users of the codebase, with default hyperparameters for each method.
-- A statistical significance analysis (e.g., paired Wilcoxon tests) over datasets would substantiate the ranking-based claims.
-- Including a validation-set-tuning baseline alongside the test-set-tuned "upper bound" would give two practical reference points.
+- The paper would benefit from investigating *why* certain methods fail on near-OOD or under contamination — e.g., by analyzing learned representations or OOD scores — rather than only documenting the performance degradation. This would move from observation to explanation.
+
+- Presenting results under both default and validation-tuned settings would give readers a sense of sensitivity to hyperparameter choice, addressing the test-set-tuning concern even if a full re-run is impractical.
 
 ## Removed Points
 
 These points are flagged to be removed; treat them with caution.
 
-- *"No discussion of how the benchmark should be used by future researchers"* — Scope creep. The paper provides a unified codebase, explicit dataset splits, and outlines future directions. What constitutes "how to use" is subjective and the paper's deliverable (code + splits) is standard.
-- *"Does not report how many hyperparameter trials were run per method per dataset"* — The paper already reports "20 times or for a maximum of one day per method per dataset" (line 118). The granularity the critic requests would be nice but is not absent.
-- *"The paper should not be accepted in its current form ... the numbers must be regenerated"* — This conflates severity. The test-set tuning is a major issue requiring correction, but (1) the authors are transparent, (2) the qualitative findings are likely robust, and (3) calling it "fatal" overstates the case relative to the paper's actual contributions.
-- *General formatting/style nitpicks and criticisms about missing appendix content* — Parser artifacts; the original submission does not have these issues.
+- **Strength from Strength Finder: "Rigorous and reproducible experimental setup."** This claimed strength conflicts with the verified weakness about test-set tuning (the "rigorous" part is undermined). The reproducibility aspects (open-source codebase, 5 runs) remain positive but are not strong enough to counterbalance the tuning issue. Removed per the rule that when a strength and verified weakness disagree, the weakness wins.
+
+- **Criticism about Table~\ref{tab:dataset} not being visible.** The harsh reviewer noted that this table is "referenced but not visible." In the original submission (not the parser-extracted text), this table exists. This is a parser artifact, not an author error. Removed per hard rules on missing appendix/table artifacts.
+
+- **Criticism that the paper "lacks a discussion of the split definitions."** The paper explicitly states (line 116) "Detailed splits are provided in Table~\ref{tab:dataset}" and "we adopted the splits from Liu et al. (2023) and Li et al. (2022)." This is sufficient documentation. Removed as factually incorrect about what the paper contains.
+
+- **Criticism that robustness results are "contingent on hyperparameters having been tuned on a now-contaminated test set."** The test set used for evaluation in the robustness experiment is the same clean test set; the *training* set is contaminated. The hyperparameters were tuned on the clean test set. The broader point that the robustness results inherit the test-set-tuning problem is valid and already captured in the Major weakness above. The specific inaccuracy about a "contaminated test set" is removed.
 
 ## Novel Insights
 
-The most interesting cross-cutting insight that emerges from the reviews is the tension between the paper's transparent-but-nonstandard methodology and its role as a benchmark. The authors openly state they tuned on the test set to obtain "upper bounds," and this honesty is commendable — but for a benchmark that aims to *set standards* for a field, methodological rigor in the evaluation protocol itself is part of the contribution. A benchmark that reports inflated numbers risks misleading the community even if relative rankings hold. The reviewers collectively highlight that the paper's value proposition (unifying GLAD and GLOD) is strong, but the execution of the evaluation protocol undermines the very trust a benchmark needs. This is a case where the contribution is real, the findings are probably directionally correct, but the paper needs to raise its own methodological bar to match the standards it implicitly asks the community to adopt.
+None beyond the paper's own contributions. The reviewer feedback does not surface an unarticulated insight that the paper itself does not already convey.
 
 ## Suggestions
 
-- **Rerun all effectiveness experiments (RQ1) using a proper validation split** drawn from the training (ID) set (e.g., 80/20 holdout) for hyperparameter selection, keeping the test set untouched until final evaluation. Report both default and validation-tuned results.
-- **Clarify the hyperparameter selection protocol for RQ2 and RQ3** — state explicitly whether the same tuned hyperparameters from RQ1 were carried over, or whether hyperparameters were re-selected for each setting. Ideally, use the same validation-based protocol throughout for consistency.
-- **Add statistical significance tests** (e.g., pairwise Wilcoxon signed-rank tests or critical difference diagrams) to support ranking-based claims and observations.
-- **Report the actual number of successful hyperparameter trials** per method per dataset (some methods may not complete 20 trials within the one-day budget), so readers can assess fairness of the search budget.
-- **Use the same hyperparameter selection strategy across all RQs** — or, at minimum, include a supplementary comparison showing how much the rankings change between default and tuned settings so readers can assess the impact.
+1. **Address the test-set-tuning issue directly.** The most impactful fix is to adopt a proper validation protocol. In unsupervised anomaly/OOD detection, one can draw a held-out split from the ID training data and use an unsupervised criterion (e.g., reconstruction error, one-class score, or held-out likelihood) for model selection. Alternatively, report results under both default and validation-tuned settings and clearly flag which numbers are upper bounds vs. realistic assessments. Even a discussion acknowledging how this practice might affect the reported rankings (e.g., methods with fewer hyperparameters are less affected) would strengthen the paper.
+
+2. **Add standard deviations or confidence intervals** to Table~\ref{tab:AUROC_optimization} or report per-run variability. Given 5 runs per method-dataset combination, this is straightforward and would substantially improve the benchmark's reliability assessment.
+
+3. **Explicitly state in the abstract and introduction** that the reported performance numbers are "upper bounds obtained by tuning on test labels" rather than claims of true generalization performance, so readers immediately calibrate their expectations.
+
+4. **Align the efficiency analysis protocol** with the performance analysis protocol, or at minimum acknowledge the mismatch and discuss whether it could affect the combined effectiveness-efficiency conclusions.
 
 ## Score and Decision
-
-This paper addresses a genuine gap and makes a useful contribution by unifying two previously separate evaluation tracks. The benchmark design (four scenarios, 35 datasets, 16 methods) is comprehensive, and the multi-dimensional analysis provides qualitatively valuable insights. However, the decision to tune hyperparameters on the test set is a significant methodological flaw for a benchmark paper — it inflates all reported numbers and undermines trust in the quantitative results. This is fixable by re-running with a proper validation split, but the paper cannot be accepted with the current numbers. The paper's core qualitative findings (near-OOD difficulty, contamination vulnerability, no universal method) are likely robust and valuable, but the benchmark's primary deliverable is reliable comparisons, and that standard is not currently met.
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

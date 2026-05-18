@@ -1,18 +1,18 @@
-Now I have a thorough understanding of the paper. Let me synthesize the final review.
+Now I have all the information I need. Let me write the final consolidated review.
 
 ## Summary
 
-This paper proposes HQGS, a 3D Gaussian Splatting variant for novel view synthesis from degraded inputs (low resolution, blur, noise, JPEG compression, mixed). It introduces two components: an Edge-Semantic Fusion Guidance (ESFG) module that uses edge maps from low-quality images to modulate Gaussian primitive positions, and a Structural Cosine Similarity Loss (L_SCS) that applies a global cosine-similarity constraint to low-frequency regions. Experiments on LLFF (8 real scenes) and a synthetic Blender dataset show consistent improvements over NeRF-based and 3DGS-based baselines across five degradation types, with particularly large margins under severe degradation.
+This paper proposes HQGS, a 3DGS-based framework for novel view synthesis under degraded inputs (low resolution, blur, noise, JPEG compression, and mixed degradation). The key contributions are (1) an Edge-Semantic Fusion Guidance (ESFG) module that uses edge-aware features fused with image semantics via cross-attention to improve Gaussian primitive placement in detail-rich regions, and (2) a Structural Cosine Similarity Loss (L_SCS) that constrains global low-frequency structure. Experiments on LLFF and DeblurNeRF datasets show HQGS outperforming NeRF-based and 3DGS-based baselines across all five degradation types.
 
 ## Strengths
 
-1. **Consistent SOTA across multiple degradation types**: On LLFF (Table 1) and DeblurNeRF (Table 2), HQGS achieves the best PSNR/SSIM/LPIPS across all five degradation conditions (low-res, JPEG, blur, noise, mixed) against both NeRF-based (NeRF, NaN, NVSR, NeRFLiX) and 3DGS-based (3DGS, SRGS) baselines. Gains are nontrivial in several settings (e.g., +2.49 dB PSNR over NeRF on low-res LLFF; +1.17 dB over NeRFLiX on DeblurNeRF).
+- **Consistent SOTA across multiple degradation types and two datasets.** Tables 1 and 2 show HQGS achieves the highest PSNR and lowest LPIPS under all five degradation conditions. For example, on LLFF under low resolution, HQGS gains +2.49 dB PSNR over NeRF and +0.49 dB over the specialized SR method SRGS. This directly supports the claim of a general framework.
 
-2. **Strong robustness under extreme degradation**: Table 6 is one of the paper's strongest pieces of evidence. Under noise variance 50, HQGS maintains 26.31 dB while SRGS drops to 23.21 dB and NeRFLiX to 23.32 dB — a ~3 dB advantage. At 8× downsampling, HQGS exceeds SRGS by 1.26 dB. The gap widens as degradation worsens, directly supporting the claim of superior robustness.
+- **Robustness gap widens under stronger degradation.** Table 6 shows that as noise variance increases from 0 to 50, HQGS maintains 26.31 dB PSNR while SRGS drops to 23.21 dB and NeRFLiX to 23.32 dB — a margin of >3 dB at the hardest setting. This objectively demonstrates superior robustness.
 
-3. **Empirically validated component design**: Table 3 shows the full ESFG module improves PSNR by 1.38 dB over vanilla 3DGS on the blurry 'Wine' scene. Table 4 shows L_SCS adds 0.87 dB over L1 alone and outperforms alternative structure-aware losses (L_BGM, L_SP). Table 5 validates the Sobel operator choice. These ablations, though limited in scope (see Weaknesses), are well-structured and support the design decisions.
+- **Better quality–efficiency trade-off than competing 3DGS methods.** Figure 8 shows that a 5-minute HQGS reconstruction exceeds a 9-minute 3DGS result (+1.22 dB PSNR), indicating the proposed modules improve quality without requiring longer training.
 
-4. **Efficiency advantage**: Figure 8 shows HQGS achieves higher quality in less training time than 3DGS and SRGS. At 5 minutes, HQGS outperforms 3DGS at 9 minutes by 1.22 dB PSNR. Rendering takes 200ms per frame vs. 7.5s for NeRFLiX. This practical advantage is well-documented.
+- **Clear motivation backed by empirical observation.** Figure 2(b) convincingly shows that degradation causes sparse Gaussian primitive coverage in detailed regions (power lines, flags), and the ESFG module demonstrably addresses this (Figure 7 recovers those details).
 
 ## Weaknesses
 
@@ -21,58 +21,57 @@ None.
 
 ### Major
 
-1. **Ablation experiments conducted on only a single scene with a single degradation type**: All three ablation tables (Table 3: ESFG variants, Table 4: L_SCS comparison, Table 5: edge operator comparison) are performed exclusively on the 'Wine' scene with blurry degradation from the DeblurNeRF dataset. The paper's captions explicitly state this. The effectiveness of ESFG (which modulates Gaussian positions via edge maps) and L_SCS (which masks high-frequency regions) likely depends on scene content (e.g., texture density, edge richness) and degradation type (e.g., noise destroys edges differently than blur). Without ablations on at least 3–4 scenes across at least 2 degradation types (e.g., blur + low-res or noise), the conclusions about which component contributes what, and whether contributions generalize, are weakly supported. This is the most significant gap in an otherwise reasonable experimental suite.
+1. **ESFG module architecture is under-specified, hindering reproducibility.** Section 3.2 states that after down-sampling images and edge maps by 2×, MLPs are used "to obtain I'_M and E'_M ∈ R^{M/2×3}" where M is the number of Gaussians (which varies adaptively during training). How an MLP maps from a fixed-resolution image feature grid (N×H/2×W/2×3) to a variable number of tokens M/2 tied to Gaussian count is not explained. The mechanism for associating these features with specific Gaussian primitives is absent. While the overall concept is understandable at a high level, the dimensional algebra has a genuine gap: a practitioner cannot determine from the paper how the connection between image features and Gaussian positions is established. This is a core architectural component. The paper should provide tensor shapes for each operation, clarify the mapping mechanism, and explain how the module handles the variable M during training.
 
-2. **L_SCS loss: the "structural" framing is not well-supported**: The loss computes cosine similarity between two global image vectors after masking out high-frequency regions with (1 - ∇I'). There are two concerns:
-   - The mask is derived from the *degraded input image*'s edge map, not the clean target. If the input has incorrect or missing edges (common under strong noise or blur), the mask may suppress meaningful high-frequency content in the target or fail to suppress noise artifacts in the rendered image. The paper does not analyze the reliability of these edge maps under degradation.
-   - Cosine similarity on a flattened image vector is a directional/global brightness-and-contrast measure, not a "structural" loss in the spatially-aware sense (unlike SSIM or perceptual losses). A 0.87 dB gain is demonstrated empirically, which is valuable, but the explanation of *why* this particular form works — and whether it genuinely improves low-frequency structure vs. simply regularizing global statistics — is missing. A comparison against a simple low-pass L2 baseline would clarify this.
+2. **Ablation evidence is too narrow to fully support the claimed generality.** All three ablation studies (Tables 3, 4, 5) are conducted on a single scene ("Wine") with a single degradation type (blurry) from DeblurNeRF. The paper claims a general framework for five degradation types, but the ablation evidence for the ESFG module and L_SCS loss — the paper's core contributions — is demonstrated in only one narrow setting. Without ablations across multiple scenes and degradation types, it is unclear whether the observed improvements (e.g., the 1.38 dB from ESFG, 0.87 dB from L_SCS) hold for low resolution, noise, JPEG compression, or mixed degradation, or across different scene geometries. This does not invalidate the main results (which show the full method works), but it weakens the claim that these specific components are the source of the gains across all settings.
 
 ### Minor
 
-1. **No error bars or statistical significance**: All results in Tables 1, 2, and 6 are single runs without standard deviations. While single-run evaluation is common in this subfield, many improvements are modest (e.g., 0.42 dB on JPEG, 0.32 dB on noise over SRGS), making it unclear whether these small margins are consistent. Reporting at least mean/std over 3 seeds for the main tables would substantially strengthen the claims.
+1. **Choice of gradient mask source for L_SCS is not justified.** The low-frequency mask (1−∇I') is derived from the degraded input images, not from the rendered or target images. When degradation destroys edges (e.g., heavy blur or noise), this mask will be erroneous. The paper provides no ablation comparing masks from different sources (degraded input vs. rendered vs. target) to validate this design choice. While the loss still produces a measurable improvement (0.87 dB on the blurry Wine scene), the lack of analysis leaves this design choice undefended.
 
-2. **No explicit limitations or failure-case discussion**: The conclusion summarizes contributions but does not discuss limitations. The paper operates in a paired clean-degraded supervision setting (as do all compared baselines; this is stated transparently on line 136: "We retrain all methods using low-high-quality pairs"). A brief limitations paragraph acknowledging the paired-data requirement and discussing scenarios where edge maps from degraded images might fail (e.g., near-complete loss of edge structure) would improve the paper's completeness.
-
-3. **Robustness analysis covers only two of five degradation types**: Table 6 progressively tests noise and low resolution, but not JPEG compression or blur. The strong robustness claim is partially supported, but it would be more comprehensive to include all degradation types at multiple severity levels.
+2. **The "matrix multiplication" notation is used incorrectly.** The paper defines ⊙ as matrix multiplication, but in both uses (E = ∇I'⊙I and μ_new = Sigmoid(F'_M)⊙μ+μ), the context calls for element-wise (Hadamard) multiplication. The 4D tensors in the first case cannot be matrix-multiplied, and the shapes in the second case (both M×3) would produce M×M under true matrix multiplication, not M×3. This does not affect the substance but signals imprecision.
 
 ### Trivial
-None.
+None beyond the notation issue listed above.
 
 ## Nice-to-Haves
 
-- Compare L_SCS against a simpler global baseline, such as L2 loss on low-pass-filtered images, to confirm the cosine similarity form is genuinely beneficial and not simply acting as a global regularization term.
-- Visualize where L_SCS changes the output (e.g., difference maps between models trained with and without L_SCS, focusing on low-frequency regions as claimed).
-- For completeness, consider showing ablations with edge maps treated as additional input channels (a simpler alternative to the ESFG cross-attention design) to clarify whether the full cross-attention mechanism is necessary.
-- Show an ablation on mixed degradation (not just single-degradation blur) to confirm the components help in the combined setting tested in the main results.
+- **Analysis of COLMAP sensitivity.** The method relies on COLMAP for initial point clouds. Figure 2(a) shows sparser point clouds under degradation, but the paper does not analyze cases where COLMAP fails to register enough points or produces incorrect poses. A sensitivity analysis (e.g., across degradations where COLMAP output quality varies) would strengthen robustness claims.
+
+- **Ablation for mixed degradation.** Mixed degradation is included in the main comparisons but not separately ablated. A brief ablation or discussion of the design choices (degradation order, parameter tuning) would help.
+
+- **Demonstration on a real-world degraded capture.** The paper uses synthetic degradations throughout. A qualitative result on a real low-light, out-of-focus, or compressed camera capture would strengthen the practical relevance argument.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **Baseline fairness concern** (Harsh Critic: "NeRF and NeRFLiX are not designed to handle all five degradation types... comparisons penalize baselines"). Removed because this is the paper's core thesis — showing that existing specialized methods do not generalize, while the proposed method does. The paper explicitly acknowledges that methods target specific degradations (Section 1, line 10). Comparing general vs. specialized methods on a broad testbed is standard practice; this asymmetry is intentional and legitimate. The paper does not claim baselines are unfair; it claims they are limited in scope, which is precisely the motivation.
 
-- **"The term 'high-frequency edge-aware maps' is confusing"**: This is a stylistic/terminology preference, not a substantive weakness. The paper's nomenclature is clear enough in context.
-- **"Figure 2(b) is qualitative only"**: Qualitative motivation is standard and acceptable for a motivating observation. The paper does not claim this figure proves anything quantitatively.
-- **"The factor M/2 is not clearly justified"**: This is a design detail common in neural network papers. The downsampling followed by MLP projection is straightforward.
-- **"The sigmoid displacement could distort geometry"**: This is speculative without evidence that distortion actually occurs. The empirical results show improvement, not degradation.
-- **"The paper should justify degradation levels are representative"**: The levels (e.g., blur kernel 10-20, JPEG quality 10, noise std 10) are clearly specified and are reasonable for demonstrating robustness. Demanding a real-world calibration is scope creep.
+- **COLMAP failure case** characterization as a weakness. Moved to Nice-to-Haves (it is a reasonable future direction but not a flaw in the paper as presented — COLMAP is the standard initialization for all 3DGS papers).
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviewer analyses confirm the paper's stated strengths (consistent SOTA across degradation types, strong extreme-degradation robustness) while highlighting that its ablation generality is the main gap. The observation that the L_SCS loss's "structural" framing is somewhat loose and its mask from degraded edges could be unreliable is a useful nuance, but the paper's empirical results still speak for themselves — the loss works, even if the theoretical explanation could be sharpened.
+The most interesting observation from the reviews is that while the ESFG module's main strength is its use of cross-attention between edge-aware and semantic features, the paper's textual description focuses more on the "what" (cross-attention, concatenation, modulation) than the "how" (how features indexed by image position map to unordered Gaussian primitives). This tension between a conceptually appealing design and under-specified mechanics is the paper's central weakness. Conversely, the robustness scaling results (Table 6) are genuinely compelling and under-exploited in the paper's narrative — the fact that HQGS's advantage grows with degradation severity, rather than shrinking, is a strong signal that the approach is not just "better on average" but qualitatively different in how it handles information loss. This finding deserves more prominence in the paper's positioning.
 
 ## Suggestions
 
-- **Most important**: Expand ablations to at least 3–4 scenes from LLFF across at least 2 degradation types (e.g., blur + low-res or noise). This single change would resolve the paper's most significant evidential weakness and is not conceptually difficult — it just requires running existing code on more data.
-- Add an analysis of edge map quality under different degradations (e.g., edge recall/precision against clean ground-truth edges) to validate or reveal the breaking points of the ESFG module.
-- Report mean and std over multiple seeds for at least the main comparison tables.
-- Add a brief limitations paragraph to the conclusion.
+1. **Provide a clear ESFG architecture specification.** Add a supplementary figure or table showing each operation's input/output tensor shapes, especially how the MLPs map image features to M/2 tokens and how these tokens are associated with specific Gaussians. Explain how the adaptive M (variable number of Gaussians during training) is handled by the module.
+
+2. **Expand ablation to at least 3 scenes × 3 degradation types.** Run Tables 3 and 4 on additional scenes (e.g., one indoor, one outdoor from LLFF) and on at least noise and low-resolution settings. If trends are consistent, the generality claim becomes credible. If gains vary, the paper should discuss why.
+
+3. **Add an ablation study comparing gradient mask sources for L_SCS.** Compare using the mask from the degraded input vs. from the rendered image vs. from the target image to justify the current design choice or adjust it accordingly.
+
+4. **Fix the notation for element-wise multiplication.** Replace "matrix multiplication" with "element-wise multiplication" (or use a different symbol consistently) for the Hadamard product operations in Equations 1 and 3.
 
 ## Score and Decision
 
-This paper tackles a well-motivated problem (3DGS under degradation) with a clean approach (edge-guided Gaussian placement + a global cosine loss) that is grounded in an intuitive observation about sparse primitives in degraded scenes. The main experiments across two datasets and five degradation types consistently show HQGS outperforming both NeRF-based and 3DGS-based baselines, and the robustness analysis under extreme degradation (Table 6) is genuinely compelling — the gap over competitors grows as conditions worsen, which is exactly what a robust method should do.
+**Originality:** Moderate. Combining edge guidance with 3DGS via cross-attention is a reasonable extension; the individual components (edge maps, cross-attention, cosine similarity loss) are known but their combination in this context is novel.  
+**Importance of question:** High. Robust 3DGS to degraded inputs is practically relevant for real-world applications.  
+**Claims supported:** Partially. Main quantitative results support the overall claim, but ablation evidence is too narrow to fully validate the claimed generality of individual components.  
+**Soundness:** Moderate. Methodology is generally reasonable; the architectural gap undermines the reader's ability to fully assess soundness.  
+**Clarity:** Moderate. Paper is readable at a high level but critical architectural details are under-specified.  
+**Value to community:** Moderate. If the architectural gap is resolved and ablations are expanded, this would be a useful contribution.
 
-The most serious weakness is that all component ablations are confined to a single scene with a single degradation type. This does not invalidate the core contribution (the full system's superiority is established on full datasets), but it weakens the evidence that each component matters generally. The L_SCS loss's theoretical framing is also somewhat loose, though its empirical benefit is clear. These are addressable gaps, not fatal flaws.
+The paper addresses a worthwhile problem and presents promising results across five degradation types. However, the ESFG module description contains a genuine reproducibility gap for a core contribution, and the ablation evidence is too narrow to fully support the generality claim. These issues are addressable with revision but are significant in the current form.
 
-The paper represents a solid, well-executed contribution with a clear practical value proposition: a single 3DGS framework that works across multiple degradation types without needing degradation-specific design, and that degrades gracefully under severe conditions.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

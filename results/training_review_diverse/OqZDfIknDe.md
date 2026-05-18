@@ -1,94 +1,70 @@
-Here is the consolidated meta-review.
-
----
+Now I have a thorough understanding of the paper and the reviews. Let me compose the final consolidated review.
 
 ## Summary
-
-This paper introduces UniRiT, a two-stage framework for non-rigid point cloud registration that first applies a learned rigid alignment and then a non-rigid deformation refinement. The authors also introduce MedMatch3D, a benchmark built from real human organ shapes (from MedShapeNet) with synthetic TPS deformations, totaling 3,408 point cloud pairs across 10 organ types. The central claims are: (1) this is the first systematic study of few-shot non-rigid registration, (2) decomposing the registration into rigid then non-rigid steps reduces problem complexity, and (3) UniRiT achieves state-of-the-art results on MedMatch3D.
-
----
+The paper introduces UniRiT, a two-stage (rigid → non-rigid) MLP-based framework for non-rigid point cloud registration, motivated by a GMM-based decomposition analysis. It also introduces MedMatch3D, a benchmark of 3,408 organ point cloud pairs derived from real CT/MRI scans with synthetic TPS deformations. The method is evaluated on mixed-organ, zero-shot small bowel, and liver experiments.
 
 ## Strengths
 
-- **The two-stage rigid → non-rigid decomposition is a sensible and effective design choice.** The ablation study consistently shows that removing the rigid module degrades performance (RMSE 2.16 → 8.29 mm on the mixed-organ benchmark, and 6.65 → 15.19 on the zero-shot small bowel benchmark). This is clean evidence that the decomposition helps.
+1. **Principled two-step decomposition with theoretical motivation**: The paper decomposes non-rigid registration into rigid alignment followed by non-rigid refinement, motivated by a GMM analysis showing that rigid transformations affect the mean while non-rigid transformations affect the covariance (Section 4.1, Equations 6–13). This provides a cleaner theoretical grounding than typical ad-hoc two-stage designs.
 
-- **MedMatch3D is a potentially useful benchmark.** It provides 3,408 registered point cloud pairs across 10 organ types from real medical scans (MedShapeNet), addressing a gap in non-rigid registration benchmarks for medical data. The observation that intra-organ distributional divergence (GMM $\mathcal{L}_{mc}$ values like liver–liver = 0.62) can approach inter-organ divergence (liver–brain = 0.98) is a genuinely interesting finding that motivates the problem.
+2. **Computationally efficient architecture**: UniRiT uses only MLP and FC layers, achieving 4.58 GFLOPs and 18.08 ms inference time — competitive with the fastest methods (e.g., FPT at 7.58 GFLOPs, 8.23 ms) while being substantially more accurate. This is a genuine practical advantage for surgical applications.
 
-- **Strong zero-shot generalization results.** UniRiT achieves 6.65 mm RMSE on the small bowel dataset (with real noise and missing structure) versus 84.45 mm for the best baseline (FPT). This result, combined with the qualitative evidence in Figure 4, convincingly demonstrates that UniRiT generalizes substantially better than existing methods to unseen, noisy organ classes.
+3. **Demonstrated cross-organ generalization**: The zero-shot small bowel experiment (Table 3, left) shows UniRiT achieving 6.65 mm RMSE versus 84.45 mm for the best prior method (FPT) on an unseen organ class with real noise and incompleteness. This is the paper's strongest evidence of generalization.
 
-- **Consistent improvement under large rigid displacements.** In the liver Case B experiment (random rotations ±45°, translations up to 30 mm), UniRiT achieves 3.04 mm RMSE versus 6.71 mm for RoITr, validating that the explicit rigid module specifically helps when rigid motion is present.
-
----
+4. **Ablation study confirms rigid module helps**: The "w/o rigid" variant degrades RMSE from 2.16 mm to 8.29 mm on the mixed dataset and from 6.65 mm to 15.19 mm on the small bowel, showing that the rigid alignment step contributes meaningfully to the final performance.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-1. **The "few-shot" framing is misaligned with the experimental protocol, weakening the paper's central contribution claim.** The paper defines few-shot N-PCR (Section 3) as generalizing to unseen transformation patterns with limited data, then runs experiments on 3,277 training pairs (mixed organ) and 487 training samples (liver). Neither experiment follows a conventional N-way K-shot episodic protocol, nor does any experiment test performance with, say, 1–10 training pairs per organ. The liver experiment (487 samples for a single organ) qualifies as "limited data" in a medical context but not as "few-shot" by the community's standard usage. Since the paper's first claimed contribution is defining and addressing "few-shot" N-PCR, this mismatch between the label and the evidence is a structural issue: a reader looking for few-shot results in the standard sense will not find them.
+1. **"Few-shot" framing is inconsistent with the experimental design.** The paper claims to define and address a new "few-shot N-PCR" task (Contribution 1), yet the main experiment trains on 3,277 pairs across nine organ types — orders of magnitude beyond any conventional few-shot regime. The liver experiment uses 487 training samples, which is modest but not few-shot. The small bowel experiment is zero-shot (domain generalization), not few-shot. The paper's own definition (§3) describes the challenge in terms of distributional diversity, not sample count, which is a legitimate problem but not what "few-shot learning" means in the literature. The claimed novelty of the task definition depends on this framing, making this a significant overclaim. The contribution would be better characterized as "non-rigid registration under distribution shift with limited per-organ data."
 
-2. **Training configurations for all baseline methods are absent, making the reported 94.22% improvement over RoITr unverifiable.** The paper reports enormous performance gaps (UniRiT 2.16 mm vs. next-best RoITr 37.41 mm on the mixed-organ benchmark, and 6.65 vs. 84.45 on small bowel). Yet no details are provided about how any baseline was adapted to MedMatch3D: no learning rates, optimizers, epochs, data splits, loss configurations, or whether methods were re-trained from scratch or used out-of-the-box with default settings. Without this information, the reader cannot distinguish between a genuine architectural advantage and a failure to fairly tune the comparison methods. Some baselines (e.g., Lepard, RoITr) rely on geometric features (normals, FPFH) that do not exist in the raw-coordinate MedMatch3D data — the paper does not state whether these features were used or omitted, which could seriously handicap those methods.
+2. **Baseline comparisons lack sufficient reporting detail to be credible.** The paper reports UniRiT at 2.16 mm RMSE versus the best baseline (RoITr) at 37.41 mm — a ~94% improvement. However, the paper provides no description of how any learning-based baseline was trained: no data splits, no hyperparameter tuning procedures, no learning curves, no overfitting analysis. Many baselines (PointPWC, BPF, DifFlow3D, MSBRN, RoITr) were designed for large-scale clean data, and if simply run off-the-shelf on this small, noisy dataset they would be expected to fail. Without evidence that baselines were given a fair chance (same training data, tuned hyperparameters), the dramatic performance gap cannot be attributed to the proposed method versus being an artifact of improper baseline evaluation. The CD metric partially corroborates the results (UniRiT: 1.88 mm vs. CPD: 2.07 mm), but the CD gap is far narrower, and CPD (a non-learning method) actually beats all learning-based baselines on CD.
 
-3. **Missing implementation details for UniRiT itself.** No hyperparameters are reported: the loss weight $\alpha$, the number of rigid refinement iterations $n$, optimizer choice, learning rate, batch size, number of epochs, data augmentation, or point cloud sampling strategy. Without these, the experiments cannot be reproduced.
+3. **The "real-world" nature of MedMatch3D is overstated.** The paper describes MedMatch3D as "real human organs" and implies it captures authentic registration challenges (Abstract, §5.1). However, the registration pairs are generated by applying uniform-strength TPS deformations to cleaned organ point clouds from MedShapeNet (§5.1: "applied uniform strength TPS deformations across all organ types"). While the base organ shapes are real (with real noise from CT/MRI reconstruction), the registration task itself is a synthetic warp simulation, not a dataset of real intra-operative to pre-operative correspondences. The paper's motivation criticizes existing methods for failing on real-world data, yet the benchmark removes much of the realism at the deformation level. This should be acknowledged explicitly.
 
 ### Minor
 
-4. **The w/o rigid ablation (RMSE 8.29 mm) already outperforms all baselines (next best 37.41 mm) by a factor of 4–5x.** This suggests that the architectural backbone itself (MLP encoders, bidirectional encoding, coordinate concatenation, iterative refinement) is responsible for the majority of the improvement over existing methods — not specifically the rigid decomposition. The paper attributes success to the decomposition, but no ablation controls for other architectural factors (e.g., number of parameters, presence of iterative structure, loss function design). The decomposition *does* improve within UniRiT (8.29→2.16), but its importance relative to other design choices is unclear.
+1. **The GMM analysis does not directly connect to the implementation.** Section 4.1 frames the method in terms of GMM parameters (means and covariances), but the actual method (§4.2) operates on raw point coordinates via MLPs and never estimates or manipulates GMM parameters. The GMM analysis serves as a high-level motivation, which is fine, but the presentation creates a misleading impression that the method works on GMMs directly. This could be clarified.
 
-5. **No variance estimates or error bars are reported.** Given the modest test-set sizes (e.g., 64 samples for the liver experiments), standard deviations across multiple runs would be needed to assess significance.
+2. **The "w/o rigid" ablation does not fully isolate the contribution of the two-stage design.** The "w/o rigid" variant (removing the rigid module) still achieves 8.29 mm RMSE — far better than any baseline at 37+ mm. This suggests that the MLP architecture and training regime themselves contribute substantially to the gains, independent of the two-stage decomposition. A proper control would compare against a single-stage non-rigid network of comparable total capacity, not just the full model minus one module (which also has fewer parameters). The paper does not discuss this.
 
-6. **The benchmark's realism is somewhat overstated.** The paper repeatedly motivates the work with challenges of real medical data (noise, missing structure, distribution shifts) and describes MedMatch3D as "real human organs collected in authentic medical scenarios." However, the benchmark pairs are generated by applying uniform-strength TPS deformations to segmented organ meshes. The deformation patterns are not those of real intra-operative vs. pre-operative registration, and the benchmark does not explicitly model noise or missing data (though the small-bowel dataset does contain real noise). The shapes are real; the registration pairs are synthetic. The paper is transparent about the TPS construction (Section 5.1), but the abstract and contributions list could create an impression of greater realism.
+3. **GMM divergence table (Table 1) presentation is unclear.** The mapping from organ names to matrix indices is not obvious, and some off-diagonal entries are smaller than diagonal entries (e.g., gallbladder row: kidney at 1.05 < gallbladder at 1.40), which somewhat weakens the claimed argument that intra-organ variability rivals inter-organ variability. The data still broadly supports the qualitative point, but the presentation needs improvement.
 
 ### Trivial
-
-7. The abstract says UniRiT "first aligns the centroids of the source and target point clouds," but the actual rigid module learns a full rotation matrix **R** and translation vector **t** (Eq. 10–11), not just centroid alignment. These are different operations; the description should match what the network does.
-
----
+None.
 
 ## Nice-to-Haves
-
-- **A genuine few-shot experiment** with N-way K-shot episodic sampling (e.g., 1, 5, 10 training pairs per organ) would directly support the paper's title and central claim. This is the most impactful addition the authors could make.
-- An ablation on the number of rigid refinement iterations **n** and the loss weight **α**.
-- An ablation comparing the bidirectional encoding scheme to simpler alternatives (e.g., shared-weight MLPs, single-branch encoding).
-- Analysis of why the w/o rigid architecture (simple MLPs) so dramatically outperforms more complex baselines like RoITr and BPF on this data.
-
----
+- Report error bars / variance across multiple runs (important given the small dataset sizes).
+- Include a failure case analysis (samples with largest errors).
+- Compare against classical non-rigid registration methods beyond CPD/BCPD (e.g., N-ICP) for completeness.
+- Provide the value of key hyperparameters (rigid iterations n, loss weight α) and basic training details (epochs, learning rate) — these are missing from the main paper and would help reproducibility.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution.
-
-- *"The GMM analysis is not connected to the design of UniRiT"* — The paper uses GMM to motivate the mean-change (rigid) vs. covariance-change (non-rigid) decomposition (Section 4.1), which directly motivates the two-stage architecture. The GMM is not a network component but a theoretical framework for the decomposition; the critic misunderstands the role of the analysis.
-- *"The paper does not discuss how point clouds of varying sizes are handled"* — The formulation assumes **N** points for source and target (Eq. 1), and the architecture concatenates coordinates explicitly. The paper could be clearer, but the assumption of equal point counts is stated.
-- *"The paper should justify why RoITr is considered state of the art"* — RoITr is a well-known method in non-rigid registration; this is a standard baseline choice.
-
----
+- **Criticism about missing hyperparameters (n, α, MLP architecture)**: Per guidelines, these are nitpicks about reproducibility-sensitive details typical for reviewer requests, but the rules instruct removing such nitpicks. (However, note these would help reproducibility.)
+- **Criticism about no comparison on existing benchmarks (4DComplete, DeformingThings4D)**: The paper introduces a new dataset for a newly defined task; evaluating on external benchmarks is outside its stated scope.
+- **Criticism that "the improvement percentage (94.22%) is not in the main text"**: This is factually incorrect — it appears in the abstract, but the abstract is part of the paper. The core concern (baseline fairness) is captured under Major #2.
+- **Strength about "new problem definition for few-shot N-PCR"**: Conflicts with verified weakness #1 (few-shot framing mismatch). Weakness wins. Moved here.
+- **Strength about "SOTA results on MedMatch3D benchmark"**: Undercut by verified weakness #2 (insufficient baseline reporting). The results may be legitimate but cannot be verified from reported details. Moved here.
+- **Strength about "introduction of a realistic medical benchmark"**: Conflicts with verified weakness #3 (overstated real-world nature). Moved here.
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The key observation — that a two-stage rigid→non-rigid decomposition is empirically far more effective on this medical data than end-to-end methods — is valuable but is the paper's own claim, not a novel synthesis from the reviews.
-
----
+None beyond the paper's own contributions. The key observation — that an MLP-based two-stage architecture can dramatically outperform complex attention-based methods on noisy, limited-data organ registration — is the paper's central claim, not a novel synthesis from the reviews.
 
 ## Suggestions
-
-1. **Re-frame the contribution.** Drop the "few-shot" label for the current experiments and instead describe the setting as "small-sample" or "limited-data" non-rigid registration, or add a proper few-shot experiment (e.g., 1/5/10 training pairs per organ with episodic evaluation) that directly supports the title.
-2. **Report complete training details for all baselines and for UniRiT itself**, ideally with a released configuration file.
-3. **Add controlled ablations** that isolate the rigid decomposition from other architectural choices — compare UniRiT against a version with shared-weight MLPs, without coordinate concatenation, or with varying iterations **n**.
-4. **Acknowledge the benchmark's limitation** explicitly: MedMatch3D uses real shapes with synthetic TPS deformations, not real surgical deformations. The small bowel dataset has real noise, but the main benchmark does not model noise or missing data.
-5. **Report standard deviations** across at least 3 random seeds for the main results.
-
----
+1. **Reframe the contribution honestly**: Replace "few-shot" with "limited-data" or "distribution-shift" non-rigid registration. If you want to claim few-shot, run actual k-shot experiments (k=1,5,10).
+2. **Provide full baseline training details**: Same data splits, hyperparameter tuning procedure, training epochs, and validation curves for all baselines. Without this, the main quantitative result is not credible.
+3. **Add a proper single-stage control**: A non-rigid-only network with matched total parameter count and training budget, to isolate the benefit of the two-stage decomposition.
+4. **Acknowledge the synthetic deformation limitation**: State clearly that MedMatch3D uses synthetic TPS warps on real organ shapes, and discuss how this differs from real surgical deformation (tissue sliding, topological changes).
+5. **Release the dataset and code** to enable independent verification of the striking performance gap.
 
 ## Score and Decision
+The paper tackles an important and practical problem with a sensible, computationally efficient architecture and provides a useful new benchmark. However, the three major weaknesses — (i) overclaimed few-shot framing inconsistent with the experiments, (ii) insufficiently documented baseline comparisons that make the headline 94% improvement unverifiable, and (iii) overstated "real-world" nature of the benchmark — collectively undermine the paper's core claims. The baseline comparison issue is the most serious: a 94% improvement over existing methods would be a landmark result, but without details on how baselines were trained, the result is not credible. The paper's real contributions (simple MLP-based architecture, cross-organ generalization, MedMatch3D dataset) are valuable but the presentation overclaims substantially.
 
-The paper addresses a real problem and presents a reasonable method with strong empirical results, but the evaluation has serious gaps: the "few-shot" claim is unsupported by the experimental protocol, baseline training details are entirely missing (making the large performance gaps unverifiable), and the core contribution is not fully isolated by ablation. The paper would require major revisions — primarily re-framing the contribution and documenting fair comparisons — before it is publishable.
-
-**Originality:** Moderate. Rigid→non-rigid decomposition is intuitive but not previously applied in this few-shot setting.  
-**Importance:** The medical registration problem is practically important.  
-**Claims vs. Evidence:** The central "few-shot" claim is not supported; the method's effectiveness is evidenced but not convincingly attributed to the stated novelty.  
-**Soundness:** Questionable due to undocumented baseline configurations.  
-**Clarity:** Reasonable, though the GMM analysis and method sections have some disconnects.  
-**Value to community:** The benchmark could be useful; the method itself is simple and effective if properly validated.
+Score: 5.0 (borderline reject — major revision needed to address the above concerns)
 
 MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

@@ -1,72 +1,89 @@
-Now I have all the evidence I need. Let me write the consolidated review.
+Now I have all the information needed to produce the consolidated review. Let me carefully verify each claim against the paper.
+
+---
 
 ## Summary
 
-This paper addresses hyper-parameter optimization and model selection for unsupervised anomaly detection (UAD), where no labeled validation data is available. It proposes three surrogate metrics — RTM, EAG (internal), and NPD (semi-internal) — that approximate expected test performance, and integrates them with Bayesian optimization. NPD, which measures the discrepancy between anomaly scores on a held-out validation set and a Gaussian-generated pseudo-anomaly set, is the paper's main contribution. Experiments on 38 datasets with four UAD methods show that NPD-guided search outperforms existing internal evaluation heuristics (EM/MV, MC, HITS) and random/default baselines.
+This paper tackles hyperparameter optimization and model selection for unsupervised anomaly detection (UAD), where labeled validation data is unavailable. It proposes three surrogate metrics—RTM, EAG, and NPD—to approximate expected test performance without labeled anomalies. NPD, the main contribution, measures the discrepancy between anomaly scores on a held-out validation partition of the training data versus scores on data generated from an isotropic Gaussian with matched first/second moments. The metrics are integrated with Bayesian optimization (TPE) and evaluated on 38 benchmark datasets across four UAD methods (OCSVM, AE, DeepSVDD, DPAD). NPD consistently outperforms existing heuristics, including consensus-based methods (MC, HITS) and EM/MV, on both BO-based HPO and unsupervised model selection tasks.
 
 ## Strengths
 
-- **Novel and well-motivated metric (NPD).** The idea of using an isotropic Gaussian as a proxy for unseen anomalies is clever and grounded in a simple argument: the Gaussian has higher entropy than the training data (Theorem 1), so it provides a diverse reference set without requiring real anomalies. NPD is hyper-parameter-free (unlike RTM and EAG which need a threshold), and its translation/scale invariance (Theorem 2b) makes it robust to arbitrary score scaling.
+1. **Simple, well-motivated metric (NPD) with practical appeal.** The idea of comparing anomaly scores on real vs. Gaussian-generated data is intuitive and requires no labeled anomalies or prior knowledge of the anomaly ratio. The metric is hyperparameter-free by design (modulo the validation split, see Weaknesses), translation- and scale-invariant (Theorem 2b), and does not overfit because it is computed on held-out data independent of training. This contrasts favorably with prior work that requires meta-learning across labeled historical datasets or assumes knowledge of the anomaly ratio.
 
-- **Strong empirical evidence across scale.** The benchmarking on 38 datasets with 4 UAD methods (one shallow, three deep) is substantial. Mean AUC and F1 results in Table 1 show NPD achieving the best or second-best performance across methods, with statistically significant gains over Random (p < .01 for OCSVM, AE, DPAD). The UOMS study (Table 2) further shows RTM and NPD outperforming consensus-based selection (MC, HITS) on a pool of up to 2,667 models.
+2. **Strong empirical results across a large benchmark.** In Table 1, NPD-guided BO achieves the highest mean AUC and F1 among all methods for OCSVM (AUC 0.832), AE (AUC 0.779), and DPAD (AUC 0.697). NPD consistently outperforms the Random baseline (expected grid search value) with statistically significant p-values across 38 datasets. The UOMS study (Table 2) further shows NPD and RTM outperform consensus-based selectors (MC, HITS) on a model pool of up to 2,667 configurations.
 
-- **Truly unsupervised operation.** Unlike meta-learning methods (Zhao et al., 2021, 2022) that require labeled historical datasets, AutoUAD works entirely with the training data alone. This is explicitly and honestly contrasted in the Related Work section.
+3. **Clear problem formulation and thorough motivation.** Definitions 1 and 2 formalize the UAD and AutoUAD problems with precision. Figure 1 vividly demonstrates the sensitivity of UAD methods to hyperparameters and the diversity of performance landscapes across datasets, providing concrete motivation for automated tuning.
 
-- **Clear problem formulation.** The formalization of AutoUAD (Definition 2) with two explicit goals — (1) hyper-parameter optimization per method and (2) model selection across methods — gives the paper clean framing. The distinction between UAD (inductive, trained on normal data) and transductive outlier detection is appropriately scoped.
+4. **NPD avoids overfitting issues of internal metrics.** The paper shows (Figure 6) that NPD yields a Spearman rank coefficient of 1.0 with test AUC across configurations, while RTM and EAG exhibit non-monotonic relationships on some methods (e.g., DPAD). This is a genuine advantage of the semi-internal design.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **Overstated Spearman correlation claim.** The paper states: "taking Figure 6 as an example, we see NPD consistently has a strict positive correlation with AUC and F1, where the Spearman rank coefficient is always 1" (lines 205–211). While the phrase "as an example" limits this to Figure 6, claiming perfect rank correlation (ρ = 1) within any real BO trajectory is an extraordinary assertion that the paper does not substantiate. No Spearman correlation coefficients are computed or reported across any other datasets or conditions. This single overstatement weakens the paper's credibility despite the aggregate results being positive. The authors should either retract this claim or back it with quantitative rank-correlation statistics across all 38 datasets.
+1. **Missing critical experimental details that compromise reproducibility.** Two parameters central to the experimental design are not reported:
+   - **M (validation split size) in NPD (Definition 6):** The paper never states what fraction of training data is held out as $\mathcal{X}_{\text{val}}$  (size $M$) versus used for training (size $N-M$). Since $M$ determines both the validation quality and the size of the generated set $\mathcal{X}_{\text{gen}}$, this is a free design parameter of NPD. The paper claims NPD is "hyper-parameter-free," which is strictly true only if $M$ is treated as a fixed preset rather than a tunable choice, but the value is never disclosed.
+   - **Number of BO iterations:** The paper uses Bayesian optimization with TPE but never states how many function evaluations are performed per dataset per method. Without this, readers cannot assess whether the search budget was sufficient, whether comparisons across methods on a given budget were fair, or whether the results are reproducible.
+
+   These omissions go beyond presentation polish—they prevent independent verification and limit the paper's scientific value. *Recommendation: specify $M$ (or the split ratio $M/N$), report the number of BO iterations, and ideally show robustness to the choice of $M$.*
+
+2. **Lack of ablation studies for NPD's design choices.** The paper does not ablate:
+   - Varying $M$ (e.g., 10%, 20%, 50% of training data)
+   - Replacing the isotropic Gaussian with a uniform distribution, a shuffled version of the training data, or another reference distribution
+   
+   An ablation would substantially strengthen the claim that the specific choices in NPD—the Gaussian, the particular split—are important. Without it, one cannot rule out that other reasonable choices would work as well or better.
 
 ### Minor
 
-- **Unspecified validation split size M for NPD.** Definition 6 splits training data into X_trn (size N−M) and X_val (size M), but M (or the proportion) is never stated. This is a reproducibility gap: NPD's behavior (variance, sensitivity to the training/validation trade-off) depends on M. The authors should specify the value and ideally justify it or show robustness.
+3. **Surrogate validation is indirect; direct correlation analysis would be stronger.** The paper validates that RTM, EAG, and NPD are good surrogates by showing that BO guided by these metrics finds hyperparameters that outperform Random and baselines. This is a valid but indirect approach. A direct analysis—computing Spearman or Kendall correlation between each metric and test AUC across all hyperparameter configurations for each dataset and method—would more cleanly establish the surrogate claim. Figure 5 shows trends for "different datasets" (plural) and Figure 6 is illustrative, but neither constitutes a systematic correlation study across all 38 datasets. The results are not inconsistent with the surrogate claim, but the evidence could be more direct.
 
-- **Theoretical analysis does not directly establish the surrogate claim.** The paper advertises "theoretical guarantees" (abstract, contribution list), but the theorems provide only peripheral support. Theorem 2 gives an upper bound on NPD in terms of score gaps, but an upper bound does not logically entail that maximizing NPD maximizes separation — the bound and the metric share the same denominator structure, so the direction of implication is unclear. Theorem 3 bounds KL divergence under GMM approximations but is never connected to why NPD should predict test AUC. The theoretical content is interesting background but is weaker than the "guarantee" framing suggests.
+4. **Theoretical results (Theorems 2 and 3) have limited practical utility.** Theorem 2 bounds NPD in terms of the unknown partition of $\mathcal{X}_{\text{val}}$  and $\mathcal{X}_{\text{gen}}$ into normal and anomalous points—quantities never observed in practice. Theorem 3 assumes a Gaussian mixture approximation with bounds on eigenvalues, component norms, and approximation error $\varepsilon$, which are unlikely to hold on real-world datasets. While the translation/scale-invariance property (Theorem 2b) and the entropy result (Theorem 1) are useful, the more complex bounds offer no actionable guidance. They give an appearance of theoretical rigor without providing guarantees that inform practice.
 
-- **Statistical comparison only against Random, not among metrics.** The p-values in Table 1 compare each metric against Random. The lone p-value* column compares NPD to the second-best overall mean, but there are no per-method statistical tests among the proposed metrics themselves (e.g., NPD vs. RTM for a given UAD method). This leaves uncertainty about whether NPD's advantage over RTM/EAG is significant method-by-method.
+5. **EM/MV baseline usage could be clearer.** The paper states EM/MV is compared "with BO" in Table 1, but does not fully describe how EM/MV is computed and used as the acquisition objective. For reproducibility, the paper should specify the exact implementation (e.g., the Goix 2016 formulation used, hyperparameters of the metric itself). The "Random" baseline is, however, clearly defined as "the expected value of the grid search" (Table 1 caption), so this specific concern raised by the reviewer is unfounded.
 
-- **Missing per-dataset win/loss summaries.** Only mean AUC/F1 across 38 datasets is reported. A critical difference diagram, Nemenyi test, or a win/tie/loss table would clarify whether NPD dominates consistently or has high variance. The current reporting could hide that NPD wins by a little on many datasets but loses badly on some.
+6. **Notable that NPD does not outperform Random on DeepSVDD.** In Table 1, NPD's AUC (0.737) is close to Random (0.730) on DeepSVDD, with the p-value indicating marginal or no statistical significance. The paper does not discuss this negative result, which would provide useful context about when NPD may fail.
 
 ### Trivial
 
-None.
+- Figure 6's dataset is not identified in the text (line 205 says "taking Figure 6 as an example").
+- The double p-value notation in Table 1 ($p$ and $p^*$) is explained but could be clearer.
 
 ## Nice-to-Haves
 
-- **Add an oracle (Max) column to the UOMS table (Table 2).** The Max baseline is present in the BO study (Table 1) but absent from the UOMS comparison. Including it would show how close RTM/NPD come to the theoretical optimum and contextualize the remaining gap.
-- **Add a limitations subsection.** The conclusion briefly notes that "the highest NPD did not always correspond to the best model performance." This could be expanded into a short discussion of when NPD is likely to fail (e.g., when training data is already near-Gaussian, or when anomalies are highly localized in a small subspace).
-- **Computational cost discussion.** The overhead of generating and scoring the Gaussian dataset per hyper-parameter candidate is not mentioned; a brief note would help practitioners assess the practical trade-off.
+- A direct correlation analysis (Spearman rank) between each metric and test AUC across all configurations, datasets, and methods.
+- An ablation of NPD varying the split ratio $M$ and the reference distribution.
+- A brief discussion of the DeepSVDD case where NPD does not significantly outperform Random.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are factually wrong or reflect misreading of the paper. They are noted here for completeness but should not factor into the evaluation:
 
-- *"NPD's Spearman rank correlation with both AUC and F1 is 1.0 (Figure 6)" listed as a strength by the Strength Finder* — This conflicts with the verified weakness about the overstated Spearman claim. The weakness wins; the strength is removed.
-- *"Weak connection between theoretical analysis and surrogate quality" framed as a fatal/structural issue by the harsh critic* — I have moved this to Minor. The theoretical analysis is peripheral but does not invalidate the empirical results. The paper's core contribution (the metrics and their empirical validation) stands on its own.
-- *Harsh critic's broader concern about "missing oracle in UOMS table" as a "methodological gap"* — Moved to Nice-to-Haves. It is a useful addition but not a flaw in the existing analysis.
+- **"Figure 5 shows that for one dataset (unlabeled)."** Removed because the Figure 5 caption explicitly says "on different datasets" (plural). The reviewer misread the figure.
+- **"Random baseline could mean the expected performance of a single random draw."** Removed because the paper clearly states "Random is the expected value of the grid search" (Table 1 caption), which is standard terminology meaning the average over all grid configurations.
+- **"The paper says 'the same number of iterations for all methods'" (from Strength Finder).** This claim from the Strength Finder is not verifiable in the paper text and is removed from consideration.
+- **"Confusion over whether EM/MV is used with the same BO procedure."** The paper states at line 203: "We compare the performance using BO to search for the best model of RTM, EAG, and NPD with Max, Default, Random, and EM/MV in Table 1." While the implementation details of EM/MV could be clearer, the paper does state it is used with BO.
 
 ## Novel Insights
 
-The reviewer critiques surface some genuine tensions in the paper. The most interesting observation is the fundamental asymmetry in the theoretical framing: the paper claims that Theorem 2's upper bound supports the claim that maximizing NPD maximizes separation, but an upper bound actually provides a necessary condition for good separation (small NPD implies small gap), not a sufficient one for the converse. This is a subtle but real logical gap that the paper elides. However, no reviewer raises a deeper structural insight beyond this — the paper's main value remains its strong empirical demonstration rather than its theoretical apparatus.
+The harsh reviewer correctly identifies that the UOMS study (Table 2)—where NPD selects from a known pool of models—is cleaner evidence than the BO experiments. The reviewer's suggestion to add a direct correlation analysis across all configurations and datasets is the single most impactful improvement the authors could make. The reviewer's observation about the theorems' limited practical utility is also fair, though it does not invalidate the paper: many ML papers include theory that is more about establishing basic properties (here, scale/translation invariance and the entropy result in Theorem 1) than about providing actionable bounds.
+
+The Strength Finder overstates the theoretical contribution by treating Theorems 2-3 as "theoretically grounded" in a practical sense, but understates the paper's genuine strength: NPD's simplicity and strong empirical performance across a diverse 38-dataset benchmark are the real contributions.
 
 ## Suggestions
 
-1. **Replace the "Spearman = 1" claim** with quantitative rank-correlation statistics (Spearman or Kendall τ) computed across BO iterations for all 38 datasets and all UAD methods. Report the mean correlation and the fraction of datasets where ρ > 0. This directly supports the surrogate claim and remedies the overstatement.
-2. **Specify the validation split ratio M** for NPD. State the exact value (or proportion) used in experiments. A short sensitivity analysis (e.g., varying M from 10% to 50% on a subset of datasets) would further strengthen the paper.
-3. **Add per-method statistical tests** comparing NPD against RTM and EAG (e.g., paired t-test or Wilcoxon signed-rank per UAD method) so readers can see where the advantage is significant.
-4. **Provide dataset-level win/tie/loss counts** or a critical difference diagram comparing NPD against the second-best metric, to supplement the averaged means.
-5. **Tone down the "theoretical guarantee" language** in the abstract and contributions. Replace with "theoretical motivation" or "theoretical analysis" to better match what the theorems actually deliver.
+1. **Specify all missing experimental parameters:** report the value of $M$ (or the ratio $M/N$) used for NPD, and the number of BO iterations per dataset/method.
+2. **Add a direct correlation analysis:** compute Spearman rank correlation between each metric (RTM, EAG, NPD, EM/MV) and test AUC/F1 across the full hyperparameter grid for each dataset and method. Report the distribution (mean, variance, fraction of datasets with significant positive correlation).
+3. **Add ablations:** vary $M$ (e.g., 10%, 20%, 50%), compare Gaussian vs. uniform vs. shuffled training data as the reference distribution for $\mathcal{X}_{\text{gen}}$.
+4. **Discuss the DeepSVDD negative result** where NPD does not significantly outperform Random.
+5. **Consider whether Theorems 2 and 3 add enough value to justify their complexity.** The translation/scale-invariance and entropy results are useful; the more elaborate bounds may mislead readers about the strength of the theoretical foundation.
 
 ## Score and Decision
 
-The paper makes a real contribution to a practically important problem. NPD is a novel, simple, and empirically effective surrogate metric. The main issues are an unsubstantiated strong claim about perfect rank correlation, a missing reproducibility detail (M), and a slightly inflated theoretical framing — all fixable. The empirical evidence across 38 datasets and four methods is substantial enough to support acceptance.
+The paper tackles an important and underexplored problem with a simple, intuitive metric (NPD) and provides solid (though imperfect) empirical validation across a large benchmark. The core weakness is the omission of key experimental details (M, BO iterations) and the lack of ablations and direct correlation analysis, which prevent the paper from being a fully convincing contribution. However, the positive results are consistent and the core idea is sound. The paper would be significantly strengthened by the suggested additions, and the missing details are fixable in revision.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Overall assessment:** The paper's contribution is meaningful—a practical, hyperparameter-free surrogate metric for UAD that works well in practice—but the experimental reporting gaps and missing validations lower confidence in the current form.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

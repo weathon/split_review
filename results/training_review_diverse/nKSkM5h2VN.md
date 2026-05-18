@@ -1,86 +1,80 @@
-Now I have all the information I need. Let me produce the final consolidated review.
-
----
+Now I have all the information I need. Let me compile the final consolidated review.
 
 ## Summary
 
-This paper proposes a test-time adversarial defense with three components: (1) an Opposite Adversarial Path (OAP) baseline purifier that excessively denoises inputs along the direction opposite to the adversarial gradient, (2) integration of this OAP prior with reverse diffusion for guided purification, and (3) a dual-path cleaning (DPC) design that forces adaptive attackers to compute gradients through two paths, increasing attack cost by an order of magnitude. The paper also observes that using a finer-grained adjoint-method approximation in AutoAttack (Rand) reveals robustness overestimation in prior diffusion-based defenses.
+This paper proposes a test-time adversarial defense framework centered on three elements: (1) an "opposite adversarial path" (OAP) training strategy that maps adversarial inputs to reference points pushed in the anti-adversarial direction, (2) integration of an OAP-trained purifier with reverse diffusion as a directional prior, and (3) a dual-path diffusion cleaning design that increases the computational cost of adaptive attacks. The paper also identifies a granularity pitfall in AutoAttack (Rand) evaluation for diffusion-based defenses. Empirical results on CIFAR-10/100 and ImageNet show the OAP prior improves both clean and robust accuracy when plugged into DISCO, and the dual-path method increases attack computation time 10–40× over DiffPure.
 
 ## Strengths
 
-- **OAP concept — excessive denoising along the opposite adversarial direction.** The idea of pushing data multiple steps along the negative adversarial gradient (K=-3 to -20) to move away from the decision boundary is genuinely different from single-step Anti-Adv approaches. Table 1 demonstrates this effect dramatically (e.g., 99.86% robust accuracy at K=-10 in a controlled training-set experiment), and Table 2 shows that plugging OAP into DISCO improves both clean accuracy (89.57% → 90.71%) and non-adaptive robust accuracy (73.13% → 86.10%).
+- **The OAP training strategy demonstrably improves existing defenses.** Table 2 shows that training DISCO with the OAP reference point (K=1) lifts robust accuracy from 73.13% to 86.10% under non-adaptive PGD-ℓ∞ (ResNet-18) and from 85.00% to 88.79% under non-adaptive AutoAttack (WRN-28-10), while also improving clean accuracy. This is a clear, quantifiable benefit over a competitive baseline.
 
-- **Dual-path design with explicit attack-cost analysis.** The DPC method is deliberately designed to increase the computational burden on adaptive attackers. Table 4 shows attack time per image: 6,880 sec (DPC) vs 592 sec (DiffPure) for BPDA+EOT, and 22,722 sec vs 3,633 sec for PGD+EOT. The paper transparently studies this trade-off, which is a useful contribution regardless of whether the accuracy gains alone would be convincing.
+- **The granularity pitfall in AutoAttack (Rand) evaluation is a useful methodological finding.** Table 3 shows that using per-step adjoint method calls (rather than one encapsulated call) drops DiffPure's robust accuracy from 76.56% to 64.06% on CIFAR-10, with similar trends on CIFAR-100 and ImageNet. This is an actionable implementation-level observation for the community.
 
-- **Identification of the AutoAttack (Rand) adjoint-method granularity pitfall.** The paper shows that DiffPure's robust accuracy drops from 76.56% to 64.06% (CIFAR-10/WRN-28-10) when using a multi-call adjoint method instead of a single call, revealing a concrete source of robustness overestimation. This is a practical evaluation note that other researchers can adopt.
+- **The dual-path design substantially increases adaptive attack computation time.** Table 4 reports attack times increasing from 593s (DiffPure) to 6,881s (Ours) under BPDA+EOT, and from 3,633s to 22,722s under PGD+EOT. This makes adaptive attacks practically more expensive, which the paper correctly identifies as a trade-off rather than a principled guarantee.
+
+- **The paper provides reasonable non-adaptive evaluation on full CIFAR-10 test set** with error bars for the OAP+diffusion method (Table 4 rows: 90.77±2.25% clean, 88.48±2.04% robust under PGD-ℓ∞; 90.46±2.36% clean, 89.06±2.62% robust under AutoAttack Standard), showing competitive performance under non-adaptive attacks.
 
 ## Weaknesses
 
-### Fatal
-
-None.
-
 ### Major
 
-- **Adaptive-attack evaluation rests on an undisclosed tiny subset, making the headline numbers uninterpretable.** The 64-image subset is explicitly stated only for the AutoAttack (Rand) comparison (Table "tab: AutoAttack diff," line 356). For the main adaptive-attack table (Table 4, "Adaptive robustness comparison"), the sample size is **not stated**. However, the reported clean accuracies — 100% for Ours under PGD+EOT, 95.31% under DiffAttack — are effectively impossible on the full CIFAR-10 test set (10,000 images) for any input-modifying defense, strongly implying that this table also evaluates on a tiny subset (almost certainly the same 64 images). The paper only vaguely notes that "the data size and the given random seeds between adaptive and non-adaptive attacks are quite different" (line 491). On a 64-image test, a single misclassification shifts accuracy by ~1.5 percentage points, and the standard error at 50% accuracy is ~6.25 percentage points. Claiming state-of-the-art robustness or superiority over baselines from these numbers is not credible without full test-set evaluation or at minimum explicit disclosure with confidence intervals. This is the single most consequential weakness in the paper.
+- **The diffusion integration relies on an unvalidated gradient approximation.** Equation (8) replaces the conditional gradient  ∇_{x_{t-1}} log p_θ(x^K | x_{t-1}) with η(ŝ{x^K} − x_{t-1}), where ŝ{x^K} is the purifier's output at the same input. This substitution is not derived, and the paper provides no empirical validation (e.g., cosine similarity between the approximated direction and a reference gradient, or an ablation showing the term's contribution). Since the entire Sec. 3.2 contribution depends on this approximation, its lack of justification is a structural gap. The noise-augmented training (Eq. 9) partially addresses domain mismatch but does not validate the gradient proxy itself.
 
-- **BPDA+EOT advantage is within noise.** Table 4 reports 81.25±3.62% (Ours, DPC) vs 80.92±3.53% (DiffPure) for BPDA+EOT — a 0.33 percentage point difference with overlapping confidence intervals. This is a tie, not a win. The paper's claim of superior robustness under adaptive attacks is unsupported by this comparison.
+- **The DiffAttack evaluation (Table 4) is overestimated and presented without sufficient caveat.** The paper acknowledges (line 488) that "DiffAttack focuses on attacking the only one path by computing the gradient on it without meeting our dual path strategy," meaning the reported 93.75% robust accuracy (vs. 46.88% for DiffPure) comes from an attack that does not handle the defense's dual-path structure. This result is presented in the main table without qualification in the caption or footnote. A properly adaptive attack would need to compute gradients through both paths. The paper's own conclusion (line 502) vaguely notes possible overestimation. This significantly undermines the strongest quantitative claim.
 
-- **DiffAttack result is largely an artifact of attack design mismatch, not fundamental robustness.** The paper explicitly states (line 488) that "DiffAttack focuses on attacking the only one path by computing the gradient on it without meeting our dual path strategy." This means the 93.75% vs 46.88% gap is primarily because the attack was not designed to handle the two-path architecture, rather than because the defense is fundamentally stronger. A properly adaptive attack targeting both paths jointly would be needed to substantiate the claimed advantage.
+- **The paper lacks an ablation study attributing gains to specific components.** The method has three main components: (a) OAP training of the purifier, (b) integration with reverse diffusion, and (c) dual-path cleaning with color transfer. Without ablations, it is impossible to determine whether the accuracy improvements in Table 4 come from the OAP prior, the diffusion integration, the dual-path design, or the color transfer. For example, does the diffusion+OAP combination in Sec. 3.2 outperform the OAP-only purifier (Sec. 3.1) on adaptive attacks? This is not tested.
 
-- **Missing adaptive ablations that isolate the contribution of each component.** The paper includes three components: (i) OAP baseline training, (ii) integration with reverse diffusion, (iii) dual-path cleaning. Table 2 shows the OAP+non-adaptive gain over DISCO, but there is **no adaptive-attack evaluation of the single-path version** (Sec. 3.3) to compare against the dual-path version (Sec. 3.4). Without this ablation, it is impossible to determine how much of the robustness comes from the dual-path architecture vs the OAP-diffusion combination, and whether the 10× attack cost buys any genuine robustness increase beyond attacker ignorance.
+- **The "excessive denoising" framing is at odds with the actual method.** The paper motivates the approach with Table 1, where K=5,10,20 opposite steps give near-100% robust accuracy on a non-defense classifier. However, for the trained purifier, K>1 degrades performance (Table 2), and the paper empirically sets K=1 throughout all main experiments (line 183, line 413). The paper explains this discrepancy, but the narrative and the practice remain in tension. The core idea that survives is a single-step opposite-direction push, which is closer to existing anti-adversarial approaches than the "excessive" framing suggests.
 
 ### Minor
 
-- **The "safer area" claim is not directly validated.** The central thesis — that excessive denoising along the opposite adversarial direction pushes data to a lower-loss region on the decision surface — is supported only by end accuracy numbers. No loss-landscape visualization, decision-boundary distance measurement, or certified radius comparison is provided. The motivating experiment (Table 1) uses ground-truth labels and a training-set setup that does not directly translate to the test-time defense scenario.
+- **Key experiments use small subsets.** The AutoAttack pitfall finding (Table 3) uses only 64 images. The adaptive attack results in Table 4 do not clearly state the test set size, and the paper mentions "different random seeds" without clarifying whether full 10,000-image CIFAR-10 test sets were used consistently. This raises concerns about estimate stability.
 
-- **"First to present" claims are overstated.** The claim of being "first to present the idea of excessive denoising along the opposite adversarial path" (Contribution 1) should acknowledge that moving data along the opposite gradient direction is present in Anti-Adv (Alfarra et al., 2022), which the paper cites. The novelty is in doing *multiple* steps and training a purifier to learn this mapping, which is a meaningful distinction but should be framed more precisely. Similarly, the "first time" claim for the AutoAttack pitfall (Contribution 4) could be softened given prior work on gradient approximation in diffusion defenses (Lee et al., 2023, cited in the paper as the "surrogate process").
+- **Equation (2) suggests joint optimization of classifier and purifier** (min_{p,θ} 𝔼 [max_{x'} ℒ((f_p ∘ g_θ)(x'), y)]), but the paper only trains the purifier θ while keeping the classifier f_p fixed. This formulation is never corrected, creating a misleading impression of the optimization scope.
 
-- **The color-transfer / optimal transport step (Sec. 3.4) is introduced without validation.** The paper does not analyze whether the Sinkhorn divergence selects a meaningful target image or whether the color-transfer step actually contributes to robustness. It remains a somewhat ad-hoc engineering choice whose effect is not isolated.
+- **The OAP prior is only demonstrated with DISCO as the base architecture.** The paper claims the purifier "can be plugged into pre-trained models" (Abstract) but Table 2 only tests DISCO+OAP. No results with alternative base architectures (e.g., UNet denoisers, other purifiers) are provided, limiting the generality claim.
+
+- **The AutoAttack pitfall finding, while useful, is narrow in scope.** It is tested on only 64 images per dataset and compared only against DiffPure's implementation. The paper does not explore whether this granularity issue affects other diffusion-based defenses (e.g., DDA mentioned in related work) or whether the effect is complementary to other recently identified overestimation issues (e.g., the surrogate process of Lee et al. 2023).
 
 ### Trivial
 
-- None.
+- None beyond ordinary presentation issues typical of extracted PDFs.
 
 ## Nice-to-Haves
 
-- Running the BPDA+EOT and PGD+EOT evaluations on the full CIFAR-10 test set (10,000 images) would resolve the most critical uncertainty. If computational cost is prohibitive, the paper should be clearly reframed as a proof-of-concept on small subsets and all strong claims of superiority should be retracted.
-- A single-path ablation (Sec. 3.3 version) in the adaptive-attack table would isolate the benefit of dual-path complexity.
-- A brief analysis (e.g., decision-boundary distance, certified radius, or a loss-surface visualization) supporting the claim that OAP moves data to a "safer area" would strengthen the paper's conceptual contribution.
+- Ablation study isolating the contributions of (a) OAP training alone, (b) OAP+diffusion integration, (c) dual-path design without color transfer, and (d) color transfer alone.
+- Full test-set (10,000 images) evaluation for all entries in Table 4.
+- Empirical validation of the gradient approximation in Eq. (8) (e.g., cosine similarity comparison or an ablation removing the term entirely).
+- A genuinely adaptive attack for the dual-path method that handles both paths, with appropriately caveated results.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **Critical Issue 2 (training objective mismatch):** The reviewer claimed the mapping (x_adv → x^K) lacks meaningful correspondence because x^K is defined relative to the clean image. This is incorrect. Both x_adv and x^K are derived from the same underlying clean image x: x_adv = x + δ (adversarial perturbation) and x^K = x with K opposite steps applied. The training pairs share the same clean origin, making the supervised mapping standard — no different conceptually from training a denoiser on (noisy_in, clean_target) pairs. This criticism is removed.
 
-- **"The paper does not apply this finer-grained approximation to its own defense in a consistent way."** The paper explicitly states (lines 360, 417-418) that the finer-grained adjoint strategy "will be used in implementing stronger adaptive attacks" in all evaluations. This criticism is contradicted by the text.
+- **Critical Issue 5 (time cost as non-contribution):** The reviewer claimed the time-cost increase is "trivially achievable by adding more computation." This overstates the case. The dual-path method both increases attack time AND yields modest accuracy improvements (81.25% vs. 80.92% under BPDA+EOT; 53.12% vs. 46.88% under PGD+EOT). The contribution is not purely about making things slower. Downgraded to Minor (the time-cost framing is a weak defense principle but not invalid).
 
-- **"The selective use of this attack to deflate DiffPure but not to stress-test competing methods (e.g., Hill et al., ADP)."** Hill et al. and ADP are not diffusion-based; the adjoint-method trick is specific to differentiable diffusion processes and cannot be applied to them. This criticism expects the paper to apply an inapplicable method.
-
-- **"The min-max formulation in the introduction is not used later; it appears decorative."** This is a standard adversarial defense framing that sets up the problem; it does not need to be directly re-derived in later sections.
-
-- **"The derivation from Equation (5) to (8) has thin justification."** While the derivation uses a heuristic approximation (replacing the classifier-condition gradient with a direction toward x^K), this is a design choice that the paper explicitly describes and tests empirically. Reasonable researchers can disagree about its elegance, but this is a methodological taste issue, not a correctness error.
-
-- **"The entire section reads as a collection of ad-hoc engineering choices."** This is a subjective characterization of the dual-path design. The design is described with clear motivation and is tested.
+- **Criticism about DDA not being compared experimentally:** The paper mentions DDA in related work but is under no obligation to include every possible baseline, especially when DiffPure (the most directly comparable diffusion-based defense) is the primary comparison partner.
 
 ## Novel Insights
 
-The reviewers surface one genuinely insightful observation beyond the paper's own contributions: the paper's core advantage in the DiffAttack comparison (93.75% vs 46.88%) is largely attributable to the attack targeting only one path of a dual-path defense — an artifact of attack design lagging behind architecture, rather than evidence of fundamental robustness. This distinction is important because it means the paper's main claimed win is contingent on attackers not adapting to the dual-path structure, which is an inherently unstable foundation for a defense claim. The paper acknowledges this (line 488) but does not temper its narrative accordingly.
+The paper's most genuinely novel observation is the granularity pitfall: that the number of adjoint method calls in AutoAttack (Rand) evaluation of diffusion-based defenses matters significantly, and prior work (DiffPure) systematically overestimates robustness by using a single encapsulated adjoint call. This is a clean, implementation-level insight. The OAP training idea — pushing toward a deliberately "over-purified" reference rather than the clean image — is also a useful conceptual contribution, even if in practice only K=1 works and the "excessive" framing over-promises.
 
 ## Suggestions
 
-1. **Disclose the sample size for every experiment in the main tables**, including the adaptive-attack evaluations. If adaptive evaluation is on a subset (e.g., 64 images), state this explicitly alongside the results and add confidence intervals or error bars. Better yet, evaluate BPDA+EOT on the full CIFAR-10 test set.
-
-2. **Add an adaptive-attack ablation comparing the single-path version (Sec. 3.3) to the dual-path version (Sec. 3.4)** under identical attacks (BPDA+EOT, PGD+EOT, DiffAttack). This would isolate the actual robustness contribution of the dual-path complexity from the OAP-diffusion combination.
-
-3. **Design a proper adaptive attack that targets both paths jointly** for the dual-path method. Currently the DiffAttack comparison is uninformative because the attack does not account for the second path.
-
-4. **Soften the "first to present" claims.** The distinction from prior work (especially Anti-Adv) should be clearly articulated rather than claimed ex nihilo. The AutoAttack pitfall finding should be positioned as a practical implementation note rather than a first-ever discovery.
-
-5. **Provide at least one piece of direct evidence** (loss landscape, boundary distance, certified radius) supporting the claim that excessive opposite-direction denoising moves data to a safer region of the loss surface.
+1. Commit to whether the method uses K=1 or multiple steps in the narrative. If K=1 is what works, drop the "excessive denoising" framing in favor of "anti-adversarial directional push" — the results are still interesting without the overclaim.
+2. Provide an ablation study: compare (a) vanilla DISCO, (b) DISCO+OAP(K=1), (c) DISCO+OAP+diffusion, (d) DISCO+OAP+diffusion+dual-path. This would let readers attribute gains and would likely strengthen the paper by showing each component's contribution.
+3. Run a proper adaptive attack on the dual-path method that computes gradients through both paths, including the color transfer. Report the honestly degraded numbers alongside honest caveats.
+4. Validate Eq. (8)'s approximation by measuring the cosine similarity between η(ŝ{x^K} - x_{t-1}) and the true  ∇ log p_θ(x^K|x_{t-1}) (which can be estimated via score-based methods) — or at minimum, ablate the OAP directional term entirely in the diffusion process to see its marginal effect.
+5. Consistently report test-set sizes across all tables and report confidence intervals for all main results (Table 4 currently has ± values for some rows but not for the PGD+EOT and DiffAttack rows).
 
 ## Score and Decision
 
-The paper proposes a genuinely interesting idea (excessive denoising along OAP, dual-path cost increase) and makes a useful practical observation (adjoint granularity for AutoAttack). However, the empirical evaluation has a critical transparency gap: the adaptive-attack results — the paper's main evidence for superiority — appear to be on a 64-image subset without clear disclosure, the BPDA+EOT "gain" is within noise, and the DiffAttack "win" is an artifact of attack design mismatch. The core claims of state-of-the-art robustness are not supported by the evidence as presented. The paper could be strong with substantial revisions, but in its current form it does not meet the standard for acceptance.
+**Originality:** 6/10 — The OAP training direction and the AutoAttack granularity pitfall are novel; the dual-path time-cost idea is incremental.  
+**Importance of research question:** 7/10 — Adversarial robustness remains important, and improving test-time defenses is a relevant direction.  
+**Claims supported:** 4/10 — The core claims (OAP improves robustness) are partially supported, but the diffusion integration lacks validation, the DiffAttack result is overestimated, and the lack of ablations makes attribution impossible.  
+**Soundness of experiments:** 4/10 — Small subsets, inadequate adaptive attack for a key result, missing ablations, and unclear test-set sizes collectively weaken the empirical foundation.  
+**Clarity of writing:** 6/10 — Generally readable but the misleading Eq. (2) and the tension between "excessive" narrative and K=1 practice create confusion.  
+**Value to community:** 5/10 — The AutoAttack pitfall finding is genuinely useful; the OAP training idea may inspire follow-up work, but in its current form the experimental validation is insufficiently rigorous.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

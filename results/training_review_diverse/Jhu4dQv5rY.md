@@ -1,61 +1,76 @@
-Now I have all the information needed. Let me synthesize the final review.
+Now I have a thorough understanding of the paper and all the claims. Let me write the final consolidated review.
 
 ## Summary
-The paper proposes a novel method for contextual biasing in ASR by integrating the Knuth-Morris-Pratt (KMP) string matching algorithm into beam search. The method simulates WFST-based biasing using vectorized operations designed for TPU execution, requiring no additional model parameters. Experiments on large-scale voice search data demonstrate substantial WER reductions on biasing test sets (e.g., ~75% relative on With-Prefix at B=150) and additive gains when combined with the NAM model-based biasing method (20–40% relative further improvement).
+
+This paper introduces a contextual biasing method for ASR that replaces WFST-based search with a vectorized implementation of the Knuth-Morris-Pratt (KMP) string matching algorithm applied during beam search. The method operates on token sequences directly, tracking partial matches of biasing phrases and adding score bonuses incrementally. It supports both on-the-fly rescoring and shallow fusion, can be extended with prefix (carrier phrase) boosting, and is designed to be TPU-friendly through vectorization. Without introducing trainable parameters, KMP biasing achieves 50–77% relative WER reductions on biasing test sets and yields further gains when combined with model-based biasing (NAM).
 
 ## Strengths
-- **Novel algorithmic connection.** The paper introduces KMP-based pattern matching to ASR contextual biasing, replacing sparse WFST operations with a vectorized alternative. The memory analysis (Section 2.1) quantitatively shows the advantage of storing the O(m) failure function versus an O(m×|V|) transition table, and the forward/backtracking mechanics are clearly explained with well-structured algorithms.
-- **Strong WER gains without trainable parameters.** Table 1 shows large improvements over the unbiased baseline across all biasing test sets — e.g., With-Prefix WER drops from 9.6% to 2.4% (B=150, F=4096), and Contact-Tag drops from 14.7% to 7.7% — with minimal degradation on the Anti-Biasing out-of-domain set. These gains require no additional model training or learned parameters.
-- **Additive improvement on top of a strong model-based method.** When combined with NAM, KMP biasing yields 20–40% relative WER reductions on With-Prefix and Without-Prefix sets, and an additional 21% relative reduction on Contact-Tag with prefix boosting (Table 2), demonstrating genuine complementarity between inference-time and model-based biasing.
-- **Efficient prefix/carrier-phrase extension.** Section 2.4 proposes a mechanism that adds only O(C+B) per step instead of O(B+CB) for naive prefix expansion, with clear experimental gains on With-Prefix and Contact-Tag.
-- **Two integration modes with complexity analysis.** Shallow fusion and on-the-fly rescoring are both formalized (Algorithm 3) with complexity expressions (O(γ̄KFB) vs. O(γ̄KB)), giving practitioners a principled accuracy-efficiency trade-off.
+
+- **Large WER reductions without additional model parameters.** On the With-Prefix test set, KMP biasing (shallow fusion, F=4096) reduces WER from 9.6% to 2.4% for B=150, and from 20.9% to 4.8% on Without-Prefix (Table 1). These represent relative reductions of 75% and 77%, respectively, with no new trainable parameters.
+
+- **Complementarity with model-based biasing (NAM).** Combining KMP biasing with NAM yields additive gains. On With-Prefix (B=150), NAM alone achieves 1.5% WER, while NAM + KMP (fusion, F=50) achieves 0.9%—a 40% relative improvement (Table 2). On Contact-Tag, the combination drops WER from 3.8% (NAM alone) to 3.4%.
+
+- **Efficient handling of prefix-based biasing.** The proposed prefix-boosting method (§2.4) avoids the combinatorial explosion of concatenating prefixes with biasing phrases (which would create O(CB) extra patterns) by maintaining separate states for prefixes and biasing phrases with O(C+B) complexity. This is validated in Table 2, where adding prefix boosting further reduces WER.
+
+- **Rigorous algorithmic exposition with complexity bounds.** The paper provides pseudocode for all key subroutines (Algorithms 1–3) and explicitly states time complexities for each operation (e.g., O(γ̄KB) per step for OTF rescoring). This level of detail supports reproducibility and informed deployment decisions.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-- **No comparison to WFST-based biasing, despite the paper's central framing.** The abstract states the method "simulates the classical approaches often implemented in the WFST framework," and the introduction motivates the method by arguing that "FST-based biasing poses significant challenges for an efficient TPU-based implementation." Yet the experiments include no comparison — neither in WER nor in any efficiency metric — to any WFST-based biasing method (e.g., Zhao et al. 2019's shallow fusion with a subword WFST). Without this comparison, the reader cannot evaluate whether KMP biasing actually achieves the accuracy of the approach it claims to simulate, or whether it provides a meaningful advance over existing WFST-based methods. This gap directly undermines the paper's primary positioning.
-- **No efficiency, latency, or memory measurements despite TPU-friendliness being a key motivation.** The paper repeatedly emphasizes TPU-friendly vectorization and memory efficiency (abstract, Section 1, Section 2.1), but provides zero empirical measurements — no wall-clock time, no latency per beam-search step, no memory footprint comparison against WFST graphs, no throughput numbers. The complexity analysis (O(γ̄KFB)) is useful but does not substitute for empirical hardware measurements. A method whose main selling point is TPU efficiency must demonstrate that efficiency.
+
+- **No empirical evidence of TPU efficiency.** The paper's central design motivation is that it is a "TPU-friendly" alternative to WFST-based biasing, with "careful considerations on memory footprint and efficiency on TPUs by vectorization" (abstract, §1). Yet the paper provides zero runtime measurements — no wall-clock time, no throughput comparisons (with or without biasing), no latency numbers, and no comparison to a WFST-based baseline on any hardware. The complexity analysis (O(γ̄KB), etc.) is necessary but not sufficient to substantiate the claim. Since the motivation for avoiding FSTs is precisely that they are "inherently sparse" and therefore inefficient on TPUs (line 32), the reader needs to see that the proposed alternative is actually efficient in practice. This is a structural gap: it leaves the paper's main practical proposition unsubstantiated, even though the accuracy results are strong.
 
 ### Minor
-- **Single-architecture evaluation.** All experiments use one RNN-T model (870M parameters, voice search domain). The claim that the method "can be incorporated into the beam search of any ASR system" (Section 1) is conceptually plausible but unsupported for CTC, LAS, or attention-based decoders. The blank-token handling noted in Section 4 is specific to RNN-T; other architectures would need their own considerations.
-- **No isolation of prefix boosting's independent contribution.** Table 2 combines NAM + KMP + prefix boosting, but the contribution of prefix boosting alone (i.e., KMP + prefix without NAM) is not ablated, making it impossible to assess how much the λ-parameterized boost adds independently of the baseline KMP biasing and NAM.
-- **Proprietary datasets with no public benchmark.** The test sets are from prior work and not publicly available. An experiment on a public dataset (e.g., LibriSpeech with artificially injected rare phrases) would substantially strengthen reproducibility and external validation.
-- **Subword boundary artifacts not discussed.** The method operates on wordpiece tokens, so partial matches may accidentally span natural word boundaries (e.g., matching a phrase's prefix across the end of one word and start of the next). This is a well-known issue in subword-level biasing and merits explicit discussion.
-- **No variance or confidence intervals.** WER point estimates are reported without any measure of variability, making it difficult to assess the significance of small differences (e.g., between F=50 and F=4096 on several conditions).
+
+- **Out-of-domain degradation is under-analyzed.** On the Anti-Biasing test set (B=3000), WER degrades from 1.7% to 2.3% for shallow fusion (Table 1) — a 35% relative increase. The paper describes this as "not degrading… by much" (line 341), but provides no analysis of whether this degradation is uniform across utterance types, whether it concentrates on utterances with acoustic similarity to biasing phrases, or whether a confidence-based gating mechanism could mitigate it. The practical cost in production (where most traffic is out-of-domain) is unclear.
+
+- **No experimental comparison to WFST-based biasing.** The paper positions itself as an alternative to WFST-based approaches (the standard inference-time method) but never compares against one experimentally. Without such a comparison, the reader cannot assess the relative accuracy of the method against the approach it seeks to replace. Adding a CPU-based WFST baseline (or explaining why it is infeasible on this model) would significantly strengthen the paper's positioning.
+
+- **Hyperparameter robustness is not shown.** Only the best δ, s, and λ values are reported, with a brief remark that WER first drops, plateaus, then rises as δ increases. No sensitivity curves, confidence intervals, or analysis of how much performance changes when parameters deviate from the optimum are provided. This matters because these parameters must be tuned per use case and per B.
+
+- **Matching restart prevents overlapping matches of different phrases.** When any biasing phrase is fully matched, matching restarts for all phrases (Algorithm 2, line 153). This means a hypothesis containing two different biasing phrases (e.g., "call John and text Mary") would only receive a bonus for the first. The paper states this is intentional ("we are not interested in overlapping matches," line 122) and the test sets contain utterances with at most one biasing entity, so this does not affect reported results. However, the limitation is not discussed, and it may affect generalization to use cases with multiple biasing entities per utterance.
 
 ### Trivial
-- The maximum-backtracking bound γ̄ is defined but not empirically characterized on the actual biasing phrase sets. A brief distribution of γ values across the phrase library (max length 16, up to 3000 phrases) would ground the complexity analysis.
+
+None.
 
 ## Nice-to-Haves
-- A WFST biasing comparison on even a single configuration (e.g., With-Prefix B=3000) would substantially address the most critical evaluation gap.
-- Empirical efficiency measurements (latency per step, memory for failure functions) on the actual TPU deployment.
-- An ablation table showing KMP alone → KMP+prefix → KMP+NAM → KMP+NAM+prefix as incremental additions.
+
+- A comparison of WER as a function of δ for at least one setting (visualized as a sensitivity curve) to help practitioners assess tuning difficulty.
+- An ablation comparing the linear incremental scoring function to alternatives (e.g., a constant bonus per full match) to verify that the incremental formulation drives the gains.
+- Analysis of how results vary with beam size K (the paper uses K=8 throughout).
 
 ## Removed Points
-- **Hyperparameter tuning conflation concern.** The paper clearly states it tunes on Anti-Biasing and With-Prefix and treats Without-Prefix and Contact-Tag as test sets (Section 4.1). This is standard ML practice, and the paper is transparent about it. The reported numbers on tuning sets are development-set results, which is normal.
-- **Without-biasing WER per B value.** The without-biasing WER is independent of B because no biasing is applied; the reviewer misunderstood the experimental design.
-- **Missing discussion of δ-NAM interaction.** The paper explicitly discusses this: "now the optimal δ is much smaller...as the output of NAM already contains strong biasing information" (Section 4.2).
-- **Strikethrough/abstract-history comments.** These are PDF-parser artifacts and irrelevant to evaluating the paper.
-- **Missing related works (non-FST inference methods).** Per meta-review policy, I cannot verify the existence of such methods.
-- **Presentation/style nitpicks and "dense explanation" comments.** These are subjective presentation preferences, not substantive weaknesses.
-- **Missing proofs/appendix content.** Parser-stripped content that exists in the original submission.
-- **Scoring function being linear.** Acknowledged as future work and a design choice, not a weakness.
+
+These points were raised by reviewers but are removed or downgraded per the review guidelines:
+
+- **"Scoring function is extremely simple"** — The paper explicitly acknowledges this (line 169: "It is future work to explore more sophisticated scoring functions") and the function is appropriate for the voice search use case with short phrases (max 16 tokens). This is acknowledged scope, not a weakness.
+- **"Prefix boosting tested with only three prefixes"** — The paper states "It is future work to conduct full-fledged experiments with more complex prefixes" (line 396-397). The experiments adequately validate the mechanism; more prefixes would not change the conclusion about the method. This is scope the paper already acknowledges.
+- **"Strength: TPU-friendly alternative"** (from Strength Finder) — This claimed strength conflicts with the verified major weakness that no empirical TPU efficiency evidence is provided. The design considerations exist but are not validated. Per guidelines, when a strength and weakness disagree, the weakness wins.
 
 ## Novel Insights
-The key insight from synthesizing the reviews is that the paper's contribution is split across two distinct claims that receive very different levels of support. The algorithmic claim — that KMP matching can be adapted for ASR biasing with good WER results — is well-supported by the experimental data. The systems claim — that this provides a TPU-friendly alternative to WFST-based biasing — is entirely unevidenced. This asymmetry means the paper's value proposition is narrower than its framing suggests: it convincingly demonstrates a new biasing method that works and complements NAM, but does not demonstrate that it replaces or improves upon the WFST-based approach it references. The prefix boosting extension is elegant but would benefit from cleaner ablation.
+
+The key insight that emerges from the reviews is that the paper's strongest contribution is decoupled from its headline claim: the KMP-based biasing algorithm delivers large and consistent WER improvements regardless of whether one cares about TPU efficiency. Even if the TPU-friendliness claim were set aside entirely, the method stands on its own as a clean, parameter-free, and well-specified inference-time biasing technique that complements model-based approaches. The vectorization strategy for running KMP-style matching across thousands of phrases in parallel is a genuine algorithmic contribution that could find use beyond ASR (e.g., in other sequence transduction tasks with discrete constraints). The reviews also surface that the paper could be strengthened more by narrowing its claimed scope than by expanding experiments: if the TPU efficiency claim were softened or deferred to future work, the remaining claims would be fully supported by the evidence.
 
 ## Suggestions
-1. **Add a WFST biasing baseline** — even on a single sub-table (e.g., With-Prefix B=150/600/3000). If the WFST implementation cannot run on TPU, compare on GPU/CPU and note the deployment difference. This is the single most impactful addition.
-2. **Provide at least basic efficiency numbers** — latency per beam-search step (with/without biasing), memory for failure function storage, and throughput (utterances/sec). These can be brief but are essential for the TPU-friendliness claim.
-3. **Ablate prefix boosting independently** to separate its contribution from the combination with NAM.
-4. **Discuss subword boundary concerns** explicitly as a limitation.
-5. **Report variability** — even a note on stability across δ perturbations or multiple runs would increase confidence.
+
+1. **Provide runtime measurements.** The single highest-leverage improvement is to report wall-clock time or throughput for each variant (OTF rescoring, shallow fusion with various F) on the same TPU hardware, ideally comparing against a reasonable implementation of WFST-based shallow fusion (even on CPU). This directly substantiates the central claim of TPU-friendliness.
+
+2. **Analyze the out-of-domain degradation more deeply.** Explore whether degradation concentrates on certain utterance types, or whether a simple confidence-based gating mechanism could reduce it. This would increase the practical credibility of the method.
+
+3. **Add a WFST experimental comparison, or explain its absence.** Even a brief note that WFST-based biasing is not compatible with the current model/hardware stack (which itself supports the motivation) would help.
+
+4. **Include hyperparameter sensitivity analysis.** A plot of WER vs. δ for one representative setting would give readers a sense of the plateau width and tuning difficulty.
+
+5. **Discuss the matching restart limitation** explicitly and note that it is not a concern for the single-phrase-per-utterance test setup but may matter in other deployments.
 
 ## Score and Decision
-The paper presents a clean, novel algorithm with strong empirical WER results and clear exposition. The core algorithmic contribution is solid and the experiments convincingly show that KMP biasing works and is complementary to model-based methods. However, two significant evaluation gaps — the absence of any comparison to WFST-based biasing and the complete lack of efficiency measurements — mean that the paper's central framing (as a TPU-friendly replacement/alternative to WFST-based biasing) is not supported by the evidence presented. The paper would be substantially strengthened by addressing these gaps. On balance, the contribution is real but the evaluation is incomplete relative to the paper's own stated claims.
+
+This paper presents an elegant algorithmic contribution — adapting the KMP algorithm for ASR biasing with vectorized multi-phrase matching — and backs it with strong WER results on large-scale data. The accuracy improvements are substantial and the complementarity with model-based biasing is clearly demonstrated. However, the paper's central narrative frames the method as a "TPU-friendly" alternative to WFST-based biasing, yet provides zero empirical evidence of efficiency. This is a structural gap in the evidence for the claimed contribution, not a minor omission. The paper would be strengthened considerably by adding runtime measurements and a WFST baseline comparison, and the out-of-domain degradation needs more careful treatment. The core idea is worth publishing, and the accuracy results are compelling, but the paper does not fully support its own framing.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

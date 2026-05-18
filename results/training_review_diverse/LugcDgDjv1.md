@@ -1,24 +1,20 @@
-Now I have a thorough understanding of the paper. Let me compose the final review.
+Now I have a thorough understanding. Let me write the final consolidated review.
 
 ## Summary
 
-This paper introduces **stochastic partial-multivariate methods** for multivariate time-series forecasting, generalizing existing univariate (S=1), deterministic partial-multivariate (Dirac-delta P), and complete-multivariate (S=D) approaches into a unified framework. The authors propose **SPMformer**, a Transformer that stochastically samples feature subsets of size S and computes attention only within each subset. Training uses random partitioning to avoid redundancy/omission, and inference can average over multiple random partitionings. Experiments across long-term, short-term, and probabilistic forecasting (13/15 best scores) demonstrate consistent SOTA performance, along with computational efficiency and robustness to missing features.
-
----
+This paper introduces **stochastic partial-multivariate methods** for multivariate time-series forecasting, a generalization that unifies univariate, deterministic partial-multivariate, and complete-multivariate approaches as special cases. The authors propose **SPMformer**, a Transformer that stochastically samples feature subsets (clusters) during each training iteration, models within-subset dependencies via a shared attention module, and averages over multiple random partitions at inference. The paper provides extensive empirical validation across long-term, short-term, and probabilistic forecasting (SPMformer achieves best or second-best in 13/15 settings), along with a PAC-Bayes theoretical analysis and demonstrations of computational efficiency and missing-feature robustness.
 
 ## Strengths
 
-- **Conceptual unification of forecasting paradigms (Section 3.1).** The paper formalizes how univariate (S=1), deterministic partial-multivariate (Dirac-delta distribution over subsets), and complete-multivariate (S=D) methods are all special cases of the stochastic partial-multivariate framework. This is a genuine conceptual contribution that places disparate prior work in a common lens.
+- **Novel and well-motivated generalization**: The paper formalizes stochastic partial-multivariate forecasting as a unified framework (Section 3.1, Eq. 1) that subsumes univariate ($S=1$), deterministic partial-multivariate ($\mathcal{P}$ constrained to Dirac delta), and complete-multivariate ($S=D$) methods. This conceptual reframing opens a new design space for time-series models by treating feature grouping as stochastic rather than fixed.
 
-- **Consistent and broad empirical superiority (Tables 1–3).** SPMformer achieves the best score in 13 out of 15 settings across long-term, short-term, and probabilistic forecasting tasks, against a strong set of baselines including PatchTST, iTransformer, Crossformer, TSMixer, and TimesNet. This breadth of empirical success is the paper's strongest evidence and is not undermined by any of the identified weaknesses.
+- **Consistent and broad empirical superiority**: SPMformer achieves the best or second-best performance in 13 of 15 experimental settings across long-term forecasting (Table 1), short-term forecasting (Table 2), and probabilistic forecasting (Table 3), outperforming a comprehensive set of 11+ baselines spanning complete-multivariate, univariate, and deterministic partial-multivariate methods.
 
-- **Empirically validated U-shaped performance curve with optimal subset size (Figure 3, Table 4).** The paper systematically varies S and demonstrates that partial-multivariate settings (1 < S < D/2) consistently outperform both univariate (S=1) and complete-multivariate (S=D) extremes, confirming the central design intuition with clear experimental evidence.
+- **Clean ablation validating stochasticity as the driver of improvement**: Figure 4 systematically expands the subset pool size ($\alpha$) and shows monotonic performance gains as more subsets become available, directly demonstrating that stochasticity (access to all $\binom{D}{S}$ subsets) — not architectural differences — drives the improvement over deterministic variants.
 
-- **Inference-time stochastic averaging improves performance with a transparent trade-off (Figure 5).** The paper shows that repeating inference with different random subsets and averaging outputs monotonically reduces test MSE as N_I increases, providing a practical accuracy lever that practitioners can calibrate to their latency budget.
+- **Practical advantages demonstrated**: SPMformer reduces inter-feature attention FLOPs from $\mathcal{O}(D^2)$ to $\mathcal{O}(SD)$ (Figure 7) and maintains stable MSE under dropped input features where a complete-multivariate variant degrades sharply (Figure 6). These properties address real-world deployment concerns.
 
-- **Computational efficiency and missing-feature robustness (Figures 6–7).** The inter-feature attention cost of SPMformer scales as O(S·D) with small S (e.g., S=20–30 for D=862), substantially cheaper than O(D²). The missing-feature experiment demonstrates a genuine practical advantage over the complete-multivariate variant of the same architecture.
-
----
+- **Inference technique leveraging stochasticity**: The simple $N_I$-repetition averaging (Figure 5a) monotonically improves accuracy with no additional *training* cost, and the analysis relating $N_I$ to the probability of sampling a good subset is intuitively sound.
 
 ## Weaknesses
 
@@ -27,73 +23,61 @@ None.
 
 ### Major
 
-- **Theoretical analysis in Section 3.5 uses flawed PAC-Bayes reasoning and should not be presented as a formal justification.** The paper claims that the PAC-Bayes bound's m (number of training instances) varies with S because m ∝ (D choose S) — "each subset is regarded as a separate instance." This is incorrect: m refers to the number of training examples drawn from the data distribution, which is fixed (≈ total time-series windows), not to the combinatorial number of feature subsets. Theorem 2 is stated without proof, and the authors admit they cannot evaluate H(Q) to compare the magnitudes of the effects. The empirical finding of a U-shaped curve is real and valuable, but the formal theoretical covering is unsound. The paper would be stronger stating the intuition as a conjecture or empirical observation rather than as a theorem-backed rationale. *(Verified: lines 114–120 explicitly state "m ∝ (D choose S)" because "each subset is regarded as a separate instance"; this is fundamentally wrong.)*
+- **Flawed theoretical analysis (Section 3.5)**: The PAC-Bayes argument contains two problematic claims that are presented as explanations for the method's superiority rather than loose intuition. First, the claim that effective training set size $m \propto \binom{D}{S}$ (line 114) is not standard PAC-Bayes reasoning — $m$ in the PAC-Bayes bound refers to the number of training examples (time windows), not the combinatorial count of possible subset configurations. Varying $S$ changes data augmentation or architectural flexibility, not $m$ in the PAC-Bayes sense. Second, Theorem 2 ($H(\mathbf{Q}_{S_{+}}) \leq H(\mathbf{Q}_{S_{-}})$ for $S_{+}>S_{-}$) is stated without proof, with only intuitive hand-waving about "harder tasks" (line 118) as support. The paper itself acknowledges it "cannot compare the magnitudes of effects" (line 120), which further undermines the claimed conclusion $1 < S_{*} < D/2$. The theory section as written does not provide a rigorous foundation and overclaims. **This is a major weakness because the paper lists theoretical analysis as part of its contributions (line 24) and the analysis contains unsupported reasoning.** The empirical ablations (Table 4, Figures 3-4) independently demonstrate the core empirical finding, so the theory can be corrected or removed without harming the paper's main contribution.
+
+- **Divisibility assumption violated in practice**: The training algorithm (Algorithm 1, line 89) requires $D$ to be divisible by $S$, explicitly stating "we assume that $D$ is divisible by $S$." However, the hyperparameters reported (line 133) violate this assumption for most datasets: ETT ($D=7, S=3$ → not divisible), Electricity ($D=321, S=30$ → not divisible), Traffic ($D=862, S=20$ → not divisible). The paper does not explain how non-divisible cases are handled during training (e.g., remainder features dropped, padded, or handled via unequal subsets). This is a significant methodological gap that affects the implementation's correctness.
 
 ### Minor
 
-- **Controlled comparison against a deterministic version of SPMformer is absent.** The paper's unique claim is that *stochastic* grouping outperforms *deterministic* grouping. While Figure 4 varies the subset-pool size (showing more subsets → better performance), and CAMELOT is included as a deterministic baseline, there is no direct ablation where SPMformer is trained with a *fixed* set of subsets (e.g., one fixed partition reused every iteration) while keeping all other architecture choices identical. Such a comparison would cleanly isolate the benefit of stochasticity over determinism. Figure 4 partially addresses this (α=1 approximates a fixed pool), but a cleaner ablation with a truly frozen partition would strengthen the core claim.
+- **Unclear wording on inference cost**: Section 3.4 states "It is worth noting that without any additional computation cost" followed by a truncated sentence (parser artifact). If the original claims the $N_I$-repetition inference has no additional computation cost, this is incorrect — repeating inference $N_I$ times multiplies inference cost by $N_I$. If it meant "no additional *training* cost" (which is true), the phrasing needs correction for clarity.
 
-- **The inference cost claim ("without any additional computation cost") is misleading.** The paper describes running the model N_I times and averaging outputs, which clearly multiplies inference FLOPs by N_I. *(Verified: line 98 contains a truncated sentence; the claim as extracted is "without any additional computation cost (i…" — even if completed differently, the N_I× cost is real and should be explicitly acknowledged with a trade-off discussion.)* Figure 5(a) shows accuracy gains versus N_I, but the corresponding cost axis is missing. A practical MSE-vs-FLOPs plot would make the trade-off actionable for practitioners.
+- **Missing standard deviations / confidence intervals**: The main results (Tables 1-3) are reported as point estimates without variance across seeds. Given the stochastic nature of both training (random partitioning) and inference ($N_I$ averaging), reporting variability is important for interpreting the reliability of the claimed improvements.
 
-- **No confidence intervals, error bars, or multi-seed results are reported.** All metrics appear as point estimates without standard deviations or significance tests. Given the known variability of forecasting metrics across random seeds and data splits, reporting error bars (e.g., over 3–5 runs) would make the empirical claims more convincing and allow readers to assess whether the reported margins over baselines are statistically reliable.
+- **Limited comparison with deterministic partial-multivariate methods**: Only one deterministic partial-multivariate baseline (CAMELOT) is included, and its reported performance is far below SPMformer. While Figure 4's ablation on subset pool size partially addresses this, a direct comparison where the *same SPMformer architecture* uses a fixed (deterministic) partition versus the stochastic version would more cleanly isolate the benefit of stochasticity. The current ablation varies allowable subsets rather than deterministic-vs-stochastic selection.
 
-- **Baseline hyperparameter fairness is not clearly stated.** The paper does not specify whether baselines were retrained with tuned hyperparameters under a fair budget or taken from previously reported numbers. If the latter, the comparison may systematically favor SPMformer due to more careful tuning. This should be clarified in the experimental setup.
+- **Missing implementation details for reproducibility**: Key hyperparameters (number of layers $L$, hidden dimension $d_h$, number of segments $N_S$, learning rate, optimizer, number of training epochs) are not reported for the main experiments. These would be necessary for faithful reproduction.
 
-- **No dedicated limitations section.** The paper acknowledges some limitations indirectly (e.g., the assumption D is divisible by S, the use of uniform P when prior knowledge is unavailable), but a candid paragraph discussing these and other constraints (e.g., sensitivity to S choice, the cost of temporal attention not addressed by the scheme) would improve the paper's credibility and steer future work.
+- **Probabilistic forecasting baseline fairness**: The DeepAR decoder attachments for baselines (line 131) are described without details on training procedure, convergence criteria, or hyperparameter tuning, making it difficult to assess whether the comparison is equitable.
 
 ### Trivial
-
-- **Subset size choices (S) lack a validation study.** The paper states S=3 for ETT (D=7), S=20 for Traffic (D=862), etc., satisfying 1 < S < D/2, but does not describe a validation procedure for selecting these values. A small validation study on one or two datasets showing that chosen S are near the optimum of the U-shaped curve would increase confidence.
-
-- **The α values in the subset-pool experiment (Figure 4) are not motivated.** The sequence α ∈ {1, 400, 1600, 6400, Max} is used without explanation of how these values were determined.
-
----
+- The binomial coefficient in line 114 uses ${n \atop S}$ where the variable should be $D$ (the number of features), not $n$ — a minor notational inconsistency.
+- Theorem 2's statement (line 116) has a grammatical fragment ("For $S_{+}$ and $S_{-}$ satisfying $S_{+}>S_{-}$.") that should be reformulated.
 
 ## Nice-to-Haves
 
-- An ablation comparing random partitioning (Algorithm 1) against naïve uniform sampling (independent sampling without the disjoint constraint) to justify the design choice.
-- A discussion of how the method generalizes to cases where D is not divisible by S (e.g., padding or partial subsets).
-- An exploration of learned/non-uniform P distributions guided by feature-attention scores, building on the preliminary analysis in Table 5.
-
----
+- A direct deterministic-vs-stochastic ablation within the *same* SPMformer architecture (e.g., training with a fixed partition from K-means vs. the standard stochastic version) would strengthen the central claim without adding much overhead.
+- A brief discussion of how remainder features are handled when $D$ is not divisible by $S$ would address a practical concern.
+- Reporting results with variance over seeds would improve interpretability.
 
 ## Removed Points
 
-- **"The missing-features experiment (Figure 6) is unfair because SPMformer excludes missing features while CMformer pads with zeros."** This comparison is between SPMformer and its complete-multivariate variant (same architecture, S < D vs. S = D). It is a fair ablation demonstrating a real structural advantage of the partial-multivariate design, not a claim of SOTA missing-data handling. The point is that the partial-multivariate design *inherently* handles missing features — this is correct and worth showing.
+- **Strength Finder's "Theoretical justification via PAC-Bayes bounds" (Strengths, item 2)**: Removed because this conflicts with the verified major weakness that the theoretical analysis is flawed. The paper's theoretical claims are not well-supported, so presenting them as a strength would be misleading.
 
-- **"Figure 7 FLOPs comparison should include total model FLOPs."** The paper explicitly scopes the comparison to inter-feature attention FLOPs and states this clearly. The figure serves its stated purpose as a lower-bound comparison.
+- **Harsh Critic's "Attention-score inference contradicts claim about prior knowledge"**: Removed because the paper's claim is that prior knowledge is *usually unavailable* at training time (justifying the uniform $\mathcal{P}$), not that feature relationships cannot be learned post-hoc. Exploring attention scores as a way to *learn* $\mathcal{P}$ (Table 5, lines 183-184) is a natural extension, not a contradiction.
 
-- **"The subset pool experiment α values and the averaging over forecast horizons are poorly motivated / hide variation."** The paper references a supplement for per-horizon results (standard in this field), and the α values, while not motivated in detail, support the claimed monotonic trend. These are at most presentation nitpicks.
+- **Harsh Critic's criticism about the PAC-Bayes section being "not salvageable" and needing "removal or replacement"**: While the theory is flawed, the severity assessment is adjusted. The empirical results are strong enough to stand without the theory, and the theory can be corrected (e.g., reframed as a data-augmentation/variance-reduction argument) rather than requiring complete removal. This is a Major weakness but not a fatal one.
 
-- **"The ETT subset size S=3 is close to D/2=3.5."** This is factually correct by design (1 < S < D/2 is satisfied) and the U-shaped results confirm S=3 outperforms S=1 and S=7.
-
-- Strengths removed from Strength Finder: None of the strengths were generic or conflicting with verified weaknesses, except the claim of a "PAC-Bayes theoretical rationale" — since the theory is flawed, this framing is adjusted. The empirical finding (U-shaped curve, Figure 3) is still a genuine strength and is kept.
-
----
+- **Various formatting/parser artifact criticisms**: Removed per instructions — these reflect parser errors, not author errors.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface the following novel perspective: the paper's core empirical finding — that optimal subset size S* lies between 1 and D/2 across diverse datasets — is robust and interesting even without the attempted PAC-Bayes justification. The U-shaped MSE curve (Figure 3) and the pool-size sensitivity (Figure 4) suggest that the benefit of stochastic partial-multivariate modeling may stem from a variance-reduction / data-augmentation effect: stochastically sampling different feature subsets acts as an implicit ensemble regularizer, similar to how dropout or Mixup introduce beneficial stochasticity. This intuition is more plausible and better supported than the formal PAC-Bayes argument, and the paper would benefit from reframing the analysis in these terms. The missing-features robustness experiment (Figure 6) is also more interesting than the review gives it credit for — it shows that the partial-multivariate design has a *graceful degradation* property under feature dropouts that complete-multivariate architectures cannot replicate without dedicated missing-data machinery.
-
----
+A genuinely novel observation emerges from the interaction between the paper's framework and the ablation in Figure 4: the performance gain from increasing subset-pool size follows a clear monotonic trend, suggesting that the *diversity* of seen feature groupings during training is a first-order driver of forecasting quality, separate from the specific quality of any individual grouping. This implies that models benefit not from finding a "correct" clustering of features (as deterministic partial-multivariate methods aim to do) but from exposure to many plausible groupings — a finding that could inform the design of self-supervised pretraining strategies for multivariate time series.
 
 ## Suggestions
 
-1. **Remove or substantially downgrade the PAC-Bayes theoretical analysis (Section 3.5).** Replace it with an intuitive argument (e.g., variance reduction via stochastic grouping, connections to dropout/mixup/ensemble methods, or a simpler bias-variance decomposition). The empirical U-shaped curves and pool-size experiments already provide strong evidence for the claims — the flawed formal framing only weakens the paper.
+1. **Revise or restructure the theoretical section**: Either (a) replace the PAC-Bayes framing with a clearer argument about variance reduction or data augmentation from stochastic sampling, or (b) clearly label the current Section 3.5 as an intuitive motivation rather than a rigorous proof, removing the unsupported $m \propto \binom{D}{S}$ claim and either proving Theorem 2 or dropping it.
 
-2. **Add a controlled ablation comparing stochastic vs. deterministic SPMformer.** Train SPMformer with a single fixed partition (reused every iteration) vs. random partitioning, keeping all other hyperparameters identical. This would directly isolate the benefit of stochasticity — the paper's unique contribution.
+2. **Address the divisibility issue explicitly**: Explain how training handles datasets where $D$ is not divisible by $S$ (e.g., ETT, Electricity, Traffic). This is a practical concern that affects implementation correctness.
 
-3. **Acknowledge and quantify the inference-time cost of the N_I averaging technique.** Add an MSE-vs-inference-FLOPs (or wall-clock time) plot for varying N_I. This turns the current misleading claim into a transparent, actionable trade-off for practitioners.
+3. **Add a deterministic-vs-stochastic ablation**: Train SPMformer with a fixed random partition (or a clustering-based offline partition) and compare to the standard stochastic version using the same architecture. This would directly isolate and validate the central claim.
 
-4. **Add confidence intervals or error bars** over at least 3 random seeds for the main results, and clarify whether baselines were retrained under a fair tuning budget.
+4. **Report standard deviations** across at least 3 random seeds for the main tables, and **list key hyperparameters** ($L$, $d_h$, $N_S$, learning rate, optimizer, epochs) in the main text or appendix.
 
-5. **Add a brief limitations paragraph** covering: the assumption that D is divisible by S, the reliance on uniform P when prior knowledge is absent, the sensitivity of results to the choice of S, and the quadratic temporal-attention cost (not addressed by the feature-level stochasticity).
-
----
+5. **Clarify the inference cost statement** in Section 3.4 to distinguish between training cost and inference cost.
 
 ## Score and Decision
 
-The paper introduces a genuinely novel and well-motivated idea — stochastic partial-multivariate modeling — and backs it with strong empirical evidence across multiple forecasting tasks. The main issues are fixable: the theoretical analysis needs substantial correction (or removal), a more direct deterministic-vs-stochastic ablation would strengthen the core claim, and several presentation gaps should be addressed. The empirical contribution itself is significant and the method is of clear interest to the community. These problems do not invalidate the paper's core claims but do require a major revision.
+This paper makes a meaningful contribution — the stochastic partial-multivariate framework is conceptually clean and empirically validated with strong results across diverse forecasting tasks. The main weaknesses are (1) a flawed theoretical analysis that overclaims, and (2) a practical inconsistency in the divisibility assumption. Neither undermines the core empirical contribution, and both are addressable in revision. The paper would benefit from correcting or removing the theory section, fixing the divisibility gap, and adding a few missing experimental details.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

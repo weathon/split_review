@@ -1,89 +1,75 @@
-I have now carefully read the paper and all reviewer inputs. Let me now produce the consolidated review.
+Now I have all the information needed to verify the reviewer claims against the actual paper text. Let me compose the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes DRMGuard, the first defense framework specifically designed for detecting and mitigating backdoor attacks in deep regression models (DRMs) in the image domain. The core contribution is identifying that backdoored DRMs exhibit a distinctive feature-space property — the Ratio of Angle Variance (RAV) is consistently ≪ 1 for poisoned inputs, meaning the angles between feature vectors and the linear layer's weight vectors are highly concentrated. This observation is used to formulate a reverse-engineering optimization problem with a feature-space regularization term, enabling backdoor detection without enumerating continuous target vectors. Experiments on two regression tasks (gaze estimation, head pose estimation), four datasets, and four backdoor attacks show that DRMGuard achieves 95% identification accuracy and perfect 1.000 ROC-AUC, substantially outperforming adapted classification defenses.
+This paper proposes DRMGuard, the first backdoor defense framework for deep regression models (DRMs) in the image domain. It identifies a unique feature-space property of backdoored DRMs — that the angles between feature vectors and weight vectors are highly concentrated (low RAV) — and exploits it to reverse-engineer potential trigger functions without enumerating target vectors in the continuous output space. Experiments on gaze estimation and head pose estimation tasks across four datasets and four backdoor attacks show strong identification accuracy and mitigation performance.
 
 ## Strengths
 
-- **Novel problem and key theoretical insight**: The paper correctly identifies that existing backdoor defenses fail for DRMs because (1) the continuous output space makes target vector enumeration impossible, and (2) all neurons contribute to the output (no argmax), so sparse-neuron defenses are ineffective. The derivation of the RAV metric (Section 3.3, Eq. 4) and the empirical demonstration that RAV ≪ 1 across four attacks on two datasets (Table 1, Figure 2) constitute a genuine and well-supported contribution.
+- **Novel identification and exploitation of a feature-space characteristic unique to backdoored DRMs.** The paper theoretically derives (via Equation 3 and the inner-product structure of regression outputs) and empirically validates that backdoor inputs induce highly concentrated angles between feature vectors and weight vectors (RAV < 0.1 across all 8 attack–dataset combinations in Table 1). This property is absent in classification models and is used as a regularization term (Equation 4) that enables reverse engineering in continuous output spaces.
 
-- **Principled optimization framework**: The reverse-engineering objective (Equation 8) is well-motivated by the RAV observation. The feature-space regularization term $r_f$ directly encodes the identified property, making the optimization tractable where classification-based methods fail. The ablation study (Table 5) confirms that removing the feature-space regularization term (FSRT) causes complete failure (50% accuracy — all models classified as backdoored).
+- **Principled formulation of reverse engineering for continuous output spaces.** Unlike classification defenses that enumerate over discrete classes, DRMGuard directly minimizes the variance of output components across poisoned inputs (first term of Equation 4). This avoids the intractable enumeration problem posed by regression's infinite target space. The approach achieves AUC=1.000 on all four attacks (Table 3), significantly outperforming adapted NC (0.379) and FeatureRE (0.599).
 
-- **Strong empirical results against adapted baselines**: DRMGuard achieves ROC-AUC scores of 1.000 across all four attacks on MPIIFaceGaze, while the best adapted defense (FeatureRE) reaches only 0.599 and Neural Cleanse 0.379 (Table 3). Identification accuracy is 95% on MPIIFaceGaze and 87.5% on average across four datasets (Table 1). The mitigation results also show DRMGuard outperforming ANP, Fine-pruning, and Fine-tuning (Table 6).
+- **Strong and comprehensive empirical results.** Across four datasets and four attack types, DRMGuard achieves 95% identification accuracy on MPIIFaceGaze (Table 1) and 87.5% average accuracy across datasets (Table 2). For mitigation, it substantially reduces DAE (from ~15 to ~3) while raising AE, outperforming four adapted classification defenses (Tables 4–5).
 
-- **Adaptive attack analysis**: The paper explicitly constructs an adaptive attack that targets the RAV property (adding a loss term to force RAV ≈ 1). This attack still cannot reduce DRMGuard's identification accuracy (95%), and the attack itself degrades (AE rises from 1.51 to 5.71, Table 7), suggesting the RAV property is a fundamental characteristic of backdoor behavior in DRMs.
+- **Ablation studies confirm that every component is necessary.** Removing either the feature-space regularization term (FSRT) or the momentum reverse trigger (MTR) collapses accuracy to 50% (Table 8). This validates the design choices and confirms the claimed differences from classification-model defenses.
+
+- **Adaptive attack analysis strengthens the core claim.** An attacker that explicitly targets the RAV property (Equation 8) still cannot bypass detection (95% accuracy; Table 9), because breaking the angle concentration weakens the backdoor itself (AE jumps from 1.51 to 5.71). This demonstrates a fundamental coupling between the observed feature-space property and effective backdoor attacks.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Momentum Reverse Trigger (MTR) is critically underspecified**: The MTR is shown by ablation to be indispensable — without it, all benign models are flagged as backdoored (Table 5, Acc drops to 50%). Yet the paper describes it in a single sentence: "assign different weights to different regions to balance the attention of the DRM on the image" (Section 3.4). No algorithm, equation, or architectural detail is provided. A commented-out line in the source (line 189) hints at a gradient-based attention map, but this is absent from the submission. Since MTR is a key enabler of the method's success, **the paper is not reproducible without a proper specification of this component.**
+- **The momentum reverse trigger (MTR) — a critical component — is insufficiently specified.** The ablation study shows MTR is essential (without it, all benign models are misclassified as backdoored), yet the paper provides only an intuitive sketch: "assign different weights to different regions to balance the attention of the DRM on the image." The actual computation of the attention map, how momentum is incorporated, and how it modifies the generator's optimization are absent from the compiled paper. (The brief mention of gradient-based attention maps appears to be in a LaTeX comment that would not appear in the compiled PDF.) This prevents reproduction of the method.
 
-- **Baseline adaptations are insufficiently described, weakening the comparative claims**: The paper adapts Neural Cleanse and FeatureRE to regression by "taking the potential target vector $y_t$ as the optimization variable" (Section 4.1), with no further detail. For Neural Cleanse — which relies on enumerating discrete classes and detecting outliers — it is unclear how candidate target vectors are sampled in the continuous space. For FeatureRE — whose sparsity assumption the paper itself argues does not hold for DRMs — a simple adaptation is unlikely to be faithful. The paper's claim of "significantly outperforming" these baselines must be interpreted in light of this gap. While showing that naive adaptations fail is still useful evidence, the evaluation would be strengthened by either (a) a more careful adaptation, (b) explicit discussion of why these are the best possible adaptations, or (c) additional baselines more naturally suited to the setting (e.g., autoencoder-based outlier detection in feature space).
-
-- **Architecture of the generative model $G_\theta$ is not specified**: The paper uses a generative model $G_\theta$ to reverse-engineer triggers for both input-independent and input-aware attacks (Section 3.2), but never describes its architecture (Is it a U-Net? An autoencoder? What are its dimensions, optimizer, training iterations?). This is essential for reproducibility.
+- **The adaptation of classification-based baselines (Neural Cleanse, FeatureRE) to regression is described too briefly to assess fairness.** The paper states they are generalized "by taking the potential target vector $y_t$ as the optimization variable" (Section 4). Neural Cleanse's detection statistic (outlier detection on per-class trigger norms) and FeatureRE's feature-space constraint are designed around discrete label structure. Treating $y_t$ as a continuous optimization variable changes the behavior of these methods substantially. Without specifying the exact loss functions, optimization objectives, and detection procedures used for these adapted baselines, the reported AUC scores (e.g., NC: 0.270 for BadNets, FeatureRE: 0.730) cannot be fully attributed to the original methods' capabilities or limitations. This is important because the paper's claim of outperformance depends on this comparison.
 
 ### Minor
 
-- **Small evaluation set for identification**: The identification accuracy is computed on only 20 models (10 benign + 10 backdoored) per condition. A single false positive yields 95%, and the perfect 1.000 AUC is achieved with just 20 data points — the confidence interval for this value is wide. Results are consistent across multiple attacks and datasets, which partially mitigates this concern, but bootstrapped confidence intervals or additional models (e.g., 30–50 per condition) would substantially strengthen the statistical reliability.
+- **The identification threshold $\epsilon=0.03$ is set without justification or sensitivity analysis.** The binary decision rule (Equation 6) depends on this threshold, yet no analysis is provided on how $\epsilon$ was chosen, whether it was tuned, or how it generalizes across datasets with different resolutions or trigger sizes. While the ROC-AUC metric is threshold-independent and softens this concern, the TP/FP/FN/TN counts in the tables all depend on $\epsilon$.
 
-- **Detection threshold $\epsilon$ is set without justification or sensitivity analysis**: The identification metric $\mathcal{I}(f)$ uses $\epsilon = 0.03$ (Section 3.5). No ablation or analysis is performed on this value, even though $\lambda_1$, $\lambda_2$, and $p$ are ablated. Since $\epsilon$ directly governs the false-positive/false-negative trade-off, the paper should at minimum show that results are stable across a range of $\epsilon$ values (e.g., 0.01, 0.03, 0.05).
+- **Small sample sizes without confidence intervals.** Experiments use 10 benign + 10 backdoored models per setting. While this is common in the literature, reporting confidence intervals or running more seeds would improve reliability, especially for the perfect AUC=1.000 scores where 20 data points make the metric less informative than it appears.
 
-- **Limited architectural diversity**: All experiments use ResNet18 as the feature extractor $F$. The paper claims generalization "to different architectures" (Section 6) but provides no evidence. Testing at least one additional architecture (e.g., VGG, MobileNet) would support this claim.
-
-- **Mitigation comparison lacks statistical testing**: The paper reports AE and DAE for DRMGuard (15.36, 3.29) vs. Fine-tuning (13.96, 4.32) as single values per method (Table 6), claiming "significantly larger" and "much smaller." Without variance estimates or statistical tests across multiple runs, the significance of these differences is not established.
+- **Multiple backdoor results are claimed but not shown with data.** The paper mentions that DRMGuard is effective on models with multiple trigger functions (Section 4.2), but only provides a single sentence without any quantitative results. If detailed results appeared in a truncated appendix, this is understandable, but the main paper would benefit from at least a summary table.
 
 ### Trivial
-None.
+
+- The paper frames the RAV observation as an empirical finding rather than a proven necessary condition for all backdoor attacks. This is appropriate for an empirical paper; the adaptive attack analysis already partially addresses the concern by showing that breaking RAV weakens the backdoor.
 
 ## Nice-to-Haves
 
-- Report computational cost (GPU hours per model) for training $G_\theta$, as this affects practical deployability.
-- Clarify whether Fine-pruning's pruning ratio and other baseline hyperparameters were tuned for the regression task or used with defaults.
-- Discuss whether the RAV property could be circumvented by an adaptive attack that preserves low AE while achieving RAV ≈ 1 (the current adaptive attack trades off attack success for evasion).
-- A more thorough discussion of limitations beyond the benign dataset requirement would strengthen the paper (e.g., reliance on the specific architectural decomposition $F + H$, applicability to other modalities).
+- A runtime/computational cost comparison with adapted baselines would be useful, since reverse engineering involves iterative optimization.
+- A discussion of whether low RAV is a necessary condition for *all* effective backdoor attacks on DRMs (beyond the four tested) would strengthen the theoretical framing, though the adaptive attack already provides evidence.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution:
+- **Criticism about "no formal proof that *any* successful backdoor attack must produce low RAV":** The paper presents this as an empirical observation (Section 3.3: "Observations"), not a theorem. Asking for a formal proof misaligns with the paper's empirical scope. The adaptive attack already provides supporting evidence. Moved from weaknesses.
 
-1. **Criticism that the paper should test on 50 models per condition** — The defense paper norm is 10–20 models; 50 is an unusually high bar. However, the broader concern about statistical fragility (no CIs, no replication) is kept in Minor.
-2. **Criticism that the RAV observation is "only verified on four attacks"** — The paper covers both input-independent and input-aware attacks, which is the standard taxonomy. This is adequate coverage.
-3. **Criticism about missing related works** — Not verifiable; the paper adequately covers the relevant defense literature (NC, FeatureRE, ANP, Fine-pruning).
-4. **Criticism about missing appendix or proofs** — These exist in the original submission; the parser strips appendix content.
-5. **Strength Finder's claim about "DRMGateway"** — This appears to be a typo by the strength finder; the paper uses DRMGuard correctly.
+- **Criticism about missing appendix content or multiple backdoor details:** The reviewer acknowledges the appendix may have been truncated. The paper's single-sentence mention in the main text is thin, but this is noted in Minor weaknesses above. The stronger "no details are available" framing is removed per the rule about appendix stripping.
+
+- **Criticism about "the paper should also cover additional tasks/datasets":** The paper already covers two regression tasks and four datasets — a reasonable scope for a single paper. Demands for broader coverage would constitute scope creep.
+
+- **Criticism about the paper not discussing computational cost:** A nice-to-have, not a weakness that affects the core claims.
 
 ## Novel Insights
 
-The reviews surface a tension that the paper itself does not fully address: the RAV property is presented as a *defender's advantage* (backdoored models are more constrained in feature space), yet the adaptive attack analysis shows that an attacker who tries to break this property suffers reduced attack efficacy. This suggests there may be a fundamental trade-off between attack effectiveness and evasion of RAV-based detection — a claim the paper gestures at but does not formalize. If this trade-off is provable, it would be a stronger result than any individual defense. This observation goes beyond the paper's own framing and could motivate future theoretical work.
+The key insight that synthesizes the reviews is that the paper's core contribution — identifying the angle-concentration (low RAV) property of backdoored DRMs — is its strongest asset and also creates its main vulnerability. The RAV property is what enables the defense, but it is also what makes the baseline adaptation and MTR specification essential: without knowing exactly how the baselines were adapted, the reader cannot tell whether their poor performance reflects a genuine limitation of those methods or a flawed re-implementation; without knowing exactly how MTR works, the reader cannot tell whether it is a genuinely novel mechanism or a re-packaged existing technique. Both specification gaps must be closed before the contribution is fully verifiable.
 
 ## Suggestions
 
-1. **Fully specify the MTR**: Provide the exact equation, algorithm, or pseudo-code for how attention weights/region weights are computed and applied in the optimization. This is the single most important change for reproducibility.
+1. **Specify the momentum reverse trigger completely.** Provide the exact formula for the attention map (e.g., based on input gradients of $f$), the momentum update rule, and how the weighted perturbation is combined with the generator's output. Include a figure or pseudocode.
 
-2. **Specify the $G_\theta$ architecture**: Describe the generative model's architecture, optimizer, learning rate, training iterations, and any other relevant details.
+2. **Fully specify the baseline adaptations.** Write out the exact optimization objectives and detection procedures used for NC and FeatureRE when applied to regression. Show that these are faithful adaptations (or acknowledge where approximations were necessary and justify them).
 
-3. **Justify or ablate $\epsilon$**: Add a sensitivity analysis over $\epsilon$ values (e.g., 0.01, 0.03, 0.05) to show the detection performance is stable, or explain the principled basis for choosing 0.03.
+3. **Add a sensitivity analysis for $\epsilon$.** Report identification accuracy (or precision-recall curves) over a range of $\epsilon$ values on a held-out validation set, or justify the chosen value theoretically.
 
-4. **Improve baseline adaptation description**: Either (a) describe the adaptation of NC and FeatureRE in more detail (how target vectors are sampled in continuous space, how statistical outlier detection is performed), (b) include additional baselines more suited to the regression setting, or (c) temper comparative claims to acknowledge the limitations of the adaptations.
-
-5. **Increase evaluation set or add confidence intervals**: Either train more models per condition (e.g., 30) or provide bootstrapped confidence intervals for the identification accuracy and AUC scores.
-
-6. **Test at least one additional architecture** (e.g., VGG, MobileNet) to support the generality claim beyond ResNet18.
+4. **Report confidence intervals** on the main identification and mitigation results, or increase the number of seed runs per setting.
 
 ## Score and Decision
 
-The paper tackles an important and underexplored problem — backdoor defense for deep regression models — with a novel and well-motivated approach. The core insight (RAV-based feature space constraint) is sound and supported by theoretical derivation and empirical evidence across multiple attacks, tasks, and datasets. The method demonstrably outperforms adapted classification defenses.
+The paper addresses a genuine and important gap — backdoor defense for deep regression models — and provides a clever, empirically grounded solution. The core idea (exploiting feature-space angle concentration) is novel and well-supported by theoretical derivation and experiments. However, two specification gaps prevent the contribution from being fully verifiable: the momentum reverse trigger (the paper's own method component) and the baseline adaptations (the comparison) are both described at a level too vague for reproduction or fair assessment. These are addressable in revision but are significant as-is.
 
-However, the paper has significant reproducibility gaps: the MTR component (essential for correct operation) and the generative model $G_\theta$ are not described in sufficient detail. Additionally, the baseline adaptations are poorly documented, making the comparative claims harder to evaluate. These are fixable in a revision and do not invalidate the core contribution.
-
-**Overall assessment**: The contribution is real and the evidence for the main claims is credible, but the paper requires major revisions to meet reproducibility standards and to substantiate the comparative evaluation. I recommend acceptance pending these revisions.
-
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

@@ -1,83 +1,75 @@
-Now I have a thorough understanding of the paper and all the claims. Let me write the consolidated review.
-
----
+Now I have a thorough understanding of the paper. Let me construct the final consolidated review.
 
 ## Summary
 
-This paper introduces DELIFT, a data subset selection algorithm for LLM fine-tuning that combines a novel pairwise utility metric (measuring how much one sample's inclusion as an in-context example improves prediction on another) with submodular optimization. The method is evaluated across three fine-tuning stages (instruction tuning, task-specific fine-tuning, continual fine-tuning), two model scales (Phi-3 3.8B, Qwen2-72B), and multiple datasets, consistently outperforming baselines (SelectIT, LESS, Random) while reducing data by 70% with minimal or no performance loss.
+DELIFT introduces a pairwise utility metric (UF_ij) that measures how much one data sample improves the model's prediction on another, combined with stage-specific submodular functions (FL, FLMI, FLCG) to select informative, diverse subsets for LLM fine-tuning. The paper evaluates across three fine-tuning stages (instruction tuning, task-specific fine-tuning, continual fine-tuning), two model scales (Phi-3 3.8B and Qwen2 72B), and two training paradigms (ICL and QLoRA), showing that selecting 30% of data via DELIFT retains performance close to the full dataset while outperforming existing methods like LESS and SelectIT.
 
 ## Strengths
 
-1. **Novel pairwise utility metric grounded in model feedback**: The metric \(UF_{ij}\) quantifies the improvement in predictive accuracy on sample \(i\) when sample \(j\) is used as an in-context example, using only forward passes with teacher forcing. This is model-aware, dynamically reflects the model's current capabilities, and avoids the expensive gradient computations of methods like LESS (Section 3.2, Equation 1).
+- **Unified framework validated across diverse settings**: The paper defines three submodular functions mapped to distinct fine-tuning stages and demonstrates effectiveness across six dataset pairs, two model scales (3.8B and 72B), and two paradigms (ICL and QLoRA). This goes well beyond single-stage methods like LESS or SelectIT. Empirical backing: Tables 1–6 show DELIFT leading in 23 out of 24 metric–model–stage comparisons.
 
-2. **Unified framework across three fine-tuning stages**: DELIFT tailors three submodular functions (FL for instruction tuning, FLMI for task-specific fine-tuning, FLCG for continual fine-tuning) within a single greedy selection algorithm, sharing the same utility kernel across all stages. This is more comprehensive than existing methods that target only a single stage (Section 3.3, Section 4.1).
+- **Strong empirical results with 70% data reduction**: Across all experiments, using only 30% of the data, DELIFT achieves performance within 0.31–10.44% of the full dataset. In several cases (HotpotQA→MMLU, Table 4; IBM/Government ICL, Table 6) it *exceeds* full-data performance. The worst-case drop (10.44% on MixInstruct Qwen2 ICL) still outperforms all baselines.
 
-3. **Consistent and substantial outperformance of baselines**: Across extensive experiments (24 evaluation settings: 2 models × 2 paradigms × 3 metrics × 2 datasets for each use case), DELIFT (Util. Feat.) achieves the best performance among all subset selection methods on the vast majority of metrics. For example, on Use Case 1 (MixInstruct), it outperforms the next-best baseline by 2.27% and the worst baseline by 26.21% (Table 1 and surrounding text).
+- **Utility kernel ablation validates the core innovation**: The "Util. Feat." variant consistently and often substantially beats the "SE Feat." variant (e.g., ROUGE 52.79 vs. 48.22 on Qwen2 QLoRA MixInstruct, Table 1), directly confirming that the model-aware utility metric contributes beyond what semantic embeddings provide.
 
-4. **Data reduction with minimal or no performance degradation**: DELIFT reduces the fine-tuning dataset by 70% while incurring only a 0.76% performance drop on P3 (Table 2), a 1.94% drop on SQuAD→HotpotQA (Table 6), and actually *improving* over full-data training by 5.51% on the HotpotQA→MMLU transfer task (Table 5). This demonstrates that strategic selection can match or exceed full-data performance.
+- **Consistent outperformance across subset sizes**: The ablation study (Section 4.3) reports that DELIFT beats all baselines from 5% to 100% subset size, showing the method is robust and not tuned to a specific budget.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-1. **Missing runtime/complexity analysis for a paper claiming computational efficiency**: The paper prominently lists "Computational Efficiency" as Contribution 3, claiming "at least 70% reduction in computational time compared to gradient-based methods on benchmark tasks" (line 42). However, **zero runtime measurements, wall-clock times, or FLOP counts are provided anywhere in the paper**. For the 72B-parameter model (Qwen2-72B) and the smallest dataset used (21,000 samples), computing \(UF_{ij}\) for every pair would require ~441M forward passes through the model. The paper offers no analysis of how this cost scales, whether pairs are subsampled, or whether a proxy model is used. Without this information, the central efficiency claim is unsubstantiated, and a reader cannot assess whether the method is practically viable at the claimed scales. This is the most significant gap in the paper.
+- **The mapping from the utility metric UF_ij to the similarity measure s_ij used in submodular functions is never specified, breaking reproducibility.** The submodular functions (FL, FLMI, FLCG) are defined generically over a "similarity measure s_ij" (lines 97, 100, 107, 114). The paper calls UF_ij the "utility-based kernel" and says it is used "as a feature space" (Section 3.4), but never states whether s_ij = UF_ij directly, or if UF_ij is transformed (e.g., symmetrized, clamped, shifted) to produce s_ij. Since UF_ij can be negative and submodular maximization typically expects non-negative similarities, this gap is consequential. Without this mapping, the algorithm in Section 3.5 cannot be implemented from the paper alone. This is the most significant methodological omission.
 
-2. **No explanation of how the O(N²) pairwise kernel is computed at scale**: The methodology section (line 149) states "Calculate \(UF_{ij}\) for all relevant pairs of data points" with no clarification of what "relevant" means. The paper does not describe any approximation strategy, subsampling scheme, or computational optimization for the pairwise utility matrix. For any real-world dataset (e.g., 21k samples), a naive all-pairs computation is prohibitive, especially for a 72B model. This is not a minor omission—it is a fundamental detail about whether the method can be deployed.
+- **The claimed computational efficiency is asserted without evidence and the O(N²) cost of computing UF_ij is unaddressed.** Computing UF_ij for all pairs in a dataset of size N requires O(N²) forward passes with teacher forcing. For the experimental setting (N ≈ 21,000), this is ~441M forward passes. The paper claims "at least 70% reduction in computational time compared to gradient-based methods" (Contribution 3) but provides zero wall-clock measurements, no complexity analysis, and no description of any approximations or sampling strategies that would make this tractable (especially on Qwen2-72B). Since computational efficiency is listed as a core contribution, this gap is decisive — the claimed advantage cannot be assessed and may not hold.
 
 ### Minor
 
-3. **"Performance percentage drop" is undefined and aggregates across heterogeneous metrics**: The captions report single aggregate numbers like "10.44% performance percentage drop from Full Data to DELIFT" without specifying how this is computed across different metrics (ROUGE, BGE, LAJ), models (Qwen2, Phi-3), and paradigms (ICL, QLoRA). Per-metric variation is substantial—e.g., on MixInstruct Qwen2 ICL, ROUGE drops ~17% (58.65→48.46) while LAJ drops ~3% (3.45→3.35). Averaging these into one number obfuscates the variance and makes the metric uninterpretable. The raw data is in the tables, but the summary figures need clarification.
+- **The ground truth distribution GT_i is described imprecisely.** Line 76 defines GT_i as "modeled as a vector of ones for each token to signify perfect prediction." This likely means a one-hot vector (1 at the correct token, 0 elsewhere), which is the standard ground-truth distribution and works correctly with the L2 distance defined. The "vector of ones" phrasing is ambiguous — a literal reading (all elements = 1) would not be a valid probability distribution. This is a clarity issue, not a mathematical error, but it should be corrected.
 
-4. **Subset size ablation lacks numerical results**: Section 4.3 describes the ablation study qualitatively ("performance gains plateau beyond 50% subset size," "DELIFT outperforms all baselines across subset sizes from 5% to 100%") but provides **no table, figure, or numerical data** to support these claims. The reader cannot verify the trend or inspect the actual numbers. This weakens what could otherwise be a valuable robustness analysis.
+- **The aggregate "performance percentage drop" numbers in table captions are not explained.** Captions report numbers like "10.44% performance percentage drop from Full Data to \sysn{}" (Table 1) but never specify how the three metrics (ROUGE, BGE, LAJ) on different scales are combined into a single percentage. The individual metric values are all present in the tables, so the raw data is transparent, but the headline aggregates cannot be verified from the text.
 
-5. **Imprecise description of the ground truth distribution**: Equation (1) defines \(GT_i\) as "modeled as a vector of ones for each token to signify perfect prediction" and calls it a "ground truth distribution" and "probability distribution." A vector of ones is not a probability distribution (its entries do not sum to 1). However, the actual computation—\(d(GT_i, p) = \sqrt{\sum_{k=1}^N (1 - p_k)^2 / N}\) where \(p_k\) is the model's predicted probability of the correct token at position \(k\)—is mathematically well-defined and meaningful as an RMSE between perfect confidence and actual confidence. The description needs correction but the metric itself is valid.
+- **The ablation study on subset size (Section 4.3) is described only in text with no supporting figure or table.** The paper claims DELIFT "outperforms all baselines across subset sizes from 5% to 100%" but provides no visualization or tabulation of these results. This claim is important enough to warrant display.
 
-6. **Duplicated tables with different formatting**: Several tables appear twice (e.g., Tables 1 and the later version with "Util. Feat." labeling; the IBM-Government and SQuAD-HotpotQA tables appear twice with different styling). This suggests editorial carelessness and could confuse readers.
+- **The "up to 26% improvement" framing in the introduction is ambiguous.** Line 311 clarifies that this is a 26.21% advantage over the *worst* baseline (Random), not over the best alternative method. The introduction (line 44) states "outperforms current data selection techniques by up to 26%" without this clarification, which could mislead readers about which comparison establishes the margin.
+
+- **Full-data baseline discussion needs more nuance.** In Use Case 2 (HotpotQA→MMLU, Table 4), DELIFT outperforms full-data fine-tuning by 3–4 percentage points, and full-data training *degrades* performance relative to the initial model (Qwen2: 82.10 → 78.36). The paper attributes this to "noise filtering" but does not discuss whether the full-data baseline hyperparameters (learning rate, epochs) were tuned to avoid overfitting or catastrophic forgetting. The result is interesting and potentially valuable, but the asymmetry in tuning raises questions about the comparison.
 
 ### Trivial
 
-7. **"Flattened probability distributions" in Equation (2) could be clarified**: The term "flattened" is not explicitly defined. From context (teacher forcing, sum over \(k=1\) to \(N\)), it is clear that \(p_k\) refers to the model's probability of the correct token at position \(k\), but stating this explicitly would avoid ambiguity.
+- Tables 1–4 appear twice in the paper with different column labels (once as "\sysn{}" / "\sysn{} (SE)" and once as "Util. Feat." / "SE Feat."). This is a presentation artifact from the compilation/formatting process but creates confusion about which version is canonical.
 
 ## Nice-to-Haves
 
-- A runtime comparison table (wall-clock time or forward-pass count) for each selection method, broken down by dataset size and model scale, would directly substantiate the efficiency claim and is the single most impactful addition the authors could make.
-- An analysis of how the pairwise utility matrix can be approximated (e.g., via random pair sampling, clustering, or using a smaller proxy model) would address scalability concerns.
-- The "task-specific fine-tuning" experiments (Use Case 2: HotpotQA→MMLU, MixInstruct→MT-Bench) are better described as "selecting data from a heterogeneous pool to improve a target task" rather than standard task-specific fine-tuning. A clarifying sentence would prevent misinterpretation.
+- Report wall-clock times for all methods (including the UF_ij precomputation step) to substantiate the computational efficiency claim, or retract it if the cost is comparable to gradient-based methods.
+- Clarify whether the utility matrix was computed on the full 72B model or a proxy (e.g., Phi-3), and whether all O(N²) pairs were evaluated or some approximation was used.
+- Include the ablation study figure/table for subset size variation.
+- Report variance or confidence intervals over multiple selection runs.
+- Discuss whether the same "noise filtering" effect in Use Case 2 could be achieved by simply training fewer epochs on the full data, which would isolate DELIFT's specific contribution.
 
 ## Removed Points
 
-These points were identified in the provided reviews but are removed or downgraded after verifying against the paper:
-
-- **"The ground truth distribution issue is fatal"** (Harsh Critic, Critical Issue 2): The reviewer claims this invalidates the method. However, while "vector of ones" is not technically a probability distribution, the computation \(d(GT_i, p) = \sqrt{\sum_k (1 - p_k)^2 / N}\) is mathematically well-defined and measures the RMSE between perfect confidence and the model's confidence on the correct token. The description is imprecise but the metric is valid. Downgraded from fatal to minor.
-
-- **"Use Case 2 does not measure task-specific fine-tuning"** (Harsh Critic, Critical Issue 3): The reviewer claims this measures catastrophic forgetting rather than task-specific adaptation. However, the FLMI function explicitly selects data from the training pool that maximizes mutual information with the target dataset. Selecting data informative for a target task from a heterogeneous pool is a legitimate formulation of task-specific fine-tuning. The fact that the experiment also reveals forgetting-mitigation properties is a feature, not a flaw. Removed.
-
-- **"Unified framework claim is overstated"** (Harsh Critic): The three submodular functions are indeed applied to different stages, but the utility kernel is the shared core that unifies them. This is a reasonable use of "unified framework." Removed.
-
-- **"Several tables appear twice"** is a genuine observation, kept as minor weakness #6.
+- *"The utility metric definition is mathematically incoherent"* — The "vector of ones" phrasing is ambiguous but the intended meaning (one-hot encoding) is standard and the metric is computable. Reduced to Minor clarity issue.
+- *"Evaluating the paper against the wrong class"* — No, this is an empirical methods paper and the expectations applied are appropriate for its class.
+- *"Missing related works"* — Removed per instructions (cannot verify existence of uncited references).
+- *"Formatting/style nitpicks about duplicate tables"* — Moved to Trivial.
+- *"Reproducibility concerns about hyperparameters"* — The paper discloses sufficient experimental setup details; the main reproducibility gap is the UF→s_ij mapping, not hyperparameters.
+- *"The paper should cover Y / domain Z"* — Scope-creep demands removed.
 
 ## Novel Insights
 
-The reviews collectively highlight a tension that the paper itself does not fully engage with: the pairwise utility kernel's O(N²) nature creates a tension between model-awareness and scalability. The method requires a forward pass for every pair (i, j), which is O(N²) in the number of forward passes, while gradient-based methods like LESS require O(N) backward passes. Forward passes are cheaper than backward passes per-unit, but the quadratic vs. linear factor means the comparison depends critically on N, model size, and whether approximations are used. The paper's failure to provide any complexity analysis or runtime data means this tension goes unresolved, and the claimed "70% reduction in computational time" cannot be evaluated. Beyond the paper's own contributions, the reviews reveal that the real question for this line of work is not just "does the metric work?" but "can the metric be computed at the scales where it matters?"—a question the paper leaves unanswered.
+The strongest takeaway from the reviews is that the paper's core empirical contribution — DELIFT selects better subsets than existing methods across diverse settings — is robust and well-supported, but the paper simultaneously makes two claims (reproducibility via a fully specified algorithm, and computational efficiency) that are undermined by what the paper *omits* rather than by what it gets wrong. This is an unusual failure mode: the method demonstrably works, but the reader cannot reconstruct it from the paper, and the efficiency advantage is asserted without evidence. The reviews converge on the same root cause: the paper describes its pipeline at the conceptual level but skips the engineering instantiation that connects UF_ij to s_ij and the practical approximation that makes O(N²) pairwise computation feasible. Fixing these documentation gaps would significantly strengthen the paper without changing any experiments.
 
 ## Suggestions
 
-1. **Add a runtime analysis table** showing wall-clock time (or number of forward/backward passes) for each selection method, including DELIFT (utility kernel), DELIFT (sentence embedding), LESS, SelectIT, and Random, across at least the two dataset sizes and two model scales used in the paper. This is essential to substantiate Contribution 3.
-
-2. **Define the "performance percentage drop" metric explicitly** and consider reporting per-metric breakdowns alongside the aggregate.
-
-3. **Add a table or figure for the subset size ablation** (Section 4.3) with actual numerical results across 5%, 10%, 25%, 50%, 75%, and 100% for at least one representative use case.
-
-4. **Correct the description of \(GT_i\)**: Clarify that it is a vector of ones representing perfect prediction confidence at each token position (not a probability distribution) and that the distance in Equation (2) computes the RMSE between this ideal and the model's actual predicted probability for the correct token.
-
-5. **Discuss the scaling of the pairwise kernel**: Even a brief complexity analysis (e.g., "computing the full UF matrix requires \(O(N^2)\) forward passes, but in practice we [subsample pairs / use a smaller model / exploit greedy selection to avoid full computation]") would significantly strengthen the paper.
+1. **Explicitly state the relationship s_ij = f(UF_ij).** If s_ij = |UF_ij|, or a symmetrized version, or a shifted variant — say so. Provide the exact formula. This single clarification would resolve the largest reproducibility gap.
+2. **Provide a computational complexity table** showing: (a) cost of computing the utility matrix, (b) cost per greedy selection step, (c) comparable numbers for LESS/SelectIT, (d) whether a smaller proxy model was used for UF computation. If only N×k (not N²) pairs were evaluated (e.g., against a random subset or via MIPS), state the approximation explicitly.
+3. **Explain the aggregate "performance percentage drop"** — if it is a simple average of per-metric relative drops, say so. Better yet, report per-metric drops separately and let the reader draw conclusions.
+4. **Include the ablation figure for subset size** — this is claimed as supporting evidence for robustness and deserves visualization.
+5. **Clarify the GT_i definition**: replace "vector of ones" with "one-hot vector" to avoid ambiguity.
 
 ## Score and Decision
 
-The paper presents a genuinely interesting approach to data-efficient fine-tuning with strong empirical results. The pairwise utility metric is novel, the unified framework is well-motivated, and the experiments are comprehensive across multiple stages, models, and datasets. However, the paper makes an explicit computational efficiency claim ("70% reduction in computational time") without providing any runtime measurements, and it does not address how the O(N²) pairwise kernel scales to realistic dataset sizes. These are not fatal—the core data-selection contribution is still valid—but they are significant gaps that prevent acceptance at the current level of completeness. The paper would benefit from a major revision that adds a runtime analysis and scaling discussion, after which it could be a strong contribution.
+The paper proposes a well-motivated idea, validates it extensively (6 dataset pairs, 2 model scales, 2 training paradigms), and obtains consistently positive results. However, two structural issues prevent acceptance: (1) the mapping from the utility metric to the submodular optimization functions is underspecified to the point of non-reproducibility, and (2) the core efficiency claim — listed as a primary contribution — is asserted without evidence while the O(N²) pairwise computation cost is unacknowledged. These are fixable documentation gaps that do not invalidate the empirical results, but they preclude acceptance in the current form.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

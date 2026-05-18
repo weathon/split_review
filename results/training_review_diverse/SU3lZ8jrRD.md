@@ -1,20 +1,26 @@
-Now I have a thorough understanding of the paper. Let me synthesize the final review.
+Now I have all the information I need. Let me construct the final review.
 
 ---
 
 ## Summary
 
-This paper proposes three strategies to improve Mamba-based networks for point cloud understanding: **SAST** (Surface-Aware Spectral Traversing), which uses eigenvectors of the Random Walk Laplacian to define an isometry-invariant token traversal order for classification; **HLT** (Hierarchical Local Traversing), which recursively partitions tokens via multiple eigenvectors for segmentation; and **TAR** (Traverse-Aware Repositioning), which restores learnable MAE tokens to their original positions rather than appending them at the end, preserving spatial order for Mamba's directional processing. The paper evaluates these methods on ModelNet40, ScanObjectNN, ShapeNetPart, and few-shot benchmarks.
+This paper introduces Spectral Spatial Traversing (SST), a method for adapting Mamba (state-space model) networks to point cloud data. It proposes three contributions: (1) Surface-Aware Spectral Traversing (SAST), which orders point patches by the eigenvectors of the Random Walk Laplacian of a patch-connectivity graph to define a rotation-invariant traversal replacing viewpoint-dependent grid-based ordering; (2) Hierarchical Local Traversing (HLT), a recursive binary partitioning of the spectral embedding for segmentation; and (3) Traverse-Aware Repositioning (TAR), which restores masked learnable tokens to their original sequence positions in Mamba-based masked autoencoders. Experiments on ModelNet40, ScanObjectNN, ShapeNetPart, and few-shot benchmarks show improvements over Point-Mamba and several transformer-based baselines.
+
+---
 
 ## Strengths
 
-- **Principled spectral traversal addresses a real limitation of existing point-cloud Mamba methods.** The paper correctly identifies that 3D grid-based traversals (Point-Mamba, PCM) are view-dependent and fail to capture surface adjacency. SAST replaces this with a traversal ordered by low-frequency Laplacian eigenvectors, which is theoretically isometry-invariant and better respects the underlying manifold. The ablation in Fig. 4 (left) shows that SAST with 4 eigenvectors outperforms both Point-Mamba's grid traversal and an unordered baseline, confirming the importance of the ordering principle.
+1. **Spectral traversal demonstrably improves over grid-based traversal for Mamba point cloud architectures.** Ablation results (Fig. 4, left) show SAST with four eigenvectors achieves 93.3% on ScanObjectNN (OBJ-BG, from scratch), outperforming Point-Mamba's 92.5% and substantially beating the "no traversal" baseline. This directly validates that spectral ordering provides a better inductive bias than 3D grid ordering for Mamba's sequential processing.
 
-- **TAR is a clean, well-validated solution to a genuine problem.** The observation that MAE's learnable token placement (append-at-end) breaks Mamba's directional sensitivity is insightful and practically motivated. The ablation (Fig. 5) provides clear, interpretable numerical evidence: 91.05% vs. 90.11% SVM accuracy on ModelNet40 with vs. without TAR, and consistent improvement in downstream fine-tuning. This is a straightforward modification with measurable impact.
+2. **HLT yields measurable gains on part segmentation.** On ShapeNetPart (Table 2), the full SST+HLT method achieves 86.8% mIoU (Inst.) with pretraining, outperforming SST with SAST only (86.6%) and all listed transformer baselines (e.g., Point-MAE 86.1%, Point-M2AE 86.4%). This confirms that recursive binary partitioning of multiple eigenvectors captures local patch relationships useful for point-level classification.
 
-- **Systematic ablation studies guide key design choices.** The paper analyzes the number of eigenvectors (Fig. 4 left), the number of nearest neighbors for graph construction (Fig. 4 right), and the individual contribution of TAR (Fig. 5). These experiments isolate the benefit of each component and provide clear evidence for why 4 eigenvectors and 20 neighbors are optimal.
+3. **TAR provides a clean, well-motivated solution to the token-positioning problem in Mamba-based MAE.** Ablations (Fig. 5) show TAR improves linear evaluation accuracy on ModelNet40 from 90.11% to 91.05% after ShapeNet pretraining, and raises fine-tuning accuracy on ScanObjectNN by ~0.8 points. The idea of restoring learnable tokens to original positions rather than appending them at the end is principled and justified by Mamba's directional sensitivity.
 
-- **Strong motivation and problem formulation.** The introduction clearly articulates three distinct problems with existing point-cloud Mamba methods (view dependence of grid traversal, task-specific traversal requirements, MAE-Mamba incompatibility) and maps each to a proposed solution. The methodological narrative is coherent and well-structured.
+4. **Comprehensive ablation studies isolate key design choices.** Section 4.3 systematically varies the number of eigenvectors (0–6, peaking at 4) and the number of nearest neighbors K (5–30, peaking at 20), providing concrete hyperparameter guidance and demonstrating robustness near the optimum.
+
+5. **The canonicalization procedure addresses known eigenvector sign/order ambiguities.** Section 3.3 describes a deterministic method to flip signs and reorder near-degenerate eigenvectors, ensuring reproducible traversal orders — a practical prerequisite for the method's reliability.
+
+---
 
 ## Weaknesses
 
@@ -24,54 +30,69 @@ None.
 
 ### Major
 
-- **Missing ablation comparing HLT vs. SAST on the segmentation task.** The paper claims HLT is superior to SAST for segmentation (Section 3.4, line 109: "While effective for classification tasks, the SAST strategy considering each eigenvector in a separate traversal may not capture the precise relationship between patches needed for segmentation") and states in the results (line 218) that "In the 'Training from pretrained' setting, we further demonstrate the effectiveness of HLT strategy compared to SAST in the segmentation task." However, Section 4.3 (Ablation Studies) contains no experiment comparing HLT vs. SAST on ShapeNetPart — it only analyzes eigenvector count and K-neighbors on the *classification* task (ScanObjectNN) and the TAR strategy. The segmentation results in Table 2 (an image in the extraction) compare against SOTA methods, but without a direct SAST vs. HLT ablation, the source of the segmentation gain is confounded: it could come from the different traversal strategy, the pretraining, or other factors. This is the most significant experimental gap in the paper. The claim is plausible and well-motivated, but it lacks direct empirical validation.
+None.
+
+The issues identified below are fixable with revisions; none invalidate the paper's core empirical findings.
 
 ### Minor
 
-- **No empirical validation of isometry invariance.** The paper asserts (correctly, via spectral theory) that the Laplacian-based traversal is invariant to isometric transformations, but never tests this empirically. A simple experiment rotating test shapes and measuring traversal stability or prediction variance would directly validate a core motivation for SAST. This is not fatal — the mathematical property is well-established — but given that the paper argues robustness to viewpoint as a key advantage, some empirical demonstration would strengthen the paper.
+1. **The "isometry invariance" claim is imprecisely scoped.** The paper repeatedly claims the traversal is "isometry-invariant" (abstract, Section 3.1 property 4, Section 3.3, conclusion). However, the graph in Section 3.3 is built using *Euclidean distances between patch centers in 3D space*. The spectrum of this graph is invariant to rigid motions (rotations, translations) — which are isometries of Euclidean space — but is *not* invariant to intrinsic (non-rigid) isometries of the underlying surface, since those would change the 3D coordinates and thus the Euclidean distances. The paper connects this claim to the Laplace–Beltrami operator (Section 3.1), which in the shape analysis literature concerns intrinsic geometry, creating ambiguity about what type of invariance is being claimed.  
 
-- **Computational cost analysis deferred to supplement.** The paper states that "a comprehensive analysis of the computational efficiency, runtime, and memory usage of our SAST approach is provided in the Supplementary Material" (line 138). While deferring details to the supplement is standard, SAST's per-block feature concatenation multiplies the sequence dimension by 2s (e.g., 8x for 4 eigenvectors with forward/backward traversals), which is a non-trivial increase over Point-Mamba's 2 traversals. A brief statement of relative overhead in the main paper (e.g., "SAST adds approximately X% to the forward pass time") would help readers assess the practical trade-off.
+   **Why it matters:** The paper's practical advantage over grid-based traversal (viewpoint robustness) is already achieved by rotation invariance, and the experiments on rigid-object benchmarks (ModelNet40, ScanObjectNN) do not test non-rigid deformations. However, phrasing the contribution as "isometry-invariant" without qualification misrepresents the theoretical scope. The authors should explicitly clarify that invariance holds for rigid motions and that this is sufficient for the benchmarks evaluated.
 
-- **Variance not reported for classification results.** Tables 1 and 4 report accuracy without standard deviation or confidence intervals. The few-shot results (Table 3) report mean and std from 10 runs, which is good practice. For the main classification benchmarks, especially the "Training from scratch" settings where differences between methods can be small, variance information would aid interpretation.
+2. **Missing comparison against PCM (Zhang et al., 2024).** The paper mentions PCM alongside Point-Mamba as a Mamba-based point cloud method (Section 2, Section 3.3) and states that both suffer from "grid-based traversal" issues. Yet the experimental tables (Tables 1–4) only compare against Point-Mamba among Mamba-based methods. No PCM results appear.  
 
-- **Canonicalization edge case.** The sign-flip rule (flip if the first element is negative) is a standard but not fully robust heuristic: if the first element is zero or near-zero, the sign remains ambiguous. This is a known limitation of such approaches and unlikely to cause problems in practice, but worth acknowledging.
+   **Why it matters:** Point-Mamba and PCM use different grid-based traversal strategies (PCM's CTS is designed to maintain spatial adjacency). Without comparing against PCM, the claim that SAST's spectral traversal offers a general advantage over all existing Mamba-based traversals is not fully supported.
+
+3. **HLT's random sorting of tokens within leaf segments is not ablated.** Section 3.4 states that tokens falling in the same HLT segment are "sorted randomly to add stochasticity in the training." The paper does not analyze whether this randomness contributes to the reported improvements, or whether deterministic ordering (e.g., by the first eigenvector) would perform similarly.  
+
+   **Why it matters:** Without an ablation, the reader cannot determine whether the HLT gains come from the hierarchical partitioning itself or from the stochastic regularization introduced by random in-segment ordering.
+
+4. **The canonicalization procedure uses a fragile sign-flip rule.** Section 3.3 flips eigenvector signs based on the sign of each eigenvector's first element. If that element is near zero, the sign is effectively random and flipping decisions become unstable. While this is a known practical issue in spectral shape analysis and the paper's approach is common, it is worth acknowledging the limitation or adopting a more robust reference (e.g., majority vote over largest-magnitude entries).
 
 ### Trivial
 
-None.
+- The choice of mean (rather than median or another quantile) as the binary threshold in HLT (Section 3.4) is stated without justification. While the mean is a natural choice, a brief rationale would be helpful.
+- Computational overhead of eigenvector computation is deferred to the Supplementary Material. Including a brief cost estimate (time and memory) in the main paper would improve self-containedness.
+
+---
 
 ## Nice-to-Haves
 
-- **Exploring TAR under varying masking ratios or token counts.** The current analysis (Fig. 5) fixes these hyperparameters. A brief study of whether TAR's benefit is consistent across different masking ratios would further strengthen the contribution.
-- **Ablation of within-segment sorting strategy in HLT.** The paper uses random sorting within HLT segments to add stochasticity. Comparing this against sorting by the first eigenvector (which the paper mentions as an alternative) would clarify whether the randomness itself contributes to performance.
+- Qualitative visualizations comparing the spectral traversal path against the grid-based traversal path on representative shapes would help readers build intuition for why the spectral ordering is beneficial.
+- If feasible, including an experiment on a non-rigid benchmark (e.g., SHREC'15 or a subset of deformable objects) would allow the paper to demonstrate whether the spectral traversal's benefits extend beyond rigid objects — or alternatively, would provide evidence that rotation invariance is sufficient for the practical settings considered.
+
+---
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
+These points were raised by reviewers but removed after cross-verification against the paper:
 
-- **"Missing numerical results from main tables"** — The tables (1–4) appear as image placeholders in the extracted text due to PDF parsing artifacts. The original submission contains these tables with numerical values. Per the parsing-artifact rule, this is not a paper weakness.
-- **"Several cited works are only tangentially relevant"** — Subjective opinion about related work breadth. The paper's related work section is descriptively adequate for positioning the contributions.
-- **"The paper should include a direct comparison of traversal order as the only variable"** — The ablation already compares SAST (with eigenvector traversal) against Point-Mamba's grid traversal and an unsorted baseline, which serves this purpose.
-- **"The paper claims reproduction issues"** — No such claim is made by any reviewer in a justified manner. Removed as not present in verified evidence.
+- **"TAR is evaluated only on one downstream task"** — *Removed as factually inaccurate.* Fig. 5 evaluates TAR on both ModelNet40 (linear evaluation after pretraining) and ScanObjectNN (fine-tuning), i.e., two tasks/datasets.
+- **"No analysis of computational overhead"** — *Downgraded from weakness to Trivial.* The paper states (Section 4) that "a comprehensive analysis of the computational efficiency, runtime, and memory usage of our SAST approach is provided in the Supplementary Material." This is a placement choice, not an omission.
+- **"Missing appendix / proofs" and any formatting/typo criticisms** — *Removed per policy.* These are parser artifacts, not author errors.
+- **Reproducibility nitpicks about undisclosed hyperparameters** — *Removed per policy.* The paper follows standard practices for its domain.
+
+---
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the key experimental gap (missing HLT vs. SAST ablation for segmentation) and the lack of empirical isometry testing, but do not identify fundamentally new angles beyond what the paper already presents.
+The most interesting observation arising from the reviews is that the paper's core innovation — using spectral graph eigenvectors to define traversal order for Mamba — is largely decoupled from the isometry-invariance claim that the paper uses to motivate it. The spectral traversal works because the eigenvectors of a KNN graph built from Euclidean distances provide a smooth, low-frequency parametrization of the point cloud surface (by Courant's Nodal Line Theorem), not because of any deep geometric invariance. This suggests the method could be used with other graph constructions (e.g., geodesic-distance graphs, cotangent-weight Laplacians on meshes) to achieve different invariance properties without changing the core architecture, which is a useful design insight the paper hints at but does not fully articulate.
+
+---
 
 ## Suggestions
 
-1. **Add a direct ablation comparing HLT vs. SAST on ShapeNetPart segmentation.** This is the most impactful addition the authors could make. Show performance (mIoU) for: (a) SAST traversal on segmentation, (b) HLT traversal on segmentation, (c) HLT with random within-segment sorting vs. sorted by v^(1). This would directly validate the central claim about HLT's advantage for per-point tasks.
-2. **Add a simple isometry-invariance test.** Measure the stability of the SAST traversal order (e.g., Kendall tau or edit distance between orderings) under random rotations of the input point cloud, and report how prediction variance changes compared to grid-based traversal.
-3. **Include a brief computational overhead statement in the main paper.** Even one line stating, e.g., "SAST with 4 eigenvectors adds approximately X ms to each forward pass (Y% overhead over the base Mamba backbone)" would address the efficiency concern.
-4. **Report standard deviations for main classification results** (Tables 1 and 4) across multiple runs, to allow assessment of whether observed improvements are statistically significant.
+1. **Correct the invariance scope.** Replace "isometry-invariant" with "rotation-invariant" (or "rigid-motion-invariant") throughout the abstract, introduction, and method sections. Qualify the connection to the Laplace–Beltrami operator to avoid implying intrinsic isometry invariance. The paper's actual contribution is stronger when stated precisely.
+2. **Include the PCM baseline** in at least one comparison table (e.g., classification on ScanObjectNN or ModelNet40), or explicitly explain why a fair comparison is infeasible.
+3. **Add an ablation of the random in-segment ordering in HLT**, comparing against deterministic sorting (e.g., by the first eigenvector) to isolate the source of gains.
+4. **Briefly justify the mean threshold choice in HLT** and consider noting the sign-flip limitation in the canonicalization discussion.
+
+---
 
 ## Score and Decision
 
-The paper presents three well-motivated, clearly described contributions to an important problem (token traversal in point-cloud Mamba networks). SAST's spectral approach is theoretically grounded and supported by ablations; TAR is a simple but effective fix validated with clear numbers; HLT is conceptually appealing for segmentation but lacks a direct comparison to SAST on the segmentation task. The available evidence from ablations and the prose descriptions of full-benchmark results (which appear in table images removed during parsing) is predominantly positive. The missing HLT vs. SAST ablation is the most significant gap, but it weakens rather than invalidates an otherwise solid contribution.
+The paper proposes three sensible, empirically validated strategies for adapting Mamba to point clouds. The spectral traversal idea is principled, the ablations are thorough, and the improvements over Point-Mamba are clearly demonstrated. The main weakness is an imprecise framing of the invariance property, which is fixable with revision and does not invalidate the empirical results. The missing PCM baseline is a gap worth addressing. Overall this is a solid contribution that advances the state of the art in Mamba-based point cloud processing.
 
-The paper is original in applying spectral graph theory to Mamba traversal for point clouds, the research question is well-motivated, the claims are largely supported by the available evidence (with one notable gap), and the experiments cover the standard benchmarks for this area. Writing is clear. The value to the community lies in demonstrating that spectral traversal can improve Mamba-based point cloud processing, and in identifying the MAE-Mamba token-placement problem with a practical fix.
-
-**Score: 7.0 / Accept**
-
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

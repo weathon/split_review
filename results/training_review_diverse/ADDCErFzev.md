@@ -1,20 +1,20 @@
-Now I have all the information needed. Let me construct the final consolidated review.
+Here is my synthesized final review:
 
 ---
 
 ## Summary
 
-This paper uses controlled variation of dropout probability (p=0 to 0.9) in AlexNet to operationalize a sparse-to-distributed coding continuum, and asks where the human visual system falls along this continuum. The authors report three convergent findings: (1) lesion robustness peaks at p=0.7 (non-monotonically), (2) representational similarity with human OTC (7T fMRI, NSD) also peaks at p=0.7, and (3) the eigenspectrum decay rate (α) of the p=0.7 model closely matches that of human OTC (~1.13). The central claim is that this reveals an optimal balance between efficiency (high-dimensional/sparse) and robustness (low-dimensional/distributed) in biological and artificial vision.
+This paper uses controlled dropout variation across 10 AlexNet models (p=0 to 0.9) to operationalize a continuum between sparse (high-dimensional) and distributed (low-dimensional) population codes. The authors report that dropout systematically reduces representational dimensionality, that lesion robustness peaks at p=0.7 (not at extreme dropout), and that this same p=0.7 model shows the highest emergent representational similarity with human occipitotemporal cortex (OTC) measured via 7T fMRI, alongside the closest match in eigenspectral decay rate. The core thesis is that these converging findings reveal an optimal balance between coding efficiency and robustness that the human visual system may also occupy.
 
 ## Strengths
 
-- **Systematic dimensionality control via dropout.** The paper convincingly shows that varying dropout proportion p produces monotonic changes in the eigenspectrum decay rate α of fc6 activations (Figure 1D, Section 2.1). This provides a clean, controlled empirical framework to manipulate representational dimensionality while holding other architectural factors constant.
+- **Controlled parametric manipulation of a single inductive bias**: All 10 models share the same architecture, training data, and hyperparameters except for dropout rate (Section 2.1). This is a clean design that isolates the effect of dropout on representational geometry and avoids the confounds of comparing across different architectures or training regimes.
 
-- **Non-monotonic lesion robustness with a genuine sweet spot.** Lesioning experiments reveal that robustness to unit removal increases with dropout up to p=0.7 and then declines, with p=0.8 and p=0.9 models performing worse under severe lesions (Figure 2C–D, Section 2.3). This non-monotonicity is the paper's most interesting finding — it rules out a trivial "more dropout = more robustness" story and suggests genuine structural differences between models.
+- **Non-trivial optimal robustness point**: Lesion robustness increases with dropout up to p=0.7 then declines at higher rates (Figure 2C-D). This U-shaped relationship is not a trivial consequence of dropout training (which would predict monotonic gains) and genuinely suggests that intermediate dropout levels best balance competing pressures. The paper is transparent that lesioning mirrors the training perturbation (Section 2.3).
 
-- **Convergent evidence across three independent measurements.** The fact that the same dropout level (p=0.7) emerges as optimal across lesion robustness, brain alignment (classical RSA), and spectral decay matching is a genuinely novel cross-level finding. The convergence of behavioral (lesion), representational (RSA), and spectral analyses on the same model is compelling and unlikely to be coincidental.
+- **Triple convergence at p=0.7**: Three independent measurements — lesion robustness, RSA alignment with human OTC across 8 NSD subjects, and eigenspectral decay rate — all peak or most closely match the brain at the same dropout level. This specific convergence is the paper's most striking finding and provides meaningful circumstantial evidence for a shared coding principle.
 
-- **Extension to human high-level visual cortex.** While prior work (Stringer et al., 2019) was limited to mouse V1, this paper studies human OTC — a higher-order visual region — and uses high-resolution 7T fMRI data from the Natural Scenes Dataset.
+- **High-quality fMRI data and rigorous ROI definition**: The paper leverages the Natural Scenes Dataset (7T, 8 subjects, 515 shared images, 3 repetitions each) with GLMsingle denoising and a well-validated OTC mask, providing a strong empirical target for model-brain comparison.
 
 ## Weaknesses
 
@@ -23,66 +23,57 @@ None.
 
 ### Major
 
-1. **The RSA brain alignment result lacks inferential statistics.** Figure 3C reports model–brain correlations across 8 subjects, and the paper claims the p=0.7 model shows "the highest degree of alignment." However, no statistical tests are provided (e.g., paired t-tests, confidence intervals, or Bayesian comparisons between dropout conditions). With only 8 subjects, the differences between p=0.7 and adjacent levels (p=0.6, p=0.8) could be driven by noise. This is the paper's central empirical finding, and the lack of uncertainty quantification is a significant gap that weakens the strength of the claim.
+- **The brain-alignment peak (Figure 3C) lacks statistical validation**: The claim that maximal representational similarity occurs at p=0.7 is central to the paper's argument. However, no confidence intervals, pairwise significance tests, or mixed-effects models accounting for subject variability are reported. Visual inspection of Figure 3C suggests that p=0.5 and p=0.6 may be comparable to p=0.7 for several subjects, and the between-subject spread is large enough to be consistent with a flat or noisy function. Without statistical evidence, this finding remains suggestive rather than conclusive. This weakness is compounded because the paper uses the convergence across findings (lesion + RSA + spectra) as its main rhetorical device — if one leg of the tripod is unstably supported, the whole argument weakens.
 
-2. **The "optimal balance" narrative is overclaimed relative to the evidence.** The paper frames a trade-off between efficient high-dimensional (sparse) codes and robust low-dimensional (distributed) codes, then claims the p=0.7 model represents an "optimal balance" point. However, the p=0.7 model is the most low-dimensional (steepest spectral decay) among the models, placing it firmly on the distributed/robust side of the continuum. The paper does not measure "efficiency" independently — it is equated with dimensionality. The data are equally consistent with the brain simply favoring low-dimensional, robust codes. The non-monotonic lesioning result does show a sweet spot within the distributed regime, which is interesting, but the framing of a *balance between efficiency and robustness* goes beyond what the measurements support. The language in the title, abstract, and conclusion should be scaled back to match the evidence.
+- **The causal interpretation is confounded by dropout's multiple effects**: The paper interprets dropout-induced dimensionality reduction as evidence for an efficiency–robustness tradeoff. However, dropout also alters gradient variance during training, forces individual units to be independently useful, and changes the model's effective capacity — any of which could independently produce the observed patterns. The paper acknowledges this in its Limitations (Section 3: "Alternative regularization techniques such as L1 and L2 penalties on the weights could also be explored") but does not run these controls. Without disentangling whether dimensionality *per se* is the causal factor (e.g., via bottleneck layers that directly constrain dimensionality, or via L1/L2 regularization that affects weights differently), the paper's central interpretation remains undersupported.
 
 ### Minor
 
-1. **The lesioning evaluation is partially circular with respect to the training intervention.** Models are trained with dropout and then tested for robustness by applying the identical operation (randomly setting units to zero) at inference. Models trained with dropout are specifically adapted to that exact perturbation. The paper acknowledges this (Section 2.3: "Note that dropout regularization occurs during training but not during inference. In this analysis, we are effectively applying dropout during inference time") but does not address it as a limitation. **However**, the finding is not fully explained by circularity: if training on dropout directly caused inference-time robustness in a simple way, p=0.9 would be most robust, yet robustness declines after p=0.7. This non-monotonicity shows the result is not merely a self-fulfilling prophecy. Still, testing at least one alternative perturbation (e.g., additive Gaussian noise, weight scaling) would substantially strengthen the claim of general robustness.
+- **Single architecture and single layer**: All experiments use AlexNet and focus on fc6. While the paper acknowledges this limitation, the claim that the results generalize to "biological and machine visual systems" (title and abstract) is premature without at least one additional architecture (e.g., ResNet or a ViT with dropout in its MLP blocks). The brain alignment result could be specific to AlexNet's particular architectural biases.
 
-2. **The spectral decay comparison between model and brain uses incompatible estimation procedures.** Model eigenspectra are computed from noiseless activations using standard PCA (Section 2.1), while brain eigenspectra are estimated using the GSN denoising method (Section 2.5.1), which explicitly subtracts noise covariance. The two estimates are on different footings. The GSN method is described as "to be fully described and validated in a forthcoming manuscript" (line 138) — no validation against alternative approaches (e.g., cvPCA from Stringer et al.) is provided here. Additionally, the model has 4,096 units while OTC has ~34k voxels; fitting power laws over the first 250 components in both cases is sensitive to truncation choice. The match in α could be coincidental.
+- **GSN method lacks in-paper validation**: The eigenspectrum analysis (Section 2.5) relies on Generative Modeling of Signal and Noise (GSN), described as "to be fully described and validated in a forthcoming manuscript" (line 138). While the paper provides a mathematical description (Equations 8–10) the method is not validated on synthetic data with known ground-truth spectra, nor are its results compared to the established cvPCA approach (Stringer et al., 2019) on the same dataset. The core spectral match finding (Figure 3E) thus rests on a method whose behavior is not fully characterized in this paper.
 
-3. **Dropout manipulation conflates multiple effects.** Varying p changes not just dimensionality but also feature norms, effective learning rate, training stochasticity, and potentially feature diversity. The paper attributes downstream effects to the dimensionality continuum, but no ablation isolates dimensionality from these confounds. The authors acknowledge this in the Limitations section ("it is possible that the percentage of dropout may reflect a pressure to be more-or-less distributed... Alternative regularization techniques such as L1 and L2 penalties could also be explored"), but the paper's central narrative relies on a cleaner mapping than the experiment delivers.
+- **No multiple training seeds**: All analyses appear to be based on a single training run per dropout level. The dimensionality analysis (Figure 1D) and brain RSA results (Figure 3C) show no error bars reflecting training variability, so it is impossible to assess whether the observed patterns — particularly the subtle differences between neighboring dropout levels — are reproducible or idiosyncratic to the particular weight initialization and training trajectory.
 
-4. **Single architecture and limited layer analysis.** Only AlexNet (2012 architecture) is tested, with dropout applied to fc6/fc7. The main analyses focus on fc6; results for other layers (fc7, convolutional layers) are deferred to supplementary material. Testing at least one additional architecture would show the findings are not a quirk of AlexNet's fully connected layers.
-
-5. **No variance estimates for model eigenspectra.** Models were trained with a single random seed each, so there is no distribution of α values from the model side to compare against the human distribution (mean α=1.13, sd=0.05 across 8 subjects). Multiple training seeds would enable proper statistical comparison.
+- **Top-5 accuracy only**: The paper reports only top-5 ImageNet accuracy. Top-1 accuracy, precision-recall tradeoffs, or per-class performance would provide a more complete picture of how dropout affects task performance and whether the "preserved performance" claim holds uniformly.
 
 ### Trivial
-
 None.
 
 ## Nice-to-Haves
 
-- Testing alternative regularization methods (L1, L2 weight decay, input noise) to disentangle effects specific to dropout from more general regularization phenomena.
-- Adding a second perturbation type to the lesioning analysis (e.g., additive Gaussian noise, targeted unit removal based on importance) to test whether the robustness advantage generalizes beyond the training intervention.
-- Comparing GSN estimates to cvPCA (Stringer et al., 2019) on the same data as a validation check.
-- Including results for additional model architectures (e.g., ResNet, ViT) and additional layers (conv5, fc7) in the main text.
+- Bootstrapped confidence intervals or a mixed-effects model (dropout level as fixed effect, subject as random intercept) for the RSA results in Figure 3C would substantially strengthen the brain-alignment claim.
+- Training models with L1/L2 regularization (or with a bottleneck layer directly controlling dimensionality) and testing whether they reproduce the same lesion-robustness and brain-alignment patterns would help disentangle dimensionality from other dropout effects.
+- Validating GSN on synthetic data or reproducing the eigenspectrum analysis with cvPCA would remove reliance on an unpublished method.
+- Adding a second architecture (e.g., ResNet-50 with dropout in its fully connected layers) would demonstrate generality.
+- Reporting top-1 accuracy in addition to top-5 would provide a more complete picture.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed — treat them with caution:
 
-- **Criticism about truncated sentence referencing an appendix ("A.2)").** Per hard rules: the parser strips appendix content from all papers; this exists in the original submission and is not a paper error.
-- **Complaint that fc7 lesioning results are only in supplementary.** Per hard rules about appendix references.
-- **Claim that the paper "does not engage with the fact that Stringer et al. used cvPCA while here GSN is used."** The paper explicitly compares GSN to cvPCA conceptually (Section 2.5.1). The valid residual concern is about *empirical validation*, not lack of engagement — moved to Minor #2.
-- **Criticism about the weighted least squares (w_i = 1/i) departing from Stringer et al. without justification.** The paper provides a clear rationale for this weighting ("to emphasize the importance of the leading principal components"). This is a defensible methodological choice, not a flaw.
-- **Criticism about the representational trajectory analysis being purely descriptive.** While this analysis is indeed descriptive, it is presented as supporting visualization (Section 2.2.1), not as a core claim. The space it occupies is reasonable for a results section.
+- *"The lesion analysis is largely tautological"*: Removed because the paper explicitly acknowledges this relationship (Section 2.3: "In this analysis, we are effectively applying dropout during inference time"). The interesting finding is the non-monotonic peak at p=0.7, which is not predicted by a simple "more training dropout = more inference robustness" account. The reviewer's criticism here largely restates the paper's own framing as if it were a flaw.
+- *"The paper dismisses cvPCA without showing GSN yields different results"*: The paper actually discusses cvPCA and explains why GSN is preferable (Section 2.5.1). The absence of an empirical comparison is a valid concern (retained as a Minor weakness above), but the claim that the paper "dismisses" cvPCA is inaccurate.
+- *Various formatting and style nitpicks*: Standard removal per instructions.
+- *Generic or unsubstantiated "strengths" from the Strength Finder*: Generic claims lacking specific evidence were filtered out.
 
 ## Novel Insights
 
-The most interesting insight emerging from this review is that the non-monotonic lesion robustness pattern (optimal at p=0.7, declining at p=0.8–0.9) is actually the paper's strongest result because it *cannot* be explained by the simple circularity concern. If the lesioning result were merely "training matches test," one would expect monotonic improvement with higher dropout. The fact that robustness declines after p=0.7 suggests that extreme dropout degrades representation quality in a way that even training-adapted representations cannot compensate for — this is a genuine finding about the limits of distributed coding. The convergence of this sweet spot with brain alignment and spectral matching is striking, but the paper would benefit from explicitly framing the non-monotonic lesion result as the independent discovery and the brain results as convergent validation, rather than treating all three as equal legs of the "optimal balance" claim.
+None beyond the paper's own contributions. The reviewers' observations (need for statistical testing, confound controls, architectural generality) are standard methodological desiderata rather than novel insights.
 
 ## Suggestions
 
-1. **Add inferential statistics to the RSA analysis.** Report paired t-tests (or Bayesian alternatives) comparing the p=0.7 condition to each other dropout level across the 8 subjects, with multiple comparison correction. Show individual subject trajectories with error bars.
-2. **Reframe the central claim.** Replace "optimal balance between efficiency and robustness" with more measured language: e.g., "a sweet spot in the distributed coding regime that aligns with human visual cortex." The data show convergence around p=0.7, not a measured trade-off between independently quantified efficiency and robustness.
-3. **Add at least one alternative perturbation to the lesioning analysis.** Even a simple additive Gaussian noise experiment would substantially increase confidence that the robustness finding is general.
-4. **Report model variability.** If computational budget allows, train 3–5 seeds per dropout level to provide error bars on model eigenspectra α values. This would enable proper statistical comparison with the human α distribution.
-5. **Validate GSN or compare to cvPCA** on the brain data to ground the spectral comparison more firmly.
+1. **Add statistical evidence for the RSA peak**: This is the most actionable and important fix. Report bootstrapped confidence intervals on the RSA correlations (across subjects, or across image subsets) and a simple mixed-effects model with dropout level as a fixed effect and subject as a random intercept to determine whether p=0.7 is significantly different from its neighbors.
+
+2. **Run at least one control regularization** (e.g., L1 weight decay or a bottleneck layer) to test whether dimensionality, rather than other dropout effects, drives the lesion-robustness and brain-alignment patterns. Even a partial replication would substantially strengthen the causal interpretation.
+
+3. **Validate or supplement GSN**: Either validate the GSN method on simulated data with known ground-truth eigenspectra, or report the eigenspectrum analysis using cvPCA and show the results converge.
+
+4. **Train from multiple seeds** (at least 3) for each dropout level to establish that the observed patterns are reproducible and to enable error bars on all model-level measurements.
 
 ## Score and Decision
 
-**Originality:** 7/10 — The controlled dropout manipulation as a tool to study the coding continuum is clever, though the underlying question is well-established.
+The paper presents a clever experimental design and an intriguing set of converging findings. However, the lack of statistical validation for the brain-alignment peak, the confounded nature of the main manipulation, and the reliance on an unvalidated method for a core analysis mean that several of the paper's central claims are not yet rigorously supported. The paper would benefit from additional controls and statistical analyses before its conclusions can be fully accepted. Nonetheless, the core approach — systematic dropout variation to probe the sparse-distributed coding continuum — is novel and valuable, and the triple convergence at p=0.7 is sufficiently provocative to warrant publication with the expectation that the authors address the major concerns in a revision.
 
-**Quality of evidence:** 5/10 — The convergent findings are compelling but the key RSA result lacks statistical support, and the lesioning analysis has a circularity concern.
-
-**Claims supported by evidence:** 5/10 — The "optimal balance" framing overreaches; the evidence better supports a more modest claim about a distributed-coding sweet spot.
-
-**Clarity:** 7/10 — Well-written and clearly structured.
-
-**Value to community:** 7/10 — The approach of using controlled regularization as an empirical lever is a valuable methodology, and the convergent findings will stimulate further work.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

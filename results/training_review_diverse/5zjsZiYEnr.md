@@ -1,91 +1,78 @@
-Now I have all the information needed. Let me synthesize the review.
-
----
+Now I have the full picture. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper introduces M-Longdoc, a benchmark of 851 questions across 180 documents averaging 210.8 pages (120,988 tokens), requiring open-ended answers rather than extractive spans — substantially exceeding prior benchmarks like MMLongBench in document length. The paper also proposes a retrieval-aware tuning framework that includes distractor pages during training to improve robustness in retrieval-augmented settings, and an automated evaluation framework using multiple judge models. Experiments show Qwen2-VL-7B improves from 3.84 to 4.02 on a 5-point correctness scale after tuning.
+This paper introduces M-Longdoc, a benchmark of 851 open-ended question-answering pairs over 180 multimodal documents averaging 210.8 pages and ~121k tokens, along with an automated evaluation framework using three judge models (GPT-4o, Claude-3.5-Sonnet, Gemini-1.5-Pro) and a retrieval-aware tuning method that trains models with both gold-evidence and distractor pages. The benchmark is substantially larger in document length than prior work (47.5 pages for MMLongBench, the next closest), and the tuning method yields consistent gains for Qwen2-VL-7B (3.84→4.02).
 
 ## Strengths
 
-- **M-Longdoc fills a genuine gap in document length and answer depth.** At an average of 210.8 pages and 120,988 tokens per document, the benchmark far exceeds prior datasets (MMLongBench: 47.5 pages, 2,030.5 tokens). The open-ended question format is a meaningful departure from extractive QA benchmarks (Table 1, Table 2). This is a clear and well-motivated contribution.
+1. **Benchmark scale significantly exceeds prior work.** Documents average 210.8 pages and 120,988 tokens, compared to 47.5 pages for MMLongBench and ≤20 pages for SlideVQA (Table 1). This gap supports the claim that the benchmark captures genuinely longer documents than existing multimodal benchmarks.
 
-- **The retrieval-aware tuning produces consistent, measurable gains across all domains and question categories.** Qwen2-VL-7B improves from 3.84 to 4.02 overall, with gains in every row of Table 3 (academic: 4.03→4.17, product: 3.88→4.01, finance: 3.56→3.86; text: 4.08→4.31, figure: 3.83→4.00, table: 3.62→3.77). The pattern is systematic, not driven by a single category.
+2. **Automated evaluation achieves high human agreement on a preliminary study.** The aggregate score from three judge models (each sampled five times) shows a Pearson correlation of 88.9% (p<0.001) with human annotators on 100 samples (Section 3.4). The multi-judge, multi-sample aggregation strategy is a reasonable approach to reducing intra-model bias.
 
-- **The automated evaluation framework achieves strong alignment with human judgment.** The aggregated judge scores produce a Pearson correlation of 88.9% (p < 0.001) with human annotators on the preliminary study subset (Section 2.4). This provides empirical support that the automated scoring is reliable for open-ended answers.
+3. **Retrieval-aware tuning yields consistent gains across all domains and question categories.** Qwen2-VL-7B improves from 3.84 to 4.02 overall (4.7% relative), with gains in academic (4.03→4.17), product (3.88→4.01), and finance (3.56→3.86) domains, and across text, figure, and table question categories (Table 5). The consistency of the improvement strengthens the claim that the approach is broadly effective.
 
-- **The training corpus quality is verified.** A random subset of 100 training samples scores 4.82/5 on correctness (Section 3), and training documents are explicitly from non-overlapping companies/products/publication periods, reducing contamination risk (Section 3).
-
-- **The benchmark is diverse and balanced** across three domains (academic, product, financial) and three question categories (text: 271, figure: 283, table: 297), supporting broad evaluation of multimodal document understanding.
+4. **Ablation confirms the importance of multimodal inputs.** Removing image inputs drops figure-question accuracy from 3.83 to 3.37 and table-question from 3.62 to 3.38 (Table 6), justifying the paper's multimodal focus.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-- **No ablation isolating the distractor mechanism.** The method adds distractor pages at training time, but there is no control condition that trains on the same data *without* distractors. The 3.84→4.02 improvement over the base Qwen2-VL could be due to standard SFT on the training corpus rather than the retrieval-aware design specifically. This is a core claim of the paper (the tuning framework is "retrieval-aware") that cannot be verified from the current experiments. Adding a "Qwen2-VL + SFT w/o distractors" row to Table 3 would directly address this.
+1. **Missing ablation: the contribution of the distractor component is not isolated.** The paper's central methodological claim is that training with distractors (irrelevant pages) makes the model "retrieval-aware." However, there is no ablation comparing fine-tuning with distractors vs. fine-tuning on clean (gold evidence only) data. Without this control, the 0.18-point gain cannot be attributed to the distractor strategy — it may come entirely from domain-specific fine-tuning on the training corpus. This is the single most important experiment needed to validate the method's claimed novelty. The paper acknowledges RAFT (Zhang et al., 2024) as inspiration but does not distinguish itself experimentally.
 
-- **Tuning is demonstrated on only one open-source model.** The retrieval-aware tuning is applied only to Qwen2-VL-7B-Instruct (line 313). The paper states "Due to training instabilities with other open-source models" without specifying what failures occurred (OOM? loss divergence? poor convergence?). This makes the claimed generality of the "framework" unsubstantiated — it could be a model-specific recipe. At minimum, the paper needs to (a) report what was attempted on LLaVA-OneVision-7B and why it failed, or (b) soften the generality claims.
+2. **Single model, single run, modest gain with no variance reporting.** Only Qwen2-VL-7B with LoRA is successfully trained (LLaVA-OneVision is mentioned but could not be trained due to instabilities). The gain is 0.18 out of 5 (4.7% relative). No confidence intervals, standard deviations, or significance tests are reported. While greedy decoding (T=0) reduces output variance, the result is a point estimate from one model with one random seed, making it impossible to assess reliability. The claim that the approach "significantly improves the efficiency and effectiveness of multimodal document reading" is stronger than the evidence supports.
 
-- **The judge models used in the evaluation framework are never named.** Section 2.3 describes using "multiple leading multimodal models" (line 172) as judges with J=3, but never specifies which three models. Without knowing the judge models, the evaluation is not reproducible and the 88.9% human correlation cannot be assessed or replicated. This is a straightforward transparency issue — the models evaluated as generators (GPT-4o, Claude 3.5 Sonnet, Gemini 1.5 Pro) are named in Section 4.2, but it is never confirmed whether these are also the judges, nor whether the same judges were used for the preliminary human correlation study and the main results.
+3. **No experimental comparison to existing retrieval-aware tuning methods.** The paper cites RAFT (Zhang et al., 2024) as inspiration but does not adapt it as a baseline. Since the proposed method is essentially RAFT extended from text to multimodal documents, a comparison is needed to demonstrate that the multimodal adaptation adds value beyond a simple text-based RAFT applied to extracted text. The same applies to MuRAG (chen-etal-2022-murag), which is also cited but not compared.
 
 ### Minor
 
-- **Placeholder macros throughout the paper.** The macros `\datasize{}`, `\trainsize{}`, and `\performanceincrease{}` appear in the abstract (line 4), introduction (lines 22, 83, 85), results (line 349), and conclusion (lines 430, 433). These prevent the reader from assessing the actual scale of the benchmark and training corpus, and the exact performance gain. This must be resolved for publication.
+1. **Human evaluation validation is limited to 100 samples.** The 88.9% Pearson correlation is based on 100 samples from the preliminary study subset. No confidence intervals, per-domain breakdowns, or per-question-category agreement analyses are provided. While 100 samples is a reasonable starting point, the benchmark's main results rely entirely on this automated evaluation, and a larger validation (e.g., 200–300 samples) would substantially strengthen confidence.
 
-- **No variance estimates or confidence intervals.** All scores in Tables 1, 3, and 4 are reported as point estimates without standard errors or confidence intervals. Given the modest benchmark size (851 questions), this makes it difficult to assess whether the 0.18-point improvement (3.84→4.02) is statistically significant.
+2. **Potential circularity: judge models overlap with evaluated models.** The three judge models (GPT-4o, Claude-3.5-Sonnet, Gemini-1.5-Pro) are also evaluated as subjects in the main results (Table 5). The paper addresses intra-model bias (single judge favoring its own outputs) via multi-judge aggregation, but does not analyze whether judges systematically favor answers that match their own output style, or whether the human agreement would hold for judge-independent scoring. An inter-judge agreement analysis and a breakdown of whether each judge favors specific model outputs would clarify this risk.
 
-- **Potential circularity in model usage is not discussed.** The same unspecified pool of "leading multimodal models" is used for question generation (line 136), training answer generation (line 281: "leverage the respective question generator models to also produce a high-quality answer"), and evaluation judging. If the same or similar models serve multiple roles, the evaluation could exhibit biases that favor answers aligned with the judge models' own generation style. The paper does not discuss this risk.
+3. **Training data quality is validated using the same automated evaluator.** The paper reports an average correctness score of 4.82/5 on a random 100-sample subset of the training corpus, assessed by the same automated evaluation framework. Since this framework may share biases with the judge models, the 4.82 figure may not reflect true quality as judged by humans. Human validation on at least a subset of training samples would strengthen confidence in the training data.
 
-- **Annotator qualifications differ by domain.** Academic questions are verified by "expert annotators who are Ph.D. students and above in computer science," while finance and product questions use "professional annotators" (line 144). The paper does not discuss whether this difference could affect annotation quality or consistency across domains.
+4. **Yield rate of the question generation pipeline is not reported.** The paper reports that 80.1% of generated questions pass automated verification, and 80.9% of those pass human verification, but does not report the initial number of generated questions. Knowing the yield rate (how many of the original candidates survive to 851) would help assess potential selection biases in the benchmark.
 
-- **The choice of J=3 judges and K=5 samples per judge is stated without justification or sensitivity analysis.** While not a fatal flaw, a brief sensitivity study (e.g., showing that results are stable with J=2 or J=4) would strengthen confidence in the evaluation framework.
+5. **Benchmark, while long, is modest in question count per cell.** At 851 total questions, per-domain counts range from 261 (finance) to 311 (academic), and per-category counts range from 271 (text) to 297 (table). Per-domain × per-category cells have roughly 80–114 questions each. This limits the statistical power of fine-grained comparisons, though the overall benchmark remains useful as a focused evaluation set.
 
 ### Trivial
-
-- The preliminary study for human correlation uses only 100 samples (line 238). While reasonable for a preliminary check, the paper could acknowledge this limitation explicitly.
-- Table 4 shows text-based questions improve without images (4.08→4.22). The paper acknowledges this briefly (line 374) but could discuss the implication that images sometimes mislead the model more substantively.
+None.
 
 ## Nice-to-Haves
 
-- A comparison of M-Longdoc's difficulty against existing benchmarks (e.g., MMLongBench) on the same task, showing that model performance drops more sharply on M-Longdoc to quantify the additional challenge.
-- An ablation varying retrieval depth (k=1, 3, 5, 10) after tuning to show whether the method improves robustness to noise.
-- Sensitivity analysis of the evaluation framework to the number of judges (J) and samples per judge (K).
+- Larger human validation sample (e.g., 200–300) with per-domain and per-category agreement breakdowns.
+- Inter-judge agreement analysis and per-judge scoring behavior (e.g., does Gemini judge favor Gemini answers?).
+- Ablation varying the number of distractor pages (e.g., 1 distractor vs. 3 distractors vs. 5 distractors) to understand sensitivity.
+- Reporting of training and inference computational costs, since the paper claims "efficient" processing.
+- Confidence intervals or bootstrap estimates for the main results (Table 5).
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"The benchmark is too small (851 questions)"** → 851 questions over 180 documents is a reasonable size for a long-document benchmark, especially given that each document requires processing hundreds of pages. This is a matter of judgment, not an objective flaw.
-- **"The relative improvement of ~4.7% may not be practically meaningful"** → For a 7B model on a challenging benchmark, a consistent improvement across all domains and categories is practically meaningful. The critic's framing understates the systematic nature of the gains in Table 3.
-- **"The claim of being first to address retrieval setting is 'plausible but not deeply substantiated'"** → The paper clearly positions its contribution relative to prior work (MuRAG, REVEAL, RAFT) and the claim is appropriately scoped to "multimodal long documents." This is a reasonable novelty claim, not an overstatement that needs substantiation.
+- **Placeholder tokens (\performanceincrease{}, \datasize{}, \trainsize{}):** These are LaTeX macros to be filled — a formatting artifact, not an author error. Per hard rules, removed.
+- **"Benchmark size is relatively small" as a fatal weakness:** 851 questions for documents averaging 210 pages is a reasonable scope. The concern about statistical power is kept (Minor #5) but the framing as a fatal weakness is removed.
+- **"Preliminary study only 100 samples" as a structural flaw:** The study is explicitly called a *preliminary* study to motivate the method. The concern about evaluation validation is kept (Minor #1), but the criticism that 100 samples is "too small to draw strong conclusions about model weaknesses" misunderstands that this is a motivation, not the paper's main result.
+- **Critique that the method is "not novel in spirit" because it adapts RAFT:** This is a judgment about degree of novelty, not a factual error. The method is, by the authors' own admission, inspired by RAFT. The lack of experimental comparison to RAFT is kept as Major #3, but the generic "not novel" criticism without evidence of prior identical work is removed as insufficiently specific.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the core tension clearly: the benchmark is a solid, well-motivated empirical contribution, but the method validation is incomplete without an ablation that separates the effect of the distractor mechanism from standard SFT, and the evaluation framework lacks transparency about which models serve as judges. These are not inherent flaws in the paper's direction but gaps in the current execution.
+None beyond the paper's own contributions. The reviews surface the expected tension between a solid benchmark contribution and a method whose core design choice (distractor training) lacks an isolating ablation. No reviewer identified a genuinely novel perspective on the problem that the paper itself does not articulate.
 
 ## Suggestions
 
-1. **Add the distractor ablation.** Fine-tune Qwen2-VL-7B on the same training corpus *without* distractor pages and compare to the retrieval-aware variant. This single experiment would clarify whether the gains come from the distractor mechanism or from standard SFT, and would be the most impactful addition.
-
-2. **Name the judge models explicitly** in Section 2.3. State which three multimodal models were used for evaluation, and confirm whether the same set was used for both the human correlation study and the main results.
-
-3. **Report confidence intervals or bootstrap estimates** for all scores in Tables 1, 3, and 4 so readers can assess the reliability of the reported improvements.
-
-4. **Replace all placeholder macros** (`\datasize{}`, `\trainsize{}`, `\performanceincrease{}`) with explicit numbers.
-
-5. **Explain the "training instabilities"** encountered with other open-source models — was it OOM, loss divergence, or poor convergence? This would clarify whether the limitation is fundamental or addressable with different hyperparameters or hardware.
-
-6. **Discuss the risk of circularity** from using the same pool of models for question generation, answer generation, and evaluation.
-
-7. **Acknowledge the single-model limitation** as a caveat in the conclusion.
+1. **Run the critical ablation:** Compare Qwen2-VL-7B fine-tuned on (a) gold evidence only, (b) gold + distractors (current method), and (c) no fine-tuning (baseline). This single experiment will either validate or refute the core claim about retrieval-aware tuning.
+2. **Expand human evaluation** to at least 200–300 samples from the full benchmark, with per-domain and per-category breakdowns, and report confidence intervals for the correlation.
+3. **Add an adapted RAFT baseline** (using extracted text from document pages) to quantitatively demonstrate that the multimodal adaptation adds value beyond the text-only counterpart.
+4. **Tone down novelty claims** or clearly situate the method relative to RAFT and MuRAG, stating explicitly what the multimodal extension adds.
+5. **Report the yield rate** of the question generation pipeline (initial count → after automated → after human) to assess potential selection biases.
+6. **Validate training data quality via human annotation** on a sample, given the 4.82 score is produced by the same automated evaluator used for main results.
 
 ## Score and Decision
 
-The M-Longdoc benchmark is a genuine contribution: it addresses a clear gap with substantially longer documents and open-ended questions, and the benchmark construction pipeline is well-documented. The retrieval-aware tuning method is plausible and shows consistent gains. However, the paper's current form has significant gaps: the core methodological contribution (distractor mechanism) is not ablated from standard SFT, the evaluation is not reproducible without named judge models, and placeholder macros prevent the reader from assessing the scale. These issues are fixable in revision, but they prevent the paper from meeting the standard for acceptance in its current form.
+The paper makes a solid benchmark contribution — M-Longdoc is genuinely longer and more challenging than prior multimodal document QA benchmarks, and the automated evaluation framework is well-motivated. The tuning method shows promising results but is under-validated: the missing distractor ablation and single-model evidence prevent the paper from fully supporting its strongest claims. With the critical ablation and expanded human validation, the paper could become a strong contribution.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL DECISION: <orange>Accept</orange>

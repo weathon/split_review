@@ -1,20 +1,20 @@
-I now have all the evidence I need. Let me compose the final consolidated review.
+Now I have a thorough understanding of the paper and can write the consolidated review.
+
+---
 
 ## Summary
 
-The paper proposes framing offline model-based reinforcement learning (MBRL) as a Bayes Adaptive Markov Decision Process (BAMDP), where belief over an ensemble of dynamics models is adaptively updated with experience rather than treated uniformly. The authors introduce Continuous BAMCP, a novel planning algorithm extending BAMCP to continuous state/action spaces via double progressive widening (DPW), and integrate it into a search-based policy iteration framework. Three variants (BA-MBRL, BA-MCTS, BA-MCTS-SL) are evaluated on 12 D4RL MuJoCo tasks and three tokamak plasma control tracking tasks.
+This paper frames offline model-based reinforcement learning (MBRL) as a Bayes Adaptive Markov Decision Process (BAMDP), a principled framework for handling model uncertainty over an ensemble of learned dynamics models. It introduces Continuous BAMCP — an extension of PUCT with double progressive widening applied to the BAMDP MDP⁺ formulation — and integrates this planner as a policy improvement operator within a search-based policy iteration loop. Three variants (BA-MBRL, BA-MCTS, BA-MCTS-SL) are evaluated on 12 D4RL MuJoCo tasks and 3 tokamak target-tracking tasks, consistently outperforming several established offline RL baselines.
 
 ## Strengths
 
-1. **Principled Bayesian treatment of model uncertainty in offline MBRL.** The paper is the first to model offline MBRL as a BAMDP with adaptive belief updates over ensemble members (Eq. \ref{b'}), incorporating belief-weighted reward penalties (Eq. \ref{p-rwd}). The BA-MBRL variant (which adds Bayesian belief updates without deep search) achieves an average normalized score of 71.06 across D4RL MuJoCo tasks, outperforming the reported scores of COMBO (66.83) and Optimized (65.16) (Table 1). On the tokamak tasks, BA-MBRL (-28.03 average tracking error) substantially improves over CQL (-60.49) and Optimized (-70.98) (Table 6).
+1. **Principled BAMDP framing for offline MBRL with strong empirical support.** The paper formalizes offline model-based RL as a BAMDP, using deep ensembles for practical belief updates (Equation 4) and an adaptive reward penalty (Equation 6) that evolves with the belief. Even the simplest variant BA-MBRL (without search) achieves an average D4RL score of 71.06, substantially outperforming the best baseline Optimized (65.16) and demonstrating that the BAMDP framing alone improves performance over prior offline MBRL methods (Table 1).
 
-2. **Novel continuous BAMCP algorithm.** The paper extends BAMCP to continuous state/action spaces and stochastic transitions via DPW, correctly identifying that DPW breaks the root-sampling lemma of BAMCP and motivating a PUCT-based formulation (Section \ref{ContBAMCP}). This is a non-trivial extension of prior discrete BAMCP methods.
+2. **First MCTS-based Bayes-adaptive planner for continuous state/action spaces with stochastic transitions.** The proposed Continuous BAMCP algorithm (Algorithm 2) extends BAMCP using double progressive widening, enabling tree search in continuous spaces while maintaining Bayesian belief updates. BA-MCTS and BA-MCTS-SL further improve over BA-MBRL (average scores 74.62 and 74.45 vs. 71.06), showing that deep search on top of the Bayesian framework yields additional gains across the 12 D4RL tasks (Table 1).
 
-3. **First integration of deep search into offline MBRL policy iteration.** The search-based policy improvement operator (Algorithm 3) demonstrates that incorporating MCTS-style planning during training improves policy quality: both BA-MCTS (74.45 avg) and BA-MCTS-SL (74.62 avg) outperform BA-MBRL (71.06) on D4RL (Table 1). The tokamak results show even larger gaps (BA-MCTS-SL -24.11 vs. CQL -60.49 in Table 6), confirming the benefit of "RL + Search" in offline continuous control.
+3. **Comprehensive empirical validation on diverse domains.** The paper evaluates on 12 D4RL MuJoCo tasks (three agents × four data qualities) and 3 target tracking tasks in a stochastic tokamak control simulator (28D state, 14D action), consistently outperforming multiple SOTA model-free and model-based offline RL methods (CQL, COMBO, MOReL, MOPO, Optimized, Sampled EfficientZero). The tokamak domain demonstrates applicability to a challenging, high-dimensional, stochastic real-world-inspired problem.
 
-4. **Evaluation on a challenging real-world domain.** The tokamak control experiments involve a 28-dim state space, 14-dim action space, and stochastic neural network dynamics. Results consistently outperform strong baselines across three tracking tasks with shared ensembles for the model-based comparisons (Table 6, Figure 2), providing more controlled evidence than the D4RL benchmarks.
-
-5. **Ablation structure across three variants.** The three variants (BA-MBRL → BA-MCTS → BA-MCTS-SL) provide layered evidence isolating the effects of Bayesian belief updates and deep search, with both components showing additive improvements across most tasks.
+4. **Insightful analysis of policy update mechanisms.** The paper compares supervised learning-based policy improvement (BA-MCTS-SL) with policy gradient methods (BA-MCTS), finding that supervised learning yields smoother learning curves but can struggle with continuous action spaces due to finite action sampling. This analysis (Section 5, discussion of Table 1 and training curves) provides practical guidance for algorithm design in continuous control.
 
 ## Weaknesses
 
@@ -23,58 +23,59 @@ None.
 
 ### Major
 
-1. **No clean ablation isolating belief adaptation from the reward penalty.** The BA-MBRL variant differs from the "Optimized" baseline on two dimensions simultaneously: (i) adaptive vs. uniform belief weighting in the penalty (Eq. \ref{p-rwd}), and (ii) sampling transitions from the belief-updated mixture vs. uniformly sampled members. The paper does not include a controlled experiment that holds everything fixed and varies only the belief update (adaptive vs. uniform). As a result, the improvement of BA-MBRL over Optimized (71.06 vs. 65.16 on D4RL) cannot be cleanly attributed to the belief adaptation mechanism versus other implementation differences (the baselines are cited from other papers, as acknowledged). This is the single most important missing piece for the paper's core claim about Bayesian RL.
-
-2. **D4RL baseline comparisons are not controlled.** Table 1 reports baseline numbers "taken from the original papers" (caption, line 234). Differences in model architectures, training schedules, evaluation protocols, and hyperparameters can produce score swings of 5–10 points on these tasks. The paper claims in the abstract to "significantly outperform state-of-the-art... methods on twelve D4RL MuJoCo benchmark tasks," but the observed average improvement over the strongest baseline (COMBO, 66.83) is about 4–8 points across the three proposed variants (71.06–74.62). While the results are suggestive, the uncontrolled comparison weakens this headline claim. The tokamak experiments (Table 6) partially mitigate this concern with shared ensembles, but the D4RL claim remains the paper's main quantitative contribution.
+1. **The tokamak evaluation uses a learned model as the "ground truth" simulator, weakening the real-world claim.** The paper states (line 292): "we use a well-trained data-driven dynamics model... as a 'ground truth' simulator." The offline dataset (725k transitions) is generated from this same model. This means the entire tokamak evaluation is in-simulation, testing how methods perform on an approximate (and potentially biased) version of the real system that shares the same data distribution as the planning model. While the paper is transparent about this (using scare quotes), it does not discuss the validation of the simulator, the distribution shift between training and evaluation models, or the risk of overfitting to the learned simulator. This substantially weakens the "real-world demonstration" claim. The D4RL results stand independently, but the tokamak results should be framed more cautiously, and additional analysis (e.g., held-out validation, sensitivity to the simulator quality) is needed.
 
 ### Minor
 
-3. **Action exploration term in pseudocode is ambiguous.** The text (line 142) correctly states that actions are selected "according to the UCT rule" and that the algorithm is based on PUCT (line 145). The pseudocode (Algorithm 2, line 119) uses `\tilde{Q}((s,h), x)` without defining whether this includes the UCB exploration bonus. While the intention is clear from the text, the pseudocode should explicitly include the exploration term or define `\tilde{Q}` to avoid ambiguity.
+2. **The ablation study does not fully isolate the belief adaptation from the penalty design.** The reward penalty (Eq. 6) replaces Optimized's uniform ensemble weights with adaptive belief weights. A critical baseline is missing: using the adaptive belief for dynamics sampling and state selection (Eq. 7/StatePW) but keeping the reward penalty with *uniform* weights. Without this comparison, it is unclear whether the improvement of BA-MBRL over Optimized comes from the Bayesian belief update, the adaptive penalty weights, or their interaction. The paper would be substantially strengthened by adding this ablation.
 
-4. **No computational cost analysis.** The paper does not report wall-clock time, simulation count, or training cost. MCTS with an ensemble of dynamics models applied even at 10% of states is computationally expensive relative to standard offline MBRL methods. The paper mentions the 10% ratio (line 238) but provides no runtime comparison.
+3. **The paper does not discuss whether PUCT's convergence conditions hold for the BAMDP MDP⁺ formulation.** The paper correctly notes (lines 145-146) that PUCT is "provably consistent" for MDPs and that it can be applied to the MDP⁺. However, PUCT's convergence guarantees rely on smoothness assumptions about the optimal Q-function over the state-action space. Since the MDP⁺ state space (s, b(θ)) is continuous and the transition kernel involves belief updates, these assumptions are non-trivial. The paper does not discuss whether they plausibly hold, nor does it provide any new theory. Given that the claims of a "novel" planning algorithm rest partly on such guarantees (inherited or otherwise), this gap should be addressed.
 
-5. **No sensitivity analysis for hyperparameters.** The paper does not report the ensemble size K, penalty coefficient λ, or DPW growth parameters (α, β), nor how they were selected (tuning set? held-out validation?). These are important design choices that affect performance.
+4. **Key hyperparameters are not reported in the visible main text.** The search budget \(E\), DPW exponents \(\alpha, \beta\), reward penalty coefficient \(\lambda\), ensemble size \(K\), and the warm-up duration for BA-MCTS-SL are not mentioned in the main paper. These may be in the (stripped) appendix, but their absence from the visible text makes reproducibility difficult for a reader without the full submission.
 
-6. **High variance on some tasks without significance testing.** Several standard deviations are large (e.g., BA-MCTS on Hopper medium: 14.0; BA-MCTS-SL on β_n tokamak: ±17.98 on a mean of -37.03). Baselines report no std in Table 1, so statistical overlap is unknown. No confidence intervals or significance tests are reported for the main results.
+5. **The "first algorithm to successfully integrate Bayesian RL, offline MBRL, and deep search" claim (Contribution 3) is somewhat aggressive.** MuZero already integrates deep search with offline learning (via the reanalyse technique) and Sampled EfficientZero extends this to continuous control. While neither uses Bayesian RL nor explicit ensemble uncertainty, the integration *pattern* (search-based policy improvement + policy iteration) is not entirely new. The specific three-way combination is novel, but the "first" framing invites unnecessary debate.
 
-7. **Figure 1 discusses EfficientZero without direct comparison to proposed methods.** Figure 1 shows learning curves for Sampled EfficientZero on D4RL, but the paper's own methods are not plotted alongside for comparison. The discussion is qualitative and supports a point about SL-based policy updates, but a side-by-side comparison would be more informative.
+6. **BA-MCTS-SL requires a warm-up phase using BA-MBRL on Walker2d "random" datasets.** The paper mentions this (line 238) but does not analyze why. Whether the issue stems from poor policy/value initialization, unreliable search results early on, or the SL update itself is left unexplored. A brief analysis would strengthen the paper.
 
 ### Trivial
 
-8. **Missing limitations section.** The paper's conclusion focuses on future work but does not explicitly acknowledge limitations such as: (a) the finite action approximation during search is a notable weakness for continuous control, (b) the method's reliance on a well-calibrated ensemble, and (c) the high computational overhead.
+7. The paper uses \(N((s, h)) > 1\) as the condition for recursive simulation vs. leaf evaluation in Algorithm 2 (line 99). The choice of \(>1\) rather than \(>0\) is standard PUCT (first visit always expands), but a brief justification would help clarity.
+
+8. The policy input representation could be clarified. The paper says the policy takes \((s, h)\) as input but uses a feedforward network. The implied implementation is concatenating the belief vector \(b(\theta)\) (a fixed K-dimensional vector) to the state \(s\). Making this explicit would prevent reader confusion.
 
 ## Nice-to-Haves
-- An ablation comparing adaptive vs. uniform belief weighting while keeping everything else fixed (this would cleanly isolate the central claim about Bayesian RL).
-- Wall-clock time or simulation budget comparisons against baselines.
-- Sensitivity analysis for the DPW growth parameters (α, β), the penalty coefficient λ, and the 10% search ratio.
+
+- A sensitivity analysis varying the search ratio (0%, 10%, 25%, 50%, 100%) on one or two representative MuJoCo tasks to characterize the marginal value of search.
+- A computational cost comparison (wall-clock time or FLOPs) between BA-MCTS variants and baselines.
+- Confidence intervals for baseline D4RL numbers from original papers where available (e.g., Optimized, COMBO) to assess statistical significance.
+- A brief discussion of how the reward likelihood is computed in the belief update (Eq. 5) for deterministic reward functions.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-- **"Missing exploration term makes algorithm non-functional"** — The text clearly states UCT (line 142) and PUCT (line 145) are used; `\tilde{Q}` in PUCT convention includes the exploration bonus. The critic's claim of a non-functional algorithm is not supported by the paper content.
-- **"Introduction framing about AlphaZero/scaling law is overwrought"** — This is a stylistic opinion about writing, not a factual weakness. The analogy is used as motivation, which is standard practice.
-- **"State representation uses both h and b(θ) redundantly"** — This is a design choice, not a flaw. The algorithm stores both for node identity and belief tracking respectively.
-- **"Root sampling discussion is too brief"** — The paper provides a footnote explaining why DPW breaks the lemma; the level of detail is appropriate for a paper focused on empirical contributions.
+
+- **Figure 1 caption contradiction claim:** The reviewer claimed the caption "Performance of Sampled EfficientZero" contradicts the content, saying the text above discusses BA-MCTS-SL training curves. This is factually incorrect. The text above (line 238) references **Figure 3** (in the appendix) for BA-MCTS-SL curves. Figure 1 correctly shows Sampled EfficientZero (a baseline), and the text immediately following (line 290) explicitly states "The evaluation results are presented in Figure 1." The caption and content are consistent. **REMOVED** (factually wrong).
+
+- **Baselines are too old (2020–2022):** The reviewer speculates that "by 2026 there are likely newer offline MBRL methods" but does not name any concrete papers. The paper compares against a standard set of well-established baselines (MOPO, MOReL, COMBO, Optimized, CQL, Sampled EfficientZero). Speculation about methods that do not exist in the review context is not a valid criticism. **REMOVED** (speculative; no concrete methods identified).
+
+- **Feedforward network vs. RNN confusion:** The reviewer claimed that using \((s, h)\) as input with a feedforward network is contradictory. The paper's implementation encodes the belief as a fixed K-dimensional vector \(b(\theta)\) appended to the state \(s\), which is standard for feedforward networks of input dimension \(d + K\). The paper's footnote (line 148) clearly states that the belief is a function of history via the recursive update, not the raw history sequence. **REMOVED** (misunderstanding of standard encoding).
+
+- **Penalty is "an orthogonal heuristic":** The reviewer called the belief-weighted reward penalty "an orthogonal heuristic" to the Bayesian framework. The paper (line 79) explicitly states that adapting the belief weights in the penalty is part of its novelty and a natural extension of the Bayesian framework. **REMOVED** (incorrect characterization; the penalty is consistent with the Bayesian framing).
 
 ## Novel Insights
-None beyond the paper's own contributions. The reviews largely focus on evaluation gaps rather than surfacing new observations about the method.
+
+The reviewer's most valuable insight is that the benefit of the Bayesian framework cannot be cleanly attributed because the ablation conflates belief-adaptive dynamics sampling with belief-adaptive penalty weighting. This is a genuinely useful observation — the paper would be significantly strengthened by a version that keeps uniform penalty weights while using the adaptive belief for dynamics sampling only. Additionally, the tokamak evaluation's use of a learned simulator as the evaluation environment, while transparent, creates a circularity (both the planning model and the evaluation model are trained from the same data distribution) that the paper does not adequately address.
 
 ## Suggestions
-1. Run a controlled ablation on D4RL (even a subset of tasks) that compares BA-MBRL with adaptive belief vs. the exact same algorithm with uniform belief, to cleanly isolate the benefit of Bayesian adaptation.
-2. Re-implement at least one strong baseline (e.g., COMBO) in the same codebase on a subset of D4RL tasks to provide controlled evidence for the main claim.
-3. Explicitly define the action selection formula in Algorithm 2 by writing out `Q + c * sqrt(log(N_parent) / N_child)` or providing the definition of `\tilde{Q}`.
-4. Report wall-clock time per training iteration and total training cost.
-5. Add a brief limitations paragraph to the conclusion.
+
+1. Add the critical ablation: adaptive belief for dynamics sampling + uniform-weight penalty vs. full adaptive belief + adaptive penalty. This cleanly isolates the Bayesian belief update's contribution.
+2. Tone down the tokamak claims or add validation that the learned simulator faithfully reproduces real tokamak behavior (e.g., comparison on held-out real data, or at minimum a discussion of known failure modes).
+3. Either provide a brief sketch of why PUCT's consistency should carry over to the BAMDP MDP⁺ (plausible Lipschitz assumptions on the Q-function over the extended space), or explicitly frame the planning algorithm as an empirical adaptation without theoretical guarantees.
+4. Report hyperparameter values (\(\alpha, \beta, \lambda, E, K\)) in the main text.
+5. Analyze the warm-up requirement for BA-MCTS-SL — is it due to unreliable search early on, poor initialization, or the SL update itself?
+6. Clarify the policy input format: state \(s\) concatenated with belief vector \(b(\theta)\) (fixed K-dimensional), fed into a standard feedforward network.
 
 ## Score and Decision
 
-**Originality:** Good — first application of BAMDP to offline MBRL; novel continuous BAMCP algorithm.  
-**Importance of question:** High — handling model uncertainty in offline MBRL is a central challenge.  
-**Claims support:** Moderate — the core claims are supported by the data but weakened by uncontrolled D4RL baselines and missing belief-adaptation ablation.  
-**Soundness:** Adequate — the algorithm design is sound but evaluation gaps reduce confidence.  
-**Clarity:** Generally clear; minor ambiguity in pseudocode.  
-**Value to community:** Moderate — the BAMDP framing and continuous BAMCP algorithm are useful contributions, but evaluators should verify the claims with controlled comparisons before relying on them.
+The paper makes a solid contribution: the BAMDP framing of offline MBRL is principled and empirically validated, the Continuous BAMCP planner is a reasonable adaptation of PUCT to the BAMDP setting, and the search-based policy iteration framework yields consistent improvements across 12 D4RL tasks. The main weaknesses — the missing ablation, the tokamak evaluation limitation, and the lack of convergence discussion — are addressable and do not invalidate the core claims. The D4RL results alone provide strong evidence for the method's efficacy. The paper would benefit from revisions to clarify novelty and add ablations, but the current form has sufficient substance for acceptance.
 
-The paper makes a genuine conceptual contribution (BAMDP for offline MBRL) and introduces a nontrivial algorithmic extension (continuous BAMCP). The tokamak results are well-controlled and compelling. However, the main quantitative evidence on D4RL relies on uncontrolled baseline comparisons, and the central claim about belief adaptation benefits is not cleanly ablated. These gaps are addressable but non-trivial in the current draft.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

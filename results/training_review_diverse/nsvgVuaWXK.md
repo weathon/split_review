@@ -1,90 +1,88 @@
-I now have a thorough understanding of the paper. Let me write the consolidated review.
+Now I have a thorough understanding of the paper and all the reviews. Let me produce the final consolidated review.
 
 ---
 
 ## Summary
 
-This paper studies transfer learning in partially observable contextual bandits, where agents have incomplete contextual information and access to expert data with hidden confounders. It makes three main contributions: (1) formulating the estimation of causal effect bounds as functional optimization problems and developing a sequential LP Monte-Carlo sampling algorithm with convergence guarantees; (2) incorporating these causal bounds into classical bandit algorithms (MAB, contextual bandit, function approximation) and proving improved regret bounds — most notably improving the dependence on policy space size from √|Π| to √log|Π|; (3) proving near-optimal lower bounds and providing experimental validation.
+This paper proposes a framework for transfer learning in partially observable contextual bandits. It converts the transfer problem into computing causal bounds (confidence intervals for causal effects) via optimization, develops a Monte Carlo algorithm with sequential LP solving that achieves 100% valid samples, and then uses these bounds to improve bandit algorithms across three tasks: MAB, contextual bandits with finite contexts, and contextual bandits with function approximation. The main theoretical contribution is improving the regret dependence on the policy space from √|Π| to √log|Π| in the function approximation setting, supported by matching lower bounds.
 
 ## Strengths
 
-1. **Tighter causal bounds via sequential LP with guaranteed validity.** The sampling algorithm (Alg. 1) sequentially solves linear programs to enforce all joint-distribution constraints, achieving 100% valid samples compared to <10⁻⁴ for prior LP-based methods (CEbound). Numerical experiments confirm the resulting bounds are narrower (e.g., E[Y|do(A=0)] shrinks from [0.283,0.505] to [0.371,0.466]). This is a concrete algorithmic improvement over prior work in causal bound computation.
+- **Novel improvement in regret dependence on policy space size**: The paper proves that in the function approximation task (Task 3), regret scales as √(𝔼_W[𝒜^*(W)] T log(δ⁻¹|ℱ^*|log T)), reducing dependence on policy space size from √|Π| (prior work, e.g., boundingCE_continuous_IV) to √log|Π|. This is stated in the abstract, elaborated after Theorem 4, and discussed in the "Discussion" section.
 
-2. **Improved regret dependence from √|Π| to √log|Π| in function approximation.** Theorem 12 (and the summary in Table 1) shows that by using causal bounds to shrink the function class from ℱ to ℱ* and the action set to 𝒜*(w), the regret improves from 𝒪(√(|𝒜| T log(|ℱ|))) to 𝒪(√(𝔼_W[|𝒜*(W)|] T log(|ℱ*|))). Since |ℱ*| ≤ |ℱ| and 𝔼_W[|𝒜*(W)|] ≤ |𝒜|, this is a clear theoretical improvement with qualitatively better dependence on the function class size (logarithmic vs. linear in |Π|).
+- **100% valid sample proportion in causal bound estimation**: The proposed Monte Carlo algorithm (Algorithm 1) with sequential LP solving achieves 100% valid sample proportion for the feasible region (Table 1, fourth row), dramatically outperforming prior methods (e.g., CEbound's <10⁻⁴ and direct sampling ≈0). This directly supports the claim of more reliable causal bound estimation.
 
-3. **Provable convergence of the Monte-Carlo sampling algorithm.** Proposition 1 establishes convergence in probability under mild coverage assumptions on the sampling distribution, and Proposition 2 strengthens this to almost-sure convergence when augmented with a local optimization oracle. These provide theoretical justification that the algorithm can recover the optimal discretized bounds.
+- **Incorporation of estimation error into causal bounds**: The optimization problem in Theorem 1 explicitly includes a discrepancy parameter ε for estimation error, and the algorithm samples θ from distributions accounting for uncertainty (Eq. 13). The paper notes this is neglected in prior literature (e.g., boundingCE_continuous_IV, CEbound), making the bounds more practical for finite-sample settings.
 
-4. **Near-optimal minimax lower bounds.** Theorems 11 and 13 prove lower bounds matching the upper bounds up to logarithmic factors (e.g., Ω(√(𝔼_W[|𝒜*(W)|] log|ℱ*| T)) in Theorem 13), showing the algorithms are essentially optimal within the problem class.
+- **Matching lower bounds for multiple settings**: The paper provides minimax lower bounds for contextual bandits with finite contexts (Theorem 3) and with function approximation (Theorem 5), demonstrating near-optimality of the proposed algorithms up to logarithmic factors. The lower bounds depend on the reduced action set, confirming the theoretical advantage of using causal bounds.
 
-5. **Incorporation of estimation error into the optimization formulation.** The constraints in Theorem 1 explicitly include |F(a,y,w)−F̂(a,y,w)| ≤ ε and |F(u)−F̂(u)| ≤ ε, and Proposition 7 provides an ε-identification sample-size bound for the fully identifiable case (Task 2). This treats a practical issue that prior literature (CEbound, boundingCE_continuous_IV) often neglects.
+- **Systematic handling of three transfer learning tasks**: The paper structures the problem into three increasingly challenging tasks (MAB, partially observable contextual bandit with full identification, and partially observable contextual bandit with partial identification), each with tailored algorithms and theoretical guarantees.
+
+- **Numerical validation showing improvements**: Experiments demonstrate that the proposed algorithms outperform classical UCB and naive transfer (UCB-) in MAB (Figure 1), and outperform the state-of-the-art FALCON in function approximation (Figure 2), with results averaged over 50 repetitions with error bars.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
 
-None.
+- **Discretization gap for continuous variables is unresolved**: The paper admits (lines 586–588) that "it is still an open problem whether the solution to the discretized problem will converge to the solution to the original functional optimization problem as the discretization becomes finer." Despite this, the entire bandit improvement argument (Theorems 7–13) assumes the true expected reward lies within the computed interval [l(a), h(a)] or [l(w,a), h(w,a)]. The convergence results (Propositions 4 and 5) establish convergence to the *discretized* solutions only, not to the true continuous bounds. For discrete variables the discretization is exact, which covers the experiments, but the paper's framing and title claim generality to continuous variables. Without a convergence guarantee or finite-sample error bounds on the discretization error, the regret theorems for continuous settings are conditional on an unverified assumption. The paper also says (line 411) that "the approximation error converges to zero for good distributions," which is not formalized. This gap needs to be resolved (e.g., by providing Lipschitz/Hölder regularity conditions under which convergence is guaranteed) or the paper's scope should be explicitly restricted to discrete settings.
+
+- **Estimation error handling is heuristic, not rigorous**: In Algorithm 1, parameters θ_{ijk} and θ_l are sampled from uniform distributions over ε-balls. Only a finite number B of samples are drawn, and the resulting bounds l(a) and h(a) are the minimum and maximum over these B sampled parameter values. This does *not* produce an interval that provably contains the true causal effect with high probability, because one would need to take the infimum/supremum over the *entire* ε-ball, not just over a finite set of sampled points. Propositions 4 and 5 set the discrepancy parameter to 0, so they do not address this. The claim of having "incorporated estimation error" is therefore imprecise — the method provides a heuristic approximation rather than a rigorous confidence bound. The paper would benefit from replacing this with a rigorous procedure (e.g., using concentration inequalities to construct a set Θ that contains the true θ with probability 1−δ, then optimizing over Θ via the LP-based method).
+
+- **Choice of the linearly independent variable set S is underspecified**: The algorithm requires selecting a linearly independent index set S of the linear constraints (Eq. 77). The paper does not explain how to construct such a set in practice or whether the results are sensitive to this choice. Since different choices of S could lead to different induced sampling distributions, this is a meaningful implementation concern that merits discussion.
 
 ### Minor
 
-1. **Limited connection between estimated bounds and regret analysis.** The regret theorems (Thms 3, 5, 7) assume the causal bounds [l(a),h(a)] are known exactly and deterministically. In practice, these bounds are estimated via the sampling algorithm, which introduces random error due to finite samples, discretization, and the Monte-Carlo procedure. The paper discusses estimation error in the optimization (the ε parameter) and samples θ from intervals of width 2ε, but the regret analysis never formally accounts for how uncertainty in the bounds propagates to regret. If estimated bounds are too wide, the regret improvement degrades; if too narrow, bounds may not contain the true causal effect. A high-probability guarantee connecting the bound estimation procedure to the regret would significantly strengthen the work.
+- **No evaluation of sensitivity to discretization resolution**: The numerical experiments use binary variables (natural discretization), so they do not test how bounds and regret change with discretization granularity. For the paper to support its claim of handling continuous variables, experiments showing convergence of bounds as the number of bins increases would be valuable.
 
-2. **Discretization gap for continuous random variables.** Propositions 1 and 2 establish convergence of the sampling algorithm to the solutions of the *discretized* optimization problem (Eq. 10). The paper explicitly acknowledges "it is still an open problem whether the solution to the discretized problem converges to the solution of the original functional optimization problem as the discretization becomes finer" (line 587). While the paper mentions that discretization error converges to zero "for good distributions" (line 411), no formal conditions or proof are provided. This limits the scope of the theoretical guarantees to discrete settings.
+- **Sample size calculation in Task 2 (Proposition 2) is limited**: The ε-identification result assumes all variables are discrete with bounded support and requires a constant lower bound κ on the fraction of samples containing each (y,u) tuple. The sample size bound scales with |𝒰|²|𝒴|²/κ, which can be large. This is not a fatal issue but reduces the practical applicability of the result for settings with many categories.
 
-3. **Computational cost of sequential LP sampling is unanalyzed.** Algorithm 1 solves up to |S| linear programs per sample, where |S| = n_𝒜 n_𝒴 n_𝒲 n_𝒰 − n_𝒜 n_𝒴 n_𝒲 − n_𝒰 + 1. For moderate discretization grids this becomes large, and the paper does not report wall-clock time, discuss scaling to larger variable domains, or provide guidance on choosing the independent variable index set S (whose choice affects the induced sampling distribution).
-
-4. **Empirical evaluation is limited.** The function approximation experiment (Fig. 2) uses a single synthetic quadratic function class of size 50 with one random instantiation. No comparison with other transfer-learning baselines (beyond FALCON) is provided, and no real-world dataset is used to demonstrate practicality. For a paper making strong claims about "orders of magnitude faster convergence rates," the experimental validation is too narrow.
-
-5. **Illustrative example contains a computational error.** In the running example (lines 246–254), the paper computes E[Y|do(A=0),W] = 10×0.1 + 0.9×0.9 = 1.81. However, from the reward table (Table 1), do(A=0) yields reward 0 (U=0) or 1 (U=1), so the correct value is 0×0.1 + 1×0.9 = 0.9. The computation 10×0.1 + 0.9×0.9 = 1.81 corresponds to do(A=1). The values for the two arms are swapped. This does not affect the core technical contributions but should be corrected.
+- **Gap-dependent and minimax bounds contain unexplained constants**: The UCB algorithms use specific constants (√(2log T / n_a(t)) in MAB versus √(log t / n_{w,a}(t)) in CB) with no justification for the change. The constant 8 appears in Theorem 8 without derivation. While common in the bandit literature, the discrepancy is worth clarifying.
 
 ### Trivial
-
-- The objective in Eq. (6) involves division by Σ_{j'} x_{ij'kl}, which can be zero when no probability mass falls in a discretization cell. The paper does not address this degenerate case.
-- The constraint set in Theorem 1 is partially redundant (some constraints are implied by others). While this does not cause inconsistency, a cleaner formulation would improve readability.
+None that survive filtering — the minor formatting issues in the paper are typical of submitted manuscripts.
 
 ## Nice-to-Haves
 
-- A formal analysis integrating the bound-estimation uncertainty (ε, sampling noise) into the bandit regret, showing how the regret degrades gracefully with estimation quality.
-- A discussion or simple experiment on how the choice of S (the linearly independent variable index set) affects the induced sampling distribution and the resulting bounds.
-- Reporting wall-clock time per sample for the sequential LP algorithm to help readers assess practical feasibility.
+- **Computational complexity analysis**: The sequential LP sampling solves O(n_𝒜 n_𝒴 n_𝒲 n_𝒰) LPs per sample, which could be prohibitive for moderate discretization sizes. A discussion of computational cost and possible approximations would help practitioners.
+- **Guidance on choosing the discrepancy parameter ε**: The paper suggests ε = 1/(2√n) but does not discuss how to set ε when n varies across different marginals or when the sampling distribution for θ is chosen differently (e.g., truncated Gaussian vs. uniform).
+- **Extension to handle estimation error rigorously**: As described in the Major weaknesses, replacing the heuristic ε-ball sampling with a procedure that provides formal confidence sets (e.g., using concentration inequalities and optimizing over the full confidence region) would significantly strengthen the paper.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+The following points from the reviews are removed per policy:
 
-- **"Regret bound for arms with h(a) < μ^* appears incorrect."** After careful analysis, this bound is correct. The algorithm truncates the UCB of each arm at h(a). For arms with h(a) < μ^*, the truncated UCB never exceeds h(a). The optimal arm's UCB is at least μ^* with probability ≥ 1−1/t² (standard UCB confidence bound), and its truncated UCB is min{U_{a^*}(t), h(a^*)} ≥ μ^* since h(a^*) ≥ μ^*. Therefore, arm a is only pulled when the confidence bound fails (probability ≤ 1/t²), yielding expected pulls ≤ Σ 1/t² = π²/6. The critic's claim that Ω(1/(μ^*−h(a))²) samples are needed misunderstands how the truncation operates: the causal bound *pre-emptively* caps exploration — no learning of the gap is required.
+- **"The 100% valid sample proportion is trivial because the algorithm ensures feasibility"**: This misunderstands the contribution. The method is *designed* to achieve 100% validity via LP-based sequential sampling, and the comparison with prior methods (<10⁻⁴ and ≈0) demonstrates the practical significance. This is a strength, not a weakness.
 
-- **Missing appendix / proofs.** The parser strips appendix content from all papers. The original submission contains these proofs.
+- **"The comparison to boundingCE_continuous_IV is unfair"**: The paper explicitly discusses the differences (different inference strategies, IV requirements). The improvement in regret order is a genuine contribution; the reviewer's concern reflects a disagreement about framing, not a flaw in the paper.
 
-- **"The regret comparisons... improvement is not 'orders of magnitude' as claimed."** Going from √|Π| to √log|Π| is an exponential improvement in the dependence on the function class size, which plausibly justifies "orders of magnitude" in the relevant regime.
+- **"The connection to POMDP literature is tenuous"**: The paper uses "partially observable" in the literal sense (hidden confounders/contexts), not claiming to use POMDP techniques. The framing is reasonable.
 
-- **"Theorem 1 constraint set is over-specified... could lead to inconsistencies."** Redundancy among constraints does not cause inconsistency; the feasible region is simply defined by a subset of the listed constraints. This is standard in causal inference formulations.
+- **"The example's independence assumption is inconsistent with the general model"**: The example chooses U ⟂ W as a specific case for clarity. The general model allows arbitrary dependence. A specific illustrative example need not cover all cases.
 
-- **"Figure x-axis label is missing."** The TikZ code clearly includes `xlabel = time $t$` (lines 1180, 1249).
+- **Typographical issues (e.g., "max" vs "min" in Algorithm 1, line 567)**: Per hard rules, formatting/typo criticisms are removed as parser artifacts that do not appear in the original submission.
 
-- **"Plot appears to show only 10,000 steps."** The paper states T = 10^5 (line 1157). The critic appears to misread the plot scale.
-
-- **"Least squares oracle over the entire function class each epoch is computationally heavy."** This is standard practice in the IGW literature (FALCON, instanceCB_RL) and is not a weakness of this paper specifically.
-
-- **"Almost sure convergence condition on OPT is strong."** The paper acknowledges this (line 649: "the assumption on OPT is not so strict") and presents the result as what is achievable under ideal conditions.
+- **Missing appendix/proofs**: Per hard rules, these sections are stripped by the parser and exist in the original submission.
 
 ## Novel Insights
 
-The key insight from the reviews is that the paper's two halves — causal bound estimation and bandit regret minimization — operate at different levels of analysis. The estimation side provides Monte-Carlo samples with convergence guarantees to optimal *discretized* bounds, while the regret side assumes exact deterministic bounds. This gap is not currently bridged by formal guarantees. However, the paper does partially address it by incorporating ε-estimation error into the optimization constraints and by showing empirically that the estimated bounds are tighter than prior methods. A deeper insight is that the truncation mechanism (capping UCBs at h(a)) is what makes the regret analysis work for the intermediate case without needing to learn gaps — this is a genuinely clever algorithmic design that pre-emptively avoids exploration rather than relying on data-driven elimination.
+The reviews reveal that the paper's core tension lies between the heuristic/engineering contributions (the sequential LP sampling algorithm achieving 100% valid samples, the practical framework connecting causal bounds to bandit algorithms) and the theoretical guarantees (which are fully rigorous only for discrete variables). The harsh critic correctly identifies that the discretization gap and the non-rigorous confidence-set construction are the paper's two "Achilles heels." However, neither of these invalidates the contributions for discrete settings, where the experiments operate. The reviewers converge on the same assessment: the paper's ideas are interesting and the regret improvement from √|Π| to √log|Π| is a genuine advance, but the theory overreaches into continuous settings without the necessary guarantees.
 
 ## Suggestions
 
-1. Correct the swapped arm indices in the illustrative example (lines 248–252) and verify the conclusion.
-2. Add a short discussion or formal statement linking the ε-estimation error in the bound computation to the regret bound — even if only under simplifying assumptions (e.g., if bounds are correct with probability 1−δ, regret degrades by at most an additive term).
-3. Report the wall-clock time for the sequential LP algorithm and discuss how it scales with discretization fineness.
-4. Strengthen the experiments with at least one additional instantiation or a real-world partially observable bandit problem to demonstrate practicality beyond synthetic data.
+1. **Restrict the scope or prove convergence.** Either (a) restrict the paper's theoretical claims to discrete random variables where the discretization is exact, or (b) provide Lipschitz/Hölder regularity conditions under which the discretized solution provably converges to the continuous solution at a controlled rate. The latter would substantially strengthen the paper.
+
+2. **Replace the heuristic ε-ball sampling with a rigorous confidence procedure.** Use concentration inequalities to construct a set Θ containing the true θ with probability 1−δ, then optimize over Θ (via the LP-based method) to obtain provably valid outer bounds on the causal effect. This would make the "incorporation of estimation error" claim precise.
+
+3. **Add experiments with discretization sensitivity.** Show how the bounds and regret change as the number of bins increases for continuous or finely-discrete variables, demonstrating that the improvement over baselines is robust to discretization granularity.
+
+4. **Clarify the construction of the independent variable set S.** Provide guidance or a systematic method for selecting a linearly independent index set, and discuss whether results are sensitive to this choice.
 
 ## Score and Decision
 
-This paper makes solid theoretical contributions to an important and understudied problem — transfer learning in partially observable bandits via causal bounds. The main results (improved regret dependence from √|Π| to √log|Π|, near-optimal lower bounds, convergence of the sampling algorithm) are novel and significant. The weaknesses are primarily about incomplete integration between the two halves of the paper and limited experimental validation, rather than structural flaws in the core claims. The paper is a clear contribution to the theory of causally-informed bandit learning.
+The paper presents an interesting and potentially impactful framework, with genuine theoretical contributions (improved regret bounds, matching lower bounds) and practical algorithmic innovations (100% valid LP-based sampling). However, the two major weaknesses — the unresolved discretization gap for continuous variables and the non-rigorous handling of estimation error — undermine the central claim of "provably efficient learning" in the general continuous setting. The paper's contributions are solid for discrete settings, which cover the experiments, but the title and framing overclaim generality. The paper requires substantial revision to address these issues or to honestly scope its claims to discrete settings.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

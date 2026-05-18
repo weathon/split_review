@@ -1,94 +1,78 @@
-Now I have all the information needed. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper. Let me write the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes a multivariate time-series forecasting model that combines stationary wavelet transform (SWT) tokenization with a geometric-algebra-enhanced attention mechanism. The core idea is to use multi-scale wavelet decomposition to create tokens that capture temporal/frequency structure, then replace standard dot-product attention with a geometric product that captures both scalar similarity (dot product) and linear independence (wedge product) between token pairs. The model achieves best MSE/MAE on 7 of 8 long-term forecasting datasets and all 4 PEMS short-term datasets, using only 1–2 layers.
+This paper proposes a multivariate time-series forecasting model that combines stationary wavelet transform (SWT) for multi-scale tokenization with a geometric algebra-enhanced attention mechanism. The architecture processes each channel through a learnable SWT, applies a two-stream attention (standard dot-product plus wedge-product between query-key pairs), and reconstructs via an inverse SWT. Experiments claim optimal MSE/MAE on 7 of 8 long-term datasets and all 4 PEMS short-term datasets against 15 baselines, using only 1–2 layers.
 
 ## Strengths
 
-- **Strong empirical performance across diverse benchmarks**: The model achieves top MSE/MAE on 7 of 8 long-term datasets (Table 1) with notable margins (e.g., 8.3% on ETTh2 and 13.0% on Solar-Energy over TimeMixer; 6.9–7.3% against iTransformer on ETTm1/ETTh1/ECL). It also achieves best MAE/MAPE/RMSE on all four PEMS subsets for short-term forecasting (Table 2). This is the paper's most concrete contribution.
+1. **Novel integration of wavelet tokenization with a geometric-product attention signal is a motivated design.** The paper makes a concrete argument that standard dot-product attention misses complementary inter-channel information (the zero-dot-product-but-high-complementarity example with tokens $(1,1,0,0,0)$ and $(0,0,1,1,0)$ in Section 4 is clear and intuitive). Using the wedge product to capture this signal is a well-motivated idea that differs from prior geometric algebra transformers (which the paper correctly notes are computationally heavy).
 
-- **Principled, well-motivated tokenization**: The wavelet tokenization (Section 3) is justified from first principles — multi-scale decomposition, shift invariance via SWT (avoiding downsampling), and the observation that learnable filters are beneficial but not critical. This provides a clear rationale for how the model relieves downstream modules from discovering all temporal/frequency patterns.
+2. **SWT tokenization is theoretically appropriate for this setting.** SWT provides shift-invariant, multi-scale decomposition without decimation (Section 3), preserving the original temporal length. Making the wavelet filters learnable is a natural extension, and the paper notes that even fixed filters perform robustly. The choice of SWT over downsampling-based approaches is principled for the stated goal of capturing both local and global temporal structure.
 
-- **Novel integration of geometric algebra with self-attention**: The use of the wedge product to capture token complementarity/linear independence (Section 4) is conceptually interesting and goes beyond standard dot-product attention. The paper correctly distinguishes its lightweight instantiation from heavier Clifford-algebra transformers (Brehmer et al., de Haan et al.) by restricting to \(G_2\) and computing bivectors only for pairs.
+3. **Comprehensive evaluation setup.** The paper compares against 15 baselines spanning MLP (DLinear, RLinear, TimeMixer, TiDE), Transformer (iTransformer, PatchTST, Crossformer, FEDformer, Autoformer, FiLM, Stationary), CNN (TimesNet, SCINet, MICN), and GNN (CrossGNN) methods across 8 long-term and 4 short-term benchmarks. This is a thorough coverage of the MTS forecasting landscape.
 
-- **Honest characterization of limitations**: The conclusion acknowledges that inter-channel dependency does not always yield improvements and that the method cannot easily be extended to token-by-token generation. This self-awareness strengthens credibility.
+4. **Ablation study validates geometric attention's contribution.** The paper reports (Section 6.3) that both component replacement and removal experiments confirm geometric attention consistently improves across all metrics, providing empirical evidence for the core design choice.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
 
-- **Unsubstantiated claim about LLM-based model competitiveness**: The abstract directly states that results are "competitive with much bigger (and even LLM-based) models." However, the experiments include zero LLM-based baselines (e.g., LLM-Time, Time-LLM, Lag-Llama). This is a clear mismatch between framing and evidence. Either the claim must be removed or appropriate baselines must be added. The fact that the paper discusses LLM-based approaches in Section 1 (Introduction) and contrasts with them makes this omission especially noticeable.
+1. **The geometric algebra construction is incorrectly specified (G₂ vs. G_C).** The paper states (Section 4A): "We focus on $G_2$, the GA over a 2-dimensional vector space because we consider pairs of tokens in our attention mechanism, regardless of the tokens' dimensionality." This is mathematically unsound. $G_2$ is the Clifford algebra of $\mathbb{R}^2$ — the "2" refers to the dimension of the *underlying vector space*, not the number of operands. The tokens are $C$-dimensional vectors (each token represents $C$ channels at a time point). The wedge product $\alpha \wedge \beta$ for $\alpha, \beta \in \mathbb{R}^C$ produces a bivector in $\bigwedge^2 \mathbb{R}^C$, which has dimension $\binom{C}{2}$, not the fixed structure of $G_2$. The paper's example with 2D vectors $(a\mathbf{e}_1 + b\mathbf{e}_2)$ is pedagogically inconsistent with the actual $C$-dimensional tokens it operates on. This error affects the entire attention mechanism description — the dimensionality of the bivector matrix $B$, its interaction with $V_2^{(s)}$, and the reduction function $\zeta$. For datasets like Traffic ($C=862$), $\binom{862}{2} \approx 371{,}000$, which would make the bivector objects enormous; the paper does not discuss this scaling challenge. The core algorithmic idea (compute wedge products + reduce) is salvageable, but the paper must specify the correct algebra $G_C$, clarify the actual dimension of the bivector objects, and explain how $\zeta$ handles or avoids the $\binom{C}{2}$ explosion.
 
-- **No model size, parameter count, or computational cost data despite repeatedly claiming "simplicity" and "lightweight"**: The abstract, introduction, and contribution list (line 19: "minimal complexity and parameters"; line 114: "Our design is quite light") all frame the model as simple and lightweight. Yet the paper provides zero quantification — no parameter counts, FLOPs, training/inference time, or speed comparison against any baseline. Without these numbers, the "simple baseline" narrative is an assertion, not a supported claim. The model involves learnable wavelet filters, multi-scale decomposition, a second set of value matrices for the bivector stream, a reduction function ζ, and an inverse wavelet transform — so its actual simplicity relative to baselines is unknown. This is the most important concrete gap preventing assessment of the paper's core framing.
+2. **Dimensional ambiguity in the token/query definition.** The paper's linear projection (Section 4C) defines $U^{(s)} \in \mathbb{R}^{C \times L'}$ and $W_Q, W_K, W_V \in \mathbb{R}^{L' \times L'}$, yielding $Q, K \in \mathbb{R}^{C \times L'}$. The text says "each token represents multiple channels at a specific pseudo time point" and gives examples of tokens as $C$-dimensional vectors in channel space. Meanwhile, $Q^{(s)^T} K^{(s)}$ produces an $L' \times L'$ attention matrix over time positions. The paper says "To keep the number of channels/variables unchanged, so we apply the linear projection along $L'$" — but this makes $W_Q$ mix time positions rather than channel features, which is non-standard and insufficiently justified. The paper oscillates between treating tokens as $C$-dimensional (channel space) and treating the attention as operating over $L'$ time positions, without ever explicitly fixing which index is the token index and which is the feature dimension. This ambiguity makes it difficult to assess whether the wedge product is being computed over the correct space.
 
 ### Minor
 
-- **Ablation study discussion is too thin**: The ablation description (Section 6.3) consists of a single sentence: "Table 3 presents a summary of the results across diverse datasets and prediction horizons. The findings consistently indicate that geometric attention helps across all metrics." Even accounting for the possibility that Table 3 was stripped by the parser, the textual discussion provides no actual numbers, no comparison with alternative modifications (e.g., adding an extra linear layer or standard multi-head attention), and no insight into *how much* the geometric component contributes relative to wavelet tokenization alone. This makes the central design choice (geometric attention) harder to evaluate than it should be.
+1. **No parameter count or FLOP comparison against baselines.** The paper frames itself as a "simple baseline" but does not report the total parameter count or FLOPs relative to any of the 15 baseline methods. This makes it impossible to assess whether the competitive performance comes from efficient design or simply higher capacity. A comparison against at least DLinear, PatchTST, and iTransformer is needed to substantiate the "simple" and "lightweight" claims.
 
-- **Reduction function ζ is underspecified**: The paper states ζ "can be the bivector's magnitude or a trainable MLP" but does not specify which was actually used in the experiments. This is a reproducibility gap — a reader cannot re-implement the attention mechanism without knowing this choice.
+2. **Claim about "single or two layer model" is unsubstantiated.** The abstract claims that "even a single or two layer model yields results that are competitive," but the experimental section reports results only from the full multi-scale pipeline. No experiment isolates the performance of a 1-layer or 2-layer variant. This claim should either be backed with a dedicated experiment or removed.
 
-- **No variance, confidence intervals, or significance measures**: None of the results in Tables 1 or 2 report variance across runs. Given that many baseline numbers are close, the reader cannot determine whether the reported improvements are meaningful or within run-to-run noise. While single-seed evaluation is common in this space, the complete absence of any variability measure is a gap.
+3. **No discussion of the computational cost of pairwise wedge products.** For $L'$ tokens and $C$ channels, computing $B_{tt'} = q_t \wedge k_{t'}$ for all $L'^2$ pairs, where each wedge product is in $\bigwedge^2 \mathbb{R}^C$, carries a cost of $O(L'^2 C^2)$ without optimization. The paper does not discuss this overhead, nor does it propose any approximations, low-rank projections, or efficient bivector compression strategies — even though prior work on Clifford-algebra transformers is cited as "computationally heavy" for similar reasons.
 
-- **No per-horizon breakdown**: Results are reported averaged across four forecast horizons (96, 192, 336, 720). Does the model's advantage come from all horizons or concentrate on specific ones? This matters for understanding the method's strengths and failure modes.
-
-- **M4 dataset mentioned but no results shown**: M4 is listed under short-term forecasting datasets (Section 6.1) but no M4 results appear in Table 2 or anywhere else in the extracted content.
-
-- **"Forecastability" is introduced but never used**: The paper asserts that "ETT, M4, and Solar-Energy present modeling challenges due to their low forecastability" and claims to "assess the forecastability of all datasets," but this assessment is never shown and the concept plays no role in analyzing the results.
-
-- **Baseline configuration details not reported**: The paper does not state whether baselines were re-run under a unified protocol or whether numbers were taken from original papers. Different evaluation protocols (data splits, normalization, early stopping) can shift results, and this omission weakens the comparison's verifiability.
-
-- **Speculative explanations for baseline underperformance without controlled experiments**: The paper attributes TimeMixer's weakness to "average pooling lead[ing] to information loss" and iTransformer's to "variate tokenization fails to capture fine-grained local patterns." These are plausible but untested hypotheses — no controlled experiment (e.g., varying wavelet scales, varying attention design) isolates the specific factors.
+4. **Ablation results are referenced but not numerically visible.** The ablation study is described in Section 6.3, but the actual numbers (Table 3) are in an image and thus unavailable in the parsed text. While the parser issue is not the authors' fault, the paper still does not include numerical ablation results in the body text.
 
 ### Trivial
-None.
+
+- The related work section (Section 7) is primarily a categorized list of prior methods with brief critiques, but it does not provide a critical synthesis or explain how the proposed method specifically overcomes each limitation. This weakens the motivation slightly.
+- The phrase "exploiting inter-channel dependency does not always yield improvements" (conclusion) is mentioned but never analyzed — no failure cases or datasets where the model underperforms simpler baselines are discussed.
 
 ## Nice-to-Haves
 
-- A visualization or quantitative analysis of learned wavelet filters (frequency response, correlation patterns across channels) would strengthen the tokenization section, especially since the paper states filters "exhibit correlation patterns that resemble those in the respective variables/channels."
-- Discussion of forecast horizon granularity to show which horizons benefit most from the method.
-- Explicit mention of data splits (train/val/test proportions) for reproducibility.
+- Reporting confidence intervals or standard deviations across multiple seeds would strengthen the reliability of the empirical claims, though single-run evaluation is the norm in MTS forecasting benchmarks.
+- Providing pseudo-code or an algorithmic description of the geometric attention computation would substantially improve reproducibility given the current mathematical ambiguities.
+- An analysis of datasets where the model underperforms relative to simple linear baselines (e.g., DLinear) would provide useful insight into when the geometric attention signal is beneficial versus unnecessary.
 
 ## Removed Points
 
-These points were flagged for removal; treat them with caution.
+These are issues raised by reviewers that do not withstand verification against the paper:
 
-1. **Harsh critic Point 3 (Table 3 missing / ablation not substantiated)**: The criticism that Table 3 is "not present in the extracted content" is partly a parser artifact — the original submission likely contains the table (Tables 1 and 2 also appear as image references in the extracted text). However, the *textual discussion* is genuinely thin, which I have kept as a Minor weakness above. The extreme framing that the ablation is entirely unsubstantiated is an overstatement.
-
-2. **Harsh critic Point 2 (simplicity vs. complexity) — in its strongest form**: The reviewer's framing that the method involves "non‑trivial computational overhead" that is "not discussed" and that the paper "does not discuss this cost at all" is too strong. The paper does acknowledge the contrast with heavier Clifford-algebra transformers (Section 4) and notes that the design "is quite light, involves minimal changes to self-attention." The valid core (no parameter/FLOP numbers) is retained in the Major weakness above.
-
-3. **Strength Finder's "Computational efficiency motivated by real-world constraints"**: This strength is generic — the paper discusses data scarcity and cost of fine-tuning large models, but does not actually provide efficiency numbers for its own model. It conflicts with the verified weakness that no complexity data is provided. Dropped.
-
-4. **Harsh critic's point about "forecast horizon granularity" and "learned wavelet filters"**: These are nice-to-haves rather than weaknesses; the paper's core claims do not depend on them. Retained as Nice-to-Haves.
-
-5. **Harsh critic's point about "data splits (e.g., train/val/test proportions)"**: The standard splits for ETT, Weather, Solar-Energy, and Traffic datasets are well-established in the literature and can be assumed. This is a minor documentation gap at most. Retained as Nice-to-Have.
-
-6. **"The claim that this is a 'small generalization' is questionable"**: The paper does frame the modification as a "small generalization" and provides geometric justification. This is a matter of opinion, not a verifiable flaw, and the paper's framing is defensible.
+- **"Tables are missing from the text"** — The tables are embedded as images; their absence in the parsed text is a PDF-parser artifact, not an author error.
+- **"Learnable SWT differentiability is non-trivial and should be addressed"** — The SWT uses convolution with learnable filter coefficients; gradients flow through the (fixed) zero-insertion upsampling straightforwardly. This is a standard differentiable operation.
+- **"Model is not a simple baseline"** — The paper frames "simple" relative to LLMs and large Transformers (12+ layers, billions of parameters), not relative to DLinear. Its architecture has more components than linear models, but the 1–2 layer claim is about depth, not component count. The critic's framing misidentifies the comparison class.
+- **"G₂ is used because pairs of tokens" reasoning is mathematically confused** — This is kept in Major Weaknesses (point 1) because the underlying error is real. However, the suggestion that this means the entire mechanism "cannot be implemented" is an overstatement; the core idea (compute wedge products, reduce via MLP) is implementable with the correct algebra G_C.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface an insight about the paper that the authors themselves have not already stated.
+Beyond the paper's own contributions, one observation emerges from the review: the paper identifies a genuine blind spot in standard attention for time-series — the fact that zero-dot-product tokens can still encode highly complementary information across channels. This is a real limitation of scalar-valued attention that the wedge product addresses in an elegant algebraic way. However, the paper's failure to properly dimension the algebra (G₂ vs. G_C) and its silence on the $\binom{C}{2}$ explosion for high-dimensional datasets mean it does not deliver a working recipe for this insight. A corrected formulation with low-dimensional projections ($d \ll C$) applied before the geometric product — effectively a learned bottleneck on the wedge product — could turn this into a practical and lightweight method.
 
 ## Suggestions
 
-1. **Add model complexity data**: Report parameter counts, FLOPs per forward pass, and training/inference time relative to at least 2–3 strong baselines (e.g., iTransformer, PatchTST, TimeMixer). This is the single most important addition to support the "simple/lightweight" framing.
+1. **Fix the geometric algebra specification.** Replace $G_2$ with $G_C$ (or $G_d$ where $d$ is a projected hidden dimension $\ll C$). Specify the actual dimension of the bivector space ($\binom{C}{2}$ or $\binom{d}{2}$) and describe how the reduction function $\zeta$ maps from that space to a scalar. Provide explicit equations for $B V_2^{(s)}$ showing how each operation respects dimensions.
 
-2. **Either add LLM-based baselines or remove the claim**: The abstract's explicit invocation of LLM-based models requires either including such baselines (even a single comparison) or removing the reference.
+2. **Clarify the dimensional convention.** State explicitly: "We treat each column of $U^{(s)}$ as a token vector in $\mathbb{R}^C$ (channel space), giving $L'$ tokens. The linear projection $W_Q \in \mathbb{R}^{L' \times L'}$ mixes information across the $L'$ time positions, keeping each query in $\mathbb{R}^C$." Alternatively, change the projection to act on the channel dimension if that is the intended space.
 
-3. **Expand the ablation discussion**: Even if Table 3 is present, provide more analysis: how much does geometric attention contribute relative to wavelet tokenization alone? How does it compare to simply adding more heads or layers to standard attention?
+3. **Add parameter/FLOP comparisons** against DLinear, PatchTST, and iTransformer to substantiate the "lightweight" and "simple" claims.
 
-4. **Specify ζ concretely**: State exactly which reduction function was used in the experiments (magnitude, MLP, or something else).
+4. **Either remove the "single or two layer model" claim from the abstract, or show results** for a stripped-down variant that uses only 1–2 layers total (with fewer scales or without the full pipeline).
 
-5. **Report variance**: Add standard deviations or confidence intervals for the main results, at least for 2–3 representative datasets.
+5. **Address the $\binom{C}{2}$ scaling issue** explicitly. If using a low-dimensional projection $d \ll C$ before the wedge product, say so. If not, discuss the computational cost and any optimizations.
 
 ## Score and Decision
 
-The paper proposes a genuinely interesting combination of wavelet tokenization and geometric-algebra attention, and delivers strong empirical results across a wide range of benchmarks. However, the evaluation has serious gaps that directly undermine two of the paper's own framing claims: the "lightweight/simple" narrative (no complexity numbers) and the claim of competitiveness with LLM-based models (no such baselines). These are not minor presentation issues — they are central to what the paper promises. The core experimental results are likely real, but the paper as presented does not provide enough evidence for its stated contributions.
+**Overall Assessment:** The paper proposes a genuinely interesting combination of wavelet tokenization and geometric-product attention for MTS forecasting, and the motivation for capturing complementarity beyond dot-product similarity is well-articulated. However, the geometric algebra construction contains a concrete mathematical error ($G_2$ vs. $G_C$) that undermines the paper's technical credibility, and the token/feature dimension ambiguity makes it difficult to evaluate the attention mechanism as specified. The empirical scope is broad, but key results (ablation numbers) are not textually available, and the computational cost of the wedge-product attention for high-dimensional datasets is unaddressed. These issues are fixable but require substantial rewriting of the method section and additional experiments. In its current form, the paper's central technical claim is not coherently specified.
 
-With major revisions (adding complexity analysis, removing or substantiating the LLM claim, expanding the ablation discussion), this could become a solid contribution. In its current form, it falls short of the evidentiary bar.
-
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

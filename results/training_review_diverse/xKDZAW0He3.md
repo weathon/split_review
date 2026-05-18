@@ -1,20 +1,18 @@
-Now I have a comprehensive understanding of all the evidence. Let me compose the final consolidated review.
+Now let me write the final consolidated review.
 
 ## Summary
 
-This paper investigates memory granularity in retrieval-augmented conversational agents and proposes SeCom, a method that (1) segments long conversations into topic-coherent segments (using GPT-4-based segmentation) rather than turn-level or session-level units, and (2) applies LLMLingua-2 prompt compression as a denoising step before retrieval to remove redundancy that interferes with retrieval accuracy. Experiments on LOCOMO and Long-MT-Bench+ show SeCom outperforms turn-level, session-level, and summarization-based baselines across multiple retrievers (BM25, MPNet) and response generators (GPT-3.5, Mistral-7B), with ablation studies confirming the contribution of both components.
+This paper investigates how memory granularity affects retrieval-augmented response generation in long-term conversational agents, and proposes **SeCom**, a method that (1) constructs memory units at the topical-segment level using an LLM-based conversation segmentation model (zero-shot or with reflection-based refinement on few examples), and (2) denoises memory units via prompt compression (LLMLingua-2) before retrieval. Experiments on LOCOMO and Long-MT-Bench+ show SeCom outperforming turn-level, session-level, and summarization-based baselines, while the segmentation model itself achieves strong results on dialogue segmentation benchmarks (DialSeg711, TIAGE, SuperDialSeg).
 
 ## Strengths
 
-1. **Systematic diagnosis of the memory-granularity problem** — The paper clearly demonstrates, through both qualitative examples (Figure 1) and quantitative analysis (Figures 2a–c), that turn-level memory produces fragmented context while session-level memory includes irrelevant content. Figure 2a shows response quality peaks at a chunk size between turn and session levels, and Figures 2b–c show segment-level memory achieves higher retrieval DCG with both BM25 and MPNet retrievers. This analysis directly motivates the need for topic-coherent segment-level units.
+- **Systematic empirical analysis of memory granularity.** The paper provides clear evidence (Figures 2b, 2c) that both turn-level and session-level memory units degrade retrieval accuracy (DCG), and that response quality varies with chunk size (Figure 2a). This directly motivates the need for segment-level granularity and is a useful empirical finding independent of SeCom itself.
 
-2. **Segment-level memory consistently outperforms baselines across benchmarks and configurations** — SeCom achieves the highest GPT4Score, BLEU, ROUGE-L, and BERTScore on both LOCOMO and Long-MT-Bench+ (Table 1, Figure 4). The gains are particularly large on LOCOMO (e.g., +11.98 GPT4Score over turn-level with BM25). The method is robust across retrievers (BM25, MPNet) and response generation models (GPT-3.5, Mistral-7B; Table 3), and Figure 5 shows consistent advantages across varying context budgets.
+- **Effective compression-based denoising for retrieval.** The paper demonstrates that LLMLingua-2 improves retrieval recall at compression rates >50% across both BM25 and MPNet retrievers (Figures 3a, 3b), and increases similarity with relevant segments while decreasing similarity with irrelevant ones (Figure 3c). This is a clean retrieval-only evaluation that isolates the denoising effect at a fixed number of retrieved segments.
 
-3. **Compression-based denoising boosts retrieval and end-to-end performance** — LLMLingua-2 at ≥50% compression rate consistently improves recall for both BM25 and MPNet (Figures 3a–b). The ablation (Table 2) shows GPT4Score drops by up to 9.46 on LOCOMO when denoising is removed. Figure 3c further demonstrates that compression increases query–relevant-segment similarity while decreasing similarity to irrelevant segments. The repurposing of prompt compression (originally for inference acceleration) as a plug-and-play denoising method is novel and avoids retraining or fine-tuning retrievers.
+- **Strong conversation segmentation performance.** The proposed segmentation model (GPT-4 based, with optional reflection) outperforms all unsupervised baselines and many supervised baselines on three dialogue segmentation datasets (Table 4). The transfer learning result — learning a rubric from only 100 examples in a source dataset and generalizing to a target dataset — is particularly noteworthy.
 
-4. **Effective zero-shot segmentation with data-efficient reflection** — The GPT-4-based segmentation outperforms unsupervised baselines on DialSeg711, TIAGE, and SuperDialSeg (Table 4). With only 100 annotated examples and a self-reflection mechanism, the model surpasses several fully supervised baselines in transfer settings, demonstrating data-efficient generalization.
-
-5. **Thorough robustness analysis** — The paper validates its claims across multiple dimensions: different retrievers (BM25, MPNet), different response generators (GPT-3.5, Mistral-7B with 32K context window), varying context budgets (Figure 5), and both ablation of denoising (Table 2) and granularity comparisons.
+- **Robustness across retrievers and LLMs.** SeCom shows smaller performance variance than baselines when switching between BM25 and MPNet (Table 1), and outperforms baselines with both GPT-3.5-Turbo and Mistral-7B (Tables 1, 3). This indicates the method is not tied to a specific retrieval or generation backbone.
 
 ## Weaknesses
 
@@ -23,62 +21,57 @@ None.
 
 ### Major
 
-- **Evaluation confound: GPT-4 is used for both the segmentation method and the primary evaluation.**  
-  GPT-4-0125 drives the zero-shot segmentation (Section 2.2), the reflection-based optimization (Section 2.2), the GPT4Score metric, and the pairwise comparisons (Figure 4). This creates a concern that the evaluator may systematically favor responses aligned with its own segmentation patterns. The pairwise comparisons (Figure 4) rely entirely on GPT-4 judgments and are especially vulnerable to this confound. **Mitigation:** The BLEU, ROUGE, and BERTScore metrics (which are not GPT-4 based) show the same trends, and the Mistral-7B experiment (Table 3) shifts the response generator, partially decoupling the evaluation chain. Nevertheless, the core evaluation pipeline would be significantly strengthened by either human evaluation on a subset or an independent LLM judge (e.g., Llama-3-70B). This is the paper's most significant weakness and should be addressed before publication.
+1. **Concentration of GPT-4 across data generation, segmentation, and evaluation, without human validation.** GPT-4 is used to (a) generate the LOCOMO test QA pairs, (b) power the segmentation model that constructs SeCom's memory units, and (c) score responses via GPT4Score and pairwise comparisons. This creates a situation where the same model family both *defines the task* and *evaluates the output*. While this does not invalidate the results, the paper's strongest claims (Table 1, Figure 4) depend almost entirely on GPT4Score, and the conventional metrics (BLEU, ROUGE, BERTScore) show smaller margins. The paper lacks any human evaluation or discussion of this limitation — a notable gap for a system claiming to improve *personalized* response quality. The concern is that systematic biases in GPT-4's preferences could inflate SeCom's apparent advantage, especially since SeCom's memory units are produced by GPT-4 itself. **Why it matters:** Without human judgments or an evaluation pipeline that breaks the GPT-4 dependency (e.g., human-written questions as in Long-MT-Bench+'s original design, or a non-GPT-4 evaluator), the convincingness of the claimed improvements is substantially weakened.
+
+2. **Segmentation model capability is not disentangled from granularity choice.** SeCom's segmentation uses GPT-4, while the turn-level and session-level baselines use raw conversational structure with no equivalent segmentation step. The performance gap in Table 1 could therefore reflect the use of a far more capable model (GPT-4) to construct memory units, rather than the superiority of segment-level granularity *per se*. The paper ablates the compression component but never isolates the segmentation model's contribution — e.g., by replacing GPT-4 with a heuristic segmenter (sliding window, utterance embedding shift) and re-running the end-to-end QA experiment. Without this control, the reader cannot tell how much of the gain comes from the *idea* of topic-coherent segments versus the *engineering* of using a strong LLM to produce them. **Why it matters:** This directly affects the generality of the paper's central claim. If the advantage largely comes from GPT-4's segmentation capability, the contribution shifts from "segment-level memory works" to "GPT-4-powered segmentation works," which is a materially different finding.
+
+3. **Compression ablation confounds denoising with number of retrieved units.** The ablation in Table 2 removes compression and reports a 9.46 GPT4Score drop on LOCOMO, attributed to "denoising improving retrieval quality." However, the context budget is fixed at 4k tokens. Without compression, each segment is longer, so fewer segments fit within the same token budget. The drop could simply reflect fewer retrieved memory units rather than any effect of noise removal. Figure 3 partly addresses this by showing compression improves recall at a fixed *K* (number of segments), but that is a retrieval-only evaluation on Long-MT-Bench+, not an end-to-end QA result on LOCOMO. **Why it matters:** The paper's central claim that compression-based denoising independently improves end-to-end performance is not cleanly supported by the current ablation design.
 
 ### Minor
 
-- **Incomplete 2×2 ablation of the two contributions.** The paper claims two innovations: (i) segment-level granularity and (ii) compression-based denoising. The main results (Table 1) isolate granularity by applying the same compression to all baselines. However, the contribution of compression is ablated only on LOCOMO with a single retriever (MPNet) in Table 2. A full 2×2 (segment vs. turn vs. session × with vs. without compression) across both datasets and both retrievers would cleanly quantify whether the two benefits are additive or synergistic. The current evidence strongly suggests both components help, but does not fully decompose their individual contributions across all settings.
+1. **Ambiguity about compression settings for baselines.** The paper states that "denoising-enhanced turn-level and session-level" baselines are used in the main results, but does not explicitly confirm whether the same compression rate (75%) and the same LLMLingua-2 model were applied to these baselines. While this is the natural reading, an explicit statement would remove ambiguity.
 
-- **Reflection-based optimization lacks key reproducibility details.** The description of the reflection process (Section 2.2) does not specify the number of iterations, how the "hard examples" are selected (top K — what is K?), the learning rate (η) analogy is not concretely instantiated, and there is no convergence criterion. These details are needed for reproducibility.
-
-- **No sensitivity analysis on the compression rate.** The compression rate is fixed at 75% throughout. LLMLingua-2's behavior at different rates is not explored, so it is unclear whether performance plateaus, degrades at higher rates, or is sensitive to this hyperparameter.
-
-- **No qualitative analysis of what compression removes.** The paper claims compression removes "redundancy" that acts as noise, but provides no examples of what content is preserved vs. discarded. This would help the reader understand whether critical information is ever lost.
-
-- **Data contamination concern for segmentation evaluation.** The zero-shot GPT-4 segmentation model outperforms many supervised baselines on DialSeg711, TIAGE, and SuperDialSeg (Table 4). This is a striking result that deserves discussion — GPT-4 may have seen similar dialogues during training, and the paper does not address this.
+2. **Summarization comparison fairness.** The paper argues that segment-level memory avoids "information loss" from summarization (citing Maharana et al., 2024), but segment-level memory also selects a subset of turns — it is a different kind of reduction. The paper does not directly compare against a summarization baseline that aims for the same token budget, so the "information loss" argument for the specific setting is plausible but not directly demonstrated.
 
 ### Trivial
-
-- None beyond the minor points above.
+None.
 
 ## Nice-to-Haves
 
-- An experiment linking segmentation quality (e.g., boundary error rate) directly to downstream QA performance, by comparing the proposed segmentation against alternatives (e.g., LumberChunker adapted for dialogue, heuristic topic segmentation, or random splits) on the QA benchmarks rather than only on segmentation-specific datasets.
-- Reporting computational cost in terms of GPT-4 API calls and LLMLingua-2 inference time, which would help practitioners assess the practical overhead.
-- Failure case analysis showing examples where SeCom underperforms or retrieves misleading segments.
-- Comparison with alternative denoising strategies (keyword extraction, summarization, query expansion).
+- A small-scale human evaluation (e.g., 50–100 examples judged by 2–3 annotators for coherence, factuality, and preference) would substantially strengthen confidence in the GPT4Score trends.
+- Reporting the average number of retrieved segments (or total tokens) in the "w/o denoising" condition under the fixed 4k budget would clarify the compression ablation confound.
+- A sweep of compression rates (0%, 50%, 75%, 90%) on LOCOMO's end-to-end QA would be informative.
+- Reporting end-to-end QA performance with the zero-shot segmenter versus the reflection-augmented one would show whether the small-annotation refinement matters in practice.
 
 ## Removed Points
 
-*These points were flagged for removal; treat with caution.*
+These points were raised by the reviewers but removed after verification against the paper:
 
-- **Missing appendix / prompts.** The harsh critic noted that prompts and figures are "promised in the appendix." Per hard rules, the parser strips these sections; they exist in the original submission and should not be counted as a weakness.
-- **"Baseline setup is ambiguous."** The critic questioned whether "denoising-enhanced" baselines also use LLMLingua-2. The paper explicitly states (line 94): "in the main results, we directly compare our method to the denoising-enhanced turn-level and session-level baselines," which is unambiguous.
-- **Claim that the introduction states findings before evidence.** The critic suggested framing LLMLingua-2's denoising role as a hypothesis rather than a finding in the introduction. This is a standard paper structure — stating findings in the intro and supporting them later is not a weakness.
-- **Several generic or scope-creep suggestions** (e.g., "analyze failure cases for very long sessions," "justify context budget choices"). These are wishlist items, not genuine weaknesses.
+- **Reflection-based segmentation guidance is vague / hard to reproduce.** The reviewer noted the mechanism is described in abstract terms. However, the paper references Appendix Figures 6, 7, and 8 for the exact prompts and learned rubric. The parser strips appendices; these materials exist in the original submission. Removed per hard rules on missing appendix content.
+
+- **The paper claims segment-level avoids information loss but doesn't prove it.** This is a matter of degree. The paper does compare against three summarization baselines (SumMem, RecurSum, ConditionMem) and shows they underperform. The argument is not unsubstantiated, though a token-budget-controlled comparison would be stronger. Moved to Minor rather than removed entirely.
+
+- **Unfair comparison claims against baselines.** No evidence of unfair asymmetry favoring the author's method was found. If anything, the denoising-enhanced baselines are a generous design choice. Removed per hard rules.
 
 ## Novel Insights
 
-The most interesting insight emerging from the reviews is the tension between the paper's two contributions: the evaluations suggest that segment-level granularity and compression-based denoising both help, but the current experimental design does not fully untangle whether the benefits are independent or whether compression is especially valuable because segments happen to contain more topical coherence (and thus more redundancy that can be safely compressed). The reflection-based optimization — where the LLM effectively "self-trains" its own prompt using hard examples — is an intriguing method that deserves more transparency about convergence behavior. The data contamination concern (zero-shot GPT-4 beating supervised methods on segmentation benchmarks) raises an important question about whether the segmentation evaluation is measuring genuine generalization or memorization, which the paper does not address.
+Beyond the paper's own contributions, the most interesting cross-cutting observation from the reviews is that the paper's two main design choices — segment-level granularity and compression-based denoising — address different failure modes that interact in a non-trivial way. Segment-level units solve a *structural* problem (relevant information spans multiple turns; single turns are fragmentary, whole sessions are noisy), while compression solves a *signal-level* problem (within a retrieved unit, extraneous tokens dilute relevance signals for the retriever). The fact that the compression ablation (Table 2) produces a larger drop than the granularity ablation (Figure 5) suggests that the signal-level problem may be the more significant bottleneck in practice, at least given GPT-4's segmentation quality. This is a useful observation for future work: investing in better segmentation may have diminishing returns if the retrieved units are not also cleaned before retrieval.
 
 ## Suggestions
 
-1. **Address the evaluation confound.** Add a human evaluation on a subset of 100–200 responses, or use an independent LLM (e.g., Llama-3-70B) as the sole judge for GPT4Score and pairwise comparisons. This single addition would substantially increase confidence in the results.
+1. **Disentangle the compression confound.** Run the LOCOMO ablation with two controlled conditions: (a) SeCom w/o denoising but retrieving the same *number* of segments as the full SeCom (i.e., fewer tokens but same unit count), and (b) using padding or additional lower-ranked segments to match the total token budget. This would isolate whether the gain comes from noise removal or from fitting more units into the budget.
 
-2. **Complete the 2×2 ablation.** Run SeCom with/without compression alongside turn-level and session-level with/without compression on both datasets and both retrievers, so the independent contributions of granularity and denoising can be cleanly assessed.
+2. **Control for segmentation model capability.** Replace GPT-4 with a cheaper segmenter (e.g., utterance-embedding cosine shift with a threshold, or a simple fixed-window approach) and re-run the LOCOMO experiment. If SeCom still outperforms denoising-enhanced turn-level baselines, the granularity claim is robust. If performance drops sharply, the scope of the claim should be revised accordingly.
 
-3. **Provide concrete reflection details.** Specify the number of iterations, batch size K, and convergence criterion for the reflection-based optimization.
+3. **Add at least a small human evaluation** or replace GPT-4 as the evaluator for one condition (e.g., use an LLM from a different family, or use human-written questions as the test set for LOCOMO, following the Long-MT-Bench+ protocol).
 
-4. **Add a compression-rate sweep.** Vary the compression rate (e.g., 0%, 25%, 50%, 75%, 90%) on at least one dataset to show sensitivity.
-
-5. **Discuss data contamination in segmentation.** Acknowledge and discuss why zero-shot GPT-4 outperforms supervised segmentation methods — is this genuine generalization or potential training data overlap?
+4. **Explicitly report the compression settings for baselines** and clarify whether the same LLMLingua-2 model and rate were used.
 
 ## Score and Decision
 
-**Originality:** Good — the combination of topic-coherent segment-level memory with compression-based denoising is novel. **Importance of question:** High — long-term conversation memory is a central challenge for deployed conversational agents. **Claims well-supported:** Mostly, with gaps in the full 2×2 ablation and the GPT-4 evaluation confound. **Soundness:** Solid overall; the main conclusions are supported by consistent trends across multiple metrics and configurations, but the evaluation confound weakens the strongest claims. **Clarity:** Good, with well-structured figures and clear motivation. **Value to community:** Practical contribution with a method that can be adopted in existing RAG pipelines.
+The paper addresses a genuine and practical problem (what granularity to store conversation history for retrieval), proposes a well-motivated two-component solution (segment-level memory + compression denoising), and provides fairly extensive experiments. The segmentation model's independent evaluation on dialogue segmentation benchmarks is strong, and the robustness checks across retrievers and LLMs are commendable.
 
-The paper's core contributions are sound and well-motivated. The main weakness — the GPT-4 evaluation confound — is partially mitigated by non-GPT-4 automatic metrics showing the same trends, but the pairwise comparisons remain vulnerable. This is an addressable issue that should be resolved before publication.
+However, the evaluation has three structural concerns — GPT-4 concentration without human validation, the segmentation model confound, and the compression ablation confound — that together weaken the convincingness of the claimed improvements. These are fixable but non-trivial to address. The core ideas are solid, and the paper is clearly written, but in its current form the evidence falls short of being fully convincing.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

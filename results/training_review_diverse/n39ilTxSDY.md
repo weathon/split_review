@@ -1,18 +1,18 @@
-Now I have all the information needed. Let me produce the consolidated review.
+Now I have all the information needed. Let me write the final consolidated review.
 
 ## Summary
 
-Ditto presents a framework for quantization-aware secure Transformer inference over MPC, combining static dyadic quantization, novel upcast/downcast type-conversion primitives for converting shares between rings (ℤ₂³² ↔ ℤ₂⁶⁴), and compiler-level dynamic ring dispatch. The paper reports speedups of 1.44–2.35× over PUMA and 3.14–4.40× over MPCFormer across Bert and GPT2 models with modest utility degradation.
+This paper proposes Ditto, a framework for quantization-aware secure inference of Transformer models using secure multi-party computation (MPC). The key technical contributions are: (1) incorporation of MPC-friendly static dyadic quantization with layer-wise precision and quantization-aware distillation to maintain model utility, (2) novel MPC primitives (UpCast and DownCast) for type conversions between different rings that are essential in mixed-precision quantized inference, and (3) integration into a compiler with dynamic ring support and automatic type conversion. Empirical results on BERT and GPT2 models show 3.14–4.40× speedup over MPCFormer and 1.44–2.35× over PUMA with negligible accuracy degradation on GLUE benchmarks and Wikitext-103.
 
 ## Strengths
 
-- **Novel MPC type-conversion primitives for quantization-aware inference.** The upcast protocol (Algorithm 1) is a genuine technical contribution — it converts RSS shares from a smaller ring to a larger ring with concrete communication complexity of 3ℓ + ℓ′ bits in 3 rounds. No prior MPC framework for Transformers supports these conversions, which are essential for variable-precision quantization. The downcast protocol is locally computable (right-shift + modulo), which is cleanly designed.
+1. **Novel UpCast protocol enabling mixed-precision secure inference.** The UpCast protocol (Algorithm 1) converts shares between rings of different sizes (e.g., ℤ₂³² → ℤ₂⁶⁴) with only 3ℓ+ℓ′ bits of communication in 3 rounds. This primitive is essential for supporting the layer-wise fixed-point quantization that the framework relies on and fills a genuine gap identified in prior work (Section 4.2.1).
 
-- **Consistent and substantial empirical speedups across four Transformer models.** Ditto achieves 1.44–2.35× over PUMA and 3.14–4.40× over MPCFormer (Figure 2, Table 4). The speedups are consistent across Bert-base, Bert-large, GPT2-base, and GPT2-medium, and hold across varying input sequence lengths (Table 5). The communication reductions (2–3× over PUMA) directly explain the runtime improvements, lending credibility to the results.
+2. **Significant and well-measured empirical speedups.** In both LAN and WAN settings (Figure 3), Ditto achieves 3.14–4.40× faster runtime than MPCFormer and 1.44–2.35× faster than PUMA across BERT-base, BERT-large, GPT2-base, and GPT2-medium. These gains are substantial and clearly documented.
 
-- **Well-motivated MPC-friendly quantization design.** The paper clearly identifies two cross-domain gaps (Gap 1: dynamic quantization is MPC-expensive; Gap 2: type conversions between rings are non-trivial in MPC) and provides principled solutions: static dyadic quantization with shift-based truncation replaces expensive clip/max operations, and the novel upcast/downcast primitives enable ring conversion. The toy example (Figure 1) concretely illustrates why naive quantization fails in MPC.
+3. **Negligible utility degradation with evidence of careful design.** On GLUE benchmarks (Table 1), Ditto with Quad approximation maintains accuracy within ±0.5 points of the full-precision baseline for most tasks, and perplexity on Wikitext-103 degrades by less than 1 point. The quantization-aware distillation using layer-wise MSE loss is a sensible design choice that demonstrably recovers accuracy.
 
-- **System-level compiler integration.** Extending the SPU compiler to support dynamic ring dispatch and automatic type-conversion insertion makes the approach practical and easy to deploy from HuggingFace models. This bridges the gap between the protocol design and real-world usability.
+4. **Ablation studies cleanly isolate sources of improvement.** Table 3 separates the effect of quantization alone (1.41–1.56× speedup) from the combined effect of quantization + GeLU approximation (1.74–2.09×), showing that quantization is the primary driver of efficiency gains.
 
 ## Weaknesses
 
@@ -20,62 +20,44 @@ Ditto presents a framework for quantization-aware secure Transformer inference o
 None.
 
 ### Major
-None — none of the issues individually or collectively invalidate the core contribution. The upcast protocol's range assumption is transparently presented as a heuristic, the baseline comparisons show large and consistent speedups that cannot be explained by framework differences alone, and the utility numbers are honestly reported in the tables.
+
+1. **The UpCast protocol's range assumption lacks validation.** The core UpCast protocol relies on a "positive heuristic trick" (lines 261–264): it assumes the input value x lies in the range [−2^(ℓ−2), 2^(ℓ−2)−1], i.e., half the signed ring range. The paper explicitly states this as a "heuristic" and says "supposing" the condition holds. **However, the paper provides no analysis, proof, or empirical validation** that intermediate values in the quantized pipeline actually satisfy this constraint. While the accuracy results in Table 1 implicitly suggest the protocol works correctly (otherwise accuracy would degrade), the paper should either: (a) prove that the range condition is always satisfied given the quantization choices (FXP32^8 with layer-wise normalization), or (b) provide explicit empirical validation by measuring the distribution of values entering each UpCast operation across all layers and inputs. This is the most significant gap in an otherwise well-executed paper.
 
 ### Minor
 
-- **The upcast protocol's range assumption is stated but not verified (Section 4.3.1).** The "positive heuristic trick" assumes input `x ∈ [-2^{ℓ-2}, 2^{ℓ-2}-1]` so that the MSB of the masked value can be used to compute the wrap term. The paper calls this a heuristic and says "supposing" the input satisfies this bound, but never verifies that actual values during quantized Transformer inference respect this bound. For the 32→64-bit upcast path actually used, the bound is [-2³⁰, 2³⁰-1] ≈ ±1 billion — extremely generous given FXP32₈ encoding (with 8-bit fractional precision, actual integer values are ≪ 2²³), so the assumption very likely holds in practice. However, the paper should either provide a formal argument, empirical validation across all models/inputs tested, or a fallback protocol. This is a documentation gap, not a structural flaw.
+2. **Distillation setup is under-specified.** The quantization-aware distillation is described only as using layer-wise MSE loss (line 196). No hyperparameters (learning rate, batch size, number of epochs, optimizer, dataset used for distillation, temperature if applicable) are provided. This affects reproducibility, though the distillation procedure itself is standard and the results demonstrate its effectiveness.
 
-- **The "negligible utility degradation" claim is overstated for GPT2.** Perplexity increases from 12.25→13.78 (GPT2-base, +12.5% relative) and 10.60→11.35 (GPT2-medium, +7% relative) under Ditto (Quad). While the GLUE results for Bert indeed show minimal degradation (within ~1–2 points on accuracy metrics), the GPT2 perplexity increases are clearly noticeable and should be characterized as a modest trade-off rather than "negligible." The paper should discuss whether this degradation is acceptable for downstream applications.
+3. **Compiler overhead and dynamic ring support are not evaluated.** The paper describes dynamic ring support and automatic type conversion in the compiler (Section 4.3.2) but reports no measurements of their overhead (e.g., cost of dispatching between rings, tracking types). Given that the paper's focus is end-to-end efficiency, showing that this overhead is negligible would strengthen the contribution.
 
-- **Experimental results do not specify which network setting (LAN vs. WAN) was used for the main efficiency figures.** The experimental setup (line 314) defines both LAN (5 Gbps, 0.4ms RTT) and WAN (400 Mbps, 40ms RTT), but Figure 2 and Table 4 ("Inference efficiency with varying input length") do not state which setting produced the reported numbers. Protocol round count matters more in WAN, so this omission makes it impossible to assess how the speedups would translate to real deployments. The authors should report results for both settings or at minimum state which was used.
-
-- **Cross-framework baseline comparisons are not fully apples-to-apples.** The paper compares against MPCFormer and PUMA running in their own frameworks rather than within the same SPU pipeline. The footnote about MPCFormer being "configured to run on CPU for fair comparisons" is vague. Additionally, the embedding layer difference (one-hot vectors computed in MPC vs. locally by the client) is acknowledged but the potential impact on the GPT2 results (where MPCFormer shows lower communication) is not quantified. Re-implementing baselines within SPU, or providing a detailed per-operation cost breakdown, would substantially strengthen the efficiency claims.
-
-- **Ablation studies are performed only on Bert, not GPT2.** Given the larger utility degradation observed on GPT2, an ablation on GPT2 showing the individual effect of quantization alone vs. quantization + Quad approximation would help readers understand the source of the perplexity increase.
-
-- **Discussion section is empty.** The paper has a `\section{Discussion}` with no content. This is a missed opportunity to address limitations (the upcast heuristic, the GPT2 trade-off, framework differences) and to situate the work.
+4. **Speedup comparison against PUMA conflates two sources of gain.** The headline speedup over PUMA (1.44–2.35×) combines the effects of quantization and the cheaper Quad GeLU approximation, since PUMA uses a more accurate (and more expensive) Poly approximation. The ablation study (Table 3) partially addresses this, but the paper's main efficiency figure and narrative could more clearly distinguish the two sources.
 
 ### Trivial
-- Figure 2 is dense; the "red star" marking Ditto is hard to distinguish. A higher-contrast marker or annotation would help.
+None.
 
 ## Nice-to-Haves
-- A breakdown of where time is spent in the Ditto pipeline (linear layers, non-linear functions, type conversions) would help readers understand which components drive the speedup.
-- An ablation varying the precision bits (why 8 for linear layers and 18 for non-linear?) would strengthen the empirical contribution.
-- A brief security argument for the upcast protocol (why revealing `y = x + r` in the smaller ring does not leak information beyond the ideal functionality) would be useful, though the protocol is plausibly secure under semi-honest assumptions.
+- A breakdown of communication overhead (what fraction goes to type conversion vs. matrix multiplication vs. non-linear functions) would strengthen the efficiency analysis.
+- Discussion of scalability to deeper/wider transformers (e.g., would the range assumption in UpCast become a concern with deeper layers?).
+- The paper frames itself as "the first framework that supports MPC execution of quantization-aware secure inference" — this is defensible but could be more precise by highlighting that the novelty is specifically in supporting **mixed-precision type conversions** for quantization-aware inference, since SecureQ8 also performed int8 quantization.
 
 ## Removed Points
-
-- **Criticism about the "first framework" claim being too broad.** The paper qualifies this with "To the best of our knowledge" (line 57) and properly distinguishes from SecureQ8 which did not extend quantization to ciphertext ring sizes. This is appropriately scoped.
-- **Criticism about missing related works.** Cannot be verified without external sources (per instruction).
-- **Criticism about undisclosed hyperparameters / reproducibility details beyond what is standard.** The paper states it will open-source code and provides sufficient detail for the protocol contributions.
-- **Criticism about the missing GPT2 results for Quad+2ReLU in Table 2.** The dash entries indicate configurations that were not run, which is standard practice; this is not a weakness.
-- **Criticism about missing security analysis of the upcast protocol framed as a fatal flaw.** The paper operates in the standard semi-honest model; the protocol's information flow is straightforward and the concern is addressable in a sentence.
-- **The claim that the "upcast protocol is structurally flawed."** The paper transparently calls it a heuristic trick; the assumption is very likely satisfied in practice for the actual bitwidths used.
+These points are flagged to be removed; treat them with caution:
+- **"The paper does not treat the UpCast range assumption as a heuristic"**: The paper explicitly says "positive heuristic trick" and "supposing" (lines 260–264). The paper does acknowledge this is a heuristic. The valid concern is about *validation*, not about acknowledgment.
+- **"Security implications of the upcast heuristic could be exploited by adversary"**: The paper operates in the semi-honest honest-majority model (line 126), where parties follow the protocol. A correctness failure (wrong output due to violated assumption) is distinct from a security failure (privacy leakage). This concern conflates the two.
+- **"Downcast is trivial"**: The paper correctly presents DownCast as a straightforward right-shift and modulo (line 207). This is not a weakness of the paper.
+- **"Quad approximation is not novel"**: The paper attributes it to MPCFormer (line 180). The novelty is in the quantization-aware inference framework, not the approximation itself.
+- **"Missing related works"**: Cannot be verified without external sources.
 
 ## Novel Insights
-
-The most interesting point emerging from the reviews is the tension between the paper's framing of the upcast "heuristic trick" as a practical optimization and the reviewer's demand for formal guarantees. This reflects a broader methodological gap in the MPC+ML literature: protocols are often designed for worst-case guarantees, while quantization inherently bounds value ranges. The paper would benefit from explicitly bridging this gap by analyzing the value ranges induced by the static dyadic quantization scheme and proving that the heuristic's assumption is always satisfied under the chosen precisions (FXP32₈). Conversely, the concern about cross-framework baseline comparisons is standard for systems papers and the community should develop norms for fair comparison across MPC frameworks.
+The most interesting observation from the reviews is that the UpCast protocol's range assumption, while presented as a "heuristic trick," is actually quite natural for quantized inference. The paper uses FXP32^8 (32-bit representation with 8 fractional bits), meaning the actual numeric values are bounded by roughly ±2^23. The assumption requires values to stay within half the signed range [−2^30, 2^30−1], which is dramatically looser than the actual quantization range. This suggests the heuristic is very likely safe in practice — but the paper should still validate this explicitly rather than leaving readers to infer it.
 
 ## Suggestions
-
-1. **Verify or prove the upcast range assumption.** Since FXP32₈ has an 8-bit fractional part, the integer values are bounded by the quantization grid. Show analytically that for the chosen precision allocation (FXP32₈ for linear layers), all values satisfy the [-2³⁰, 2³⁰-1] bound. If possible, also provide empirical verification across all models and inputs.
-
-2. **Re-benchmark with a "vanilla quantized" baseline within the same SPU framework.** Implement a uniform 64-bit fixed-point baseline and a "quantized + no type conversion" baseline inside Ditto's own SPU pipeline to isolate the contribution of reduced bitwidth from framework differences.
-
-3. **Separate LAN and WAN results** for the main efficiency comparisons, or at minimum clearly state which network setting was used for each reported figure/table.
-
-4. **Qualify the GPT2 perplexity degradation** as a modest trade-off rather than "negligible." Consider adding a GPT2 ablation (quantization only vs. quantization + Quad) to Table 6.
-
-5. **Add a brief security note** for the upcast protocol explaining why revealing `y = x + r` in the smaller ring does not leak information (intuitively: `r` is uniform random and masks `x` perfectly in the smaller ring, so `y` is statistically independent of `x`).
+1. **Validate the UpCast protocol's range assumption.** Add an experiment measuring the distribution of values entering each UpCast operation across all layers and model configurations, confirming they satisfy |x| ≤ 2^(ℓ−2). A brief analysis of why the quantized pipeline guarantees this bound (due to fixed-point arithmetic with truncation after each multiplication and the bounded nature of normalized Transformer activations) would also be valuable.
+2. **Provide distillation hyperparameters** (learning rate, batch size, optimizer, number of epochs, training dataset) in the final version.
+3. **Include a brief evaluation of the compiler overhead** for dynamic ring support and automatic type conversions.
+4. **Present the speedup sources more clearly** by explicitly separating the quantization-only comparison (Ditto_w/o{a} vs. PUMA with equivalent non-linear functions) from the combined effect.
 
 ## Score and Decision
+The paper addresses a real and important problem — bridging ML quantization with MPC for secure Transformer inference — and proposes a practical solution with impressive empirical results. The main weakness is the lack of explicit validation of the UpCast protocol's range assumption, though the empirical accuracy results provide implicit validation and the paper does acknowledge the heuristic nature. With the suggested revisions (particularly validation of the range assumption and filling in reproducibility details), this would be a solid contribution to the field.
 
-The paper addresses an important practical problem (accelerating secure Transformer inference) with a novel and well-motivated approach combining static dyadic quantization, type-conversion primitives, and compiler support. The empirical results show meaningful and consistent speedups. None of the identified weaknesses are fatal — they concern verification gaps, presentation issues, and overclaiming rather than invalidating the core contribution. The paper would benefit from addressing these concerns but is acceptable in its current form.
-
-**Score:** 6.0
-
-**Decision:** Accept
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

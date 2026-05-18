@@ -1,18 +1,20 @@
-Now I have all the information I need. Let me synthesize the final review.
+Now I have all the information needed. Let me synthesize the final review.
 
 ## Summary
 
-This paper proposes a neural network-based algorithm for solving optimal transport (OT) problems with general cost functionals, going beyond classic Euclidean costs. The core contribution is a max-min reformulation (Theorem 1) that allows continuous neural OT for arbitrary convex, lower semi-continuous cost functionals, subsuming prior classic and weak OT reformulations as special cases. The paper constructs two example functionals—a class-guided functional for dataset transfer with partial labels, and a pair-guided functional for supervised image translation—and provides empirical evaluations on FMNIST→MNIST, MNIST→MNIST‑M, and paired translation benchmarks.
+This paper introduces a neural network-based framework for computing continuous optimal transport (OT) plans with general cost functionals, going beyond standard Euclidean costs. The core theoretical contribution is a maximin reformulation (Theorem 1) that subsumes prior classic and weak OT formulations, paired with a duality-gap error bound (Theorem 3) that avoids convexity assumptions on the dual potential. Two practical instantiations are presented: a class-guided functional for dataset transfer (preserving class structure across domains) and a pair-guided functional for supervised image-to-image translation. On the dataset transfer task (FMNIST→MNIST), the method achieves 83.22% accuracy with only 10 labeled target samples per class, dramatically outperforming unsupervised baselines (~10%, i.e., random chance).
 
 ## Strengths
 
-1. **Novel max-min reformulation for general OT.** Theorem 1 shows the general OT problem with a convex, lower semi-continuous cost functional can be rewritten as a saddle-point optimization problem, enabling continuous neural OT for cost functionals beyond Euclidean costs. This formulation explicitly subsumes prior classic and weak OT reformulations (Section 4, "Relation to prior works").
+- **Generic maximin reformulation unifying prior OT frameworks**: Theorem 1 derives a saddle-point formulation for general cost functionals $\mathcal{F}$ that automatically reduces to known formulations for classic OT and weak OT when the cost functional is specialized. This provides a genuine theoretical unification, and the paper explicitly traces these connections (Section 4, "Relation to prior works").
 
-2. **Compelling empirical performance on class-preserving mapping with few labels.** On FMNIST→MNIST, the class-guided functional achieves **83.22% accuracy** (Table 1), compared to at most 12.03% for all baselines including label-aware methods (OTDD at 10.28%, SinkhornLpL1 at 10.67%). This large margin demonstrates that the framework can effectively leverage side information (10 labelled target samples per class) to produce meaningful transport where prior methods fail.
+- **Class-guided functional solves dataset transfer, a previously unsolved problem for continuous OT**: With only 10 labeled target samples per class, the method achieves 83.22% accuracy on FMNIST→MNIST (Table 1), far exceeding all baselines — including label-using ones like OTDD (10.28%) and SinkhornLpL1 (10.67%). This demonstrates a new capability for continuous OT to incorporate side information like class labels.
 
-3. **Generic framework that can incorporate task-specific side information.** The paper demonstrates two distinct functional forms—one using energy distance for class preservation, another using an explicit loss for paired data—showing the framework's flexibility. The pair-guided functional is demonstrated at 256×256 resolution (CelebAMask‑HQ, Comic‑Faces) and 512×512, indicating scalability.
+- **Error analysis that removes restrictive assumptions on the dual potential**: Unlike prior work \citep{fan2023neural, rout2022generative, makkuva2020optimal} that requires convexity of the dual potential $\hat{v}$, Theorem 3 provides a duality-gap bound requiring only strong convexity of the cost functional $\mathcal{F}$. This is a genuinely differentiability-free assumption on the dual side.
 
-4. **Error analysis via duality gaps that avoids convexity assumptions on the dual potential.** Theorem 3 bounds plan error under only strong convexity of $\mathcal{F}$, without requiring the dual potential $\hat{v}$ to satisfy convexity properties needed in prior work (Fan et al. 2023, Rout et al. 2022). This is a novel theoretical contribution for the general OT setting.
+- **Convexity and lower semi-continuity of proposed functionals are established**: Theorem 4 proves that $\mathcal{F}_{\text{G}}$ is convex, lower semi-continuous, and $*$-separably increasing, ensuring the saddle-point approach is valid for the class-guided case.
+
+- **Practical Monte Carlo estimator for the energy distance term**: Proposition 1 provides a concrete estimator $\widehat{\Delta\mathcal{E}^2}$ enabling stochastic optimization with labeled batches, detailed in Algorithm 2.
 
 ## Weaknesses
 
@@ -21,58 +23,58 @@ None.
 
 ### Major
 
-1. **Key theoretical condition in Theorem 1 is never defined.** Theorem 1 (line 111) requires $\mathcal{F}$ to be "separably *‑increasing convex and lower semi‑continuous." The term "separably *‑increasing" (or the variant "$*$‑separably increasing" in Theorem 4, line 198) is not defined anywhere in the visible paper text. Without a definition, the reader cannot verify whether the proposed functionals satisfy Theorem 1's conditions or determine the scope of the max‑min reformulation. While Theorem 4 asserts $\mathcal{F}_G$ has this property, the property itself remains undefined. This is a significant presentation gap in the paper's theoretical core.
+- **Theory-practice gap: strong convexity assumption in Theorem 3 is not satisfied by either example functional.** The error analysis (Theorem 3) requires $\mathcal{F}$ to be $\beta$-strongly convex in a metric $\rho$ on $\Pi(\mathbb{P})$. However, (a) the class-guided functional $\mathcal{F}_{\text{G}}$ (Eq. 6) is a sum of energy distances — convex but not established to be strongly convex in any standard metric on $\Pi(\mathbb{P})$; (b) the pair-guided functional $\mathcal{F}_{\text{S}}$ (Eq. 8) is linear in $\pi$, hence not strongly convex at all. The paper acknowledges on line 151 that "to apply our duality gap analysis, the strong convexity of $\mathcal{F}$ is required," but nowhere checks this condition for the examples. Consequently, the theoretical error bound is decoupled from the practical algorithms being validated. To repair this, the authors would need to either (i) prove strong convexity holds for $\mathcal{F}_{\text{G}}$ under appropriate conditions (e.g., with a regularizer), (ii) relax Theorem 3 to work under convexity alone, or (iii) clearly state the bound applies only to future functionals that satisfy the condition and not to the paper's own examples.
 
-2. **Strong convexity condition for error analysis is not verified for the example functionals.** Theorem 3 (line 140) assumes $\mathcal{F}$ is $\beta$-strongly convex. The paper only establishes $\mathcal{F}_G$ is *convex* (Theorem 4, not strongly convex) and $\mathcal{F}_S$ is linear (not strongly convex). The paper does not discuss whether the error bound applies to its own example functionals, nor does it suggest modifications (e.g., adding a quadratic regularizer) to satisfy the condition. This creates a gap between the theoretical analysis and the empirical method.
-
-3. **Paired image translation experiments lack quantitative comparison to baselines.** Results for Comic‑Faces and Edges‑to‑Shoes are purely qualitative (Figures 5, 6). No FID, LPIPS, or other perceptual metrics are reported for these datasets. For CelebAMask‑HQ, only the method's FID (21.1) is reported without any baseline FID for Pix2Pix or the other listed methods. Without quantitative comparisons, the claim of "competitive quality" (line 297) is unsubstantiated. This undermines the evaluation of the pair-guided functional, one of the paper's two main practical contributions.
+- **Insufficient quantitative evaluation for the paired image translation task.** For the pair-guided functional $\mathcal{F}_{\text{S}}$, the paper reports results on three datasets (Comic-Faces-V1, Edges-to-Shoes, CelebAMask-HQ) but provides only qualitative visual comparisons for the first two and a single FID of 21.1 for CelebAMask-HQ — without reporting FID (or any other metric) for the baselines (Pix2Pix, RMSE regression, NOT) on any of these datasets. The baselines section on line 292-293 lists Pix2Pix and RMSE regression, but their quantitative performance is never reported. The claim of "competitive quality" on line 297 is not verifiable without quantitative comparisons. For a well-established benchmark task with standard evaluation protocols, this omission significantly weakens the empirical contribution.
 
 ### Minor
 
-4. **Claim of "notable improvements" is overstated.** The abstract states "notable improvements in accuracy over existing algorithms" without qualification. On MNIST→MNIST‑M, AugCycleGAN achieves **98.2%** accuracy compared to the proposed method's **95.27%** (deterministic) and **94.62%** (stochastic) in Table 1. The claimed improvement is not uniform across datasets.
+- **Key condition "separably $*$-increasing" in Theorem 1 is undefined in the main text.** This term appears in the statement of the paper's central theorem (line 111) and is invoked again in Theorem 4 (line 197) to certify $\mathcal{F}_{\text{G}}$, but is never defined or explained in the main body. The remark that "one can eliminate this restriction by taking the advantage of the minimax theorems" (line 109) is too cryptic to serve as a substitute. A reader cannot assess whether the classic OT cost, weak OT costs, or the two proposed functionals satisfy the condition without consulting external references. While a definition may appear in the appendix (stripped by the parser), the main paper should at minimum state the definition and discuss whether the examples satisfy it, since this is the core theoretical claim.
 
-5. **No statistical uncertainty reported.** Tables 1‑2 report point estimates without standard deviations or confidence intervals. Given the small labelled sample size (10 per class), variance could be high. Multiple trials with different labelled splits or random seeds would strengthen the evidence.
+- **Theorem 2's logical inference is slightly oversimplified.** Theorem 2 states: if $v^*$ is an optimal potential and $T^*$ is a stochastic OT map, then $T^* \in \arg\inf_T \mathcal{L}(v^*, T)$. The paper then claims "by solving (5) and obtaining an optimal saddle point $(v^*, T^*)$, one gets a stochastic OT map." This direction — that any $T$ minimizing $\mathcal{L}(v^*, \cdot)$ is an OT map — is the converse of what Theorem 2 proves and requires additional justification. The paper does hint at a resolution on line 129 ("To ensure that all the solutions are OT maps, one may consider adding strictly convex regularizers") but does not develop this point. Clarifying the logical structure would improve rigor.
 
-6. **No ablation on labelled sample size.** The method uses 10 labelled target samples per class. There is no analysis of how performance degrades as this number decreases, which limits understanding of practical robustness.
-
-7. **Error bound metric $\rho$ is not related to interpretable quantities.** Theorem 3 bounds $\rho(\pi_{\hat{T}}, \pi^*)$ but does not explain what $\rho$ is (beyond "a metric on $\Pi(\mathbb{P})$") or how it relates to practically useful metrics like Wasserstein distance or total variation. The practical significance of the bound is unclear.
-
-8. **No ablation isolating the effect of the cost functional.** There is no experiment that runs the same algorithm with a classic cost (e.g., $\ell^2$) to isolate the value of the general functional itself versus the neural parameterization framework.
+- **Reproducibility details for class-guided experiments are sparse.** For the pair-guided experiments, the paper specifies architectures (U2Net, ResNet discriminator). For the class-guided experiments (the paper's primary empirical contribution), no architecture details, hyperparameters, or sensitivity analysis (e.g., how accuracy changes with the number of labeled samples) are provided. The code repository URL is mentioned (line 228) but the path is cut off in the extracted text. Adding standard experimental details would improve reproducibility.
 
 ### Trivial
-9. The code repository URL appears incomplete (line 228 ends with "The code for the experiments can be found at" with no URL).
+
+- The logical flow of Theorem 2 to the claim about obtaining OT maps from saddle points could be more precise. The nuance about strictly convex regularizers on line 129 is mentioned parenthetically but deserves a clearer treatment.
 
 ## Nice-to-Haves
-- For paired translation, report FID/LPIPS for Comic‑Faces and Edges‑to‑Shoes with comparisons to Pix2Pix and optionally pix2pixHD/SPADE.
-- Add sensitivity analysis on labelled sample size (e.g., varying from 1 to 50 per class).
-- Report standard deviations over multiple random seeds / labelled splits.
-- Add discussion of whether/practitioners should add a small quadratic regularizer to $\mathcal{F}$ to ensure strong convexity when applying Theorem 3.
+
+- For the paired translation task, it would be informative to report FID (and ideally LPIPS or similar perceptual metrics) for all baselines on all three datasets, so the "competitive quality" claim can be quantitatively verified.
+- A sensitivity analysis of the class-guided method to the number of labeled target samples (e.g., varying from 1 to 50 per class) would strengthen the practical contribution.
+- The paper could explicitly state whether $\mathcal{F}_{\text{G}}$ or $\mathcal{F}_{\text{S}}$ satisfies the strong convexity condition of Theorem 3, perhaps after adding a small strongly convex regularizer, and if not, acknowledge that the error bound applies only to future $\mathcal{F}$'s that do meet the condition.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-- **Criticism that the teaser figure (Figure 1) lacks quantitative evaluation** → Removed. Teaser figures are illustrative by nature; the quantitative results appear in the relevant experimental sections.
-- **Criticism that the derivation of the max‑min objective is "opaque" without a proof sketch** → Removed as stated. The paper provides the theorem statements and references prior work; some density in page-limited theory papers is expected, and detailed proofs may exist in supplementary material stripped by the parser.
-- **Criticism about comparing to pix2pixHD/SPADE** → Removed. The paper compares to Pix2Pix, which is the canonical supervised baseline for this task. Demanding specific newer baselines is scope creep when Pix2Pix is already included.
-- **Criticism about missing hyperparameter details** → Removed per instructions (trivial implementation details impractical to include in a submission).
-- **The strength finder's claim that the error analysis is "without restrictive convexity assumptions"** → Removed as misleading. The analysis requires strong convexity of $\mathcal{F}$, which is a restrictive assumption. The correct comparison is that it avoids assumptions on the dual variable $\hat{v}$, not that it is assumption-free.
+The following criticisms from the original reviews are removed with justification:
+
+- **"Comparison against unsupervised baselines is methodologically improper"** — Removed. The paper is transparent about the label usage (line 281: "Other baselines lack the capability to use label information"), includes proper semi-supervised/label-using baselines (OTDD, SinkhornLpL1) in the same tables, and the comparison to unsupervised methods serves to demonstrate that the task is unsolvable without label information. The framing is appropriate, not misleading.
+
+- **"Missing Algorithm \ref{algorithm-gnot}"** — Removed. The parser strips appendix content from all papers; this algorithm exists in the original submission.
+
+- **"Notation issue with $\Pi(\mathbb{P})$ in Theorem 3"** — Removed. The reviewer claims the object of interest is $\Pi(\mathbb{P},\mathbb{Q})$ but $\Pi(\mathbb{P},\mathbb{Q}) \subset \Pi(\mathbb{P})$, so the metric on $\Pi(\mathbb{P})$ is well-defined for both $\pi_{\hat{T}}$ and $\pi^*$.
+
+- **"Estimator derivation should be sketched"** — Removed. The estimator is explicitly given in Proposition 1 (Eq. \ref{estimator-energy}).
+
+- **"Typos, formatting, style nitpicks"** — Removed per instructions (these are parser artifacts, not author errors).
+
+- **"Missing related works"** — Removed per instructions (cannot verify existence of missing references without external sources).
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the tension between theoretical generality (Theorems 1 and 3) and practical verification (whether the example functionals actually satisfy the required conditions), which is a useful framing for the authors to address in revision.
+Beyond the paper's own contributions, the reviews surface an important tension: the paper aims to provide a *generic* theoretical framework for general OT (Theorem 1, Theorem 3), yet the two practical instantiations both fail to satisfy a key condition (strong convexity) required by the error analysis. This suggests that the real value of this work may lie not in the generic theory but in the specific class-guided functional and its empirical success on dataset transfer — a problem that prior continuous OT methods could not address. The mismatch between the generality the paper claims and the conditions its examples actually meet is the central unresolved issue.
 
 ## Suggestions
 
-1. **Define "separably *‑increasing"** in the main text or provide a clear reference to a standard definition. Without this, Theorem 1 is unverifiable.
-2. **Address the strong convexity gap**: either (a) verify or prove that $\mathcal{F}_G$ is strongly convex (or can be made so with a small regularizer), (b) add a regularizer to $\mathcal{F}_S$ to ensure strong convexity, or (c) explicitly discuss that the error bound is a theoretical result that may require additional regularization to apply to the examples.
-3. **Add quantitative metrics for paired translation**: report FID (and preferably LPIPS) for Comic‑Faces and Edges‑to‑Shoes with Pix2Pix baselines; report a baseline FID for CelebAMask‑HQ.
-4. **Qualify the "notable improvements" claim** in the abstract/introduction to acknowledge that the advantage is dataset-dependent and that AugCycleGAN outperforms on MNIST→MNIST‑M.
-5. **Add standard deviations** (multiple seeds or labelled splits) to Tables 1‑2.
-6. **Clarify the practical interpretation of $\rho$** in Theorem 3, or show that the bound implies convergence in a familiar metric.
+1. Define "separably $*$-increasing" in the main text, or at minimum explain why the condition is mild enough that it can be eliminated via minimax theorems, and verify it explicitly for $\mathcal{F}_{\text{G}}$ and $\mathcal{F}_{\text{S}}$.
+2. Address the strong convexity gap: either prove that $\mathcal{F}_{\text{G}}$ (or a regularized version) is strongly convex, relax Theorem 3 to convexity-only (possibly with a weaker bound), or honestly state that the bound does not apply to the paper's examples.
+3. Add a quantitative comparison table for the paired translation experiments reporting FID (and ideally LPIPS) for all baselines on all three datasets.
+4. Include key experimental details for the class-guided experiments: architectures, hyperparameters, and a sensitivity analysis w.r.t. the number of labeled target samples.
 
 ## Score and Decision
 
-The paper proposes a genuinely novel extension of neural OT to general cost functionals and demonstrates a compelling result on the FMNIST→MNIST class-preserving task. However, the theoretical contribution suffers from an undefined key condition in the central theorem and a gap between the error analysis assumptions and the example functionals. The paired translation evaluation is incomplete without quantitative comparisons. These issues are addressable in a major revision but substantively weaken the paper in its current form.
+The paper makes a genuine contribution — a unified neural framework for general OT cost functionals — and the dataset transfer results are compelling. However, the combination of (a) a major theory-practice gap where the central error bound is not verified for either example functional, and (b) substantially incomplete quantitative evaluation for the paired translation task, prevents the contribution from being fully convincing. These weaknesses are addressable but require non-trivial additional work.
 
 MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

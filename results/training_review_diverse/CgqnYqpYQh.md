@@ -1,86 +1,81 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have all the information I need. Let me synthesize the final review after careful cross-verification against the paper.
 
 ---
 
 ## Summary
 
-This paper proposes a post-training compression method that merges adjacent feed-forward sublayers in Transformers by: (1) permuting neurons via correlation-based alignment to match activations across sublayers, (2) averaging the aligned weight matrices, and (3) tying the merged parameters so only one copy is stored. The method is evaluated on GPT-2 (language modeling), ViT (image classification), and an OPUS-MT translation model, showing that merging one-third of FF sublayers preserves near-original performance while removing over 21% of total parameters in ViT.
+This paper proposes a post-training compression method for Transformers: aligning, averaging, and tying adjacent feed-forward (FF) sublayers within a single model via permutation-based neuron alignment, then recovering performance with fine-tuning. The method is evaluated on GPT-2 (language modeling), ViT (image classification), and an encoder-decoder translation model. At 1/3 of FF sublayers removed, the method retains roughly 99% of original performance across all three tasks and consistently matches or exceeds a strong layer-dropping baseline.
 
 ## Strengths
 
-- **Effective across diverse architectures and modalities**: The method is tested on decoder-only (GPT-2), encoder-only (ViT), and encoder–decoder (OPUS-MT) Transformers, covering two modalities (text and vision). Across all three, merging 1/3 of FF sublayers retains near-original performance (ViT loses ~1% accuracy, GPT-2 incurs ~1 PPL increase). This breadth is the paper's strongest evidence that the approach generalizes.
-
-- **Outperforms a strong structured-pruning baseline**: At comparable compression ratios, the proposed merging method consistently matches or exceeds a layer-dropping baseline (Figure 3). The layer-dropping baseline is itself strong — it uses the same sliding-window selection and fine-tuning protocol, making the comparison fair and favorable.
-
-- **Robust to design choices**: Ablations show that the method is insensitive to which specific sublayers are merged (Table 2) and which anchor layer is used for permutation alignment (Table 3), with all variants achieving similar post-fine-tuning performance. This substantially strengthens the practical reliability of the approach.
-
-- **Orthogonal to quantization**: Combining the method with LLM.int8() quantization (Table 4) yields further compression with negligible additional degradation (e.g., ViT accuracy drops only 0.1% from 84.1% to 84.0%), demonstrating practical compatibility with other compression techniques.
+- **Novel intra-model merging approach.** The paper applies model-merging ideas (permutation alignment + weight averaging) to compress within a single Transformer by targeting FF sublayers. This is a clean, conceptually distinct alternative to pruning and quantization, clearly described in Section 3.3 and Algorithm 1.
+- **Consistent retention across diverse architectures.** Results on a decoder-only LM (GPT-2, 36 layers), an encoder-only ViT (12 layers), and an encoder-decoder translation model show that the method generalizes across model types and modalities. At 1/3 FF removal: ~1% accuracy drop (ViT), ~1 perplexity point increase (GPT-2), ~2 BLEU drop (translation) — reported explicitly in Section 5.1.
+- **Outperforms a strong layer-dropping baseline.** The paper compares against a fine-tuned sliding-window layer-pruning baseline that also searches for the best window. Across all three tasks, the merging method matches or exceeds this baseline (Figure 3), demonstrating that merging is competitively better than removing entire layers at comparable parameter reductions.
+- **Robust to specific choices.** The method is shown to be robust to which consecutive FF group is merged (Table 2) and which anchor layer is used for alignment (Table 3), reducing the risk of brittle tuning requirements.
+- **Orthogonal to quantization.** Combining 1/3 FF merging with LLM.int8() quantization yields additional storage savings (e.g., GPT-2 total storage from 1260MB to 473MB) while maintaining strong performance (Table 4), confirming the method can be stacked with other compression techniques.
+- **CKA analysis provides mechanistic insight.** Section 5.5 shows regions of high CKA similarity between hidden states of different FF sublayers across all three models, computed before residual addition (ruling out trivial residual-based similarity), offering a plausible explanation for why merging succeeds.
 
 ## Weaknesses
 
 ### Fatal
-
 None.
 
 ### Major
-
-None. The weaknesses below are substantive but addressable; none invalidate the paper's core claims.
+None.
 
 ### Minor
 
-- **"Quick fine-tuning" claim is not quantitatively supported**: The paper describes the fine-tuning as "a small amount" that "quickly" restores performance, but reports up to 100k steps for GPT-2 (batch size 2) and the translation model, and 50k steps for ViT (batch size 128). No learning curves, step-wise performance trajectories, or ablations over fine-tuning length (e.g., 1k, 5k, 10k steps) are provided, so the reader cannot assess how much fine-tuning is actually needed. This does not weaken the compression results themselves, but it does mean the characterization of efficiency is unsubstantiated.
+1. **Unsupported claim about attention sublayers.** The abstract and contribution list (Section 1, bullet 3) state that "These same patterns [of high similarity] do not occur in attention sublayers." However, the paper provides no CKA plots or any other analysis for attention sublayers — Figure 5 only shows FF sublayer similarities. This claim is presented as a finding but is unsupported by the evidence in the paper. The authors should either add the analogous attention-sublayer analysis or remove the claim.
 
-- **No variance or statistical error reporting**: All results (perplexity, accuracy, BLEU) are presented as single numbers with no standard deviations, confidence intervals, or multiple-seed runs. Given that the differences between Permute FF Merge and Vanilla FF Merge are modest at 1/3 removal for some settings, and that fine-tuning involves randomness from data order and initialization, the reliability of fine-grained comparisons (e.g., which window is best before tuning) is unclear. While single-run evaluation is not uncommon in this space, the absence of variance reporting weakens the precision of the claims.
+2. **"Quickly heal" / "small amount of fine-tuning" claim is not substantiated.** The Introduction (line 16) and Section 3.4 claim that "with a small amount of recovery fine-tuning, our models quickly regain competitive performance." While fine-tuning details (up to 100k steps for GPT-2, 50k for ViT, 100k for translation) are reported, no learning curves or early-stopping analysis are shown. Without evidence that performance saturates well before the maximum step count, the reader cannot assess whether the recovery is genuinely "quick" or whether the full fine-tuning budget is needed. The relative comparison with the baseline is fair (same regimen), but the *characterization* of the recovery phase as lightweight is unsupported.
 
-- **Incomplete model specifications**: The ViT variant (e.g., base vs. large) is not identified by hidden dimension or total parameter count — only resolution (224×224) and patch size (16×16) are given. The OPUS-MT model's hidden size, FF dimension, and total parameters are also unspecified. Hyperparameters such as learning rate, optimizer, schedule, warmup steps, and weight decay are absent. These omissions hinder reproducibility and should be added.
+3. **Selection procedure adds complexity without clear benefit.** The paper describes a sliding-window search over candidate layer groups (Section 3.4) but then shows in Table 2 that after fine-tuning, randomly chosen adjacent groups all achieve nearly identical performance. The paper acknowledges this finding but does not simplify its recommendation — the sliding search is still presented as part of the method. A simpler default (e.g., always merge a middle block) would be equally effective and more practical. The paper should either justify retaining the search or recommend dropping it.
 
-- **Mapping from "1/3 of FF sublayers removed" to concrete merge configurations is not explicitly stated**: The paper describes merging k adjacent sublayers into one (removing k−1 sublayers), and reports results at "1/3 of FF sublayers removed." The actual k values used for each model (e.g., k=13 for GPT-2 with 36 layers to remove 12 sublayers) can be inferred but are never stated. The number of merges performed (one merge of size k, or multiple) is also not clarified. This makes the experimental setup less reproducible than it should be.
-
-- **CKA similarity analysis is not empirically linked to mergeability**: Section 5.5 identifies regions of high CKA similarity between FF sublayer outputs, and the paper suggests this may explain why merging works. However, a direct, quantitative link is missing: does the best-performing sliding window correspond to the region of highest CKA similarity? Without this connection, the CKA analysis remains an interesting observation rather than evidence for the method's rationale. Plotting pairwise CKA against post-fine-tuning performance per window would substantiate the claimed explanatory value.
-
-- **Adjacent-only merging is not motivated**: The method only merges adjacent sublayers. The paper acknowledges non-adjacent merging as future work, but never discusses why adjacency is a reasonable constraint (e.g., whether CKA similarity is higher between adjacent sublayers than distant ones, as hinted by Figure 5). A brief justification would help the reader understand the design choice.
+4. **Main numerical results presented only in figures.** The quantitative results at key compression ratios (perplexity, accuracy, BLEU) are shown exclusively in line plots (Figures 2 and 3). While some approximate numbers are given in the text (Section 5.1: "1% accuracy drop," "1 PPL increase," "2 BLEU drop"), the absence of a table with exact values makes precise comparison with future work difficult.
 
 ### Trivial
-
-- The phrase "pack batches to the context length of 1024 after tokenization" (Section 4.1) is slightly ambiguous — it likely means sequences are concatenated/packed to fill the context window rather than truncated, but this could be clarified in one sentence.
+None.
 
 ## Nice-to-Haves
 
-- **Additional compression baselines**: The paper compares only against layer pruning. While the paper's justification (structured pruning is the most comparable family) is defensible, comparisons to other post-training methods — e.g., neuron-level structured pruning with recovery, or other parameter-sharing approaches — would better contextualize the contribution. This is a desideratum, not a flaw.
-
-- **Fine-tuning length ablation**: Adding an ablation that varies fine-tuning steps (e.g., 1k, 5k, 10k, 25k, 50k) with performance curves would substantiate or refine the "quick" recovery claim.
-
-- **Discussion of overfitting to alignment data**: The permutation alignment uses validation data; a brief note on whether this risks overfitting to the alignment sample would strengthen methodological rigor.
+- **Show learning curves.** A plot of validation loss/perplexity vs. fine-tuning steps for one representative condition (e.g., GPT-2 at 1/3 FF removal) would directly support or qualify the "quick recovery" claim. If the method converges in ≤10k steps, that is a meaningful advantage worth highlighting.
+- **Report computational overhead of the selection step.** The paper states the overhead is low (Section 3.4) but provides no concrete runtime or FLOP numbers. Reporting this would strengthen the practicality argument.
+- **Compare against one additional structured pruning baseline** that targets neurons within layers (e.g., Dalvi et al. 2020, which the paper already cites). This is not required — the layer-dropping baseline is a strong and fair comparison — but would further contextualize the method's advantages.
+- **Clarify how weight tying interacts with peak memory vs. disk storage.** Table 4 uses "total model storage complexity (disk space)," but for practitioners, peak inference memory is often the more relevant metric. A brief note on whether the tied parameters reduce memory proportionally would be helpful.
 
 ## Removed Points
 
-These points were flagged for removal and should be treated with caution; they reflect reviewer knowledge gaps, scope mismatches, or misinterpretations:
+The following points from the reviews were removed with justification:
 
-1. **"Thin comparison to other compression methods"** — The paper explicitly explains why it focuses on structured pruning (unstructured pruning requires specialized sparse libraries for actual memory savings; distillation and quantization are orthogonal families). Asking for more baselines beyond the most directly comparable one is scope creep; the paper's choice is defensible.
-
-2. **"Pack batches" clarity concern** — This is a minor phrasing ambiguity that does not affect the paper's contributions or reproducibility in any meaningful way.
-
-3. **Questions about random selection procedure in Table 2** — The paper says "we randomly select 3 sets of k consecutive layers" which is sufficiently clear. The reviewer's concern about whether these were "truly random or sampled from the some-are-good distribution after the fact" is not grounded in any evidence that the paper was misleading.
-
-4. **Figures missing from parsed text** — The reviewer acknowledges this is a parser issue. The original submission contains the figures.
-
-5. **Criticism about GPT-2 variant confirmation** — The paper states "36 layers and a feed-forward dimension of 5120," which unambiguously identifies GPT-2 large. The reviewer's query about this is resolved by the paper's own text.
+- *"The baseline (layer pruning) is also fine-tuned with the same regimen, so the comparison is fair—but the practical advantage of merging over other methods is unclear if the fine-tuning cost is similar."* — This is not a distinct weakness; it is the same observation as Weakness #2 above. The fine-tuning cost is a real concern for the method's characterization, but the *relative* comparison with the baseline is explicitly noted as fair by the reviewer. The retained Weakness #2 captures the substantiated part (no learning curves) without the misleading implication that the comparison is unfair.
+- *"The method is evaluated only on adjacent-layer merges... the selection procedure for the best window is opaque."* — The procedure is clearly described in Section 3.4 and Algorithm 1. The relevant weakness is not opaqueness but the finding that the search may be unnecessary (captured in Weakness #3). The "opaque" framing is inaccurate.
+- *"No comparison to other weight-tying methods or to structured pruning methods that target neurons within layers (e.g., Dalvi et al. 2020) is provided."* — The paper's choice of a strong, fine-tuned, sliding-window layer-dropping baseline is defensible and standard for this type of compression work. This is a scope-creep suggestion moved to Nice-to-Haves.
+- *"The paper should acknowledge that the method only merges adjacent layers, that it adds no speedup (only memory savings), and that the fine-tuning requirement is non-trivial."* — The paper explicitly states it merges adjacent layers throughout, and the fine-tuning requirements are reported in detail. A dedicated limitations section is not standard for all paper formats. The core concern (fine-tuning is non-trivial) is captured in Weakness #2.
 
 ## Novel Insights
 
-The reviews surface a useful meta-point: the paper's CKA analysis is interesting but currently stands as a separate observation rather than an integrated part of the method's evidence. A natural follow-up — correlating pairwise CKA within each candidate window against post-fine-tuning performance — would transform this section from an interesting aside into direct mechanistic support. The reviewers also correctly note that the method's "quick fine-tuning" framing would benefit from concrete evidence, and that the experimental reporting would be strengthened by variance estimates. None of these points challenge the validity of the core contribution; they identify where the evidence could be tightened.
+None beyond the paper's own contributions. The reviews did not surface a genuinely novel interpretation that the authors themselves did not already articulate.
 
 ## Suggestions
 
-1. Add a table reporting ViT variant (hidden dim, FF dim, total params), OPUS-MT architecture details, and all fine-tuning hyperparameters (learning rate, optimizer, schedule, warmup, weight decay).
-2. Include a fine-tuning steps ablation with performance curves (e.g., 1k, 5k, 10k, 25k, 50k, 100k) to substantiate the "quick recovery" claim.
-3. State explicitly the k values used for each compression ratio and model (e.g., "for GPT-2 with 36 layers, merging 13 FF sublayers into 1 removes 12/36 = 1/3 of FF sublayers").
-4. Add a plot correlating pairwise CKA similarity within each candidate window against post-fine-tuning performance to connect the CKA analysis to mergeability.
-5. Report results from at least 3 seeds with mean ± std for the main comparisons (Figures 2 and 3), especially for conditions where the Permute vs. Vanilla gap is small.
+1. **Remove or support the attention sublayer claim.** Either add CKA analysis for attention sublayers (analogous to Figure 5) or remove the claim from the abstract and contributions.
+2. **Add a learning curve** for a representative condition (e.g., GPT-2 at 1/3 FF removal) to show how quickly performance recovers during fine-tuning, which would either substantiate or qualify the "quickly heal" claim.
+3. **Provide a small table of exact performance numbers** for each model at each compression ratio (1/3, 1/2, full) so results are precisely reproducible.
+4. **Recommend a default merge location** (e.g., middle layers) given the finding that the specific choice matters little after fine-tuning, simplifying the method for practitioners.
+5. **Report the computational cost** of the selection step (e.g., total forward passes, approximate runtime) to substantiate the claim that it is inexpensive.
+
+---
 
 ## Score and Decision
 
-This paper presents a conceptually clean compression method that is novel (borrowing model-merging ideas for within-model compression), tested across a genuinely diverse set of architectures and tasks, and supported by reasonable ablations. The results are promising and the method is practical. The weaknesses are real but addressable — they concern the strength of claims and completeness of reporting rather than the validity of the core contribution. The paper would benefit from addressing the fine-tuning evidence gap, variance reporting, and specification completeness, but these are not structural flaws.
+The paper presents a genuinely novel compression idea — intra-model merging of FF sublayers via permutation alignment — and demonstrates its effectiveness across three diverse Transformer architectures against a strong baseline. The core claim (merging works well for compression) is well-supported. The weaknesses are real but addressable: unsupported claims about attention sublayers, unsubstantiated "quick recovery" language, a selection procedure shown to be unnecessary, and results reported only in figures. None of these threaten the paper's central contribution, and all can be fixed with additional analysis or presentation adjustments. The paper makes a solid, incremental contribution to model compression.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+**Originality:** Good — applying model merging to intra-model compression is a novel direction.  
+**Importance:** Moderate — compression is a practically relevant area, and the approach opens a new axis for future work.  
+**Claims support:** Fair — the main claim is supported, but the attention sublayer claim is unsupported and the "quick recovery" claim is unsubstantiated.  
+**Soundness:** Good — the experimental setup is reasonable, baselines are appropriate, and ablations are informative.  
+**Clarity:** Good — the method is clearly explained, though the figures-only presentation of results is a drawback.  
+**Value to community:** Moderate — the method is simple, effective, and likely to inspire follow-up work on intra-model merging.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

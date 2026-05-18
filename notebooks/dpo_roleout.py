@@ -44,7 +44,7 @@ def rollout(idx):
     messages = ds["train"][idx]["prompt"]
     messages[0]["content"] = messages[0]["content"]#.replace("Give your analysis first, then put your final score in a XML-style tag <score></score>", "Give a brief analysis first, then put your final score in a XML-style tag <score></score>. Do not think for too long.")
     cost = 0
-    for _ in range(2):
+    for _ in range(4):
         for attempt in range(5):
             try:
                 _response = or_client.chat.completions.create(
@@ -62,24 +62,24 @@ def rollout(idx):
         ans.append(response)
         cost += _response.usage.cost_details["upstream_inference_cost"]
 
-    for _ in range(2):
-        for attempt in range(5):
-            try:
-                _response = or_client.chat.completions.create(
-                    model="qwen/qwen3.5-flash-02-23",
-                    messages=messages,
-                    temperature=1.2,
-                    extra_body={"reasoning": {"enabled": False, "effort": "low"}}
-                )
-                response = _response.choices[0].message.content
-                ans.append(response)
-                cost += _response.usage.cost_details["upstream_inference_cost"]
-                break
-            except Exception as e:
-                print(f"rollout {idx} qwen attempt {attempt + 1}/5 failed: {e}")
-                if attempt == 4:
-                    raise
-       
+    # for _ in range(2):
+    #     for attempt in range(5):
+    #         try:
+    #             _response = or_client.chat.completions.create(
+    #                 model="qwen/qwen3.5-flash-02-23",
+    #                 messages=messages,
+    #                 temperature=1.2,
+    #                 extra_body={"reasoning": {"enabled": False, "effort": "low"}}
+    #             )
+    #             response = _response.choices[0].message.content
+    #             ans.append(response)
+    #             cost += _response.usage.cost_details["upstream_inference_cost"]
+    #             break
+    #         except Exception as e:
+    #             print(f"rollout {idx} qwen attempt {attempt + 1}/5 failed: {e}")
+    #             if attempt == 4:
+    #                 raise
+    
     with open(f"rollouts/{idx:05d}.json", "w") as f:
         json.dump(ans, f, indent=4)
     print(len(ans))

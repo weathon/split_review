@@ -1,78 +1,77 @@
-Here is my consolidated final review.
-
 ## Summary
 
-This paper analyzes why permutation-based weight matching (WM) produces linear mode connectivity (LMC) between independently trained neural networks. The central finding is that WM works not by significantly reducing L₂ distance between weights (only 6–20% reduction) but by aligning the directions of singular vectors associated with large singular values across models. This alignment ensures that the merged model retains functionality similar to the original models even when the weights remain far apart. The paper further shows that activation matching (AM) works via a similar principle, while the straight-through estimator (STE) achieves LMC through a fundamentally different mechanism that does not align singular vectors, disadvantaging multi-model merging.
+This paper investigates why weight matching (WM) permutations enable linear mode connectivity (LMC) between independently trained neural networks. It shows that WM does not achieve LMC by making the model weights close in L₂ distance (only 6–20% reduction), but instead by aligning the directions of singular vectors associated with large singular values across layers. This alignment propagates to the merged model and, combined with the empirical finding that inputs preferentially overlap with the top right singular vectors, explains why the merged model's behavior stays close to the originals. The paper further shows that activation matching behaves similarly to WM, while the straight-through estimator (STE) operates on a different principle that makes it less suitable for merging three or more models.
 
 ## Strengths
 
-- **Shifts the explanation for LMC from weight-space proximity to function-relevant structure.** Section 3 (Table 1) empirically demonstrates that WM reduces L₂ distance by only 6–20%, and a second-order Taylor expansion fails to predict the barrier — directly contradicting the intuitive assumption that closeness of weights is responsible. This negative result motivates the paper's positive contribution.
+- **Empirical refutation of the distance-reduction hypothesis**: Table 1 shows WM reduces L₂ distance by only 6–20%, and the Taylor-approximated barrier differs significantly from the true barrier. This directly supports Contribution 1 and motivates the deeper SVD-based analysis.
 
-- **Provides a novel, mechanistically plausible explanation via singular-vector alignment.** Theorem 4.1 shows that WM is equivalent to maximizing inner products of singular vectors weighted by singular values. Figures 2–3 confirm that WM preferentially aligns singular vectors with large singular values (R values up to ~0.8 for MLP with γ=0.3), while unpermuted vectors are nearly orthogonal (R≈0). Theorem 4.2 together with Figure 4 (showing inputs predominantly activate directions corresponding to large singular values) provides a theoretical grounding for why this alignment matters for LMC.
+- **Singular-vector alignment as a compelling mechanism**: Theorem 4.1 proves WM's objective maximizes inner products of singular vectors weighted by singular values. Figure 2 shows that with threshold γ=0.3 (large singular vectors) the alignment metric R increases substantially after WM, while with γ=0 (all vectors) it does not. Figure 3(b) shows that after merging, alignment between merged and original models exceeds 0.8 for MLP. This provides a principled explanation for why WM works.
 
-- **Distinguishes WM from STE both in mechanism and in practical consequences for multi-model merging.** Section 6.2 shows STE produces nearly zero singular-vector alignment (R≈0) despite achieving low barriers. Section 6.3 shows that WM yields significantly lower barriers than STE when merging three or more models because WM indirectly aligns singular vectors across all pairs via the anchor model, whereas STE does not. This is a clean, practically relevant contrast.
+- **Theoretical link between singular-vector alignment and layer-output similarity**: Theorem 4.2 bounds the difference in hidden-layer outputs in terms of singular-vector inner products weighted by singular values, and Figure 4 shows that inputs have large inner products with large-singular-value right singular vectors. Together, these explain why aligning large singular vectors can keep the merged model's function close even when weight distance remains substantial.
 
-- **Multiple architectures validated.** Key experiments are run on MLP, VGG11, and ResNet20, demonstrating that the findings are not specific to a single architecture family.
+- **Principled contrast between WM and STE**: Tables 2 and 3 demonstrate that STE achieves low barriers without aligning singular vectors (R ≈ 0), and that WM yields substantially lower barriers than STE when merging three models (e.g., MLP on Fashion-MNIST: 0.74 vs. 3.47). This supports Contribution 3 and has practical implications for multi-model merging.
+
+- **Consistency across architectures and datasets**: The claims are validated on MLP, VGG11, and ResNet20 across Fashion-MNIST, CIFAR-10, and CIFAR-100.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None. The paper makes a genuine analytical contribution; no weakness undermines its core claims.
+
+1. **The causal link between singular-vector alignment and LMC is not fully closed.** The paper demonstrates a clear correlation — after WM, large singular vectors align and LMC holds — and provides Theorem 4.2 bounding per-layer output differences. However, the step from "layer outputs are closer" to "the full-network loss barrier is small" is never formalized. The bound is per-layer under a fixed input, but LMC is a property of the interpolated *full network's* loss over the data distribution. The paper does not provide a bound on the barrier in terms of alignment, nor does it control for alternative explanations (e.g., joint effects across layers, bias permutations). The conclusion honestly notes "it remains unclear why our analysis can explain the phenomenon so effectively," which concedes this gap. Consequently, Contribution 2 ("Revealing the reason why WM... satisfies LMC") overstates what is actually a plausible and well-supported hypothesis rather than a proven causal mechanism. Addressing this would require either a barrier bound in terms of alignment or a controlled experiment that varies alignment while holding L₂ distance fixed.
 
 ### Minor
 
-- **The R metric would benefit from a more explicit justification, particularly regarding cross terms.** The metric R = Σ_{ℓ,i,j} (u_{ℓ,i}^{(a)})^T P_ℓ u_{ℓ,j}^{(b)} (v_{ℓ,i}^{(a)})^T P_{ℓ-1} v_{ℓ,j}^{(b)} / Σ_ℓ n_ℓ sums over all (i,j) pairs including i≠j. The paper does not explicitly argue why cross terms vanish under the correct permutation. (They are expected to be near zero because singular vectors of different indices are orthogonal, and the permutation maintains orthogonality — but this reasoning is left implicit.) The empirical observation that R≈0 without permutation supports the metric's behavior, but a direct justification would strengthen the exposition. This is a presentation gap, not a validity issue.
+2. **The analysis of activation matching (AM) is superficial.** Section 5 (roughly one paragraph) notes that AM's objective relates to Theorem 4.2 and that its R values "closely resemble" those for WM. No theoretical argument connects AM to singular-vector alignment beyond this observation. The section adds length without deepening the understanding of AM — the paper's other contributions would not be materially weakened if this section were condensed.
 
-- **The causal role of singular-vector alignment is supported by theory and correlation but not by a controlled isolation experiment.** The paper provides Theorem 4.2 bounding output differences in terms of singular-vector alignment and shows that inputs predominantly activate large-singular-value directions (Figure 4). This establishes a plausible mechanism. However, the paper does not include an experiment that directly isolates alignment from other factors — e.g., comparing WM to a procedure that achieves the same L₂ reduction without preferentially aligning large singular vectors, or synthetically controlling alignment while holding other factors fixed. Such an experiment would strengthen the claim, but its absence does not invalidate the contribution given the theoretical argument and converging empirical evidence.
+3. **Convolutional architectures are not addressed.** The paper formally analyzes MLPs and states "our analyses in this paper can be applied to any model architectures" (line 27), yet experiments on VGG11 and ResNet20 include convolutional layers. For convolutional layers (4D weight tensors), the SVD requires reshaping into 2D matrices, and the effect of channel permutations on singular vectors differs from the fully connected case. The paper neither discusses this adaptation nor validates that the SVD-based reasoning carries through. This undercuts the claimed generality.
 
-- **The AM analysis is suggestive but incomplete.** Section 5 provides a brief derivative argument and references appendix figures to claim that AM "likely" works via the same singular-vector alignment principle. While the numerical similarity to WM is noted, a tighter theoretical connection or a targeted experiment isolating the alignment mechanism for AM would be more convincing than the current treatment.
-
-- **Experimental scope is adequate but not exhaustive.** The paper tests three architectures (MLP, VGG11, ResNet20). The datasets are implied by the table images to be CIFAR variants (likely CIFAR-10/100). For an analytical paper of this type, this is a reasonable empirical base — the focus is on mechanism, not benchmark performance — but generalizability to ImageNet-scale models or language-domain architectures (e.g., Transformers) remains unknown.
-
-- **The Taylor approximation experiment could be slightly more thorough.** The paper evaluates the Taylor estimate at λ=1/2 (justified by citing prior work showing the midpoint typically gives the highest barrier). While reasonable, verifying this holds for the specific settings used would add confidence.
-
-- **Training hyperparameters are not specified.** Learning rate, weight decay, batch size, number of epochs, and Sinkhorn iteration counts are not reported in the main text. This makes exact reproduction difficult, though the qualitative nature of the findings reduces the severity of this gap.
+4. **The three-model merging experiment (Table 3) has limited scope.** Only three trials are reported, and the comparison does not explore whether a modified STE procedure (e.g., jointly optimizing permutations for three models) would close the gap with WM. The claim that WM is *intrinsically* more advantageous for ≥3 models goes beyond what the current evidence supports.
 
 ### Trivial
 
-- The paper references "appendix" figures and proofs that are not present in the submission. Per parsing conventions, these exist in the original submission.
+5. **The R metric's normalization could be explained more clearly.** The paper states R close to one indicates good alignment but does not explicitly justify why the denominator Σ_ℓ n_ℓ is the correct normalizer given the sum over i,j per layer. The reasoning relies on the orthogonality of singular vectors within each model (which zeros out cross terms when alignment is perfect) — stating this explicitly would improve clarity.
+
+6. **The threshold γ is defined as a ratio to the largest singular value, but the paper does not discuss how sensitive the results are to this specific choice.** The binary choice (γ=0 vs. γ=0.3) is coarse; a sensitivity analysis would strengthen confidence in the claims.
 
 ## Nice-to-Haves
 
-- Sweeping the γ threshold continuously in the R analysis (beyond just γ=0 and γ=0.3) would give a more complete picture of how alignment varies with singular-value magnitude.
-- Quantifying the variation in singular values across models (e.g., standard deviation per rank) would strengthen the claim that singular values are "very close" across models (Section 4.2).
-- Reporting the number of singular vectors retained at each γ threshold would aid interpretability.
-- Including confidence intervals or effect sizes for the key R-value comparisons (WM vs. no permutation, WM vs. STE) would align with best practices.
+- A controlled experiment that *causally* isolates the effect of singular-vector alignment (e.g., constructing permutations that align large singular vectors while keeping L₂ distance unchanged, or vice versa) would transform the correlational evidence into a causal explanation.
+- A bound relating the loss barrier directly to singular-vector alignment (accumulated over layers) would close the theoretical gap between Theorem 4.2 and LMC.
+- An ablation varying the quality of the Sinkhorn solver (e.g., number of iterations) to check whether lower-quality permutations show weaker alignment and worse LMC would strengthen the analysis.
+- A discussion of cases where WM fails to achieve LMC could sharpen the boundaries of the proposed explanation.
 
 ## Removed Points
 
-- **"R metric sign-flipping concern"**: The critic claimed that if left and right singular vectors both point in opposite directions, the product of inner products still gives +1, making the metric ambiguous. In fact, in SVD, flipping both u_i and v_i simultaneously preserves the weight matrix (u_i s_i v_i^T = (-u_i) s_i (-v_i)^T). The metric correctly treats this as alignment because the functional effect is identical. This is a feature, not a flaw. **Removed (factually incorrect).**
+The following points from the reviewers were removed after verification against the paper:
 
-- **"Limited to a single dataset (CIFAR-10)"**: The paper explicitly states "for all datasets" (para after Table 1) and the table structure implies multiple datasets (columns likely include CIFAR-10 and CIFAR-100). The table is embedded as an image so dataset names are not in the parsed text, but the paper's own language indicates breadth beyond a single dataset. **Removed (factually inaccurate — the paper uses multiple datasets).**
+- **"The alignment measure R is not adequately justified / numerator could exceed denominator"** — Removed: This criticism is mathematically incorrect. When singular vectors are perfectly aligned, orthogonal singular vectors within each model make cross terms (i≠j) zero, giving R = 1. The measure is heuristically valid, though the paper could be more explicit about this reasoning (captured in Trivial #5 above).
 
-- **"No causal link is established" (framed as fatal)**: The paper provides Theorem 4.2 (a theoretical bound on output differences), Theorem 4.1 (showing WM maximizes singular-vector alignment), and empirical evidence (Figures 2–4). This is not "merely correlational" — it is a mechanistic explanation supported by both theory and experiments. The absence of a strict causal isolation experiment is a minor gap, not a fatal one. **Demoted to minor weakness (appropriate tier).**
+- **"OCR artifact: Pe˜na et al."** — Removed per instructions: formatting/parser artifacts are not author errors.
 
-- **"Missing reproducibility details" as a major concern**: While training hyperparameters are not fully specified, the paper's contribution is qualitative/analytical, not a benchmark that requires exact reproduction. The main claims are about mechanism, not numerical scores. **Downgraded to minor weakness (proportionate severity).**
+- **"Taylor approximation overclaim"** — Removed: The paper's claim ("suggests that reducing the L₂ distance... is not the direct reason") is appropriately cautious; the Taylor analysis serves as a supporting negative observation, not the primary argument.
 
-- **"Missing appendix"**: Per instructions, appendix content is stripped by the parser; it exists in the original submission. **Removed.**
+- **"Sinkhorn algorithm dependence not discussed"** — Moved to Nice-to-Haves: a reasonable suggestion but not a weakness.
+
+- **"Generic strengths" from Strength Finder** — The strength about AM sharing the same principle was retained but qualified as superficial (Weakness #2). The suggestion about "consistency across architectures" was kept as a supporting strength.
 
 ## Novel Insights
 
-The reviews surface one genuinely novel lens not explicitly emphasized in the paper: the contrast between WM and STE illuminates a deeper distinction between *weight-space geometry* (WM exploits the linear-algebraic structure of individual layers) and *loss-landscape geometry* (STE directly minimizes the barrier via the loss function). This suggests that there exist qualitatively different classes of permutations that achieve LMC, which raises interesting questions about whether LMC is a single phenomenon or a family of phenomena with distinct underlying mechanisms. The paper's demonstration that the two approaches diverge in multi-model merging is the first empirical hint that this distinction has practical consequences.
+The paper's core insight — that WM works by aligning the directions of large-singular-value singular vectors while leaving their magnitudes (and thus the L₂ distance) largely unchanged — is genuinely novel and well-supported. The finding that inputs preferentially overlap with the top right singular vectors (Figure 4) elegantly explains why aligning these particular directions is sufficient even when other singular vectors remain misaligned. The observation that indirect alignment propagates to third models (Figure 5) is a useful practical finding with implications for multi-model merging settings like federated learning. None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. Add a brief explicit justification for why cross terms in R are negligible when the permutation correctly aligns singular vectors (orthogonal vectors paired by permutation have near-zero inner products).
-2. Include a controlled experiment (e.g., synthetic alignment manipulation or comparing WM to an alternative that achieves the same L₂ reduction without aligning singular vectors) to more directly test the causal role of singular-vector alignment.
-3. Report the training hyperparameters (learning rate, weight decay, epochs, batch size, Sinkhorn iterations) in a reproducibility statement.
-4. For the AM analysis, provide either a stronger theoretical argument linking activation reconstruction to singular-vector alignment, or an ablation experiment that isolates the mechanism.
+1. **Tone down the causal claim**: Reframe Contribution 2 from "Revealing the reason" to "Providing evidence that singular-vector alignment is the mechanism" and explicitly acknowledge the gap between per-layer output similarity and full-network LMC.
+
+2. **Address convolutions explicitly**: Add a discussion (even one paragraph) of how the SVD analysis extends to convolutional layers via reshaping and channel permutations, or clearly scope the claims to fully connected layers.
+
+3. **Deepen or shorten the AM section**: Either provide a theoretical argument connecting AM's objective to singular-vector alignment via the input distribution, or condense it to a brief note.
+
+4. **Add a sensitivity analysis on γ**: Show that the qualitative conclusions hold over a range of threshold values, not just γ ∈ {0, 0.3}.
 
 ## Score and Decision
 
-This is a solid analytical paper. The central claim (WM achieves LMC by aligning large-singular-value singular vectors, not by reducing L₂ distance) is well-motivated, theoretically grounded, and empirically supported across multiple architectures. The weaknesses are minor: some under-justified exposition in the metric, a lack of strict causal isolation (appropriate for an analytical paper), and modest experimental breadth. None threaten the core contribution. The contrast between WM and STE and the multi-model merging experiments add practical value beyond the core analysis.
+This paper makes a genuine contribution by revealing a plausible mechanism for LMC via WM — singular-vector alignment — that goes well beyond the standard "permutations make weights close" narrative. The evidence is coherent, the experiments span reasonable architectures, and the contrast with STE is practically informative. However, the gap between correlational evidence and the claimed causal explanation, combined with the superficial treatment of AM and the unaddressed question of convolutions, prevents the paper from being fully convincing at the level of a top venue. The paper would benefit from a revision that either closes the causal gap or appropriately caveats the claims.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**MY FINAL SCORE: <pineapple>6.5</pineapple>**
+**MY FINAL DECISION: <orange>Reject</orange>**

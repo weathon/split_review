@@ -1,20 +1,20 @@
-Now I have all the information needed. Let me produce the final consolidated review.
+Now I have all the evidence needed. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper presents EffoVPR, a family of methods that leverage DINOv2's internal self-attention features for Visual Place Recognition (VPR). The key ideas are: (1) using the [CLS] token as a global descriptor trained with classification loss (EigenPlaces-style) to produce compact yet effective global features; (2) re-ranking via mutual-nearest-neighbor matching on Value features from the penultimate self-attention layer, filtered by attention scores. The method achieves state-of-the-art results across many VPR benchmarks, with the single-stage variant (EffoVPR-G) reaching top performance with features as compact as 128–256 dimensions, and the two-stage variant (EffoVPR-R) setting new records on challenging scenarios like day-night, seasonal change, and occlusion.
+This paper presents EffoVPR, a method for Visual Place Recognition that effectively leverages DINOv2's internal representations. The key contributions are: (1) a zero-shot two-stage approach using internal ViT Value features from self-attention layers for re-ranking, which surpasses all prior zero-shot VPR methods by a wide margin; (2) a fine-tuned single-stage method that uses the [CLS] token with a classification loss (following EigenPlaces' training paradigm) to produce compact yet highly discriminative global features, eliminating the need for external pooling layers like NetVLAD or GeM; and (3) extensive experiments on 20 datasets showing state-of-the-art results, particularly on challenging scenarios (occlusion, night, seasonal change), with the compelling practical advantage that 128D features match or exceed the performance of competitors using 8,448D features.
 
 ## Strengths
 
-1. **Compact global features achieving SOTA**. EffoVPR-G with 128D features matches SALAD's 8,448D performance on Tokyo24/7 (94.6% R@1), a 66× dimensionality reduction. At 256D (95.9%), it already surpasses all prior single-stage methods. This is well-documented in Table 2 and Figure 1, directly addressing real-world memory constraints.
+- **Zero-shot method that decisively surpasses prior zero-shot approaches and even matches several trained methods**: The zero-shot EffoVPR-ZS achieves 89.4% R@1 on Pitts30k, 90.8% on Tokyo24/7, and 57.9% on Nordland, compared to AnyLoc's 87.7%, 60.6%, and 16.1% respectively (Table 1). The +30.2% gap on Tokyo24/7 over the previous best zero-shot method is particularly striking.
 
-2. **Simple, fast, and effective re-ranking**. The re-ranking stage (EffoVPR-R) uses mutual-NN matching on Value features from the n−1 layer, runs in <1 ms per match, and delivers substantial gains on challenging benchmarks: +4.3 pp on Nordland, +7.9 pp on SF-Occlusion, +15.0 pp on SF-Night over previous best results (Table 4). The design is elegantly simple—no learned re-rankers, no geometric verification—yet consistently outperforms more complex approaches.
+- **State-of-the-art single-stage global retrieval with extremely compact features**: At 128D, EffoVPR-G achieves 94.6% R@1 on Tokyo24/7 (matching SALAD's 8,448D feature — a 66× reduction), and at 1024D achieves 97.5% (Table 2). This demonstrates that the [CLS] token trained with classification loss alone produces highly discriminative global descriptors without external aggregation modules.
 
-3. **Strong zero-shot results**. EffoVPR-ZS achieves 90.8% R@1 on Tokyo24/7 and 57.9% on Nordland, compared to AnyLoc's 60.6% and 16.1% (Table 1)—improvements of +30.2 pp and +41.8 pp respectively. This demonstrates that the proposed re-ranking pipeline effectively handles extreme appearance changes (day–night, seasonal) where prior zero-shot methods fail.
+- **Large-margin superiority on challenging appearance-change benchmarks**: On SF-Occlusion (+7.9%), SF-Night (+15.0%), Nordland (+4.3%), and SVOX-Night (+2.0%) versus the previous best (SALAD), the method shows strong generalization to occlusion, day-night, seasonal, and decade-spanning temporal variations (Table 6).
 
-4. **Robust generalization across 20 diverse datasets**. Experiments cover seasonal changes (Nordland), multi-decade time shift (AmsterTime), severe occlusion (SF-Occlusion), day–night (Tokyo24/7, SF-Night, SVOX), and rain (SVOX-Rain). EffoVPR-R sets new SOTA on 9 of 12 metrics in Tables 2–4, with particular strength in hard appearance-change scenarios.
+- **Thorough ablation study validates design choices**: The paper systematically ablates layer choice (n−1 optimal, Table S), facet selection (Value > Query, Key), thresholds (both T₁ and T₂ necessary), number of re-ranking candidates (SoTA even at K=5), and number of trainable layers (5 layers is the sweet spot).
 
-5. **Thorough ablation study**. The paper systematically validates: optimal layer (n−1), best attention facet (Value), importance of both thresholds (T₁ and T₂), number of trainable layers (last five), and insensitivity to K (K≥5 already yields SOTA). This empirical grounding strengthens confidence in the design choices.
+- **Simple and efficient re-ranking**: The mutual-nearest-neighbor matching on filtered Value features adds only ~1ms per match, requires no learned adapters, geometric verification, or gallery-specific optimization, and works effectively even with only K=5 candidates.
 
 ## Weaknesses
 
@@ -26,48 +26,44 @@ None.
 
 ### Minor
 
-1. **Potential training–test overlap on SF-XL subsets is not clarified.** The model is trained on SF-XL and then evaluated on "SF-XL Occlusion" and "SF-XL Night," which are subsets drawn from the same geographic area. The paper does not explicitly state that the queries and gallery images for these subsets are disjoint from the training set. While the strong results on fully independent datasets (Nordland, AmsterTime, SVOX) confirm the method's merit, the absence of a clear statement leaves the specific gains on these two benchmarks (+7.9 pp, +15.0 pp) subject to an unresolved concern. *Why it matters: this is a standard evaluation hygiene issue that should be documented, even if the overall contribution stands on other evidence.*
+1. **Zero-shot threshold setting process is underspecified.** The paper states thresholds T₁ (attention map) and T₂ (MNN similarity) are "predefined," "established once and remain fixed across all test sets," and references the appendix for ablation. However, the paper never states *how* these thresholds were determined — whether via a heuristic (e.g., based on percentile statistics from arbitrary images), a small held-out set, or some other procedure. This matters because if the thresholds were tuned on any VPR-labeled data, the "zero-shot" label is ethically borderline (the re-ranking pipeline still has no learned weights, but a free parameter was set with task supervision). The paper should clearly disclose the procedure.
 
-2. **Zero-shot comparison with trained methods is under-supported.** Contribution (1) claims the zero-shot method shows "comparable results, even with trained VPR methods." This claim is supported by a single bar chart (Fig. a) on three datasets without exact numerical values, rather than a dedicated table. The paper does report exact numbers for zero-shot *vs.* zero-shot comparisons (Table 1), but the trained-method comparison remains qualitatively illustrated. Since the main fine-tuned contribution is strong, this does not threaten the paper's core value, but the evidence for this specific sub-claim is thinner than it should be. *Why it matters: the zero-shot claim is listed as a distinct contribution item and should be verifiable from reported numbers.*
+2. **Equation (1) uses non-standard and potentially dimensionally inconsistent notation.** The formulation `Attention = Softmax(K_l^T Q_l / sqrt(d)) V_l` with Q_l, K_l, V_l ∈ ℝ^{p×d} gives K_l^T Q_l ∈ ℝ^{d×d}, which cannot cleanly multiply with V_l ∈ ℝ^{p×d} in the standard way. The *intended* computation is clear from the actual usage (`S = Softmax(Q_l · k_cls)` producing ℝ^p), but the formal definition is confusing and should be corrected to standard notation (e.g., `Softmax(Q_l K_l^T / sqrt(d)) V_l`), or explicitly justified if using a non-standard variant.
 
-3. **Training data differences across methods are acknowledged but not discussed.** The paper correctly notes that SALAD and CricaVPR were trained on GSV-Cities while EffoVPR trains on SF-XL (line 197). However, no discussion addresses how these distributional differences might affect generalization comparisons—e.g., the +4.3 pp gain on Nordland over CricaVPR could partially reflect training set characteristics rather than method superiority. This does not invalidate results (especially since EigenPlaces/CosPlace, also trained on SF-XL, are weaker), but a brief caveat would improve rigor. *Why it matters: fair comparison is important for a SOTA claim, even if the advantage likely holds.*
-
-4. **Specific threshold values (T₁, T₂) are not reported in the main text.** The paper defines T₁ and T₂, shows their ablation (Table in §Ablation), and states they are "established once and remain fixed across all test sets" (line 124), but does not provide the chosen numerical values in the main paper or a table that clearly states them. The appendix (stripped by parser) presumably contains these, but for a reproducibility-oriented reader, the values should be stated alongside the ablation. *Why it matters: these thresholds are method parameters; knowing their actual values is necessary for reproduction.*
+3. **Training data confound in state-of-the-art comparisons.** The most competitive baselines (SALAD, CricaVPR) were trained on GSV-Cities, while EffoVPR is trained on SF-XL. The paper acknowledges this (line 197) but does not quantify the effect. The very large gains on some datasets (e.g., Tokyo24/7: 97.5% vs. SALAD's 94.6% in the single-stage setting) could partially reflect the training data distribution rather than the method alone. Running the same training pipeline on GSV-Cities for a controlled comparison would strengthen attribution of the gains to the method.
 
 ### Trivial
-- The paper uses "Anyloc" (lines 19, 155) alongside "AnyLoc" elsewhere—inconsistent capitalization of the baseline method name.
+
+- The explicit values of thresholds T₁ and T₂ are never reported in the main paper (deferred to appendix), making it harder for readers to gauge their magnitude and sensitivity.
+- The fraction of patches retained after T₁ filtering is not reported, which would help understand the computational characteristics of the re-ranking stage.
 
 ## Nice-to-Haves
 
-- **Error bars or multiple-run statistics** would increase confidence, though single-run evaluation is standard in VPR benchmarking.
-- **A runtime breakdown** beyond the "1 ms per match" claim (e.g., full pipeline timing for a query vs. gallery size) would help practitioners assess deployment trade-offs.
-- **Reporting zero-shot results on a broader set of datasets** (perhaps the full 20) would strengthen the zero-shot contribution without requiring any additional computation the paper doesn't already do.
+- A controlled experiment training on GSV-Cities (the training set used by the closest competitors) to isolate the effect of training data from the method.
+- A visualization or toy example contrasting the attention map derived from Q_l · k_cls with the standard self-attention map to build intuition for why this scheme works.
+- Reporting explicit T₁ and T₂ values and a sensitivity analysis in the main paper rather than relegating it to the appendix.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **"Dagger on EffoVPR-G rows in Table 2 may be a copy-paste error."** — The table caption states: "Two-stage methods are marked with \dag, and present 1st-stage performance (for fair comparison)." EffoVPR has a two-stage variant (EffoVPR-R), so marking its first-stage results with \dag is a consistent notation choice, not an error. (Critic misinterpreted the convention.)
-- **"Anyloc is misspelled."** — This is a trivial capitalization inconsistency (parser artifact or minor typo), removed per the hard rule on formatting/typographical nitpicks.
-- **"Missing appendix content"** — Any criticism about missing appendix sections or deferred proofs is removed; the parser strips appendix content from all submissions.
-- **"Error bars absent"** — Moved to Nice-to-Haves since single-run evaluation is standard for these VPR benchmarks.
+- **"K=100 chosen but K=5 works — paper doesn't discuss why K=100"**: The paper explicitly addresses this on line 233, stating K=100 follows common practice and noting that SoTA results are achieved even from K=5 onwards (Table S). The reviewer's claim that this is undiscussed is factually incorrect.
+- **"Only shows subset of 20 datasets in main tables"**: This is standard practice for papers evaluating on many datasets; the appendix contains the remainder. Not a valid weakness.
+- **"Fine-tuning all layers degrades — needs more discussion"**: The paper already provides a plausible explanation (backbone trained on much larger data) on line 385. While deeper analysis is always welcome, the existing discussion is adequate.
+- **"AnyLoc uses gallery-side statistics"**: This is a statement about the baseline, not a weakness of the paper.
+- **"Re-ranking stage uses top-100... should discuss"**: Already discussed as noted above.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a useful observation: the SF-XL training/test overlap concern is the most structurally significant issue, but it is also the most easily fixable (simply state the split explicitly). The reviews do not reveal any insight about the method or results that the paper itself omits.
+The most interesting observation to emerge from the reviews is the tension between "zero-shot" labeling and the presence of task-tuned hyperparameters. The paper's zero-shot results are genuinely impressive (+30% over AnyLoc on Tokyo24/7), and the core method (Value features + MNN matching) involves no VPR-trained weights. But the field lacks a clear convention for whether setting thresholds on VPR data violates the zero-shot label. This is a broader community question that the paper inadvertently highlights. Separately, the attention-map analysis comparing pre-trained vs. fine-tuned DINOv2 (Figure 3) provides a clean visualization of why fine-tuning helps: the model shifts focus from transient objects (vehicles, ads) to stable scene structures (buildings, cables), which nicely explains the jump from zero-shot to fine-tuned performance.
 
 ## Suggestions
 
-1. **Explicitly state the train/test split for SF-XL subsets.** Add one sentence confirming that the SF-XL Occlusion and SF-XL Night query and gallery images are geographically disjoint from the training set, or cite the standard split if one exists. If a small overlap exists, state it and caveat the results accordingly.
-2. **Report zero-shot R@1 against trained methods in a small table** (or add numbers to the bar chart in Fig. a) so the claim of "comparable results with trained methods" is quantitatively verifiable.
-3. **State the chosen numerical values of T₁ and T₂** either in the main ablation discussion or in a clear table in the main paper, not only the appendix.
-4. **Add a brief caveat** about training data differences when comparing with GSV-Cities-trained methods, noting the direction of any potential bias.
+- Add a sentence explicitly describing how T₁ and T₂ were set (e.g., "set as fixed percentiles of the attention score distribution on a random set of non-VPR images" or "tuned once on the SF-XL validation set and frozen thereafter"). This single change would resolve the most significant ambiguity in the paper.
+- Correct Equation (1) to standard attention notation for clarity.
+- Report the threshold values and the average fraction of patches retained after T₁ filtering.
 
 ## Score and Decision
 
-This is a well-executed paper with a clean, practical method, comprehensive evaluation across 20 datasets, and state-of-the-art results. The core contributions—compact global features via [CLS] token training, and an efficient attention-based re-ranking—are clearly demonstrated and reproducible. The weaknesses are minor and addressable (clarification on SF-XL split, stronger zero-shot evidence, reporting threshold values). None threaten the main fine-tuned contribution, which is amply validated on independent benchmarks.
+This paper makes a clear empirical contribution: a simple, well-ablated method that achieves large-margin improvements over prior work on multiple challenging benchmarks, with the practical advantage of very compact features. The weaknesses are minor and relate to presentation/transparency rather than methodology. The core claims are well-supported by the experiments.
 
-**Score: 8.0**
-
-MY FINAL SCORE: <pineapple>8.0</pineapple>
+MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

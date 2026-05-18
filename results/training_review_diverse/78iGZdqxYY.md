@@ -1,20 +1,20 @@
-Now I have all the information I need. Let me produce the consolidated review.
+Now I have a thorough understanding of the paper and the reviews. Let me write the final consolidated review.
 
 ## Summary
 
-Mirage proposes a novel graph dataset distillation method for graph classification that mines frequently co-occurring computation trees (as used by message-passing GNNs) and trains on those tree patterns instead of full graphs. The key innovation is that the distillation process is model-agnostic (works across GCN, GAT, GIN without re-distilling) and does not require training on the full dataset, unlike prior gradient-matching approaches. The paper demonstrates competitive accuracy, high compression, and substantial speedups (150× over DosCond, 500× over KIDD) on 6–7 graph classification datasets.
+The paper introduces Mirage, a model-agnostic graph distillation method for graph classification. Instead of the standard gradient-matching paradigm (which paradoxically requires training on the full dataset), Mirage mines frequent co-occurring computation trees using FPGrowth and uses these frequent tree sets as a surrogate training dataset. The method exploits the observation that computation tree frequency distributions follow a power-law across graph datasets. Extensive experiments across 6 datasets and 3 GNN architectures show Mirage achieves competitive or superior accuracy while delivering 4-5× better compression and 150-500× faster distillation than baselines, all on CPU.
 
 ## Strengths
 
-1. **Novel, principled distillation approach that avoids the "counter-objective" problem**: Unlike gradient-matching methods (DosCond, KIDD) that must train on the full dataset to distill, Mirage compresses by mining computation trees directly from the data. This is a genuine conceptual advance. The paper formalizes the problem constraints (Sections 2–3) and Mirage satisfies them: no full-data training needed for distillation, and the distilled set works across architectures.
+1. **Genuinely novel and well-motivated approach**: Mirage breaks from the gradient-matching paradigm that dominates graph distillation. The paper identifies two real limitations of existing methods — (a) they require training on the full dataset, defeating the purpose, and (b) they produce architecture-specific distilled datasets. Mirage's computation-tree mining approach cleanly addresses both. The formalization of co-occurring computation trees as a frequent-itemset mining problem (Problem 4) is a non-trivial and creative mapping.
 
-2. **Model-agnostic results across three GNN architectures**: This is the first graph distillation study to evaluate across GCN, GAT, and GIN. Table 1 shows that a single Mirage-distilled set works for all three, whereas baselines like KIDD (GIN-only) and DosCond (architecture-specific) require re-distillation. The paper delivers on its core claim — a single distilled set suffices for multiple architectures.
+2. **Consistent top-tier accuracy across architectures and datasets**: In Table 1, Mirage ranks first or second in 15 of 17 dataset-architecture combinations and achieves the highest AUC-ROC in 8 cases — the most among all baselines. This is notable because a single distilled dataset works across GCN, GAT, and GIN without re-distillation, whereas KIDD and DosCond produce architecture-specific datasets.
 
-3. **Superior compression with competitive accuracy**: Mirage achieves the highest compression in 5/7 datasets (Table 2), often by orders of magnitude (e.g., DD: 448 bytes vs. 209K–409K for baselines). Despite this aggressive compression, Mirage ranks top-1 or top-2 across all 17 dataset-architecture combinations in Table 1, often within 1–2% of full-dataset performance.
+3. **Order-of-magnitude improvements in compression and speed**: Mirage achieves the highest compression in 5 of 6 primary datasets (Table 2), with average sizes ~4× smaller than DosCond and ~5× smaller than KIDD. Distillation time (Fig. 3a) is ~150× faster than DosCond and ~500× faster than KIDD on average, despite running entirely on CPU while baselines require GPUs. This makes the method practically appealing for resource-constrained settings.
 
-4. **Practical CPU-bound efficiency**: The entire distillation pipeline runs on CPU, whereas all baselines require GPU. Figure 1 shows 150× average speedup over DosCond and 500× over KIDD, making the method accessible in low-resource environments.
+4. **Empirical validation of the core assumption**: The paper provides direct evidence that computation-tree frequency distributions follow a power-law (Fig. 2) and shows through a sufficiency experiment (Fig. 4a) that the loss gap between full-data and distilled-data evaluation quickly approaches zero when using the same trained weights. These support the claim that a small set of frequent patterns captures most of the information.
 
-5. **Empirical validation of the motivating observation**: Figure 2 provides evidence that computation tree distributions are highly skewed (power-law) across diverse datasets, supporting the paper's central insight that a small set of frequent trees captures most of the information.
+5. **Broader evaluation than prior work**: This is the first graph distillation study to systematically evaluate across three distinct GNN architectures (GCN, GAT, GIN), directly supporting the architecture-agnostic claim.
 
 ## Weaknesses
 
@@ -23,58 +23,57 @@ None.
 
 ### Major
 
-1. **Orphan table with inconsistent full-dataset numbers (Section 4.3)**: A second, uncaptioned, unlabeled table appears at lines 498–526 (within an unfinished "Impact of Parameters" subsection) that contains full-dataset AUC-ROC numbers for ogbg-molhiv that are dramatically different from Table 1 (66.34/64.78/65.13 vs. 73.71/75.93/78.66). The Mirage values also differ slightly between the two tables (e.g., ogbg-molbace GAT: 70.77 vs. 72.71). This table has no caption or label, is not referenced in the text, and sits in a section with only one sentence of content. It appears to be a draft artifact that was accidentally included. While Table 1 is the properly captioned main results table and its numbers are internally consistent, the presence of a second, contradictory table makes it impossible for the reader to know which numbers to trust, and creates the appearance of carelessness. **This must be resolved — either remove the orphan table or explain what it represents (e.g., a different experimental condition, validation vs. test set).**
+1. **Underspecified training procedure and distilled dataset format**: The paper defines the distilled dataset mathematically (Problem 4: a set of frequent itemsets of computation trees) and describes the high-level training loop (Section 3.4: sample itemsets, compute root embeddings, apply Combine). However, it does not concretely specify:
+   - What is stored on disk (canonical tree IDs? Tree structures? Node features? Frequencies?) — this makes the byte-level compression claims (e.g., 318 bytes for NCI1) difficult to interpret and compare fairly against methods that produce full synthetic graphs with node features.
+   - How exactly the itemset-to-graph-embedding approximation works during training (do multiple trees in the same itemset get processed jointly or independently? Are labels assigned per itemset from the class-specific mining?).
+   - Pseudocode or an algorithm box for the training loop on distilled data.
 
-2. **Random(sum) baseline undercuts the necessity of tree co-occurrence mining**: In Table 1, the Random(sum) baseline (randomly selecting whole graphs, not trees) achieves top-1 or top-2 results in 2 of 17 settings and is competitive in several others (e.g., ogbg-molbace GAT: 73.75 vs. Mirage 70.77; DD GAT: 67.31 vs. Mirage 76.08 but with high variance). While the paper notes this and offers an explanation (label distribution differences preserved by SumPool), the explanation is not substantiated with evidence. If a simple random subsample of whole graphs performs nearly as well as the sophisticated tree-mining approach, the paper's motivating claim that careful selection of computation tree patterns is necessary is weakened. A proper ablation — comparing Mirage's frequent co-occurring tree sets against *randomly selected tree sets* of matched size (not whole graphs) — is needed to isolate the benefit of the mining step.
+   Without this, a reader cannot reproduce the method from the description alone, and the compression comparison with KIDD/DosCond (which store complete synthetic graphs) is apples-to-oranges unless the stored representation is clearly specified.
+
+2. **Discarded multiplicity may lose important signal**: The paper notes (line 277) that graphs decompose into a *multiset* of computation trees, and that multiplicity matters (e.g., node count differences between classes can be exploited by SumPool — see line 443 on Random(sum)). However, the frequent-itemset representation (Eq. 9-10) treats each graph as a *set* of computation trees, discarding multiplicity entirely. The paper never analyzes whether this discarding hurts accuracy on datasets where within-tree-type count differences are discriminative. This is a structural limitation of the method that should be acknowledged and analyzed.
 
 ### Minor
 
-3. **Training procedure is underspecified for reproducibility**: Algorithm 1 (`alg:dd_training`) is referenced at line 324 but not visible in the manuscript (presumably stripped). The text description says "sample a batch of frequent tree sets" and "utilize the Combine function on the embeddings of the root node," but several details are unclear: (a) How many tree sets constitute a batch? (b) How is the class label of a tree set determined when a set may contain trees from multiple graphs? (c) Is the loss computed per tree set (as a graph surrogate) or per individual tree? (d) How exactly is the sampling probability proportional to frequency implemented? Without these details, independent reproduction is difficult.
+1. **Insufficient parameter sensitivity analysis**: The paper introduces two key parameters (frequency threshold θ and number of layers L) but provides no ablation. The compression/time/accuracy trade-off as a function of θ is not explored for any dataset. The "Impact of Parameters" section (line 490) contains only one sentence about runtime versus hops and appears to have its content mangled by the parser. At minimum, a plot of compression ratio and accuracy vs. θ for one dataset would substantially strengthen the paper.
 
-4. **No sensitivity analysis for the two distillation parameters ($\theta$ and $L$)**: The paper claims $\theta$ controls the size-accuracy tradeoff and $L$ should be set based on expected upper bound, but provides no empirical analysis of how varying these parameters affects accuracy, compression, or runtime. This is a gap even for a conference paper, as these are the only parameters the user must set.
+2. **Limited scope of the sufficiency experiment**: The frozen-model experiment (Section 5.4) is a reasonable sanity check but does not directly test the actual use case (training from scratch on distilled data). The paper partially addresses this with independent training loss curves (Fig. 5b) and the accuracy results in Table 1. However, a more direct comparison (e.g., test accuracy trajectory during training-from-scratch on distilled vs. full data) would be more informative than the frozen-model loss gap.
 
-5. **Missing statistical significance tests**: The paper reports means and standard deviations over 5 runs but does not perform any pairwise significance tests (e.g., t-test, Wilcoxon) to support claims like "Mirage consistently ranks among top-2 performers." Several comparisons involve overlapping error bars, and the reader cannot assess whether observed differences are meaningful.
-
-6. **Random(sum) variability is high and under-discussed**: In Table 1, Random(sum) has much larger standard deviations (e.g., DD GAT: ±12.0, ogbg-molhiv GAT: ±8.43, NCI1 GAT: ±6.87) than Mirage (typically ±0.2–3.3). This suggests that random graph selection is unstable, which actually favors Mirage — but the paper does not make this argument or analyze whether Mirage's advantage is statistically significant given this variance.
-
-7. **Unsubstantiated "30× faster than full dataset training" claim**: Line 479 references `tbl:fulltraintime` which is not present in the manuscript (likely appendix-stripped). The claim that Mirage is "30 times faster on average" than full-dataset training cannot be verified from the paper as presented.
+3. **No analysis of training complexity on distilled data**: The paper analyzes distillation complexity (line 336) but not the complexity of training on the distilled itemsets. If training samples itemsets and processes each tree's root through the GNN, the node-level computation per batch is unclear. This matters for the claim that the distilled data accelerates training.
 
 ### Trivial
-None.
+- The "Impact of Parameters" section appears truncated (single sentence).
+- The paper uses "loosing" (line 277) where "losing" is intended.
 
 ## Nice-to-Haves
-
-- An ablation comparing Mirage's frequent co-occurring tree sets against randomly selected tree sets (matched in size and count) would cleanly isolate the benefit of the co-occurrence mining step.
-- Reporting distillation time broken down by phase (tree enumeration, canonical labeling, FPGrowth) would help users understand where the efficiency comes from.
-- Discussion of how the method scales to very large or very dense graphs (e.g., IMDB-B average degree ~10; L=3 gives ~1000 paths per node) would be valuable.
+- Ablation of the frequency threshold θ showing compression vs. accuracy trade-offs.
+- Analysis of how the method performs when the power-law assumption is violated (e.g., synthetic or heterophilous datasets).
+- Discussion of how multiplicity information could be incorporated (e.g., using weighted itemsets).
 
 ## Removed Points
 
 These points are flagged to be removed; treat them with caution.
 
-- **Criticism that "no code is provided" for reproducibility**: The paper does not cite code as existing. However, this is a common request in reviews and not a fatal flaw. Moved from Weaknesses because the rule says to remove criticisms questioning existence of cited artifacts — code is not cited.
-- **Criticism about missing `tbl:fulltraintime`**: Per instructions, parser-stripped appendix content should not be penalized.
-- **Criticism about cost shifted to preprocessing vs. eliminated**: The paper already quantifies the O(z × δ^L) preprocessing cost at line 336, so this was addressed.
-- **Criticism that KIDD is at a disadvantage for GAT/GCN**: This is a limitation of KIDD's design, not the paper's fault. The paper transparently reports it.
-- **Criticism that "Herding uses target GNN"**: The paper already states this (Section 4.1).
-- **Criticism about the sufficiency experiment being "just a sanity check"**: The paper also provides independent training loss curves (Fig. 4b) showing training-from-scratch works, partially addressing this.
-- **Strength Finder's claim about "robustness across three GNN architectures"** is kept; but its claim that Random(sum) analysis shows "authors understood why frequency alone may not suffice" is overstated — the analysis is a brief paragraph, not a thorough investigation.
+1. **Duplicate table with conflicting values (Harsh Critic point 2)**: The critic identifies a second table after Section 5.5 with values differing from Table 1 (e.g., ogbg-molhiv GAT Random(mean)=59.54 vs. 53.35). This table appears after a single-sentence "Impact of Parameters" subsection, has no caption or label, and is not referenced in the text. It is a parser artifact (a garbled figure or table from a different context rendered as text) — not an author error. Removed per the rule on formatting artifacts.
+
+2. **GAT exclusion from compression table unexplained (Harsh Critic)**: The paper explicitly explains (line 399) that GAT achieves ~0.5 AUC-ROC on IMDB datasets (no node features) and is therefore excluded. The critic's claim that this is "noted without explanation" is factually wrong. Removed.
+
+3. **"The paper's handling of GAT on IMDB datasets is reasonable" (Harsh Critic)**: This is presented as a criticism pathway but the critic themselves calls it reasonable. Not a weakness.
+
+4. **"The paper's thesis is that emulating input data rather than gradient trajectories..." (Harsh Critic)**: This is a summary, not a weakness. Removed.
+
+5. **Various suggestions that amount to "the paper should also cover Y"**: The critic's suggestions to add representation comparison and decision boundary analysis are reasonable extensions but not required for the paper's contribution. Moved to Nice-to-Haves where not already listed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviewers raise standard concerns about experimental rigor (duplicate table, missing ablation, statistical testing) rather than identifying deep conceptual issues unseen by the authors. The most interesting observation from the reviews is the Random(sum) baseline challenge: the fact that a simple random subsample of whole graphs often competes with a sophisticated tree-mining approach suggests that distillation benchmarks may need to control for the "graph-size signal" more carefully. Neither the paper nor the reviewers fully unpack this.
+None beyond the paper's own contributions.
 
 ## Suggestions
-
-1. **Remove or explain the orphan table.** If it represents a different experimental condition (e.g., validation vs. test performance, different $\theta$/L), label it clearly and reference it in the text. Otherwise delete it.
-2. **Add an ablation comparing Mirage against randomly selected tree sets** (not whole graphs), matched in size and count, to isolate the benefit of the co-occurrence mining step.
-3. **Specify the training procedure in detail.** Include batching, label assignment, sampling mechanism, and loss computation — either in the main text or as pseudocode in a supplemental.
-4. **Report sensitivity to $\theta$ and $L$** across 2–3 values each to ground the claim that $\theta$ controls the size-accuracy tradeoff.
-5. **Add statistical significance tests** (e.g., paired t-test or Wilcoxon) comparing Mirage to the best baseline for each dataset-architecture setting.
+- Clearly specify the exact format of the distilled dataset: what is stored (canonical tree labels? frequencies? tree structures with node features?) and how it maps to the byte counts in Table 2. This is critical for reproducibility and fair comparison.
+- Add pseudocode for the training loop on the distilled itemsets to clarify how itemsets are sampled, how tree root embeddings are computed, and how the Combine function produces graph-level predictions.
+- Analyze the impact of discarding tree multiplicity: at minimum, measure the correlation between class-separability from multiplicity and performance drop relative to methods that use multiplicity.
+- Provide an ablation of the frequency threshold θ for at least one dataset, showing the accuracy-compression Pareto frontier.
 
 ## Score and Decision
 
-This paper introduces a genuinely novel and well-motivated approach to graph distillation. The core idea — mining frequent co-occurring computation trees for model-agnostic distillation — is clever and the efficiency/compression results are impressive. However, the presence of an orphan table with contradictory numbers undermines trust in the reported results, and the finding that a simple random-subsample baseline is often competitive weakens the claimed advantage of the tree-mining procedure. Additional ablations and specification details are needed. The paper could become a strong contribution with revisions, but in its current form the empirical evidence is not sufficiently reliable.
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>

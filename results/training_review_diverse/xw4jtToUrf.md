@@ -1,21 +1,18 @@
-Now I have a thorough understanding of the paper. Let me synthesize the final review.
-
-## Paper Summary
-
-This is a **new-method paper** that proposes POWER (Policy Optimization with World model Ensemble Rollouts), which trains an RL agent on an ensemble of world models (trained from offline data) by treating each world model as a level in the Unsupervised Environment Design (UED) framework. The paper also contributes a new dataset curation procedure and evaluates on Cartpole, Brax (Hopper/Halfcheetah), and D4RL MuJoCo.
-
-After cross-verifying every claim against the actual paper text:
-
----
+Now I have all the information I need. Let me produce the final consolidated review.
 
 ## Summary
-The paper proposes POWER, which combines world model ensembles with Unsupervised Environment Design (PLR/domain randomization) to enable full-length rollout training in offline RL without hand-crafted truncation or conservatism penalties. It also contributes a new dataset curated from multiple behavior-policy checkpoints to address biases in existing benchmarks. The core idea — treating each world model as a "level" in UED — is novel and the ablation analysis (RNN classification, ensemble size) provides supporting evidence for the approach.
+
+This paper proposes POWER (Policy Optimization with World model Ensemble Rollouts), which treats each member of a world model ensemble as a "level" in the Unsupervised Environment Design (UED) framework, enabling full-length rollout training without hand-crafted truncation penalties. The paper also introduces a new dataset curation strategy that collects transitions from behavior-policy checkpoints throughout training to reduce the healthy-state bias present in D4RL. On D4RL benchmarks, POWER variants match online PPO performance; on the authors' own dataset, ensemble methods outperform single-world-model training.
 
 ## Strengths
-- **Novel integration of world model ensembles with UED enables effective full-length rollouts.** The paper creatively breaks UED's traditional level space by treating each trained world model (differing only by SGD noise and data shuffling) as a level. Figure 3 shows this prevents the reward exploitation seen with single-model full-length training, and the RNN analysis (Section 5.6) confirms that classifier accuracy well above random (62% vs. 10%) supports the claim that models have sufficiently distinct dynamics to serve as distinct contexts.
-- **The method achieves performance comparable to online PPO on D4RL benchmarks using only offline data.** Figure 9 reports POWER matching online PPO implementations (CleanRL/Stable Baselines) on MuJoCo tasks, using PPO as the in-world-model algorithm. This directly supports the claim that full-length rollout training can recover near-online performance.
-- **New dataset curation strategy that exposes real benchmark biases.** The multi-checkpoint data collection (Section 4.1, Figure 2) produces broader state-action coverage, and the distribution analysis in Section 6.1 (Figures 11–12) concretely demonstrates that D4RL Hopper has narrower observation/action distributions biased toward healthy states, validating a need for more diverse benchmarks.
-- **Ensemble size ablation shows the method works with as few as 2–4 world models** (Figure 10), demonstrating practical utility without requiring a large ensemble.
+
+1. **Novel application of UED to world model ensembles for full-length rollouts**: The paper identifies a genuine problem — that truncated rollouts (used in methods like MOPO, MOREL) cause pathological value overestimation — and proposes treating world models as levels in a minimax-regret framework to enable full-length rollouts without hand-crafted penalties. This is formalized in Section 3.2 and Algorithm 1 and is a conceptually clean approach. Figure 3 provides direct evidence that ensemble training prevents the reward hijacking that occurs with single-world-model training in low-data regimes (2×10⁴ transitions).
+
+2. **New dataset curation with evidence of bias reduction**: The paper proposes collecting data from multiple behavior-policy checkpoints (Figure 2) to achieve broader state coverage than D4RL. Figures 11 and 12 provide direct visual evidence that D4RL's Hopper dimensions have narrower coverage skewed toward healthy states, while the authors' dataset spans a wider distribution. This is a practical contribution that addresses a known limitation (Li et al., 2024) and is central to the paper's thesis about the limitations of existing benchmarks.
+
+3. **Empirical demonstration of distinct world model dynamics**: Section 5.6 trains a classifier on the recurrent states of the agent and achieves 45–62% accuracy in identifying which world model the agent is interacting with, against a 10% random baseline. This confirms that differently-initialized world models trained on the same data develop measurably distinct dynamics, a necessary condition for treating them as meaningful "levels."
+
+4. **Computational efficiency via JAX-based parallelism**: The implementation uses vmap for batched world model training and runs on a single GPU (Section 4.2). The ensemble size ablation (Figure 10) shows strong results even with small ensembles, indicating practical feasibility.
 
 ## Weaknesses
 
@@ -23,47 +20,52 @@ The paper proposes POWER, which combines world model ensembles with Unsupervised
 None.
 
 ### Major
-- **Missing comparison against offline RL methods (CQL, SACn) on the new dataset, despite claiming superiority.** The abstract and introduction state that POWER "maintains robust performance on our dataset, where conventional offline RL methods underperform" and "outperforms standard offline RL methods on our dataset." However, Sections 5.3–5.4 (Brax results, D4RL results) present only comparisons among POWER variants and against a single world model (WM) baseline. Section 4.4 describes CQL and SACn baselines and states "we then performed a grid search over our own dataset to record the highest score obtained by the baselines," yet no CQL/SACn results appear for the Brax environments (Figures 6, 7). Figure 8 does show a comparison with model-free offline methods for Pendulum, but Pendulum is a much simpler environment — the headline claim about the new Brax-based dataset remains unsubstantiated. This evidential gap cuts to a central advertised contribution.
 
-- **The theoretical framing (Section 3.2) that minimax regret bounds transfer to the real environment is not well supported.** The paper argues that if θ* (true dynamics) lies in Θ (the set of low-loss world models), then the PLR-trained policy achieves bounded regret on θ*. However: (1) The world models differ only by SGD noise and data shuffling — they are approximations of the same MDP, not a diverse task space; (2) PLR does not guarantee the Nash equilibrium required for the minimax bound (though the paper acknowledges this); (3) The claim that θ* ∈ Θ is an assumption, not a fact — the real environment is the *source* of the data, not a member of the learned hypothesis class. The paper would be stronger if presented primarily as an algorithmic heuristic supported by empirical results, rather than leaning on a theoretical argument that does not cleanly apply.
+1. **The UED/PLR component does not empirically outperform simpler alternatives, undermining the claimed contribution of the regret-based selection mechanism.** The paper itself acknowledges in Section 5.3 that "the methods that sample a new level uniformly at every step or with a probability *p* outperform every method in sparser data regimes." Across the reported experiments (Figures 4, 5, 6, 7, 9), the simpler DR (uniform random per-episode) and DR-STEP (uniform random per-step) variants perform at least as well as PLR with regret-based scoring. The RNN analysis (Section 5.6) also shows comparable separability between DR (62%) and PLR (60%). The paper frames the UED/PLR machinery as a central contribution (abstract, Section 1, Section 3.2), yet the empirical evidence consistently shows the simpler methods are at least competitive. This creates a significant gap between what the paper claims and what it demonstrates. The paper engages with this issue only in passing (Section 5.3's observation) but does not analyze *why* the UED selection fails to add value or under what conditions it might.
 
 ### Minor
-- **No comparison to standard offline RL methods on D4RL benchmarks.** The paper motivates POWER by arguing that existing offline RL approaches suffer from truncation pathologies and benchmark biases, and shows POWER matching online PPO on D4RL (Figure 9). But it never directly compares against CQL, IQL, TD3+BC, or other offline methods on those same D4RL datasets. While the paper's explicit D4RL claim is about matching *online* PPO (not beating offline methods), the omission weakens the overall narrative that POWER addresses offline RL's problems, since a reader cannot tell whether it improves upon or falls short of existing offline methods on the standard benchmark.
 
-- **Sample efficiency claim lacks clear accounting.** Section 5.2 (Cartpole) claims that POWER methods "reach the highest episodic return possible in less than half the transition counts compared to using a single world model." It is unclear whether "transition counts" counts each interaction with each ensemble member separately or aggregates them. Since POWER trains on multiple world models simultaneously, the total compute budget could be higher even if per-model training steps are lower. No wall-clock time or total interaction budget is reported.
+2. **Dataset specification is too vague for reproducibility.** Section 4.1 states that checkpoints are taken "throughout training to convergence," collection stops "after one or two convergence checkpoints," and the total is scaled "to match D4RL's orders of magnitude of no more than 10⁶ transitions." The exact number of checkpoints, trajectories per checkpoint, stopping criterion, and total transitions per environment are not specified in the main text. While the appendix (A.2) is referenced, the main paper should provide enough detail for a reader to understand the dataset without cross-referencing stripped content. A short table in the main text would address this.
 
-- **The early stopping heuristic (holdout world model reward variance) is mentioned but not validated.** Section 4.3 describes using increased standard deviation across holdout world models as an early stopping signal, but no analysis is provided showing that this correlates with real-environment performance degradation. This appears in the method description without empirical support.
+3. **No empirical validation of the holdout world model early-stopping mechanism.** Section 4.3 describes a procedure using holdout world models (trained on test-set transitions) to detect overfitting via increased standard deviation of policy returns, triggering early stopping. However, no results from this mechanism are shown — no curves comparing training vs. holdout reward, no analysis of when early stopping fires, and no evidence that the holdout signal correlates with real-environment performance. This is a non-trivial aspect of the method and would benefit from at least a qualitative demonstration.
+
+4. **The D4RL experiments would be strengthened by direct comparison with standard offline methods.** The paper's D4RL results (Figure 9) show POWER matching online PPO, and the stated claim is specifically about matching online PPO without environment interaction. However, the paper's broader narrative (abstract, introduction) frames this as addressing offline RL challenges. Since online PPO is a relatively weak baseline on D4RL (e.g., Hopper full-replay: online PPO ~70 vs. CQL ~98, IQL ~102), the D4RL results are modest. Including comparisons with 1–2 standard offline methods would clarify where POWER stands relative to the existing literature and would better support the framing.
 
 ### Trivial
-- The RNN classifier accuracy of 60–62% (DR/PLR) vs. 10% random supports the claim of distinct dynamics, but this also means ~40% of trajectories are *not* distinguishable, which somewhat tempers the diversity claim. This is not a weakness per se but worth noting in interpretation.
+
+- Minor grammatical errors ("Additioanlly", "has been shows", "This is problem") recur throughout.
+- Figure captions could more explicitly label which D4RL dataset variants (e.g., "Hopper-full-replay-v2") are used.
 
 ## Nice-to-Haves
-- Reporting CQL/SACn results on the new Brax dataset (even in a table) would directly substantiate the paper's central comparative claim.
-- Adding a comparison against standard offline RL methods on D4RL (e.g., in a table alongside Figure 9) would clarify where POWER stands relative to the methods it critiques.
-- A clearer accounting of total training cost (total environment steps across all ensemble members, wall-clock time) for the Cartpole efficiency claim.
+
+- A quantitative distribution divergence measure (e.g., MMD, Wasserstein distance) between the proposed dataset and D4RL would strengthen the claim about bias reduction beyond the qualitative histograms in Figures 11–12.
+- A direct comparison against a truncated-rollout method (e.g., MOPO's 5-step rollouts) using the same world models would empirically validate the claim that full-length rollouts avoid truncation pathologies.
+- An analysis of *why* PLR does not outperform DR — e.g., measuring whether the regret scoring correlates with real-world model error or whether the diversity among world models is already captured by uniform sampling — would turn the current weakness into a valuable insight.
 
 ## Removed Points
-These points are flagged to be removed — treat them with caution:
-- **Critic claim: "POWER does not outperform offline RL methods on the new dataset because no comparison data exists"** — This is kept above as a Major weakness since the paper states it performed the grid search but doesn't present results for Brax. However, Figure 8 *does* show a comparison for Pendulum, so the critic's claim of "never presented" is slightly overstated for that one environment. The Brax claim remains unsupported.
-- **Critic claim about "the paper does not report the total number of environment steps... so sample efficiency claim is unverifiable"** — Weakened to Minor above since the comparison is specifically against a single WM (not online RL), and the qualitative observation that POWER reaches target return faster in training steps is still meaningful. The ambiguity about accounting is a real but minor concern.
-- **Critic claim about "RNN analysis undermines the diversity argument because 60-62% is modest"** — Removed. 60-62% accuracy with 10 classes (10% random) is statistically strong evidence that dynamics are distinguishable. This is a strength, not a weakness.
-- **Strength Finder's generic strengths about "addressing an important problem"** — Dropped as generic.
-- **Critic's notes about missing appendix content (Tables 8, 9, A.2, etc.)** — Removed per instructions (parser strips appendices; they exist in the original submission).
+
+These points were flagged by reviewers but are removed per the rules:
+
+1. **"The central claim about outperforming offline methods on the authors' dataset is unsupported"** — REMOVED. The paper states in Section 4.4 that a grid search over CQL and SAC-n baselines was performed on the authors' dataset, with results in Tables 8 and 9 (appendix). The parser strips appendix content from all papers; the results exist in the original submission. Criticizing their absence from the main text is a criticism about missing appendix content, which is a parser artifact.
+
+2. **"The RNN classification accuracy is only modest"** — REMOVED as overly harsh. 62% accuracy against a 10% random baseline over 10 classes shows substantially separable dynamics. The reviewer's framing of this as "modest" is not a fair assessment of the evidence.
+
+3. **Point about the paper not comparing against offline methods on D4RL being a fatal flaw** — DOWNGRADED from fatal to minor (as reflected in Weakness #4 above). The paper's D4RL claim is specifically about matching online PPO, and this claim is supported by Figure 9. The lack of offline-method comparisons weakens the broader narrative but does not invalidate the paper's stated contribution.
 
 ## Novel Insights
-The reviews surface one genuinely novel observation that goes beyond the paper's own contributions: the tension between the theoretical framing (minimax regret) and the actual empirical mechanism. The paper attempts to justify the ensemble approach with UED theory, but the reviews correctly identify that the world models generated by SGD noise are structurally different from the task-parameterized level spaces UED was designed for. This suggests that the method's success likely stems from a simpler mechanism — training on multiple imperfect world models acts as a regularizer that prevents overfitting to any single model's idiosyncrasies — rather than from minimax regret over a diverse task distribution. Recognizing this could lead to simpler variants that do not need PLR's complexity.
+
+The most interesting signal from the review process is that the paper's own results undercut its primary algorithmic claim: the simpler DR and DR-STEP methods consistently match or exceed PLR with regret scoring. Rather than being simply a weakness, this finding is potentially the paper's most interesting result — it suggests that the benefits of ensemble training for full-length rollouts come from **diversity** (multiple world models) rather than **curricula** (regret-based selection). This decoupling is worth investigating further: the paper shows that ensemble training prevents reward hijacking (Figure 3) and transfers to the real environment, but the UED selection mechanism is not the driver of this success. A future paper building on this work could productively explore why uniform random sampling of world models provides sufficient robustness without adversarial level selection, and whether there exist data regimes (e.g., very heterogeneous world models, severe distribution shift) where regret-based selection does add value.
 
 ## Suggestions
-1. **Present the CQL/SACn results on the new Brax dataset** in a table or figure. This is the single most impactful change — it directly substantiates the headline claim and requires only reporting numbers you already collected (the grid search was already performed).
-2. **Add a D4RL comparison table** with standard offline RL methods (CQL, IQL, TD3+BC) alongside the POWER vs. online PPO plot, or at minimum acknowledge this as a limitation and state the intent for future work.
-3. **Drop or substantially weaken the minimax regret theoretical justification in Section 3.2.** Present POWER as an algorithmic heuristic (ensemble as implicit regularization) and let the empirical results speak.
-4. **Clarify the "transition counts" accounting** in the sample efficiency claim: define what counts as a transition and report the total interaction budget.
+
+1. Directly address the DR-vs-PLR discrepancy: either (a) explain why the simple baselines are as competitive as the UED approach and reframe the contribution around ensemble diversity rather than regret-based selection, or (b) identify conditions (e.g., larger ensembles, more heterogeneous dynamics, specific data regimes) where PLR provides a measurable advantage.
+2. Add a short table in the main text with key dataset statistics (number of checkpoints, trajectories per checkpoint, total transitions per environment).
+3. Provide at least one concrete figure or table showing the holdout-model early stopping signal and its correlation with real-environment performance.
+4. Include comparisons with 1–2 standard offline methods (e.g., CQL, IQL) on the D4RL benchmarks to contextualize the results, even if only as a supplementary table.
 
 ## Score and Decision
 
-The paper has a genuinely interesting core idea and several well-executed supporting analyses (RNN classification, ensemble ablations, dataset distribution analysis). However, the evidential gap around the central comparative claim (POWER vs. offline RL on the new dataset) is a significant omission that prevents full acceptance of the advertised contributions. The paper would need to present the already-collected baseline results to substantiate its claims.
+This paper presents a clean idea and demonstrates that ensemble training with full-length rollouts works and prevents reward hijacking. The dataset contribution addressing D4RL biases is timely and well-motivated. However, the paper's central algorithmic claim — that the UED/PLR framework provides the key benefit — is not supported by its own experiments, where simpler domain randomization performs at least as well. This gap between claim and evidence is a significant weakness that needs to be addressed through either reframing or additional analysis. The remaining reproducibility and validation gaps (dataset specification, holdout mechanism) are addressable but non-trivial.
 
-**Score: 5.5**
-
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

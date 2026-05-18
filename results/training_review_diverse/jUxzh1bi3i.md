@@ -1,20 +1,20 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
 
 ## Summary
 
-This paper introduces GlobalTomo, the first 3D global synthetic seismic dataset designed for ML-based full-waveform modeling and inversion. It comprises three tiers of increasing complexity (Acoustic, Elastic, Real Earth) with 10,000–30,000 samples each, generated using AxiSEM3D with spherical-harmonic parameterization up to degree 8. The paper demonstrates ML baselines (MM, MLP, H-Fourier Net, DeepONet) for forward modeling on the Acoustic and Elastic tiers, achieving ~60,000× speedup over numerical simulation, and showcases inversion strategies (gradient-based optimization with multiple starting points, direct mapping) on the Acoustic tier.
+This paper introduces GlobalTomo, the first 3D global synthetic seismic dataset designed for ML-driven seismic wavefield modeling and full-waveform inversion (FWI). The dataset comprises three tiers of increasing complexity — Acoustic (1 km radius, 20 Hz), Elastic (same scale with source variations), and Real Earth (full 6,371 km radius, 30 s period) — generated using the AxiSEM3D numerical solver. Velocity structures are parameterized using real spherical harmonics up to degree 8. The paper demonstrates ML baselines (MLP, HFN, DeepONet, physics-informed DeepONet) on the Acoustic and Elastic tiers, showing ~60,000× speedup for forward modeling and inversion strategies achieving meaningful structure recovery (R=0.826 for direct inversion mapping).
 
 ## Strengths
 
-- **First 3D global synthetic dataset for ML seismic tomography.** GlobalTomo fills a genuine and important gap — existing open-FWI datasets (OpenFWI, etc.) are limited to exploration-scale (subsurface) scenarios. The three-tier structure (Acoustic, Elastic, Real Earth) with 50,000 total samples spanning from 1-km/20 Hz to global/30-second scales is a valuable community resource (Section 2, Table 1).
+- **First comprehensive 3D global synthetic dataset for ML-driven seismic tomography.** The paper introduces a dataset that fills a genuine gap: prior datasets like OpenFWI are limited to subsurface exploration scales, while GlobalTomo spans from 1-km radius at 20 Hz to the full Earth radius at a 30-second period. The three-tier design (Acoustic, Elastic, Real Earth) with increasing physical realism is a well-thought-out contribution. The Real Earth tier alone required ~100,000 CPU hours of simulation, representing a scale unmatched by existing ML benchmark seismic datasets.
 
-- **~60,000× speedup of ML forward modeling over numerical simulation.** The paper quantifies that AxiSEM3D requires 120 seconds on 24 CPU cores, while the trained MLP produces predictions in 1–3 ms on a single GPU (Section 3.2.1, Fig. 4b). This acceleration is the central enabler for the inversion strategies explored and is convincingly demonstrated.
+- **Efficient physics-inspired parameterization of Earth structure.** Velocity perturbations are modeled using real spherical harmonics up to degree 8, capturing dominant long-wavelength heterogeneity while keeping the parameter count tractable for inversion. The paper justifies this choice with references to spectral analyses of mantle tomographic models (citing Meschede et al., Ritsema et al.), showing that significant power resides at lower degrees. This design choice directly supports the dataset's utility for inversion tasks.
 
-- **ML-based inversion strategies that exploit the speedup to address traditional FWI limitations.** The paper shows that using an ML forward model enables gradient-based optimization with 200 iterations and up to 1,000 random starting points, with consistent improvement in model correlation — a strategy computationally prohibitive in classical FWI (Section 3.2.2, Figs. 5 & 6).
+- **Demonstrated ~60,000× speedup for forward modeling with ML baselines.** Numerical forward simulation takes 120 s on 24 CPU cores, whereas trained ML models (MLP, DeepONet) run in 1–3 ms on a single GPU. This quantified acceleration is a concrete enabler for the computationally expensive iterative inversion procedures discussed in the paper.
 
-- **Realistic geophysical parameterization.** The use of real spherical harmonics up to degree 8 with ±10 % perturbations to a 1D background model (PREM for Real Earth) is geophysically principled and supported by spectral analysis from tomographic literature showing dominant power at low degrees (Section 2.2).
+- **ML-based inversion strategies achieve meaningful structure recovery.** The paper demonstrates three inversion approaches using the ML forward models. For direct seismogram-to-structure mapping, an MLP achieved an average correlation R=0.826 on unseen test structures. The multi-start experiments show monotonic improvement with increasing starting points, illustrating that ML's low inference cost enables more thorough search in the inversion landscape compared to computationally constrained traditional FWI.
 
-- **Systematic baseline comparisons.** The paper evaluates MM, MLP, H-Fourier Net, and DeepONet on both Acoustic and Elastic tiers with R² and relative L2 metrics including standard deviations (Table 2), establishing clear benchmarks.
+- **Physics-informed learning improves temporal generalization.** DeepONet trained on 4 timesteps struggled to predict intermediate timesteps, but incorporating PDE constraints during training significantly improved performance on unseen finer-resolution time steps — a key requirement for practical FWI where continuous temporal coverage matters.
 
 ## Weaknesses
 
@@ -23,56 +23,54 @@ None.
 
 ### Major
 
-- **The Real Earth tier (Tier 3) is not used in any ML experiment.** The paper describes this tier as enabling "planetary-scale wave propagation" and "detailed geophysical analyses" (Section 2.2, line 60), and the abstract claims ML approaches are "particularly suitable for global FWI." Yet every baseline experiment — forward modeling (Table 2, Figs. 3 & 4), gradient-based inversion (Fig. 5), and direct mapping (Fig. 6) — is performed only on Acoustic and/or Elastic tiers. The claim that ML methods are suitable for global-scale FWI rests on evidence from orders-of-magnitude smaller scales (1-km radius, 0–3 s). Demonstrating forward modeling on even a subset of the Real Earth data would substantially strengthen the paper's core narrative.
-
-- **Inversion experiments are limited in scope and lack baselines.** Only the Acoustic tier is inverted, using a single forward model (MLP) with no comparison to traditional numerical FWI. The paper claims that ML "effectively tackle[s] the challenges of ill-posedness and local minima" (Section 3.2.2, line 230), but this is asserted without quantifying against any classical FWI baseline — even a single example with a few numerical solver iterations would anchor the claim. The inversion is also not demonstrated on the Elastic tier, which would test the method on more realistic wave physics.
+- **No ML experiments on the Real Earth tier.** The paper's title, abstract, and introduction emphasize global-scale seismic tomography. However, every ML experiment — forward modeling, gradient-based inversion, multi-start sampling, direct inversion mapping — is performed only on the Acoustic and Elastic tiers (1 km radius). The Real Earth tier (full Earth radius, 30 s period) is described and the data has been generated (Table 1 documents 10,000 samples, 5427 structure parameters, ~100,000 CPU hours), but no baseline results are shown on this tier. Since the Real Earth tier is what distinguishes this dataset from existing local-scale datasets, the absence of any ML demonstration on it weakens the paper's central narrative that ML approaches are "particularly suitable for global FWI." The reader cannot assess whether the ML methods scale — even in a proof-of-concept form — to the realistic problem the dataset was designed to address. This is the most significant gap in the paper.
 
 ### Minor
 
-- **PIDO is introduced as a baseline but omitted from the main comparison table.** Section 3.1 lists PIDO as one of five baseline models, yet Table 2 (the main forward modeling results) includes only MM, MLP, H-Fourier Net, and DeepONet. PIDO appears only in Fig. 4c for a qualitative temporal-resolution experiment on a single uniform model. While PIDO's purpose (physics-constrained temporal generalization) differs from the main forward modeling task, listing it as a baseline creates an expectation that should be acknowledged or the role clarified.
+- **No comparison with traditional numerical FWI on the same test cases.** The inversion experiments show that ML-based gradients improve correlation with ground truth, but there is no reference inversion (e.g., a few iterations of conventional FWI using the numerical solver's adjoint on the same acoustic test cases) to calibrate what "good" inversion looks like on this dataset. The paper argues that ML overcomes limitations of traditional FWI, but it never demonstrates what traditional FWI would produce under the same conditions. Without this anchor, the improvement numbers are difficult to interpret. (This weakness is not fatal for a dataset paper — the primary contribution is the data, not a novel inversion method — but it limits the force of the claims about ML-based FWI.)
 
-- **Direct inversion mapping reported without uncertainty quantification.** The direct MLP mapping from seismograms to velocity structures is reported as achieving "an average R of 0.826" (Section 3.2.2, line 234) without standard deviation or per-degree breakdown. While the qualitative visualizations (Fig. 6) are informative, the quantitative claim lacks the rigor applied to the forward modeling results in Table 2.
+- **No Fourier Neural Operator (FNO) baseline.** FNO is a standard neural operator for PDE problems and is cited prominently in the paper's related work section. Its absence from the baseline comparison is an odd omission that weakens the benchmarking claim. The HFN architecture incorporates some frequency-domain ideas but is not a substitute for the well-established FNO baseline that the community would expect.
 
-- **The paper's central claim about ML suitability for global FWI is somewhat over-claimed given the evidence.** The abstract states that "ML approaches are particularly suitable for global FWI" as a conclusion, but the supporting experiments are on the 1-km-scale Acoustic tier. Qualifying this as "show promise" or "demonstrate potential" would better match the presented evidence.
+- **Dataset access and release are not specified.** The paper introduces the dataset as a resource for the community but provides no repository, DOI, license, or statement of planned release. For a dataset paper, this is a structural omission that must be addressed before publication. (Per the hard rules, this is not about questioning whether the dataset exists — it is about the paper failing to provide access information for its own contribution, which is a legitimate concern for a dataset paper.)
+
+- **Inversion experiments are confined to the Acoustic tier with a single forward model (MLP).** The Elastic tier, which includes source variations and P/S wave conversions and is arguably more relevant for real data, receives no inversion results. The generality of the inversion claims would be strengthened by at least one demonstration on the Elastic tier.
 
 ### Trivial
-None.
+
+- The spherical-harmonic degree-8 limitation is acknowledged by the authors (Section 2.2) and discussed in the future work section. The harsh critic's point about this — that higher degrees matter for shallow structures — is valid in principle but the paper already addresses it with a cited justification and explicit mention of future expansion. No additional action required beyond what the authors already state.
 
 ## Nice-to-Haves
 
-- A forward modeling experiment on the Real Earth tier (e.g., training one model on a subset of samples) would transform the paper from describing a potentially useful dataset to demonstrating it actually works at global scale.
-- Including PIDO results with the same metrics as Table 2 (even as an appendix entry) would complete the baseline suite.
-- A small comparison with traditional FWI (e.g., a few iterations of the numerical solver on one Acoustic example) would ground the claimed advantage.
-- Quantitative per-degree breakdowns with error bars for the direct inversion mapping would improve reproducibility.
+- Adding a traditional FWI comparison on the Acoustic tier (even a few adjoint iterations) would ground the inversion results and directly connect to the paper's motivating argument.
+- Including FNO as a baseline would make the benchmarking more comprehensive and align with related work.
+- A brief discussion of compute budget for Real Earth ML experiments (and why they were deferred) would help manage reader expectations.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-
-- **"The dataset itself is not linked to a repository in the main text"** — Removed per hard rules: criticisms questioning the existence or availability of cited resources are not permitted. The appendix (stripped by the parsing pipeline) likely contains the link.
-- **"No comparison to real tomographic models"** — The paper explicitly justifies the degree‑8 truncation with spectral analysis from the tomographic literature; this request is scope-creep beyond what a dataset paper should be expected to demonstrate.
-- **"The discussion reads as speculation rather than evidence-based conclusions"** — Overstated; the Discussion section (Section 3.3) is appropriately speculative about future applications of a dataset paper.
-- **"The inversion should be tested on Elastic and Real Earth tiers"** — This is a valid suggestion but is already captured in the Major weakness above; the Real Earth aspect is the crucial gap, while Elastic inversion is a nice-to-have.
+- **Criticism about FNO not being included was kept** as a Minor weakness (it is a legitimate omission from the baseline set).
+- **Harsh critic's suggestion to "run at least one baseline on Real Earth tier"** — This is a valid suggestion but kept implicitly as it underlies the Major weakness above.
+- **Harsh critic's point about spherical-harmonic degree 8** — The paper already addresses this with cited justification (lines 64–65) and mentions future expansion (line 247). Moved to Trivial.
+- **Harsh critic's point about run Real Earth baseline as a suggestion** — This is essentially the same as the Major weakness; the suggestion form is redundant.
 
 ## Novel Insights
 
-The reviews do not surface an insight beyond the paper's own contributions. The key observation — that an ML forward model at ~60,000× speedup can support inversion strategies (200 iterations, 1,000 starting points) that are computationally prohibitive in classical FWI — is already clearly presented in the paper.
+None beyond the paper's own contributions. The reviewers' observations primarily iterate on gaps the paper could address rather than offering fundamentally new perspectives on the work.
 
 ## Suggestions
 
-1. **Add at least one forward-modeling experiment on the Real Earth tier.** Even training a single model (e.g., MLP or DeepONet) on 5,000 samples and evaluating on the held-out 5,000 would directly support the paper's claims about planetary-scale applicability and close the most important evidential gap.
+1. **Demonstrate at least one ML baseline on the Real Earth tier.** Even a simple experiment — e.g., training a small MLP or DeepONet on a subset of the 10,000 samples to predict wavefields or seismograms — would substantially increase confidence that the dataset's most novel tier is usable in practice and that ML methods do not collapse at global scale.
 
-2. **Include a baseline comparison in the inversion study.** A few L-BFGS iterations using the numerical solver on one or two Acoustic examples, reporting wall-clock time and final model correlation, would ground the claimed advantage of ML-based inversion.
+2. **Add a traditional FWI comparison.** On the Acoustic tier, run a few iterations of gradient descent using the numerical solver's adjoint and report the resulting correlation. This grounds the inversion results and directly supports the paper's claim that ML helps overcome traditional FWI's computational limitations.
 
-3. **Clarify PIDO's role.** Either add PIDO metrics to the main forward modeling table or explicitly state that PIDO is explored only for temporal super-resolution and is not intended as a general forward-modeling baseline.
+3. **Specify dataset release details.** Provide a repository (e.g., Zenodo, Figshare), DOI, license (e.g., CC-BY 4.0), and the expected total dataset size before final publication. This is essential for a dataset paper to be accepted.
 
-4. **Provide error bars for the direct inversion mapping.** Standard deviations or per-degree correlation coefficients would make this result more credible.
+4. **Add FNO as a baseline.** Given its prominence in the neural operator literature and its citation in the paper's own related work, including FNO would strengthen the benchmarking contribution.
 
-5. **Tone down the central claim.** Replace "ML approaches are particularly suitable for global FWI" with "ML approaches show significant promise for global FWI" or similar qualification that better matches the experimental scope.
+5. **Consider extending inversion experiments to the Elastic tier** to demonstrate the approach generalizes beyond the simplest setting.
 
 ## Score and Decision
 
-This is a dataset paper with a genuine contribution. The dataset is well-designed, the simulation pipeline is sound, and the forward-modeling speedup is convincingly demonstrated. However, the experimental validation has a meaningful gap: the most distinctive data tier (Real Earth) is not used in any ML experiment, and the inversion study lacks baselines against traditional methods. These issues are real but fixable and do not invalidate the core contribution (the dataset itself). The paper is borderline but on balance warrants acceptance subject to revisions that address the Real Earth gap.
+The paper presents a genuinely useful dataset that fills an important gap at the intersection of geophysics and ML. The dataset construction is sound, the multi-tier design is thoughtful, and the baselines on the smaller tiers provide a credible starting point for the community. However, the absence of any ML experiments on the Real Earth tier — the tier that makes this dataset novel — is a significant gap that weakens the paper's central claims about enabling global-scale ML-driven FWI. The paper is on the right track but needs at least minimal demonstration on the global tier and clarification of dataset release plans to fully deliver on its promise.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

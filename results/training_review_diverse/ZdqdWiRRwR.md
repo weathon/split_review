@@ -1,82 +1,80 @@
-Now I have enough information to write the consolidated review. Let me compose it.
+Now I have all the information to produce the final consolidated review. Let me write it.
 
 ## Summary
 
-This paper introduces Recursive Metadata Normalization (R-MDN), a normalization layer that removes confounder effects from intermediate DNN feature representations using recursive least squares. Unlike prior methods (MDN) that require batch-level statistics, R-MDN operates at the level of individual examples, making it compatible with vision transformers and continual learning where confounder distributions change over time. The method is evaluated on synthetic data, ABCD neuroimaging (sex classification), and HAM10000 dermatoscopic image classification, demonstrating reduced correlation with confounders while maintaining competitive accuracy.
+This paper proposes Recursive Metadata Normalization (R-MDN), a normalization layer that removes the effects of known confounding variables from intermediate DNN feature representations by leveraging the recursive least squares (RLS) algorithm. Unlike prior methods such as MDN (which requires batch-level statistics precomputation), R-MDN operates at the individual example level, enabling compatibility with vision transformers and natural integration into continual learning settings where data and confounder distributions shift across training stages. The method is evaluated on synthetic data, structural MRI sex classification (ABCD study), and dermatoscopic lesion classification (HAM10000), demonstrating reduced feature–confounder correlation and more equitable predictions across population groups.
 
 ## Strengths
 
-1. **Individual-example operation unlocks compatibility with modern architectures and continual learning.** R-MDN processes each example independently via recursive least squares (Section 3), unlike MDN which requires batch-level statistics and pre-computed inverse covariance matrices. This design is validated by successfully deploying R-MDN within a ViT on HAM10000 (Section 4.2.2) — a setting where MDN cannot be applied — and by enabling seamless adaptation across continual learning stages without recomputing batch statistics.
+- **Individual-example operation enables ViT compatibility and online learning.** Unlike MDN, which requires batch-level covariance precomputation and batch statistics during training (Section 2), R-MDN processes each example independently via the RLS update. This is a concrete architectural advantage that is empirically validated in the HAM10000 experiment (Section 4.2.2), where R-MDN is integrated into a vision transformer — something MDN cannot do.
 
-2. **Adapts to changing confounder distributions across continual learning stages without stage-specific networks.** R-MDN's internal state (regression coefficients and inverse covariance matrix) updates incrementally as new data arrives, so a single network suffices across all stages. Table 3 shows R-MDN consistently achieves better forward transfer (FWTd) on the synthetic continual learning benchmark (e.g., FWTd of 0.04 vs. 0.18 for P-MDN on Dataset 2). Table 4 further shows R-MDN variant (C) achieving strong backward transfer (BWT) and accuracy on HAM10000.
+- **Recursive state update naturally prevents catastrophic forgetting of confounder effects.** R-MDN maintains and continuously updates an internal model state (regression coefficients and inverse covariance matrix) using the Sherman–Morrison update. This allows a single network to generalize across training stages without stage-specific components. The continual learning experiments (Tables 3, 4) show that R-MDN achieves better backward and forward transfer than MDN, P-MDN, BR-Net, and standard continual learning methods (EWC, LwF, PackNet).
 
-3. **Strong generalization to confounder-absent test data.** In the synthetic continual learning experiment (Figure 5), R-MDN maintains near-theoretical accuracy even as confounder intensity drops to zero, while the base model's accuracy falls sharply (~0.83 → ~0.60) and BR-Net/P-MDN also degrade. This demonstrates that R-MDN learns genuinely confounder-invariant features, not just features correlated with the training confounder distribution.
+- **Strong empirical evidence of confounder invariance and equitable predictions.** In the ABCD sex classification (Table 2), R-MDN yields the lowest mean difference between true positive and true negative rates (1.1 ± 1.0) and the lowest squared distance correlation (dcor²) for both boys and girls, indicating unbiased predictions. The synthetic static learning experiment (Table 1) shows R-MDN achieving dcor² near zero at batch size 2048 (0.01 ± 0.00) across 100 random seeds.
 
-4. **Empirically validated across diverse architectures and modalities.** The paper evaluates on synthetic images (2D CNN), 3D brain MRIs (3D CNN), and dermatoscopic images (ViT). In each setting, R-MDN consistently reduces squared distance correlation (dcor²) with the confounder while maintaining competitive accuracy, demonstrating broad applicability.
+- **Principled theoretical derivation with mini-batch extension.** Section 3 provides a clean mathematical derivation of the per-sample RLS update, extends it to mini-batches via the Sherman–Morrison–Woodbury formula (Section 3.1), and introduces a regularization term (λI) for numerical stability (Section 3.3). This distinguishes R-MDN from both the batch-level closed-form approach of MDN and the penalty-based heuristic of P-MDN.
 
-5. **Provides a theoretically grounded framework with mini-batch extension and regularization.** The paper derives RLS updates via the Sherman-Morrison rank-1 update (Section 3), extends to mini-batches via the Sherman-Morrison-Woodbury formula (Section 3.1), and adds a regularization term λI for numerical stability (Section 3.3). This improves upon prior methods that are sensitive to batch size (MDN) or require difficult hyperparameter tuning (P-MDN).
+- **Robust generalization to absent confounders.** Figure 5 shows that when the confounder intensity is reduced to zero, R-MDN maintains near-constant accuracy close to the theoretical maximum, whereas the base model, BR-Net, and P-MDN exhibit sharp drops. This is relevant to deployment scenarios like cross-hospital generalization where a confounder (e.g., machine type) may be absent.
+
+- **Introduction of tailored continual learning metrics (BWTd, FWTd).** The paper adapts metrics from Lopez-Paz & Ranzato (2017) to account for theoretical maximum accuracy, providing a more precise evaluation of confounder-related forgetting than standard accuracy alone (Section 4.2.1, Equations 1–2).
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-None.
+- **The MDN baseline implementation in continual learning is underspecified.** The paper argues in Section 2 that MDN cannot be straightforwardly applied in continual learning — it would require either repeated recomputation of Σ⁻¹ at each stage or a "look-ahead" precomputation on all stages' data. Yet MDN appears as a baseline in Tables 3 and 4 (continual learning experiments) without any explanation of which protocol was used. If MDN was given full-data look-ahead (pre-computing Σ⁻¹ on all stages), the comparison is informative but should be stated explicitly so readers can judge the fairness. If MDN was recomputed per stage, that needs to be stated as well. This matters because the paper's central novelty claim about continual learning rests partly on comparisons against MDN; the reader cannot evaluate those comparisons without knowing the setup. *(Note: this is a clarification issue, not necessarily an error — the paper's own analysis in Section 2 acknowledges both possibilities, suggesting the authors are aware of the issue. The core R-MDN contribution — example-level operation, ViT compatibility, online updates — is not undermined by this, but the experimental comparison is incomplete without specification.)*
 
 ### Minor
 
-1. **The justification for linear deconfounding on deep features is incomplete and partially self-contradictory.** The paper motivates linear regression via (1) nonlinear models are hard to interpret and (2) "sufficiently powerful nonlinear models can extract almost any arbitrary variable from the information present in the features" (Section 1). Point (2) actually argues *against* the linear assumption: if features are rich enough, a linear probe may capture only the linearly-predictable portion of confounder influence. While the same linear assumption is made by prior work (MDN), the paper would benefit from engaging with this nuance or providing empirical evidence (e.g., showing that a linear probe can predict the confounder from the features used). **Why it matters:** If the linear assumption fails substantially, the method may remove too little or too much signal, and the claimed invariance is not guaranteed. This is a limitation worth acknowledging, though prior work operates under the same assumption and the empirical results suggest it works in practice.
+- **Hyperparameters ε and λ are not reported in the main text.** The paper mentions ε (initialization for R(0)⁻¹ = εI) in Section 3 and λ (regularization) in Section 3.3, noting that λ is tuned (ablation in suppl. F). However, the chosen values are not reported in the main text for any experiment. Since the paper criticizes P-MDN for having a "difficult-to-tune" penalty parameter γ, the reader needs to see that R-MDN's own parameters (ε, λ) are not themselves sensitive or difficult to tune. The appendix ablation partly addresses this, but reporting values and a brief sensitivity summary in the main text would strengthen the practical usability claim.
 
-2. **The claim that R-MDN has the "lowest mean difference between TPR and TNR" in the ABCD experiment (Table 2) needs clarification vis-à-vis BR-Net.** The paper states R-MDN has the lowest TPR–TNR difference among all methods (Section 4.1.2). However, in the static setting, BR-Net is a direct baseline, and its TPR–TNR value should be explicitly compared. If BR-Net achieves a comparable or smaller gap, the claim should be qualified or dcor² should be argued as the primary fairness criterion. **Why it matters:** Without this clarification, the paper's central fairness claim for the ABCD experiment appears potentially incomplete.
+- **No pairwise statistical significance tests for the ABCD and continual learning experiments.** Table 1 reports a one-way ANOVA (p < 10⁻⁵⁸) across methods for the synthetic static experiment, but Tables 2, 3, and 4 lack pairwise significance testing. Some differences (e.g., R-MDN vs. MDN on ABCD TNR) are modest, and the reader cannot assess whether the improvements are robust across runs. Adding pairwise tests or confidence intervals would strengthen claims.
 
-3. **BWT/FWT metrics in the HAM10000 experiment (Table 4) are not explicitly defined.** Section 4.2.1 carefully defines BWTd and FWTd for the synthetic continual learning experiment. Table 4 reports "BWT" and "FWT" without stating whether these are the same metrics, absolute versions, or something else. This is a clarity gap that makes the main continual learning experiment harder to evaluate. **Why it matters:** Readers cannot verify whether the metrics are comparable across experiments.
+- **The feedback loop between residualized features and the classifier during training is not theoretically analyzed.** The paper uses the standard residualization formulation z = x̃β̃_x + yβ̃_y + r and removes only the confounder component (x̃β̃_x). This is correct in a static regression sense. However, during end-to-end training, the features z are not fixed — they co-adapt with the classifier and the regression coefficients, creating a feedback loop. The paper does not analyze whether this loop is stable or whether the linear residualization assumption remains valid under this dynamics. This limitation is shared with MDN (prior work) and does not invalidate the empirical results, but it is a gap in the theoretical justification presented in Section 3.
 
-4. **The paper does not discuss limitations of its own approach or situations where R-MDN might underperform.** The related works section identifies limitations of MDN and P-MDN, but the paper does not acknowledge scenarios where linear deconfounding might be insufficient, how the choice of regularization parameter λ affects behavior, or the potential feedback loop where regression coefficients are updated using features being simultaneously modified by the deconfounding operation. **Why it matters:** A balanced presentation would strengthen the paper's scientific credibility, though this is common for conference papers.
+- **Linear residualization assumption is discussed but not diagnostically validated.** The paper motivates the linearity assumption in Section 1 (interpretability, avoidance of arbitrary nonlinear extraction) but does not include a diagnostic (e.g., comparing dcor² before vs. after residualization across multiple feature layers) to verify that linear regression is sufficient for the learned features in practice. Given that the method's effectiveness depends on this assumption holding, such a diagnostic would strengthen confidence in the results.
 
 ### Trivial
 
-1. The generalization claim that "R-MDN maintains consistent performance across all distributions" (Figure 5 caption text in Section 4.2.1) slightly overstates the results; a modest accuracy drop is visible as confounder intensity decreases (the text says "near the theoretical maximum" elsewhere which is more accurate).
-
-2. The "does not need to train a stage-specific network" framing in the introduction (Section 1) is stated as an advantage, but the paper does not explicitly contrast this with how many CL baselines (EWC, LwF, PackNet) also use a single network.
+- None.
 
 ## Nice-to-Haves
 
-- A brief ablation of the regularization parameter λ in the main text (even if full details are in the appendix) would help readers assess robustness.
-- Reporting statistical significance (confidence intervals or tests) for key accuracy comparisons in Tables 2 and 4 would strengthen the evidence.
-- A brief computational complexity statement (O(d²) per sample/batch) in the main text rather than only in the appendix would aid practical assessment.
-- Including a summary of the three synthetic continual learning dataset distributions in the main text (currently only in the appendix) would improve readability.
+- A stage-wise breakdown of dcor² for the HAM10000 experiment would be more informative than reporting a single test-set aggregate, especially since the confounder (age) distribution varies across stages.
+- A brief wall-clock time or parameter count comparison with MDN and P-MDN in the main text (beyond the complexity analysis in suppl. B) would support the efficiency claim.
+- A null distribution or baseline for interpreting the extremely low dcor² values (e.g., 0.002 for R-MDN) could help readers gauge practical significance.
 
 ## Removed Points
 
-These points are flagged to be removed, treat them with caution:
-- **Critic's claim that "does not need to train a stage-specific network" is not unique or not supported.** The paper makes this claim in context of confounder-removal methods for continual learning (MDN cannot adapt without recomputation; P-MDN needs per-stage tuning). The critic's objection reflects a misunderstanding of the comparison class. REMOVED.
-- **Critic's claim that joint training dynamics (feedback loop) could cause instability.** While technically true, this is an unexplored theoretical concern common to most end-to-end methods. Not a specific weakness of this paper. MOVED to Nice-to-Haves as a suggestion for analysis.
-- **Critic's note about "slightly worse absolute deviation for batch size 128" (Table 1).** This is a minor trade-off common in all methods; not a meaningful weakness. REMOVED.
-- **Strength Finder's claim about R-MDN achieving the smallest TPR-TNR difference (§4.1.2) is kept but the critic's challenge about BR-Net is unresolved.** Without seeing the embedded table image, both cannot be verified. The issue is preserved as Weakness #2 above.
+These points are flagged to be removed; treat them with caution.
+
+- **Criticism about MDN "look-ahead" being inherently unfair.** *(Reason: The paper's Section 2 explicitly discusses that in a cross-sectional study, MDN can compute Σ⁻¹ on all data. This is not "unfair" — it is MDN's standard operation mode, which the paper acknowledges. The actual concern is lack of specification, which is retained in Major Weaknesses above.)*
+
+- **Criticism that "disagreement on taste" would lead the paper to not use certain methods.** *(Reason: Not present in the harsh critic's review. This rule is about potential issues, not actual criticisms made.)*
+
+- **Strength Finder's generic summary paragraph.** *(Reason: The Strength Finder's closing paragraph is a summary of the paper's contributions, not a specific strength; it is redundant with the paper's own abstract and introduction.)*
 
 ## Novel Insights
 
-None beyond the paper's own contributions.
+The harsh critic identifies a genuinely important tension in the paper: R-MDN criticizes P-MDN for having a difficult-to-tune hyperparameter (γ), yet introduces its own hyperparameters (ε and λ). The paper partially addresses this via ablation (suppl. F), but the juxtaposition reveals a broader pattern in the confounder-removal literature — every method in this family trades batch-level statistical efficiency (MDN) for hyperparameter sensitivity (P-MDN) or initialization/regularization dependence (R-MDN). The paper's empirical advantage comes less from eliminating hyperparameter tuning and more from enabling a fundamentally different operational regime (online, example-level, ViT-compatible) that prior methods cannot enter at all. This is a more nuanced and defensible framing than "our method has no tuning problems."
 
 ## Suggestions
 
-1. In the ABCD experiment (Section 4.1.2), explicitly state the BR-Net TPR–TNR value alongside R-MDN's, and clarify whether dcor² or TPR–TNR gap is the primary fairness criterion. A brief justification for prioritizing one metric over the other would resolve the ambiguity.
+1. **Clarify MDN implementation in continually learning experiments.** State explicitly whether MDN's Σ⁻¹ was pre-computed on all stages' data (cross-sectional) or recomputed per stage (online). If the former, note that this is MDN's standard operation and does not violate the experimental setup for the cross-sectional HAM10000 study; if the latter, describe the recomputation protocol.
 
-2. Define BWT/FWT for the HAM10000 experiment (Table 4) unambiguously, either by referencing the same BWTd/FWTd definitions from Section 4.2.1 or by stating any differences.
+2. **Report ε and λ values used for each experiment in the main text** (a single sentence or brief table), and add a short paragraph summarizing the sensitivity analysis from suppl. F, demonstrating that performance is stable over a reasonable range.
 
-3. Add a short limitations paragraph in the conclusion or a separate section, discussing when the linear deconfounding assumption might be stressed (e.g., highly nonlinear confounder-feature relationships) and how the regularization parameter λ influences the trade-off.
+3. **Add pairwise confidence intervals or statistical significance tests** (e.g., paired t-tests or bootstrap intervals) for the ABCD and continual learning experiments to help readers assess the robustness of observed differences.
 
-4. Qualify the generalization claim in Section 4.2.1 ("R-MDN maintains consistent performance") to more precisely describe the small observed accuracy drop at zero confounder intensity.
+4. **Include a brief diagnostic** showing dcor² before vs. after R-MDN residualization at multiple feature layers to empirically verify the linearity assumption in practice.
 
 ## Score and Decision
 
-The paper introduces a well-motivated method (R-MDN) that genuinely extends prior work (MDN) in meaningful directions: individual-example operation, ViT compatibility, and seamless continual learning. The algorithmic design is elegant and theoretically grounded. The experimental scope is broad, spanning multiple architectures and data modalities, and the results generally support the claims.
+The paper proposes a clean, well-motivated extension of confounder-removal normalization to online and continual learning settings, with a clear practical advantage (example-level operation, ViT compatibility) and strong empirical support across multiple datasets, architectures, and evaluation metrics. The main weakness is an underspecified MDN baseline in the continual learning experiments, which needs clarification but does not fundamentally undermine the core contribution — R-MDN's unique capabilities (online updates, ViT compatibility, stage-generalization) are architectural properties independent of the MDN comparison. The remaining issues (hyperparameter reporting, statistical testing, theoretical analysis of the feedback loop) are addressable. The paper is a solid contribution that would benefit from clarification but does not require re-execution of experiments.
 
-The weaknesses identified are all minor or cosmetic — none threaten the paper's core contributions. The linear assumption concern is shared with prior work and partially validated by the empirical results. The TPR–TNR comparison needs clarification but does not undermine the overall fairness story given R-MDN's much lower dcor² values. The missing metric definition is a presentation fix.
-
-This is a solid contribution that belongs in the proceedings.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

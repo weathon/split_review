@@ -1,20 +1,19 @@
-Now I have a thorough understanding of the paper and can verify each reviewer claim against the actual text. Let me compose the final consolidated review.
+Now I have all the information needed. Let me produce the final consolidated review.
+
+## Final Consolidated Review
 
 ## Summary
-
-Shot2Story introduces a large-scale multi-shot video benchmark with 20K videos, providing per-shot visual and narration captions (human-corrected from MiniGPT-4 seeds) and human-verified GPT-4-generated video summaries averaging 201.8 words. The benchmark uniquely combines three properties: shot-level annotation granularity, audio (narration) captions tied to visual references, and long-form video summaries. The paper defines several tasks — single-shot captioning, narration captioning, multi-shot summarization, video retrieval with shot descriptions — and demonstrates through baselines that (a) ASR text is critical for multi-shot understanding, (b) explicit shot structure helps summarization over holistic processing, and (c) generated summaries transfer to zero-shot video QA, outperforming Video-ChatGPT on MSRVTT-QA (56.8 vs. 53.7) and ActivityNet-QA (47.4 vs. 37.4).
+Shot2Story introduces a benchmark of ~20K multi-shot videos (2–8 shots each, average 16.7s) with human-verified shot-level visual captions, narration captions, and GPT-4-generated video summaries further verified by annotators. The paper defines tasks (single-shot captioning, multi-shot summarization, retrieval) and provides baselines using frozen vision encoders + LLMs. The dataset is well-motivated — existing benchmarks lack shot-level audio-visual annotations and long-form summaries — and the experiments show that shot-structure awareness improves summarization and that summaries transfer to zero-shot video QA.
 
 ## Strengths
 
-- **Novel benchmark with comprehensive multi-shot annotations**: Shot2Story provides 20K videos with per-shot visual and narration captions plus human-verified video summaries (avg 201.8 words), uniquely combining multi-shot structure, audio captions, and detailed summaries — exceeding prior datasets on all these dimensions (Table 1, Section 2.4). The human verification step distinguishes it from machine-only datasets like VAST.
+- **Shot-structure modeling is shown to be beneficial for multi-shot summarization.** The comparison of SUM-shot (per-shot frame tokens) vs. SUM-holistic (uniform frame sampling) shows consistent gains across all metrics (BLEU 11.7 vs. 10.9, METEOR 19.7 vs. 18.3, ROUGE 26.8 vs. 26.2, CIDEr 8.6 vs. 6.3 in Table 5). This directly supports the paper's central claim that processing without shot structure degrades multi-shot understanding.
 
-- **Demonstrates importance of ASR and shot structure for video understanding**: Controlled experiments show adding ASR text improves summarization (SUM-shot with ASR CIDEr 8.6 vs. without ASR 4.7, Table 4) and that explicit shot-level processing (SUM-shot) outperforms holistic processing (SUM-holistic, CIDEr 8.6 vs. 6.3, Table 4), providing clear evidence that both audio and shot structure are critical.
+- **Zero-shot video QA transfer demonstrates that summaries generalize across domains and durations.** The SUM-shot model trained only on Shot2Story, when generating summaries for MSRVTT-QA and ActivityNet-QA, achieves 56.8% on MSRVTT-QA (outperforming Video-ChatGPT's 53.7% text-only baseline and 49.3% vision+text) and 47.4% on ActivityNet-QA, despite ActivityNet videos being much longer (minutes) and MSRVTT containing out-of-domain topics like TV shows (Table 6). This is a genuinely interesting result that validates the summary quality.
 
-- **Zero-shot video QA via generated summaries provides the strongest validation**: The paper achieves strong zero-shot QA on MSRVTT-QA (56.8) and ActivityNet-QA (47.4) by converting video to summary then feeding to an LLM, outperforming Video-ChatGPT (53.7 and 37.4 respectively, Table 6) — despite not using any instruction tuning — demonstrating that detailed summaries serve as effective intermediate representations for downstream tasks.
+- **Narration captioning task forces joint audio-visual reasoning, and the baseline demonstrates the need for both modalities.** The model combining visual tokens and ASR text achieves CIDEr 168.7 vs. 130.9 for ASR-only and 13.5 for the audio-only VALOR baseline (Table 4), confirming that the task requires linking speech to visual subjects as designed.
 
-- **Efficient annotation pipeline using LLM assistance**: Using MiniGPT-4 to generate initial shot captions followed by human correction achieves ~3× speedup compared to writing from scratch (Section 2.3), offering a practical methodology for scaling detailed video annotations.
-
-- **Novel retrieval tasks with shot descriptions**: The paper introduces three retrieval settings (T2V, T2S, V2T) that require finer-grained video understanding than standard text-video retrieval, and shows that T2V (video-level retrieval from a shot description) is harder than T2S (shot-level retrieval), validating the dataset's challenge (Table 5, Section 3.6).
+- **Rigorous data filtering pipeline ensures the benchmark targets non-trivial multi-shot videos.** The pipeline removes static content (PySceneDetect), duplicate adjacent shots (inter-shot similarity < 0.9), and low visual-ASR correlation (CLIP threshold 0.25), yielding 20,023 videos from 1.1M sampled clips (§2.2). This ensures the dataset focuses on videos where shot structure and audio-visual alignment matter.
 
 ## Weaknesses
 
@@ -23,54 +22,52 @@ None.
 
 ### Major
 
-- **No inter-annotator agreement statistics reported for any annotation stage**: The paper describes a multi-stage annotation pipeline (MiniGPT-4 seeding → human correction for shot captions; GPT-4 generation → human verification for summaries), yet reports no agreement metrics (e.g., Fleiss' κ, pairwise overlap, or even coarse proxy metrics like agreement on object mentions or speaker identity) for any stage. For a benchmark intended to serve as a gold-standard evaluation resource, the reliability of the ground-truth labels is foundational. This is especially concerning for the narration captions, which require annotators to identify "which person in the video is talking" and "which object the speaker is referring to" — tasks that are inherently subjective and likely have non-trivial disagreement rates. Without this information, the reader cannot assess whether the annotations are consistent enough to serve as a reliable evaluation benchmark. **This is the most significant gap and should be addressed with at least a sample-based agreement study.**
-
-- **Insufficient external baselines for single-shot video captioning**: Table 2 compares only two variants of the authors' own architecture (V vs. V+A), with no comparison to any existing video captioning model (e.g., Video-LLaMA, BLIP-2 fine-tuned for video, VideoChat-based variants). This makes it impossible to assess whether the dataset presents a genuinely new challenge or is simply well-aligned with this particular backbone. The retrieval experiments (Table 5) include strong baselines (Alpro, CLIP4Clip, UMT), so including even one external captioning baseline would strengthen the paper's claims about task difficulty. Similarly, the narration captioning task compares only to VALOR (audio-only), omitting modern audio-visual models that could serve as stronger baselines.
+- **No quantitative validation of annotation quality.** The paper provides no inter-annotator agreement scores, no statistics on what fraction of LLM-generated captions required correction, no number of annotators, no average annotation time, and no human evaluation of summary factuality or coverage. The annotation process is described qualitatively (§2.3–2.4), but for a dataset paper, this level of quality assurance is insufficient. Without these metrics, readers cannot assess whether the human "verification" was effective or whether the dataset genuinely improves over fully automatic pipelines like VAST. The paper claims "thorough manual annotation process" and "further review and correction," but provides no data to support these claims. This is the most consequential weakness.
 
 ### Minor
 
-- **QA evaluation relies on GPT-3.5 as automatic judge without human validation**: The zero-shot QA results (Table 6) — which provide the paper's strongest evidence for the value of summaries — are evaluated by having GPT-3.5 produce a binary correctness judgment, following Video-ChatGPT's methodology. No human validation of this automatic judge is reported, nor is its agreement with human evaluators measured. While this is standard practice in the current literature, a small human evaluation (e.g., 100–200 samples) to confirm that GPT-3.5 judgments align with human judgments would substantially increase confidence in the central QA result.
+- **The claim that "ASR text is critical" is over-broad.** The introduction states ASR "is critical to understand the complex multi-shot scenario" (line 26). This is well-supported for narration captioning (Table 4, V+A vs. A: CIDEr 168.7 vs. 130.9) and summarization (Table 5, SUM-shot vs. SUM-shot w/o ASR: CIDEr 8.6 vs. 4.7). However, in single-shot video captioning (Table 3), adding ASR yields only +0.2 BLEU and METEOR while ROUGE drops by 0.5 and CIDEr by 1.4 — a mixed, marginal result that the paper itself describes as "modest enhancement" with "integration challenges." The introduction's sweeping claim should be qualified to reflect task-dependence.
 
-- **Dataset filtering thresholds are given without justification or ablation**: The filtering pipeline uses thresholds (CLIP similarity >0.25, adjacent-shot similarity <0.9, PySceneDetect threshold of 11) that are reported without any analysis of how they were chosen or what effect they have on the resulting dataset composition. The CLIP threshold of 0.25 is notably low and the paper does not explain whether this was empirically determined. An ablation on even a small sample (e.g., measuring how many videos pass at different thresholds) would increase trust that the filtering does not introduce systematic biases.
+- **SUM-text (two-stage) outperforms SUM-shot (end-to-end) on all summarization metrics (Table 5).** The paper honestly acknowledges this ("better model design needs to be explored"), but it does undercut the practical value of the end-to-end approach. While the shot-structure contribution (SUM-shot > SUM-holistic) remains intact, the fact that the simpler two-stage pipeline feeding pre-generated captions into an LLM performs better suggests the main benefit may come from the training captions themselves rather than the end-to-end architecture.
 
-- **Limited discussion of limitations and potential biases**: The paper does not discuss potential biases from the filtering pipeline (e.g., over-representation of talking-head or product-review videos, exclusion of videos with low visual-ASR correlation) or from using GPT-4 as a summary generator. While no paper needs an exhaustive limitations section, some discussion of the scope and potential blind spots would improve scientific candor.
+- **The QA evaluation uses GPT-3.5 as a binary judge, following Video-ChatGPT's protocol.** While this is consistent with the baseline being compared against, it is non-standard for MSRVTT-QA and ActivityNet-QA, which typically use exact-match or multiple-choice accuracy. The GPT-3.5 judge is known to be noisy, and without reporting standard metrics, the results are less comparable to the broader literature.
 
 ### Trivial
-None.
+
+- **Wrong table cross-reference at line 241.** The text says "as in Table~\ref{tab:shot_visual_cap}" when it should refer to Table~\ref{tab:zr_qa} (the QA results table). The very next sentence correctly references \ref{tab:zr_qa}, so this is a minor inconsistency.
 
 ## Nice-to-Haves
 
-- A small-scale ablation study validating the filtering thresholds (CLIP similarity, adjacent-shot similarity, static-content detector threshold) on a held-out sample.
-- Human quality control statistics for the summary verification step: number of annotators per summary, proportion accepted without correction, edit distance distribution.
-- Including at least one open-source video captioning baseline (e.g., Video-LLaVA or BLIP-2 on video) for the single-shot captioning task to anchor task difficulty relative to existing benchmarks.
+- Reporting standard accuracy metrics (exact match or multi-choice) for MSRVTT-QA and ActivityNet-QA in addition to the GPT-3.5 judge would improve comparability with prior work.
+- A small-scale human evaluation of summary quality (e.g., 100 samples rated for factuality, coherence, coverage) would strengthen the claim that summaries are "comprehensive" and "high-quality."
+- A breakdown of the zero-shot QA setup for ActivityNet (which has longer videos) would improve reproducibility — e.g., how shots were defined for videos not originally split into shots.
 
 ## Removed Points
+These points were flagged by the harsh critic but are removed or downgraded for the reasons stated:
 
-**These points are flagged to be removed, treat them with caution:**
-
-- **"Dataset release details should be stated explicitly"** — Removed per hard rule: questions about existence, release status, or availability of cited resources must be removed. The paper cites HDvila100M as the source and describes the annotation pipeline; whether the annotations will be released is a separate matter that does not affect the technical contribution.
-
-- **"The CLIP threshold of 0.25 is very low — effectively removing only near-zero correlation"** — The critic's characterization of "very low" is a subjective opinion without empirical backing. The threshold is mentioned in the Minor weaknesses as lacking justification, which is fair; the specific claim that it is "very low" is removed as opinion.
-
-- **Criticisms about missing appendix content / Supp. Sec. references** — Removed per hard rule: the parser strips appendix sections from all papers; they exist in the original submission. The paper references Supp. Sec. for prompts and examples, and these are assumed to be present in the full version.
+- **"Zero-shot QA comparison is not fair — different paradigm."** REMOVED. The paper includes a text-only Video-ChatGPT baseline (53.7% on MSRVTT-QA) for direct comparison and clearly notes that their method does not use instruction tuning (IT=no) while the baselines do (IT=yes). The comparison is transparent and appropriate.
+- **"Retrieval experiments lack methodological contribution."** REMOVED. For a dataset paper, benchmarking existing methods on the new dataset is standard and appropriate. This is not a methodological paper.
+- **"Paper does not discuss videos with a single shot."** REMOVED. The paper explicitly states it filters for 2–8 shots, which is a deliberate design choice to focus on multi-shot understanding.
+- **"ASR results in Table 3 are marginal — doesn't support claim."** DOWNGRADED from critical to minor. The critic ignores Tables 4 and 5 where ASR benefits are substantial, but the intro's sweeping claim is indeed slightly over-broad. Moved to Minor.
+- **"Table 1 classification is coarser than actual process."** REMOVED. The table uses M+G for the paper's dataset, which accurately reflects the hybrid nature. This is nitpicking.
+- **"Video-ChatGPT fine-tuned without ASR on summaries."** REMOVED. This is a reasonable setup choice for comparing models that don't have ASR; the paper is transparent about what is being compared and there are clear ASR-aware baselines.
 
 ## Novel Insights
-
-The reviews surface one genuinely novel observation beyond the paper's own contributions: the two-stage SUM-text model (generate shot captions first, then summarize via LLM) outperforms the end-to-end SUM-shot model on summarization metrics (CIDEr 9.2 vs. 8.6, Table 4). This suggests that current end-to-end architectures that directly map frames to long-form text lose information compared to a pipeline that explicitly produces intermediate shot-level representations — an interesting finding that the paper itself treats honestly as a challenge for future work, but that the reviewer rightly highlights as a non-obvious result that could inform architecture design for long-video understanding. None of the other insights from the reviews go substantially beyond what the paper already claims or demonstrates.
+The most striking finding is that training a summarization model on Shot2Story (~16s videos, 2–8 shots) and applying it zero-shot to ActivityNet (minutes-long videos) yields competitive QA performance (47.4% vs. Video-ChatGPT's 37.4% text-only). This suggests that high-quality shot-level descriptions of short multi-shot videos teach a generalizable abstraction skill — the model learns to identify event boundaries and track subject identity — that transfers to much longer videos. If confirmed, this would mean that the bottleneck in video understanding is not video length per se, but the quality of structured textual abstractions. This insight is not explicitly emphasized by the paper but emerges from the reported results.
 
 ## Suggestions
-
-1. **Add inter-annotator agreement statistics** for a sample of at least 100–200 annotations across shot captions, narration captions, and summaries. Even a coarse proxy — e.g., agreement on whether the same subject is mentioned, or whether the speaker referent is identified — would substantially increase trust in the benchmark as a gold standard. This is the single highest-leverage improvement.
-
-2. **Validate the GPT-3.5 QA judge** on a human-annotated sample (100–200 QA pairs). Report Cohen's κ between GPT-3.5 and human judgments for both yours and Video-ChatGPT's outputs to ensure the comparison is fair and the absolute numbers are meaningful.
-
-3. **Add at least one external baseline** for single-shot video captioning by evaluating a recent open-source video captioning model (e.g., Video-LLaVA, BLIP-2, or InstructBLIP on video frames) on the test set. This would anchor the task difficulty relative to existing research and make the benchmark immediately useful to the community.
-
-4. **Briefly justify the filtering thresholds** (CLIP similarity >0.25, adjacent-shot <0.9, PySceneDetect threshold 11) — either with a small ablation or with a citation to established practice — and add a limitations paragraph discussing potential biases from the filtering pipeline.
+1. **Provide annotation quality metrics.** Report inter-annotator agreement (e.g., on a subset doubly-annotated), the fraction of LLM-generated captions needing correction, the types of corrections made, and annotator background/statistics. This is the single most important addition for a dataset paper.
+2. **Qualify the ASR claim in the introduction** to reflect that the benefit is task-dependent (strong for narration captioning and summarization, mixed for single-shot captioning).
+3. **Fix the wrong table reference** on line 241 (\ref{tab:shot_visual_cap} → \ref{tab:zr_qa}).
+4. **Add standard accuracy metrics** for the QA experiments alongside the GPT-3.5 judge results to improve comparability.
 
 ## Score and Decision
 
-This paper makes a solid contribution: the Shot2Story benchmark fills a genuine gap (multi-shot videos with shot-level visual + narration captions + long summaries), the annotation pipeline is practical and scalable, and the zero-shot QA transfer result provides compelling evidence of the dataset's value. The weaknesses are real but addressable — the lack of inter-annotator agreement statistics is the most significant, and insufficient external baselines limit the immediate utility of the single-shot tasks. Neither weakness is fatal; both can be resolved within the revision timeline. The paper is a strong candidate for acceptance.
+The dataset fills a genuine gap: no existing benchmark provides shot-level captions for both visual content and narration, plus human-verified summaries, for multi-shot videos. The core technical contribution is well-motivated, the experiments are generally well-designed, and the zero-shot QA transfer result is compelling. However, the lack of annotation quality metrics is a real omission for a dataset paper — without them, claims of "high-quality" annotations are unverifiable.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
+This is a borderline case. The dataset is likely to be useful to the community, and the weaknesses are mostly addressable. With annotation quality validation supplied (either in a rebuttal or revision), the paper would be solid.
+
+**Score: 5.5** — Borderline accept. The contribution is real but the missing quality assurance data prevents full evaluation.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

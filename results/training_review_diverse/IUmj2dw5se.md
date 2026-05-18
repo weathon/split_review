@@ -1,20 +1,20 @@
-Now I have all the information needed. Let me construct the final consolidated review.
+Now I have all the evidence I need. Let me construct the final consolidated review.
+
+---
 
 ## Summary
 
-This paper proposes CEB, a compositional evaluation benchmark for fairness in LLMs. It introduces a three-dimensional taxonomy (bias type, social group, task), assigns existing bias datasets to configurations within this taxonomy, and constructs new datasets to fill coverage gaps (e.g., toxicity evaluations across tasks, recognition/selection tasks for stereotyping). The paper evaluates six LLMs across the constructed and existing datasets using unified metrics per task.
+This paper proposes CEB (Compositional Evaluation Benchmark), a bias evaluation benchmark for LLMs built on a three-dimensional taxonomy: bias type (stereotyping, toxicity), social group (age, gender, race, religion), and task (recognition, selection, continuation, conversation, classification). The paper assigns existing datasets to configurations in this taxonomy, constructs new datasets using GPT-4 to fill uncovered configurations, and evaluates six LLMs. The experiments reveal that bias levels vary systematically across these dimensions, e.g., toxicity detection is easier than stereotyping identification, and smaller models exhibit high Refuse-to-Answer rates on sensitive social groups.
 
 ## Strengths
 
-- **Compositional taxonomy that provides an organizational framework**: The paper systematically characterizes bias datasets along three dimensions (bias type × social group × task) in Table 2 (tab:exist_config), enabling researchers to see at a glance which configurations existing datasets cover and where gaps remain. This is a genuinely useful organizational contribution that addresses the "metric incompatibility" problem raised in the introduction.
+- **Novel compositional taxonomy enabling systematic coverage mapping.** The three-dimensional taxonomy (bias type × social group × task) provides a principled framework for characterizing existing datasets and identifying gaps. Table 1 concretely shows which configurations have coverage and which are missing, giving the community a clear roadmap for future work.
 
-- **Construction of new datasets for previously uncovered configurations**: The paper identifies that most configurations for the Toxicity bias type and for tasks like Recognition and Selection were absent in prior work (marked with ✗ in Table 2), and constructs CEB-Recognition, CEB-Selection, CEB-Continuation, and CEB-Conversation datasets to cover these gaps. This fills a real need in the bias evaluation ecosystem.
+- **Construction of new datasets filling previously uncovered configurations.** Using GPT-4 to augment existing resources (BBQ, HolisticBias), the paper builds CEB-Recognition, CEB-Selection, CEB-Continuation, CEB-Conversation, and CEB-Classification datasets. These fill gaps identified in Table 1, particularly for Toxicity bias across multiple tasks and social groups.
 
-- **Unified evaluation metrics per task enabling comparability**: Micro-F1 is used across all Direct Evaluation datasets, and consistent bias/toxicity scoring is used for Indirect Evaluation. This standardization means results from different bias types and social groups are directly comparable within each task, which was a key design goal and is achieved.
+- **Comprehensive experimental results revealing dimension-dependent bias patterns.** Experiments across six LLMs (Tables 2–5) show that bias levels vary systematically by dimension — e.g., LLMs perform better on toxicity detection than stereotyping (Section 5.2), and smaller models show extremely high RtA rates on sensitive groups like Race and Religion (Tables 2, 4). These findings provide actionable guidance for bias mitigation.
 
-- **Broad model coverage**: Evaluation spans GPT-3.5, GPT-4, Llama2-7b/13b, Llama3-8b, and Mistral-7b across the full matrix of configurations, allowing the paper to draw comparative conclusions about bias patterns across model families.
-
-- **Actionable finding on Refuse-to-Answer patterns**: The paper systematically measures RtA rates and identifies that Llama2 models refuse at very high rates on selection tasks, especially for race/religion social groups (Table 2/RtA table), providing guidance for safety alignment research.
+- **Unified metrics per task enabling within-task comparison.** The paper assigns consistent metrics within each task type (Micro-F1 for recognition/selection, GPT-4 bias scores for stereotyping in generation tasks, Perspective API for toxicity, fairness metrics for classification), allowing direct comparison across datasets sharing the same task configuration.
 
 ## Weaknesses
 
@@ -23,65 +23,56 @@ None.
 
 ### Major
 
-1. **Classification results are entirely absent from the experimental evaluation.** The paper constructs CEB-Adult, CEB-Credit, and CEB-Jigsaw (Section 3), defines classification metrics (Demographic Parity, Equalized Odds, Unfairness Score) in Section 4, and claims the benchmark covers "different types of bias across different social groups and tasks." However, Section 5 presents *zero* classification results. Tables 1–4 cover only Recognition, Selection, Continuation, and Conversation. The paper cannot substantiate its claim of comprehensive evaluation coverage when results for one of the five tasks are completely missing. This is the most significant empirical gap.
+- **Missing experimental results for the Classification task — a full fifth of the benchmark is unevaluated.** The paper defines CEB-Classification datasets (CEB-Adult, CEB-Credit, CEB-Jigsaw) in Section 3.3, specifies evaluation metrics (Demographic Parity, Equalized Odds, Unfairness Score) in Section 4.1, but never reports any Classification results in Section 5. Experimental sections cover only Recognition, Selection, Continuation, and Conversation. The paper's claim of providing "11,004 samples covering different types of bias across different social groups and tasks" is materially incomplete without evaluation of this task. This is not a minor omission — it is one of five core tasks in the proposed taxonomy, and its absence means the benchmark is not comprehensive as claimed.
 
-2. **GPT-4 is used for dataset construction and (for stereotyping) as evaluator, without human validation.** The dataset construction pipeline uses GPT-4 to: identify which answer in BBQ is stereotypical, generate narrative sentences, add toxic content, and select/modify HolisticBias prompts (Section 3). For Indirect Evaluation of Stereotyping, GPT-4 *also* serves as the bias scorer (Section 4). The paper reports no human verification of labels, no inter-annotator agreement, and no analysis of GPT-4's encoding of its own biases into the data. For a benchmark positioned as a comprehensive evaluation tool, this circularity between data creation and evaluation — especially for the Stereotyping bias type where GPT-4 is the sole evaluator — is a structural validity concern. A small-scale human validation study would substantially strengthen confidence in the benchmark's labels.
-
-3. **The conversion of existing datasets (WinoBias, StereoSet, RedditBias, CrowS-Pairs) to Recognition/Selection tasks is underspecified.** The paper evaluates these datasets under unified Recognition/Selection task definitions (Table 1) but does not explain how each dataset was adapted. For example, CrowS-Pairs consists of sentence pairs; it is not stated whether the Recognition task labels each sentence individually from the original annotation, or how the Selection task is framed (choose the less stereotypical sentence?). This makes the results in Table 1 difficult to interpret and impossible to replicate.
+- **No human validation for GPT-4-generated datasets.** All constructed subsets (CEB-Recognition, CEB-Selection, CEB-Continuation, CEB-Conversation) are built using GPT-4 to identify biased content, generate stereotypical/toxic variants, and filter prompts. The paper provides no human verification, inter-annotator agreement statistics, or quality metrics for these generated samples. For a bias evaluation benchmark — where judgments about what constitutes stereotyping or toxicity are inherently subjective — this lack of grounding is a significant concern. Moreover, GPT-4 is also used as the evaluator for Stereotyping bias scores in Continuation/Conversation tasks (Section 4.1), creating a potential circularity where the same model both creates and judges the content. This circularity is limited to Stereotyping scores for generation tasks (Recognition/Selection use Micro-F1, Toxicity uses Perspective API, Classification would use DP/EO), but it is not acknowledged or discussed as a limitation.
 
 ### Minor
 
-4. **No statistical uncertainty is reported for any result.** Every number in Tables 1–4 is a point estimate without confidence intervals, standard deviations, or significance tests. With only 100 samples per configuration for CEB datasets, sampling variability is non-negligible, and differences of a few points may not be meaningful.
+- **The "unified evaluation" claim is overstated.** The paper argues that existing bias evaluation suffers from metric incompatibility and that CEB addresses this by applying "unified metrics across datasets" (Section 1). In practice, the metrics remain task-specific: Micro-F1 for recognition/selection, GPT-4 bias scores for stereotyping in continuation/conversation, Perspective API for toxicity, and fairness metrics for classification. The standardization is within each task — a useful but modest form of unification that does not enable cross-task comparability. The framing should be more precise about what kind of unification is achieved.
 
-5. **High RtA rates undermine cross-model comparisons in some configurations (partially addressed).** In Table 1, Llama2 models refuse >85% of Selection-task samples. The Micro-F1 scores for these entries are computed on tiny, non-random subsets. The paper marks these in red and excludes them when selecting best results, which partially addresses the issue. However, several claimed observations (e.g., "GPT models consistently achieve the best performance") implicitly rely on comparisons where some models' metrics reflect vastly different data denominators. The paper should state this caveat explicitly.
+- **No investigation into why Llama models exhibit high RtA on Selection but near-zero RtA on Recognition.** The paper observes this striking pattern (Tables 2, 4) but does not explore whether it stems from prompt formatting, task framing, safety alignment, or other factors. A deeper analysis would strengthen the practical insights for bias mitigation.
 
-6. **Reproducibility details are insufficient.** The GPT-4 prompts used for: (a) identifying stereotypical answers in BBQ, (b) generating narrative sentences, (c) adding toxic content, (d) scoring stereotyping in generated text are not provided. Model version, temperature, and number of generations per sample are not reported. The exact sample counts per configuration are also not clearly broken down — the paper states 100 per configuration and 11,004 total, but the relationship between these numbers is not explained.
-
-7. **No discussion of limitations.** The Conclusion (Section 7) does not acknowledge any limitations of the work: the reliance on GPT-4 for data creation and evaluation, the restriction to four social groups, the missing classification results, or the potential for dataset artifacts. Adding a limitations section would improve credibility.
+- **The highlighting rules for experimental tables are unclear and inconsistent.** Table 3's caption states that "results with exceptionally high RtA rates are highlighted in red," but the red highlights are applied to F1 scores (not RtA rates), requiring cross-referencing with Table 4. Table 5 uses the same caption language, yet it reports bias scores from generation tasks where no RtA exists — suggesting a copy-paste error from the earlier caption. The reader cannot determine what the red highlighting means in Table 5.
 
 ### Trivial
-None.
+
+- The paper uses "exceptionally high RtA rates" as the threshold for red highlighting but never defines what "exceptionally high" means numerically.
+- The discussion of bias types excludes "disparate performance" by categorizing it as an evaluation metric rather than a bias type (Section 2.1). This is defensible but should be more clearly acknowledged as a scope limitation.
+- The generation process description for Classification datasets (Section 3.3) lacks concrete prompt templates or text examples, making it hard to assess the quality of the textual formulations.
 
 ## Nice-to-Haves
 
-- **Human validation of a random subset of labels** (e.g., 100–200 samples per task) would resolve the most serious methodological concern and is standard practice for benchmark construction.
-- **Classification results** — without these, the paper's central claim of comprehensive coverage is incomplete.
-- **Bootstrapped confidence intervals** for all metric values, especially given the 100-sample-per-configuration evaluation.
-- **Reporting both unconditional F1 and F1 conditioned on non-refused samples** for configurations with high RtA.
+- A small-scale human annotation study (e.g., 200 samples across configurations) to validate that GPT-4-generated examples exhibit the intended bias types. This single addition would substantially increase trust in the benchmark.
+- Reporting the Classification results that are already defined in the paper would complete the benchmark.
+- A per-sample reliability analysis of GPT-4 bias scores (e.g., correlation across multiple API calls) for the indirect evaluation metrics.
+- Cross-benchmark comparison with existing comprehensive evaluations (HELM, DecodingTrust, TrustLLM) to contextualize CEB's coverage.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+The following criticisms from the reviews are removed as they are either unverifiable, factually wrong, or violate the rules:
 
-- *"The paper's solution is largely to unify tasks, which does not resolve incompatibility across tasks"* — This is a fair observation about a reasonable limitation of the taxonomy-based approach, but criticizing the benchmark for not enabling cross-task comparisons is scope creep. The paper's stated goal is within-task comparability, not cross-task comparability. The critic acknowledges it's "reasonable" but presents it as a weakness; it is at most a nice-to-have.
-
-- *"The paper says classification tasks measure stereotyping indirectly via performance disparities... the connection should be explained more concretely"* — The paper does address this (lines 95–97), stating that disparate performance is "potentially caused by stereotyping" and is therefore formulated as an evaluation metric that "indirectly measures stereotyping." While the explanation could be deeper, the paper has an explicit justification; this is not unaddressed.
-
-- *"The distribution plots (Figure 1)... lack axis labels"* — Cannot be verified from text-only extraction; may be a parser artifact.
-
-- *"The paper implicitly trusts GPT-4 as both dataset creator and evaluator"* — This is a restatement of Major weakness #2, not a separate point.
-
-- *"Demands that the paper should also cover Y / domain Z / additional tasks"* — The critic's note about "limited social groups (only four)" is acknowledged but the paper explicitly scopes this (line 103, "we leave the evaluation regarding these additional social groups to future work"). This is scope management, not a weakness.
+- **"11,004 sample count not broken down"** — The paper references Table `tab:ceb_datasets` for detailed statistics. This table was likely in the appendix, which the parser strips. Per policy, missing appendix content is not a valid weakness.
+- **"No cross-benchmark comparison with HELM/DecodingTrust/TrustLLM"** — This demands coverage outside the paper's stated scope. CEB is a benchmark paper, not a survey comparing benchmarks.
+- **"Compositional label is aspirational"** — The paper uses "compositional" to describe the taxonomy combining three dimensions into configurations, which is a legitimate use of the term.
+- **"Missing related works"** — Per policy, I cannot verify existence of missing citations and do not raise this concern.
+- **Formatting/style nitpicks, typo claims** — Removed as parser artifacts.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the tension between the paper's ambitious scope (full coverage across bias types, groups, and tasks) and the incompleteness of the empirical execution (missing classification results, unvalidated GPT-4 labels), but do not identify a structural limitation the paper itself fails to see.
+None beyond the paper's own contributions. The reviews surface the paper's strengths (taxonomy, gap-filling) and weaknesses (missing Classification results, no human validation) clearly, but do not contribute observations not already present in the paper.
 
 ## Suggestions
 
-1. **Add the missing classification results.** Without these, the paper cannot claim to have evaluated the full taxonomy. This is the single most important addition.
-
-2. **Conduct and report a small-scale human validation study** on a random subset of CEB dataset labels (e.g., 100–200 samples per task), reporting agreement rates with GPT-4's labels. This would substantially address the circularity concern.
-
-3. **Provide the exact GPT-4 prompts** used for data generation, label assignment, and bias scoring in an appendix or supplement. Also report model version and generation parameters.
-
-4. **Add a limitations section** that transparently discusses the reliance on GPT-4, the restriction to four social groups, and the absence of human validation.
-
-5. **Report bootstrapped confidence intervals** or standard errors for all metric values, and clarify the caveats around high-RtA configurations.
+1. **Add Classification results.** This is the single most impactful change. Report DP, EO, and Unfairness scores for CEB-Adult, CEB-Credit, and CEB-Jigsaw across all LLMs and sensitive attributes. Without these, the benchmark is incomplete.
+2. **Add human validation for GPT-4-generated data.** Even a small-scale study (100–200 samples) with agreement statistics would substantially improve credibility.
+3. **Clarify the scope of "unified evaluation."** Replace claims of cross-task unification with precise language about within-task metric standardization.
+4. **Fix the misleading Table 5 caption** and define the red/green highlighting thresholds explicitly.
+5. **Add prompt templates** for the Classification task formulation (how tabular data is converted to text) to improve reproducibility.
 
 ## Score and Decision
 
-This paper addresses a real problem — fragmented bias evaluation — and proposes a sensible organizational framework. The taxonomy and the new datasets filling coverage gaps are genuine contributions. However, the current execution has two decisive weaknesses: (1) the complete absence of classification results undermines the claim of comprehensive evaluation coverage, and (2) the reliance on GPT-4 for both data creation and stereotyping evaluation without any human validation raises validity concerns for a benchmark meant to serve as an evaluation standard. These are fixable but require non-trivial additional work.
+This paper makes a genuine contribution with its compositional taxonomy and new datasets that fill clear gaps in bias evaluation coverage. The experimental results on four of five tasks reveal useful patterns (toxicity vs. stereotyping difficulty, RtA disparities). However, the complete absence of Classification results — one of five core tasks — is a material omission that undermines the comprehensiveness claim. Combined with the lack of any human validation for the GPT-4-generated datasets, these weaknesses are significant enough to warrant rejection in the current form. The paper has a solid foundation and could be competitive with the suggested revisions.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL SCORE: <pineapple>4.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

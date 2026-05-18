@@ -1,20 +1,18 @@
-Here is my final consolidated review:
+Now I have a thorough understanding of the paper and reviews. Here is my consolidated final review.
 
 ## Summary
 
-This paper proposes a two-stage fine-tuning strategy for LLMs built on the hypothesis that fine-tuning on "Maybe Known" data (partially mastered knowledge) can cause improvement in other knowledge categories not present in the training set. The first stage fine-tunes only on "Maybe Known" data; after observing which previously-unknown data points become "Maybe Known," those newly-mastered points are added as augmented training data for a second stage of fine-tuning, with experience replay of "Highly Known" data to mitigate forgetting. Experiments on WikiQA with Qwen2-7B and LLaMA3-8B show a 24% increase in the number of "Highly Known" training data points and modest test accuracy improvements. The main contribution is broadening the pool of data usable for fine-tuning beyond what prior work (Gekhman et al., 2024) recommended.
+This paper proposes a two-stage fine-tuning strategy for LLMs, building on Gekhman et al.'s finding that fine-tuning on 'Maybe Known' knowledge (partially mastered) outperforms fine-tuning on all data. The paper's core hypothesis is that fine-tuning on 'Maybe Known' data can indirectly improve the model's mastery of related 'Weakly Known'/'Unknown' knowledge not in the training set, through knowledge interconnectivity and reasoning. After the first-stage fine-tuning on 'Maybe Known' data, the authors reclassify knowledge, use data whose mastery improved as augmented training data, and apply replay of 'Highly Known' data to mitigate forgetting. Experiments on WikiQA with Qwen2-7B and LLaMA3 report improved test accuracy and a ~24% relative increase in 'Highly Known' training knowledge points.
 
 ## Strengths
 
-- **Empirical validation of knowledge propagation during fine-tuning.** The paper shows (Table 3) that after fine-tuning exclusively on "Maybe Known" data, a substantial number of data points originally classified as "Weakly Known" or "Unknown" are reclassified as "Maybe Known" or higher. The control experiment (Table 4) confirms these changes exceed what noise from re-testing alone would produce. This directly supports the paper's core hypothesis that knowledge not present in the training set can improve via interconnected knowledge.
+- **Ablation study cleanly disentangles the source of improvement**: Tables 8 and 9 compare five strategies that systematically isolate the effect of including newly-mastered knowledge vs. replaying mastered knowledge. Strategy 4 (augmented data only) outperforms Strategy 2 (which excludes reclassified data), and Strategy 5 (augmented data + replay) performs best. This controlled decomposition provides evidence that the improvement is not solely from replaying mastered data — the inclusion of knowledge that changed classification after stage one contributes positively. This is the paper's strongest piece of evidence for its causal narrative.
 
-- **Measurable expansion of the model's mastered knowledge.** The number of training data points classified as "Highly Known" increases by approximately 24% after two-stage fine-tuning (Table 10). This is the paper's most concrete quantitative contribution and directly validates the claim of broadening the range of usable training data.
+- **Two-stage fine-tuning yields measurable gains in knowledge acquisition**: Table 10 (as described in the text) shows that after two-stage fine-tuning, the number of 'Highly Known' training points increases by approximately 24% relative to one-stage fine-tuning. This is a concrete, quantified result that supports the paper's claim of broadening the pool of usable fine-tuning data.
 
-- **Well-designed ablation study decomposing sources of improvement.** Table 8 isolates the contribution of each component (newly mastered data augmentation, knowledge replay, and their combination). Strategy 5 (both augmentation and replay) achieves the highest accuracy, and the ablation provides clear evidence that both knowledge acquisition and forgetting mitigation contribute to the gain.
+- **Generality across model families**: The first-stage knowledge-change experiment is replicated on both Qwen2-7B and LLaMA3 (Table 3), suggesting the phenomenon is not specific to one architecture. This strengthens the paper's external validity within the closed-book QA setting.
 
-- **Control for random variation in knowledge classification.** Table 4 tests the same model twice without fine-tuning and shows that category changes from stochastic sampling are stable and an order of magnitude smaller than those caused by fine-tuning. This strengthens the evidence for the core hypothesis.
-
-- **Honest discussion of limitations.** Section 5 explicitly acknowledges the qualitative nature of the experiments, the limited scope of WikiQA, and the simplicity of the replay strategy used. This transparency is a strength.
+- **The paper acknowledges its own limitations**: The Discussion section (§5) is unusually candid — it notes the experiments are "largely qualitative," the WikiQA dataset is "relatively loosely structured," and that the continual learning approach uses only basic data replay with room for improvement. This transparency is a strength.
 
 ## Weaknesses
 
@@ -24,64 +22,55 @@ None.
 
 ### Major
 
-- **Evaluation on a single dataset (WikiQA).** All experiments are conducted on WikiQA, a single factoid QA dataset. The method's effectiveness depends on knowledge interconnections that may vary greatly across domains. Two models (Qwen2-7B, LLaMA3-8B) are used, but both are similar-scale base models on similar pretraining distributions. The Discussion acknowledges this limitation but does not address it experimentally. Adding even one more dataset (e.g., a domain-specific QA dataset like MedQA or a multi-hop dataset) would substantially strengthen the claims.
+- **No measure of statistical reliability across the entire experimental pipeline**: Every accuracy result (Tables 6, 7, 8, 9, 11) and every knowledge transition count (Tables 3, 4, 10, 12) is reported as a single number without confidence intervals, error bars, or multiple seeds. Given the measurement process is inherently stochastic — random prompt construction, temperature-based sampling (16 generations), and seed-based prompt generation — the reported improvements could fall within noise. The paper partially mitigates this for test accuracy by using a fixed prompt test set (seed 42) for Table 7 onward, but this does not address seed variance in the broader pipeline (training, knowledge classification, second-stage data selection). This is the most significant methodological shortcoming.
 
-- **No error bars or variance estimates.** All accuracy numbers are reported from a single run (only the test set uses a fixed seed 42 for prompt construction). Given the stochastic nature of both knowledge classification and LoRA fine-tuning, the results could vary with different random seeds. Without variance estimates, it is impossible to assess the stability and reliability of the reported improvements.
+- **The entity graph analysis (Table 5) lacks a statistical baseline to establish significance**: The paper reports that most nodes transitioning from 'Weakly Known' to 'Maybe Known' are connected to nodes originally classified as 'Maybe Known'. However, no baseline is provided — e.g., a random graph with the same degree distribution, a permutation test, or even reporting what fraction of all nodes in the dataset are connected to the 'Maybe Known' subgraph. Without such a baseline, the reader cannot determine whether 64.1% (or whatever the reported figure is) represents a meaningful signal or merely reflects the connectivity density of the knowledge graph. This weakens the evidential link between knowledge interconnectivity and the observed transitions.
+
+- **The comparison between fine-tuning-induced changes (Table 3) and retest noise (Table 4) needs clearer exposition**: The paper uses Table 4 as a control to show the extent of random category changes. The text states that "a significant portion of the category changes can be attributed to fine-tuning," but the specific comparison between the two tables requires the reader to read numbers from embedded images. The authors should explicitly state in the text which entry in Table 4 is the relevant comparison for which entry in Table 3, and what conclusion follows. This is a presentation issue, but given its centrality to the paper's core hypothesis, it needs to be made explicit in prose.
 
 ### Minor
 
-- **The core hypothesis lacks formal statistical grounding.** While the paper provides a control (Table 4) showing that re-testing noise is much smaller than the fine-tuning effect, there is no formal significance test (e.g., permutation test or bootstrap confidence interval) to quantify confidence. The entity graph analysis (Table 5) is suggestive but does not compare connectivity against a random baseline. The argument would be stronger with a statistical comparison between Table 3 and Table 4.
+- **Limited baseline comparisons for the two-stage method**: The paper compares its two-stage method (Strategy 5) against one-stage fine-tuning on 'Maybe Known' data (the Gekhman et al. baseline). However, it does not directly compare against simply training on the full dataset (all categories) with the same LoRA regularization in its own experimental setup. While the paper references Gekhman et al.'s finding that 'Maybe Known'-only training outperforms all-data training, this finding is shown for the one-stage setting; whether it holds when a second stage is available is not tested. Adding this comparison would strengthen the claim that the two-stage method's benefit comes from the specific selection mechanism, not from simply having more data.
 
-- **Modest test accuracy improvement relative to overhead.** The test accuracy gains appear modest (the paper does not state exact numbers in text, but the improvement is small in percentage points). The method requires: (a) full knowledge reclassification of the training set after stage 1 (many inferences per data point), (b) hyperparameter tuning for stage 2 (lower LR, weight decay, replay ratio), and (c) complex early stopping decisions for both stages. The paper does not discuss whether the overhead is justified by the gains, nor does it compare to simpler baselines like training on all data with tuned regularization.
-
-- **The replay component's marginal benefit is unclear from reported data.** If Strategy 5 is only marginally better than Strategy 3 (which omits replay), the additional complexity of managing replay may not be warranted. The paper should discuss whether the replay strategy is a meaningful contributor or a minor tweak.
-
-- **Entity graph analysis is qualitative and uses simple entity extraction.** The entity extraction method ("using regular expressions") is crude and not validated. The connectivity results are not compared to a random baseline, so it is unclear whether the observed connectivity is meaningful or would occur by chance on any dataset.
+- **The accuracy improvements, while consistent, appear modest in absolute terms**: The paper states the method "significantly improves the model's test accuracy" (line 161), but the improvements over the one-stage baseline appear to be on the order of 1–2 percentage points or less (based on the text description; exact numbers are in embedded images). While any consistent gain beyond the strong Gekhman et al. baseline is noteworthy, the practical significance of such small gains should be discussed more candidly, especially since the second stage introduces additional training complexity.
 
 ### Trivial
 
-- The learning rate notation "15e-5" (Section 4.2.1) is non-standard; this should be written as 1.5e-4.
-- The paper does not report computational cost (inference time for knowledge classification, total training time), which would help readers evaluate practical feasibility.
+- The paper uses "MaybeKnown" (no space) in line 151 but "Maybe Known" (with space) everywhere else.
+- The knowledge classification methodology in Table 1 involves 10 generations for greedy and 16 samples for non-greedy decoding with temperature 0.5; the rationale for choosing these specific numbers (as opposed to other values that might give more stable classifications) is not discussed.
 
 ## Nice-to-Haves
 
-- A comparison to a straightforward baseline that fine-tunes on the full training set (all knowledge types) with appropriate regularization (lower LR, weight decay, early stopping) would help contextualize the method's benefits relative to a practical "just train carefully" approach.
-- Testing on a domain with dense knowledge connections (e.g., biomedical QA) and one with sparse connections (e.g., random trivia) would directly test whether the method's effectiveness depends on knowledge relatedness.
-- A discussion of how LoRA rank affects the knowledge propagation phenomenon would be informative.
+- Run the entire pipeline with 3–5 random seeds and report means/standard deviations for accuracy and knowledge counts. Given the small effect sizes and noisy measurement, this would substantially increase confidence in the results.
+- Add a baseline that trains on all data (ignoring knowledge classification) with the same LoRA and early stopping setup to directly demonstrate that the two-stage selection mechanism, not additional data volume, drives improvements.
+- Add a permutation test or random baseline for the entity graph analysis to quantify whether the observed connectivity of reclassified nodes exceeds chance.
+- Analyze whether the model's accuracy improvement on test questions is concentrated on those whose entities are connected vs. disconnected from the training set — this would provide a more direct test of the hypothesized mechanism.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+- **Tables 3/4 contradiction claim**: The reviewer claimed that the control experiment (Table 4, 929 transitions) shows MORE 'Weakly+Unknown'→'Maybe Known' transitions than the fine-tuned condition (Table 3, 831 transitions), directly contradicting the paper's hypothesis. The specific numbers are in embedded images that cannot be read from the text extraction. More importantly, it is unclear whether Table 4 reports the same metric as Table 3 (Weakly+Unknown→Maybe Known transitions only) or total changes across all category pairs — the caption says "differences in results when testing knowledge types twice," suggesting a broader accounting. The paper's text explicitly states the tables support its conclusion. Without being able to verify the specific numbers or the precise metric reported in each table, this criticism cannot be sustained as a verified weakness. It is removed as potentially based on a misunderstanding of what the tables report.
 
-- **"About 10-20% of knowledge points change category in the control (Table 4)"** — The reviewer claimed this, but the exact numbers in Table 4 are in an image and not verifiable from text. The paper's own text says changes are "fairly stable due to the concentration inequality." This claim may be inaccurate and is removed.
+- **Missing continual learning comparisons**: The reviewer faulted the paper for not comparing against other continual learning approaches. The paper explicitly scopes this to using "basic experience replay" and notes room for improvement in the Discussion. A full continual-learning comparison is outside the paper's stated scope and would turn it into a different paper.
 
-- **"No description of how many training epochs were used"** — The paper does specify: stage 1 early-stops around epoch 8 (Table 6), stage 2 converges within 1-3 epochs (Section 4.2.2: "typically occurring at the end of the first to third epochs"). The reviewer overlooked these details.
+- **Missing comparison against iterative fine-tuning on same data**: This is a reasonable suggestion but falls under Nice-to-Haves rather than a structural weakness — the paper's contribution is specifically about data selection, not about training dynamics.
 
-- **Criticism that Section 2.1 does not discuss limitations of Gekhman et al.'s classification** — The paper follows prior work's classification and does discuss noise from stochastic sampling (Table 4). Criticizing inherited limitations of prior work rather than the paper's own contribution is scope creep.
-
-- **Strength from Strength Finder about "67.46% to 71.00% test accuracy improvement on Qwen2"** — These specific numbers appear in image tables and cannot be verified from the text. The claim of significant improvement is kept abstractedly; the specific figures are removed as unverifiable.
-
-- **Strength Finder's "retesting the same model produces stable category counts"** — This is essentially the same point as the control experiment strength. It is redundant and subsumed by the more specific strength item above.
+- **"The results of a single retest can indicate the extent to which random factors contribute" — insufficient justification**: The paper argues that the number of changes is stable across tests due to concentration inequalities. While this argument is lightweight, it is a reasonable heuristic for a conference paper and not a fatal flaw.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface any novel perspective that the paper itself does not present.
+None beyond the paper's own contributions. The two-stage strategy that re-uses reclassified knowledge as augmented training data is the paper's core novel idea; the reviews do not surface a new synthesis that the paper itself does not articulate.
 
 ## Suggestions
 
-1. **Add at least one additional dataset** (domain-specific or multi-hop QA) to demonstrate generality. This is the single most impactful improvement.
-
-2. **Report results from multiple random seeds** (at least 3) with means and standard deviations, or bootstrap confidence intervals for the key accuracy and knowledge-type-change numbers.
-
-3. **Provide a formal statistical comparison** between the fine-tuning-induced knowledge changes (Table 3) and the control (Table 4), such as a permutation test or confidence intervals on the difference.
-
-4. **Add a simple baseline** that fine-tunes on all data with tuned regularization, so readers can assess whether the two-stage complexity is justified over a practical alternative.
-
-5. **Report wall-clock time or inference cost** for the knowledge classification step, so readers can evaluate the method's practical feasibility.
+1. Add confidence intervals / error bars to ALL quantitative results (Tables 3–12) by running the pipeline with multiple seeds. This is the single change that would most improve the paper's credibility.
+2. State the relevant comparison between Tables 3 and 4 explicitly in prose. For example: "Table 3 shows X Weakly+Unknown→Maybe Known transitions after fine-tuning; Table 4 shows Y such transitions from retest noise alone, which is Z% of the fine-tuned number."
+3. Add a random baseline for the entity graph analysis (Table 5) — either a permutation test or a comparison against the overall graph connectivity.
+4. Discuss the effect sizes more frankly: the accuracy gains are modest, and the practical significance of a <1–2 percentage point improvement should be contextualized.
+5. Add a direct comparison against training on all data in the paper's own experimental setup (not relying on Gekhman et al.'s result for one-stage training) to rule out the possibility that the two-stage method's benefit is simply from having more data.
 
 ## Score and Decision
 
-This paper presents an interesting hypothesis about knowledge propagation during fine-tuning and provides initial supporting evidence. The ablation study is well-executed and the 24% increase in mastered knowledge points is a meaningful result. However, the evaluation is limited to a single dataset (WikiQA), results lack error bars, and the test accuracy gains appear modest relative to the method's complexity. The contribution is incremental over Gekhman et al. (2024) and the evidence for generalization is insufficient at this stage. The paper would benefit from broader validation and stronger statistical grounding before it meets the bar for a top venue.
+The paper proposes a reasonable and clearly-motivated two-stage fine-tuning strategy with a well-designed ablation study. The core idea — that knowledge reclassified after stage one can be productively used in stage two — is interesting and practically useful. However, the lack of any statistical reliability measures (confidence intervals, multiple seeds) is a significant methodological concern, especially given the noisy measurement process and small effect sizes. The entity graph analysis lacks a meaningful baseline, and the comparison between fine-tuned and control category changes needs clearer exposition. These issues are addressable in a revision but limit the paper's current persuasiveness. The contribution is real but the evidence does not yet close the gap between what the paper claims and what it demonstrates with statistical rigor.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

@@ -1,20 +1,18 @@
-Now I have a thorough understanding of the paper. Let me produce the consolidated review.
+Now I'll construct the final consolidated review.
 
 ## Summary
 
-This paper proposes MolJO, a joint gradient-guidance framework for structure-based molecule optimization (SBMO) built on Bayesian Flow Networks (BFNs). It derives joint guidance over both continuous atom coordinates and discrete atom types within a unified SE(3)-equivariant framework, and introduces a backward correction sampling strategy that aggregates past history via a sliding window to balance exploration and exploitation. Experiments on the CrossDocked2020 benchmark show strong results (Success Rate 51.3%, Vina Dock -9.05, SA 0.78), substantially outperforming the prior gradient-based method TAGMol and remaining competitive with oracle-based approaches, with extensions to constrained optimization tasks.
+This paper presents MolJO, a gradient-based framework for structure-based molecule optimization (SBMO) that jointly guides both continuous atom coordinates and discrete atom types. The key idea is to leverage the continuous Bayesian belief space of Bayesian Flow Networks (BFNs) as a medium for gradient guidance, circumventing the discrete-data guidance problem faced by prior diffusion-based methods. A backward correction sampling strategy is introduced, maintaining a sliding window of past history to trade off exploration and exploitation during optimization. On CrossDocked2020, MolJO achieves Success Rate 51.3%, Vina Dock -9.05, and SA 0.78 — substantially outperforming the prior gradient-based method TAGMol (12.6%) and approaching oracle-based methods. The framework is also extended to constrained settings including R-group optimization and scaffold hopping.
 
 ## Strengths
 
-- **First joint gradient guidance over continuous and discrete modalities**: The paper derives a principled way to guide both atom coordinates (continuous) and atom types (discrete) within a unified SE(3)-equivariant framework (Section 4.1, Proposition 4.1). This directly addresses the modality-inconsistency issue of prior gradient-based methods (e.g., TAGMol guides only coordinates). The ablation in Figure 5 quantitatively confirms that joint guidance consistently outperforms single-modality guidance, with affinities benefiting more from coordinate guidance and drug-likeness from type guidance.
+- **Joint gradient guidance over continuous and discrete modalities (validated by ablation).** The paper derives a principled form for guiding both atom coordinates (continuous) and atom types (discrete, through the latent y-space) within the BFN belief-space framework. The ablation in Figure 5 confirms that joint guidance consistently outperforms single-modality guidance across Vina Dock, QED, and SA, validating the core motivation that previous methods (TAGMol, guiding only coordinates) were insufficient because they lacked joint control.
 
-- **Backward correction strategy with sliding window**: The proposed strategy (Section 4.2, Algorithm 1) allows the model to correct past sampling steps by maintaining a sliding window of history. Figure 2 shows that intermediate window sizes yield higher gradient cosine similarity at later timesteps, and Table 4 demonstrates that backward correction boosts both unguided sampling and guided optimization (Success Rate improves from 46.5% for Full B.C. to 51.3% for B.C. under guidance).
+- **Strong empirical performance on CrossDocked2020.** Table 1 shows MolJO achieving Success Rate 51.3%, the best among all categories (generative models, oracle-based methods, gradient-guided methods). The "Me-Better Ratio" analysis (Figure 1B) further shows MolJO produces roughly 2× the fraction of improved molecules compared to other 3D baselines, demonstrating practical optimization capability.
 
-- **Strong empirical performance with 4× improvement over the gradient-based baseline**: On CrossDocked2020, MolJO achieves Vina Dock -9.05, SA 0.78, and Success Rate 51.3% (Table 1). This is a >4× improvement in Success Rate over the best gradient-based baseline TAGMol (12.7%), and the "Me-Better" Ratio shows a 2× advantage over other 3D baselines.
+- **Backward correction strategy is empirically effective.** Table 4 shows that backward correction (k=130) improves both unguided sampling (37.9% → 42.8% Success Rate in the no-guidance condition) and gradient-guided sampling (42.8% → 51.3%). Figure 2 provides a clear visualization of how the window size k controls gradient alignment across steps, supporting the exploration-exploitation interpretation.
 
-- **Versatility for constrained optimization tasks**: MolJO is extended to R-group optimization and scaffold hopping (Section 5.3, Table 3), achieving the highest validity (100% for in-fill tasks) and best Success Rate (e.g., 67.5% for R-group growing vs. next best 44.2%), demonstrating practical utility for lead optimization.
-
-- **SE(3)-equivariance guarantee**: Proposition 4.4 formally shows that the guided sampling preserves SE(3)-equivariance when both the generative network and energy function are equivariant and the complex is centered at the protein's center of mass.
+- **SE(3)-equivariance preservation is formally stated.** Proposition 4.4 correctly notes that when both the energy network and base generative model are SE(3)-equivariant and the complex is zero-centered, the guided sampling process preserves equivariance. This is a helpful theoretical guarantee for physical plausibility.
 
 ## Weaknesses
 
@@ -23,62 +21,58 @@ None.
 
 ### Major
 
-- **"Me-Better" Ratio is never formally defined.** The metric is invoked in the abstract, contributions, Figure 1B, and conclusion as a headline result ("2× Me-Better Ratio as much as other 3D baselines"), but the paper provides no definition at all—not even in the Metrics paragraph (Section 5.1), which defines Success Rate, Vina scores, QED, SA, and Diversity. Without knowing how "Me-Better" is computed (fraction of molecules improving over a reference? improvement on which criteria? improvement threshold?), this key claim is unverifiable.
+- **The backward correction derivation involves an unacknowledged approximation that weakens its theoretical grounding.** In Eq. 7 (line 162), the derivation marginalizes out θ_{i-1} via p_U(θ_{i-1} | θ_{i-2}, 𝑥̂_i; α_{i-1}), replacing the *earlier* clean prediction 𝑥̂_{i-1} (which would come from p_O(·|Φ(θ_{i-2}, t_{i-1}))) with the *current* clean prediction 𝑥̂_i (from p_O(·|Φ(θ_{i-1}, t_i))). The additive accuracy property from Graves et al. (2023) applies when the same clean data point is used across merged steps, but here the network's prediction changes over time. The paper presents this derivation as following from additive accuracy without acknowledging the substitution or the approximation it introduces. This is not fatal — the empirical results in Table 4 suggest the heuristic works well — but the paper should either (a) provide a rigorous justification for the substitution, (b) explicitly label the backward correction as an approximation and analyze the associated error (e.g., comparing log-likelihood of the backward-corrected sampler vs. the standard BFN sampler), or (c) both. As written, the theoretical framing oversells the derivation's mathematical exactness.
 
-- **No statistical uncertainty reported.** Table 1, Table 3, and Table 4 report only point estimates (means) with no standard deviations, confidence intervals, or error bars. Given the stochasticity of the generative and guidance processes, the reader cannot assess whether the reported differences (e.g., 51.3% vs. 46.5% Success Rate) are significant or within noise. This is a standard expectation for empirical ML papers.
-
-- **The energy function used to produce guidance gradients is underspecified.** The paper relies on an energy function $E(\theta, \mathbf{p}, t)$ to predict molecular properties and provide gradients, and Proposition 4.4 asserts it should be SE(3)-equivariant. However, no details are given about its architecture, training data (clean molecules, noisy intermediates, or the $\theta$ representation?), loss function, or procedure for obtaining labels at intermediate timesteps. This component is central to the method—without it, there is no guidance. *Note: some implementation details may reside in sections stripped by the parser, which would mitigate this concern if present in the original submission.*
+- **Constrained optimization experiments lack sufficient methodological detail for verification or reproduction.** Section 5.3 (lines 278–289) reports results for R-group optimization and scaffold hopping, stating only that these are "achieved by infilling.2" (likely Appendix Section 2, now stripped). No algorithm, conditioning mechanism, or constraint-enforcement procedure is provided in the main text. The reader cannot determine: how is the scaffold or R-group fixed during generation? Does the backward correction interact with the constraint, and if so, how? Without these details, the strong results in Table 3 (near-100% validity, high Success Rate) are unverifiable. This undermines the paper's claim of "versatility" — the reader has no way to assess whether the method genuinely respects constraints or merely biases generation.
 
 ### Minor
 
-- **The novelty of the backward correction strategy is incremental and transparently positioned as such.** The paper itself acknowledges (line 179) that the sliding window "unifies" Graves et al. (2023) ($k=1$) and Qu et al. (2024) ($k=n$). The contribution is the empirical demonstration that an intermediate $k$ works best and the gradient-similarity analysis (Figure 2). This is a solid but modest extension—the paper would benefit from framing it as a practical improvement rather than a novel mechanism. The ablation (Table 4) is informative but does not systematically sweep $k$ to characterize the trade-off landscape.
+- **The "4× improvement over gradient-based counterpart" conflates base model strength with guidance contribution.** MolJO builds on MolCRAFT (a strong BFN-based model with 42.1% unguided Success Rate), while TAGMol builds on DiffSBDD (a diffusion model with lower base performance). The 4× claim (12.6% → 51.3%) reflects improvement of the *entire system*, not just the guidance component. The paper does show guidance contributes meaningfully (42.1% → 51.3% from MolCRAFT's base), but the headline "4×" comparison is inflated by the base model gap. The paper should be more precise about what is being compared.
 
-- **The claim of "state-of-the-art" is ambiguous.** The paper claims "state-of-the-art performance" (abstract) with Success Rate 51.3%, but the text acknowledges DecompOpt "show[s] satisfactory Success Rate" (line 217). If DecompOpt achieves higher Success Rate (the reviewer claims 54.8%), then MolJO is not SOTA on that metric. The paper should explicitly specify which comparison class (gradient-based methods vs. all methods vs. 3D methods) the SOTA claim refers to, and qualify it by metric.
+- **Limited information about the energy function(s) used for guidance.** The paper introduces E(θ, t) as a "time-dependent energy function" (line 74) but does not specify in the main text: what form does this network take (architecture, parameterization)? Is it a learned surrogate, and if so, how is it trained and on what data? For Vina, QED, and SA objectives, are these differentiable surrogates or direct formulas? These details are essential for reproducibility. (The critic also notes this; if an appendix exists, it should be moved to the main paper or clearly referenced.)
 
-- **No limitations section is provided.** The paper does not discuss potential failure modes (e.g., energy function generalization to out-of-distribution pockets, risk of mode collapse from strong guidance, sensitivity to the choice of $k$ and guidance scale $s$). A brief discussion would improve scientific rigor.
-
-- **Hyperparameter $k=130$ is used without justification.** The paper uses $k=130$ for backward correction (Table 4) but does not explain how this value was selected or how sensitive results are to it. A sweep over $k$ values would strengthen the characterization.
+- **Gradient guidance fails with the vanilla (non-corrected) sampler, raising questions about robustness.** Table 4 shows that without backward correction (Vanilla and Vanilla MC), applying guidance *hurts* Success Rate (Vanilla: 8.1% with guidance vs... the caption shows the unguided values, but the relative improvement column shows non-positive numbers for Vanilla/Vanilla MC). The paper briefly notes (line 299) this is "probably due to the suboptimal history" but does not investigate why. If guidance works only in conjunction with the heuristic backward correction, this is a meaningful limitation that deserves analysis rather than a one-sentence dismissal.
 
 ### Trivial
-None.
+
+- The gradient similarity analysis (Figure 2) provides an intuitive picture of the exploration-exploitation trade-off, but only measures cosine similarity for the first few steps; the connection to actual property improvement is suggestive rather than directly demonstrated.
+
+- Table 4's caption uses green/black shading for "improvement under guidance" but the absolute scales and thresholds for Success Rate could be more clearly defined in the caption itself.
 
 ## Nice-to-Haves
 
-- **Energy function training details** — if not in the stripped sections, providing the architecture, training data, and loss formulation would significantly improve reproducibility.
-- **Comparison of computational cost vs. oracle-based methods** — the paper positions itself as more efficient than oracle methods but provides no runtime or FLOPs comparison.
-- **A systematic sweep of $k$** (e.g., 1, 50, 100, 130, 200) with Success Rate, Vina Dock, and gradient similarity to more rigorously demonstrate the explore–exploit trade-off claimed in Figure 2.
-- **Statistical uncertainty estimates** (standard deviations or bootstrapped confidence intervals) for the main results.
+- An ablation comparing guided sampling *without* backward correction to guided sampling *with* backward correction, specifically isolating the guidance contribution from the correction contribution, would strengthen the empirical claims.
+- A brief "Limitations" section discussing failure cases (e.g., when does MolJO produce invalid molecules?) would improve the paper's completeness.
+- A systematic analysis of the KL gap between the backward-corrected sampler and the exact sequential BFN sampler would calibrate the cost of the approximation.
 
 ## Removed Points
 
-These points were raised by reviewers but removed per the filtering guidelines:
-
-- **"The energy function $E(\theta, t)$ is not specified, preventing reproducibility and undermining the core claim"** — weakened from Fatal to Major and noted that details may reside in parser-stripped sections. The core claim (joint gradient guidance) is not undermined by missing energy function training details alone, as the guidance derivation and framework are self-contained.
-- **"TAGMol already uses gradient guidance on coordinates"** — the paper does not claim to be the first gradient-based method overall; it claims "first *joint* gradient-based SBMO framework," which is accurate and properly distinguishes from TAGMol.
-- **"The backward correction is equivalent to aggregating multiple BFN steps into a single larger jump"** — the paper explicitly acknowledges this unification (line 179). The contribution is the intermediate-$k$ regime and its empirical validation, not a claim of a fundamentally new mathematical operation. Kept as Minor with adjusted framing.
-- **"Generative baselines are not optimized"** — this is expected; the primary comparisons are to optimization methods (TAGMol, DecompOpt, RGA, AutoGrow4), which are correctly positioned.
-- **Pure formatting/style nitpicks and sentence-level pedantry** — removed as per guidelines.
+These points are flagged to be removed; treat them with caution:
+- **"Algorithm 1 line 10 is garbled (exp(yi)-(kz - k)i)"** — This is a PDF parser artifact, not an author error. The original submission would have the correct expression.
+- **"Missing appendix or proofs in appendix"** — The parser strips appendix sections from all papers; they exist in the original submission.
+- **"Definition of energy function is completely absent"** — The paper does state that E(θ, t) is a "time-dependent energy function" following Kong et al. (2024) and "predicts certain property" (line 74), though details are insufficient. This criticism was merged and downgraded to Minor rather than removed entirely, since the paper does provide a notational definition even if implementation details are thin.
+- **"The paper should also cover more tasks / domains"** — This would turn the paper into a broader paper rather than a stronger version of its stated scope.
+- **"Pure formatting/style nitpicks"** — Removed per instructions.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface an angle the authors themselves missed.
+None beyond the paper's own contributions. The reviews confirm the paper's core strengths (joint guidance, backward correction, strong results) and surface a real theoretical gap (the backward correction derivation masks a heuristic substitution) and a documentation gap (constrained optimization methodology is underspecified). The harsh critic's observation that guidance *fails* with the vanilla sampler (Table 4) is a particularly important point that the paper glosses over — this suggests the guidance may be less robust than claimed, or that the backward correction is doing more work than acknowledged.
 
 ## Suggestions
 
-1. **Define "Me-Better" explicitly** in the Metrics paragraph of Section 5.1: provide the formula (e.g., fraction of generated molecules that improve upon the reference molecule on a composite or individual criterion) and the improvement threshold.
-2. **Add error bars or standard deviations** to all main tables (Tables 1, 3, 4). Even reporting results across multiple random seeds (3 runs) would substantially strengthen the empirical claims.
-3. **Clarify the SOTA claim** — specify "state-of-the-art among gradient-based methods" or report Success Rate relative to all baselines and discuss where MolJO leads and where it trails.
-4. **Systematically ablate $k$** (e.g., 1, 50, 100, 130, 200) with both guided and unguided variants to directly validate the claimed explore–exploit trade-off.
-5. **Add a Limitations paragraph** discussing energy function generalization, guidance scale sensitivity, and potential failure cases.
-6. **Provide energy function specifications** — architecture, training data, loss function — either in the main text or appendix.
+1. **Reframe the backward correction as a principled heuristic** with explicit acknowledgment of the approximation (substituting 𝑥̂_i for 𝑥̂_{i-1} in Eq. 7). Provide empirical validation (e.g., comparing KL divergence or sample quality of the backward-corrected sampler vs. the exact BFN sampler on held-out data) to calibrate the cost of the approximation.
+
+2. **Provide full methodological details for constrained optimization** — describe how R-group/scaffold constraints are enforced during the backward-corrected sampling process. Include the algorithm or pseudocode in the main paper or a clearly referenced appendix.
+
+3. **Clarify the experimental comparison framing.** Acknowledge that the "4×" improvement over TAGMol reflects overall system advantage (better base model + guidance), and isolate the guidance contribution explicitly (e.g., "MolJO on MolCRAFT improves Success Rate from 42.1% to 51.3% through joint guidance, a 22% relative gain; the additional gap over TAGMol's 12.6% partly reflects the stronger base generative model").
+
+4. **Investigate why guidance hurts the vanilla sampler.** Table 4 shows guidance leads to non-positive improvement for Vanilla/Vanilla MC samplers. A brief analysis of this phenomenon would either reveal a meaningful limitation or help the reader understand the interaction between backward correction and guidance.
+
+5. **Document the energy function** — architecture, training data, supervision signal, and whether the same function is used across all objectives or separate ones are trained.
 
 ## Score and Decision
 
-The paper makes a genuine contribution: it is the first SBMO framework to jointly guide both continuous coordinates and discrete atom types via gradients, and it demonstrates clear empirical improvements over the prior gradient-based method (TAGMol). The backward correction strategy is a modest but useful extension with empirical support. The constrained optimization results (R-group, scaffold hopping) are particularly compelling for practical drug design.
-
-However, the paper has significant presentation gaps: the headline "Me-Better" metric is undefined, no statistical uncertainty is reported, and the energy function (the very source of the claimed gradients) is underspecified. These are fixable in revision but weaken the current submission.
-
-**Score**: 6.0 — A solid paper with real contributions, but held back by incomplete specification and missing statistical rigor. With the suggested revisions, it would be a strong accept.
+This paper addresses an important problem with a novel approach and delivers strong empirical results on the primary unconstrained optimization benchmark. The joint guidance over continuous and discrete modalities via the BFN belief space is a genuinely new contribution, and the backward correction strategy, though heuristic, empirically improves performance. However, the paper has two significant issues: (1) the backward correction derivation presents a heuristic as an exact mathematical consequence without acknowledging the approximation, and (2) the constrained optimization experiments lack sufficient methodological detail for verification. These are fixable issues that do not invalidate the core contribution, but they meaningfully reduce the paper's current quality. The paper would benefit from a major revision that addresses theoretical clarity, documentation completeness, and more precise experimental framing.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL DECISION: <orange>Reject</orange>

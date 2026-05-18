@@ -1,14 +1,18 @@
-Now I have all the information I need. Let me write the consolidated review.
+I now have a complete understanding of the paper and all the review inputs. Let me write the final consolidated review.
 
 ## Summary
-This paper addresses safe linear bandits with instantaneous hard constraints in non-convex and discrete feature spaces — a setting where prior work relying on star-convexity (Pacchiano et al., 2024) incurs linear regret due to a "non-convexity bias." The authors propose NCS-LUCB, which introduces a novel bonus term \(g_t^\nu(a)\) designed to overcome this bias under only local assumptions (Assumption 3) around the origin and the optimal point. They prove an \(\tilde{\mathcal{O}}(d(1+\tau/(\epsilon\iota))\sqrt{T})\) regret upper bound, a minimax lower bound of \(\Omega(\max\{d\sqrt{T}, 1/(\epsilon\iota^2)\})\), and provide a toy experiment illustrating the claimed behavior.
+
+This paper studies linear bandits with stage-wise hard safety constraints in non-convex (and discrete) feature spaces. It identifies a phenomenon called "non-convexity bias" — where standard star-convex safe algorithms fail to explore enough in the right directions — and designs a modified UCB-based algorithm (NCS-LUCB) with a new bonus term ($g_t^\nu$) to counter this bias. The algorithm operates under local point assumptions (Assumption 3) that are strictly weaker than the star-convexity required by prior work. The paper provides a regret upper bound of $\tilde{\mathcal{O}}(d(1+\tau/(\varepsilon\iota))\sqrt{T})$ and an information-theoretic lower bound of $\Omega(\max\{d\sqrt{T}, 1/(\varepsilon\iota^2)\})$, with numerical validation on a discrete 2D instance.
 
 ## Strengths
-- **First algorithm for safe linear bandits in non-convex and discrete feature spaces.** The paper makes the explicit claim of being "the first result for non-convex and discrete settings under such local assumptions" (contribution 1, p.4), and the argument is convincing: the paper demonstrates that LC-LUCB (Pacchiano et al., 2024) incurs linear regret on a simple non-convex action set, whereas NCS-LUCB achieves sublinear regret (Figures 1a/1b). This is a genuine advance beyond prior work that assumed convex or star-convex action sets.
-- **Novel bonus design that directly addresses the non-convexity bias.** The new bonus term \(g_t^\nu(a)\) in Eq. (4) is intentionally more optimistic than safety-boundary-based bonuses from prior work. The paper provides an intuitive toy example (Section 5.2) showing why distance-to-boundary bonuses fail in non-convex spaces, and Lemma 2 proves that the new bonus restores optimism under Assumption 3, while Lemma 4 shows the bonus converges fast enough to avoid linear regret.
-- **Regret bound using only local assumptions that nearly matches star-convex guarantees.** Theorem 1 gives \(\tilde{\mathcal{O}}(d(1+\tau/(\epsilon\iota))\sqrt{T})\) regret — comparable to the star-convex bound in Pacchiano et al. (2024) — while requiring only local properties around the origin and the optimal point (Assumption 3) rather than global star-convexity. The only extra cost is the \(1/(\epsilon\iota)\) factor, which the lower bound (Theorem 2) shows is necessary.
-- **Information-theoretic lower bound demonstrating the necessity of \(\epsilon\) and \(\iota\).** Theorem 2 provides a minimax lower bound of \(\Omega(\max\{d\sqrt{T}, 1/(\epsilon\iota^2)\})\), validating that the dependence on \(\epsilon\) and \(\iota\) in the upper bound is unavoidable and that Assumption 3 cannot be further relaxed. Remark 3 notes the gap between upper and lower bounds is only \(1/\epsilon^{1/2}\), demonstrating near-optimality.
-- **Clear, well-motivated explanation of the non-convexity bias.** The illustrative example with Figure 2a and the detailed toy example in Section 5.2 make the technical challenge accessible and clearly explain why conventional bonuses fail.
+
+1. **First safe algorithm for non-convex/discrete feature spaces under local assumptions.** The paper correctly identifies that existing safe linear bandit algorithms (Amani et al., 2019; Pacchiano et al., 2024) require star-convex or convex action sets, and provides the first result relaxing this to local conditions around the origin and the optimal point (Assumption 3). This is a genuine gap in the literature and the paper's framing is well-motivated (Section 1, Section 3).
+
+2. **Novel bonus design that provably overcomes non-convexity bias.** The paper introduces $g_t^\nu(a)$ (Eq. 4), a bonus term that accounts for the distance from the optimal point to the available actions rather than to the safety boundary. Lemma 2 proves this restores optimism in non-convex spaces, and Lemma 4 bounds its cumulative cost at a sublinear rate. The toy example (Section 5.2) clearly illustrates why the star-convex bonus fails and how the proposed fix resolves the issue.
+
+3. **Upper bound nearly matches star-convex rates.** Theorem 1 gives a regret bound of $\tilde{\mathcal{O}}(d(1+\tau/(\varepsilon\iota))\sqrt{T})$, which the paper correctly compares to Pacchiano et al. (2024) and shows the only additional factor is $1/(\varepsilon\iota)$ from the weaker local assumptions. The sublinearity of the bound is genuine.
+
+4. **Local assumptions are strictly weaker than star-convexity.** Assumption 3 imposes conditions only in $\varepsilon$- and $\iota$-neighborhoods around the origin and the optimal point, rather than requiring every line from the origin to lie in the set. The paper provides clear visual intuition (Figure 3) and real-world motivation (venture capital example, Section 3).
 
 ## Weaknesses
 
@@ -16,43 +20,63 @@ This paper addresses safe linear bandits with instantaneous hard constraints in 
 None.
 
 ### Major
-- **Algorithm requires knowledge of \(\iota\) (and \(\epsilon\)) for its parameter \(\nu\).** Theorem 1 sets \(\nu = (\tau+\iota)/\iota\) to achieve the stated regret bound. The paper acknowledges this limitation (Section 5.1, "Adapting to unknown \(\iota\)") and suggests Bandits-over-Bandits as future work, but does not provide an adaptive scheme or prove that the bound holds without this knowledge. This limits the applicability of the theoretical guarantee when the local constants are unknown. That said, the paper is transparent about this limitation, and the safety guarantee does not depend on knowing \(\iota\).
+
+1. **The lower bound (Theorem 2) does not fully support the paper's claims about optimality and the necessity of $\varepsilon,\iota$ in the $\sqrt{T}$ scaling.** The bound is $\Omega(\max\{d\sqrt{T},\; \tfrac{1-2\varepsilon}{\varepsilon}(\tfrac{1-\iota}{\iota})^2\})$. The second term is a constant that does not grow with $T$. For any $T$ that is not tiny, the $\Omega(d\sqrt{T})$ term dominates, reducing the bound to the standard unconstrained linear bandit lower bound with no $\varepsilon,\iota$ dependence in the leading term. The paper's upper bound carries a multiplicative $1/(\varepsilon\iota)$ factor in front of $\sqrt{T}$, so as $\varepsilon,\iota\to 0$ the upper bound diverges, but the lower bound does not capture this multiplicative dependence in the $\sqrt{T}$ regime.  
+
+   The paper claims this bound "highlights the necessity of $\varepsilon$ and $\iota$ in the upper bound" and "implies that Assumption 3 cannot be further relaxed" (Section 1, contribution 2). While the bound does show that $\varepsilon=0$ or $\iota=0$ would make the additive constant blow up (supporting the necessity of strictly positive parameters), it does **not** demonstrate that the $1/(\varepsilon\iota)$ multiplicative factor on $\sqrt{T}$ in the upper bound is necessary or near-optimal. The gap analysis in Remark 3 sidesteps this issue by evaluating at a single $T = \lceil 1/(\varepsilon\iota^2) \rceil$ where the constant term dominates, but this does not address the large-$T$ regime where $\sqrt{T}$ dominates and the $\varepsilon,\iota$ dependence vanishes from the lower bound.  
+
+   *Why this is major:* The lower bound is listed as a main contribution and used to argue near-optimality. The paper must either (a) provide a lower bound that captures $\varepsilon,\iota$ dependence in the $\sqrt{T}$ term, or (b) significantly temper the claims about optimality and reframe the lower bound as showing only that an additive $\Omega(1/(\varepsilon\iota^2))$ regret is unavoidable and that $\varepsilon,\iota$ cannot be zero. As written, the claims outpace what the bound justifies.
+
+2. **Dependence on unknown $\iota$.** The algorithm's bonus uses $\nu = (\tau+\iota)/\iota$, which requires knowledge of $\iota$ (the local radius around the optimal point). The paper acknowledges this and suggests a Bandits-over-Bandits approach (Cheung et al., 2019) as future work (Section 5.1), but provides no analysis of how misspecification (e.g., using a conservative lower bound for $\iota$) affects the regret. While theoretical papers sometimes assume knowledge of problem-dependent constants, this parameter is central to the algorithm's sublinearity guarantee, and the paper would benefit from at least a heuristic discussion of how underestimating $\iota$ degrades the bound.
 
 ### Minor
-- **Experimental validation is too narrow to be fully convincing.** The single experiment uses a discrete 5-action set with \(d=2\), identity feature map, and one baseline (LC-LUCB). While the results correctly illustrate the core claim (sublinear vs. linear regret), the evaluation does not vary \(\epsilon\) or \(\iota\), test with non-linear \(\phi\) (a central motivation of the paper), or report confidence intervals. A theory paper does not require extensive empirics, but the gap between the paper's ambitious scope (DNNs, RBFs, etc.) and the toy validation is noticeable.
-- **The missing enumerated conditions in Assumption 3.** The text states "either of the following conditions holds" but the two conditions are not visible in the parsed text — they were likely dropped during PDF extraction. The first condition (the \(\epsilon\)-neighborhood around the origin) is already stated in the first sentence of the assumption; the second (\(\iota\)-neighborhood around the optimal point) is described conceptually in the surrounding discussion but not formally enumerated. This is almost certainly a parser artifact, but it makes verifying the reliance of Lemmas 2 and 4 on this assumption unnecessarily difficult for the reader.
-- **No discussion of the computational cost of the argmax step.** Algorithm 1 requires solving \(\arg\max_{a \in \mathcal{A}_t} \langle \phi(a), \theta_t \rangle + b_t(a)\) over a potentially non-convex, continuous set. The paper acknowledges this only in the conclusion as a direction for future work; it should be flagged as a limitation earlier, since it may limit practical applicability.
-- **Minor inconsistency between abstract and theorem in the regret expression.** The abstract writes \(\tilde{\mathcal{O}}(d(1+\tau/(\epsilon\iota))\sqrt{T})\) while Theorem 1 gives a coefficient \(\frac{2\beta_2 L(\tau+\iota)}{\epsilon\iota\tau}\). These are compatible (the abstract is a high-level simplification) but the discrepancy in the \(\tau\) term could confuse readers.
+
+1. **Minimal experimental evaluation.** The numerical section (Section 6) tests only a single 2D instance with 5 actions, comparing NCS-LUCB to LC-LUCB. While the results demonstrate sublinear vs. linear regret as predicted, the paper would be strengthened by: (a) varying dimension $d$, (b) varying $\varepsilon$ and $\iota$ to verify the predicted scaling, and (c) testing cases where the local assumptions are approximately satisfied rather than exactly met.
+
+2. **Computational tractability not addressed.** The argmax over $\mathcal{A}_t$ in line 6 of Algorithm 1 is over a potentially non-convex set, and the paper acknowledges this only in the conclusion as future work. For a "first result" paper this is acceptable, but the limitation should be noted earlier when the algorithm is presented (Section 4), as it is central to practical applicability in continuous non-convex spaces.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
-- An adaptive scheme (e.g., a working version of Bandits-over-Bandits) for the case when \(\iota\) is unknown would substantially strengthen the paper.
-- Additional experiments with a non-linear feature map \(\phi\) (e.g., RBF features) and varying \(\epsilon, \iota\) would better connect the theory to the practical motivation.
-- A formal definition of star-convexity (or a citation to the precise definition in Pacchiano et al., 2024) would improve readability, though the paper does give an informal description (line 80).
+
+- A brief analysis (even heuristic) of how performance degrades when $\iota$ is estimated from below, or when the local assumptions are only approximately satisfied.
+- Additional experiments varying dimension $d$ and the parameters $\varepsilon,\iota$ to confirm the predicted scaling of regret.
 
 ## Removed Points
-These points are flagged to be removed; treat them with caution.
-- **"Assumption 3 is incomplete — the two conditions are not provided."** This is likely a parser artifact that dropped the enumerated list. The paper's surrounding text (lines 72–78, the VC example, and the comparison with star-convexity) makes the two conditions clear: the \(\epsilon\)-neighborhood condition (explicitly stated in the first sentence) and the \(\iota\)-neighborhood around the optimal point. The harsh critic's claim that this invalidates the proofs is unwarranted given the contextual clarity and the likelihood of a parsing loss.
-- **"The lower bound is constant in \(T\) for the non-convex term, making it trivial."** This reflects a misunderstanding. The theorem states \(\text{Regret}(T) \ge \max\{d/(8e^2)\sqrt{T}, (1-2\epsilon)/\epsilon \cdot ((1-\iota)/\iota)^2\}\). The max with \(d\sqrt{T}\) ensures the bound scales with \(\sqrt{T}\) for large \(T\); the constant term captures the unavoidable dependence on \(\epsilon\) and \(\iota\). This is standard practice in lower bound construction.
-- **"Star-convexity is used repeatedly but never defined."** The paper explicitly defines star-convexity at line 80: "star-convexity is a global assumption, requiring that all lines connecting any feature point to the starting point lie within the feature set \(\mathcal{F}\)."
-- **"The assumption \(\max(\|\theta^*\|,\|\gamma^*\|) \le \sqrt{d}\) seems odd."** This is a standard normalization in the bandit literature (Abbasi-Yadkori et al., 2011) and is not a paper flaw.
-- **"Proofs of Lemma 2 and Lemma 4 are missing from the main text."** Per instructions, missing appendix content is a parsing artifact and is removed.
-- **"No discussion of the computational cost of the argmax."** The conclusion (line 231) flags this explicitly: "the maximization step in non-convex scenarios often becomes intractable in non-convex continuous cases."
+
+These points were removed from the reviewer critiques for the following reasons:
+
+- **"The gap calculation in Remark 3 is problematic: the lower bound at that T is at most a constant (or ~ 1/(√ει))"** — This is factually incorrect. At $T = 1/(\varepsilon\iota^2)$, the lower bound's second term $\tfrac{1-2\varepsilon}{\varepsilon}(\tfrac{1-\iota}{\iota})^2 \approx 1/(\varepsilon\iota^2)$ dominates the first term $d/(8e^2) \cdot 1/(\sqrt{\varepsilon}\iota)$ for small $\varepsilon,\iota$, so the bound is $\Omega(1/(\varepsilon\iota^2))$, not $\Omega(1/(\sqrt{\varepsilon}\iota))$. The paper's claimed gap of $1/\sqrt{\varepsilon}$ is correct. The reviewer appears to have considered only the first term of the max.
+
+- **"Assumption 3 appears truncated — the actual conditions are not printed"** — Parser artifact; the original submission contains the full conditions.
+
+- **"Toy example assumes the agent knows $\theta^*$ exactly"** — This is an intentional simplification for illustrative purposes, and the numerical experiment (Section 6) addresses the full setting with unknown $\theta^*$. The paper is clear about this pedagogical choice.
+
+- **Criticism about missing appendix/proofs** — Parser artifact; proofs exist in the original submission.
 
 ## Novel Insights
-None beyond the paper's own contributions.
+
+The most interesting observation from these reviews is the precise nature of the disconnect between the lower and upper bounds. The lower bound is an additive constant $\Omega(1/(\varepsilon\iota^2))$ that does not grow with $T$, while the upper bound has a multiplicative $1/(\varepsilon\iota)$ factor on $\sqrt{T}$. This suggests that the true hardness of this problem may decompose into: (i) an unavoidable startup cost that scales with the "non-convexity gap" (small $\varepsilon,\iota$ require more initial exploration before any safe progress can be made), and (ii) a standard $\sqrt{T}$ exploration cost that is independent of $\varepsilon,\iota$. The paper's upper bound may be loose in its $\varepsilon,\iota$ dependence in the $\sqrt{T}$ term — closing this gap is a genuine open problem.
 
 ## Suggestions
-1. Ensure the two conditions of Assumption 3 are clearly enumerated, even in the main text, so readers can verify the proofs without having to infer from context.
-2. Either provide an adaptive method for unknown \(\iota\) (even a simplified version with analysis), or weaken the theoretical claim to state the bound holds in terms of \(\iota\) and acknowledge that a practical tuning scheme remains an open problem.
-3. Add at least one experiment with a non-linear feature map (e.g., RBF or a simple kernel-based map) and vary \(\epsilon\) qualitatively to give a more compelling empirical demonstration.
-4. Flag the computational difficulty of the argmax over non-convex \(\mathcal{A}_t\) earlier in the paper (e.g., in Section 4 or 5), since it is central to practical applicability.
-5. Align the abstract's regret expression with Theorem 1 or add a note explaining the simplification.
+
+1. **Revise the claims about the lower bound.** Either provide a corrected lower bound that captures $\varepsilon,\iota$ dependence in the $\sqrt{T}$ term, or explicitly state that the lower bound shows only an unavoidable additive $\Omega(1/(\varepsilon\iota^2))$ cost and that $\varepsilon,\iota>0$ are necessary, without claiming near-optimality of the $\sqrt{T}$ scaling.
+
+2. **Discuss the effect of misspecifying $\iota$.** Provide a brief heuristic or bounding argument for how the regret degrades if the agent uses a conservative underestimate of $\iota$, showing the bound remains sublinear.
+
+3. **Acknowledge the optimization tractability issue earlier** (in Section 4 when the algorithm is presented, not just in the conclusion).
+
+4. **Expand the experimental section** with at least a variation in dimension or in the problem parameters to add credibility to the scaling predictions.
 
 ## Score and Decision
-This paper makes a clear and novel contribution to safe linear bandits by extending the setting to non-convex and discrete feature spaces — a real and well-motivated gap in the literature. The theoretical analysis is carefully developed, with both upper and lower bounds that demonstrate near-optimality. The non-convexity bias is clearly explained, and the proposed bonus design is a principled solution. The weaknesses (knowledge of \(\iota\), narrow experiments, presentation gaps) are real but minor relative to the contribution. After filtering the reviewer's overstated criticisms, the paper stands as a solid theoretical advance that merits acceptance.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
+**Originality:** Good — the non-convexity bias and the local point assumption are genuinely novel contributions.
+**Importance:** Solid — safe bandits in non-convex spaces are practically relevant and under-studied.
+**Claims support:** Mixed — the upper bound is well-supported; the lower bound's interpretation is overstated relative to what the bound actually shows.
+**Soundness:** The theoretical components appear correct; the main issue is the gap between claims and evidence for the lower bound.
+**Clarity:** Generally clear, with helpful toy examples and visual intuition.
+**Value:** The algorithm and upper bound are a meaningful step forward; the paper would be publishable after revisions tempering the lower bound claims.
+
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

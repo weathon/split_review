@@ -1,22 +1,20 @@
-Now I have a thorough understanding of the paper. Let me carefully synthesize the final review.
+Now let me produce the final consolidated review.
 
 ## Summary
 
-This paper presents the first comprehensive empirical study of Bayesian neural network (BNN) surrogate models for Bayesian optimization (BO). It evaluates seven surrogate types—finite-width BNNs with HMC, SGHMC, deep ensembles, linearized Laplace, deep kernel learning, infinite-width BNNs (NNGP), and standard GPs—across diverse synthetic and real-world benchmarks varying in dimensionality, stationarity, output count, and input type. The study yields several findings: rankings are highly problem-dependent; HMC is the best fully-stochastic BNN; deep ensembles underperform; full stochasticity may be unnecessary (DKL is competitive); and infinite-width BNNs excel in high-dimensional settings.
+This paper presents a large-scale empirical study comparing Bayesian neural network surrogates against standard Gaussian processes for Bayesian optimization. It evaluates finite-width BNNs with four approximate inference methods (HMC, SGHMC, deep ensembles, LLA), deep kernel learning, and infinite-width BNNs across synthetic and real-world benchmarks with varying dimensionality, stationarity, and input types. Key findings: (i) the ranking of methods is highly problem-dependent; (ii) HMC is the most reliable approximate inference method for fully stochastic BNNs; (iii) full stochasticity may be unnecessary as DKL is competitive; (iv) deep ensembles perform relatively poorly; (v) infinite-width BNNs are particularly effective in high dimensions.
 
 ## Strengths
 
-1. **Comprehensive, problem-diverse empirical evaluation.** The paper compares 7 surrogate model types across synthetic and real-world benchmarks varying in dimensionality (2–60), objectives (1–3), stationarity, and input type (continuous, discrete, mixed). This breadth (Figures 3, 5, 6) directly supports the core finding that *model ranking is highly problem dependent* and prevents over-generalization from a narrow task set.
+1. **Comprehensive and well-scoped evaluation.** The paper systematically compares standard GPs, finite-width BNNs with four inference methods (HMC, SGHMC, ensembles, LLA), DKL, and infinite-width BNNs across 6 synthetic + 6 real + 3 high-dimensional problems (Section 4, Figures 3–5). This fills a clear gap in the literature where prior work studied only one or two BNN variants in specialized settings.
 
-2. **Identification of infinite-width BNNs as a strong high-dimensional surrogate.** Figure 8 shows that I-BNNs consistently outperform GPs and other BNNs as dimensionality increases (20–60), with particularly large gaps on polynomial functions, neural-network function draws, and a realistic knowledge-distillation task. This is a novel finding that challenges the default GP choice in high-dimensional BO and is supported by controlled experiments.
+2. **Clear evidence that HMC is the most reliable inference method for fully stochastic BNNs.** On synthetic benchmarks HMC consistently achieves higher rewards than SGHMC, deep ensembles, and LLA, while those alternatives often plateau or fail (Figure 3). On real-world benchmarks HMC also generally outperforms other finite-width BNN inference methods (Figure 4). This finding is well-supported by the data.
 
-3. **Demonstration that deep ensembles underperform in BO.** Across multiple benchmarks (Figures 3, 5), deep ensembles plateau at noticeably lower objective values (e.g., BraninCurrin, DTLZ1). The paper provides an ablation study (§4.5) linking this weakness to limited data sizes in BO, which distinguishes this setting from the typical regime where ensembles succeed.
+3. **Novel result: infinite-width BNNs excel in high-dimensional settings.** In high-dimensional polynomial, neural-network function draw, and knowledge distillation tasks (d=20, 100, 31), I-BNNs clearly outperform all other surrogates including GPs (Figure 5, Section 4.3). This is a non-obvious finding with practical implications, and the paper provides a reasonable post-hoc explanation (non-Euclidean similarity metric combined with no data-hungry hyperparameters).
 
-4. **Evidence that full stochasticity may be unnecessary.** Deep kernel learning (DKL), which is only partially stochastic (last-layer GP), is competitive with fully stochastic BNNs (HMC) on several problems (e.g., Branin, BraninCurrin, Figure 3), while being simpler. This supports the claim that representation learning can matter more than full Bayesian treatment in the small-data BO regime.
+4. **The surprising weakness of deep ensembles is a noteworthy empirical contribution.** Given ensembles' success in other domains, the finding that they consistently underperform on BO tasks (plateauing on BraninCurrin, DTLZ1, etc.) is valuable (Figure 3). The paper also provides nuance by noting that ensembles improve with more queries (Section 4.4).
 
-5. **Systematic architecture sensitivity analysis.** Section 3.2 quantifies how network depth, width, prior variance, and likelihood variance affect posterior predictions and BO performance (Figures 1, 2). This provides concrete guidance for practitioners and reinforces the paper's main message that optimal architecture choices are problem-dependent.
-
-6. **Ablation studies on mean vs. uncertainty quality (§4.5) and runtime comparisons (§4.5).** Hybrid models swapping mean and uncertainty estimates across surrogates reveal mechanistic insight (HMC/I-BNNs have better means, GPs have better uncertainty). Wall-clock times are reported, showing I-BNNs are competitive in both performance and runtime.
+5. **Valuable sensitivity and ablation studies.** The architecture sensitivity study (Figures 1–2), the hybrid model ablation separating mean and uncertainty quality (Section 4.4), and the investigation of standard GP assumptions (Section 4.6) all provide practical guidance beyond the main comparison.
 
 ## Weaknesses
 
@@ -24,52 +22,43 @@ This paper presents the first comprehensive empirical study of Bayesian neural n
 None.
 
 ### Major
-None.
+
+1. **The analysis is predominantly descriptive rather than explanatory.** The paper shows *that* rankings vary across problems but does not systematically analyze *why*. With 15+ problems varying in dimensionality, stationarity, discrete/continuous inputs, and output multiplicity, the study has rich data to test hypotheses about which problem characteristics predict which surrogate will work best (e.g., regressing performance against effective dimensionality, degree of non-stationarity, or sample size). Without such analysis, the finding that "the ranking of methods is highly problem dependent" (stated as a core takeaway) amounts to a restatement of the results rather than an explanation that advances scientific understanding. This limits the paper's contribution relative to what a study of this scope could deliver.
+
+2. **Limited explanatory depth for the I-BNN high-dimensional result.** The paper attributes I-BNNs' success in high dimensions to a "non-Euclidean similarity metric" and "no hyperparameters for learning" (Section 4.3), but these explanations are offered post-hoc. A deeper analysis—e.g., comparing the effective length-scales learned by GPs vs. the neural-network-induced kernel, or quantifying how the I-BNN prior concentrates in high dimensions—would substantially strengthen the scientific contribution.
 
 ### Minor
 
-1. **GP hyperparameter selection method is ambiguous in the main text.** The paper states it uses "standard Gaussian processes with the Matérn-5/2 kernel" (line 78) but does not specify in the main text whether GP hyperparameters (e.g., length-scale) were selected via marginalization or Type-II MLE optimization. While the experiment details are referenced to the appendix (which was stripped by the parser and exists in the original submission), the main text should state this explicitly. The paper's own §4.6 ("Revisiting Standard Assumptions") shows that the choice of marginalization vs. optimization does *not* significantly change GP performance overall ("we do not find that using the Matérn kernel and hyperparameter marginalization significantly improves the performance of GPs in general"), so this is a clarity issue rather than an evidential threat. But given that §4.6 is positioned as a separate sensitivity analysis, the main experiments' configuration should be stated up front.
+3. **The GP baseline is a single configuration, and the paper's own analysis shows this matters.** The main experiments use Matérn-5/2 with hyperparameter marginalization as "standard GPs," which is a reasonable default. However, Section 4.6 demonstrates that RBF vs. Matérn and marginalization vs. optimization produce meaningfully different results depending on the problem. Since the paper does not test whether the main rankings would change with a different (potentially better-suited) GP specification, there is a gap between the evidence and the strength of the claim that "standard GPs are relatively competitive." The paper partially addresses this through Section 4.6, but does not connect that sensitivity analysis back to the main comparison.
 
-2. **The "de facto standard" claim about I-BNNs is slightly overstated.** The Discussion (line 348) says I-BNNs "are well-positioned to become a de facto standard surrogate for Bayesian optimization." The evidence strongly supports that I-BNNs are *promising* and *excel in high dimensions*, but on standard low-dimensional benchmarks (Figures 3, 6) they are competitive but not dominant—sometimes underperforming GPs. Moreover, the paper's own final paragraph recommends "simple models with strong but generic assumptions—such as standard GP models." The forward-looking claim is defensible but the phrasing could mislead readers about the current evidence base. It should be tempered to reflect the observed problem-dependence.
+4. **Computational cost is acknowledged but not integrated into the primary analysis.** The paper correctly notes (Runtime subsection) that in BO the objective query typically dominates cost. However, HMC can be orders of magnitude more expensive than alternatives as the dataset grows during the BO loop. The paper presents HMC results without caveating their practical cost implications in the main ranking analysis (Figure 6), which may mislead practitioners who cannot afford gold-standard MCMC. The runtime subsection (line 330–333) is brief and disconnected from the central conclusions.
 
-3. **Number of MC samples for acquisition function not reported.** The paper uses Monte-Carlo Expected Improvement (line 226) but does not state the number of posterior samples used for acquisition evaluation across methods. If this number varies systematically between methods (e.g., fewer samples for expensive BNN inference), it could affect the comparisons. This is standard reporting information that should be provided in the main text or appendix.
-
-4. **Discrete input encoding not discussed.** The paper includes problems with discrete/categorical inputs (Pest Control, Cell Coverage, Oil Spill Sorbent) and notes their presence (line 257) but does not describe how GPs or BNNs encode these inputs. Since encoding choices can significantly affect surrogate performance on discrete inputs, this is a gap in the experimental reporting.
+5. **Some claims would benefit from stronger statistical support.** The paper uses 10 trials with mean ± 1 SE, which is standard practice in BO. However, the claim that deep ensembles perform "consistently" worse (e.g., on Ackley 10d, Pest Control, where differences are within one SE) is a strong one that merits paired comparisons or rank-based tests across trials. The core qualitative findings are unlikely to change, but the confidence in fine-grained comparisons could be improved.
 
 ### Trivial
-
-1. **Architecture sensitivity study restricted to HMC.** The paper notes (line 136) that it focuses on HMC for the sensitivity analysis "as it is the gold standard." This is a reasonable scope choice, but the paper could briefly note whether similar architectural sensitivities are expected for other inference methods.
-
-2. **Model ranking metric could be more robust.** The relative scoring in Figure 9 normalizes per trial as (r_i - r_l) / (r_h - r_l). The critic's concern about outlier sensitivity is noted; one bad trial compresses all scores. This doesn't invalidate the qualitative rankings but warrants a brief discussion.
+None.
 
 ## Nice-to-Haves
-
-- A failure-mode analysis for I-BNNs would strengthen the high-dimensional result: on which problems do I-BNNs underperform most, and why? (E.g., are they worse on smooth low-dimensional functions?)
-- For deep ensembles, systematically varying ensemble size and retraining frequency could confirm whether poor performance is a fundamental limitation or a misconfiguration artifact.
+- A cost-adjusted comparison (performance vs. wall-clock time) or at minimum a prominent caveat that all HMC results reflect a method whose practical applicability depends on computational budget.
+- A brief discussion of the acquisition function choice: MC-EI is used for all surrogates, which is fair but means GP-quality predictive distributions are not exploited via closed-form EI. This asymmetry is unlikely to change results but is worth noting.
+- Extension of the architecture sensitivity study to inference methods beyond HMC (e.g., whether deeper networks affect SGHMC differently), though the paper's focus on HMC as gold standard is defensible.
 
 ## Removed Points
-
-- **Critic's framing of Critical Issue 1 as an "evidential issue" that undermines core comparisons.** Removed because: (a) the experiment details exist in the appendix (stripped by parser), (b) §4.6 actually shows the GP configuration choice does *not* significantly change performance, which *strengthens* rather than undermines robustness. The valid sub-point (clarity in main text) is kept as Minor #1 above.
-
-- **Critic's claim that §4.6 is "disconnected from the main experiments."** Removed because §4.6 explicitly tests whether standard GP configurations (Matérn kernel, marginalization) are universally beneficial, which is directly relevant to the main experiments' choice of GP configuration.
+- **Weakness 5 (I-BNN framing blurs BNN vs. GP distinction):** Removed. The paper is fully transparent — it explicitly states (line 25) that I-BNNs "correspond to GPs with fixed non-stationary kernels derived from a neural network architecture" and (line 130–131) that they "cannot do representation learning and instead has a fixed covariance function." No blurring or deception occurs.
+- **General formatting/style nitpicks:** Removed per instructions.
+- **Missing related work complaints:** Removed per instructions (cannot verify external completeness).
 
 ## Novel Insights
-
-None beyond the paper's own contributions. The collection of findings—particularly the I-BNN high-dimensional result, the deep ensemble underperformance linked to small data, and the competitiveness of DKL despite limited stochasticity—are the paper's genuine contributions. The reviews do not surface additional novel interpretations beyond what the paper already provides.
+The most interesting cross-perspective insight from the reviews is that the paper's grouping of models by "stochasticity" (fully stochastic BNNs vs. partially stochastic DKL vs. fixed-kernel I-BNN) is less informative than an alternative grouping by representation-learning capability: methods that learn a kernel/distance metric (finite BNNs, DKL) vs. methods with fixed kernels (standard GPs, I-BNNs). The paper's own finding — that I-BNNs (fixed kernel) outperform learned-kernel methods in high dimensions — gains sharper framing when viewed through this lens: when data is scarce in high dimensions, a strong fixed prior beats representation learning. This reframing could elevate the paper's central insight beyond what the authors currently articulate.
 
 ## Suggestions
-
-1. In §3 or §4.1, explicitly state: "For all main experiments, GP hyperparameters were selected via [marginalization / Type-II MLE]." This resolves the ambiguity without requiring readers to consult the appendix.
-
-2. Temper the Discussion claim about I-BNNs to: "well-positioned to become a strong candidate surrogate" or "well-positioned to become a default choice for high-dimensional BO" to better match the evidence.
-
-3. Report the number of MC samples used for acquisition evaluation across all surrogates in §4.1.
-
-4. Add a brief note (one paragraph) on how discrete inputs were encoded for both GPs and BNNs.
+1. Turn the current ranking analysis (Figure 6) into a predictive analysis: for each problem, measure interpretable characteristics (effective dimensionality, degree of non-stationarity, data size, number of discrete inputs) and test whether they predict which surrogate works best. This would transform the paper's main descriptive finding into an explanatory one.
+2. Include at least one alternative GP configuration (e.g., RBF + optimization) in the main comparison to verify that the relative rankings are robust to GP specification. The data from Section 4.6 can almost certainly support this with minimal additional computation.
+3. Add a brief caveat to the HMC results in the ranking figure and discussion noting that HMC's computational cost may be prohibitive in many practical BO settings, especially as dataset size grows.
+4. Add pairwise rank-based comparisons or effect sizes for the deep ensembles claim across the full benchmark suite to strengthen statistical support where error bars overlap.
 
 ## Score and Decision
+This is a solid, timely empirical study addressing an important and underexplored question. Its contributions—the comprehensive head-to-head comparison, the finding that I-BNNs excel in high dimensions, and the surprising weakness of deep ensembles—are genuine and useful to the community. The weaknesses are real but addressable: the analysis is more descriptive than explanatory (the most significant limitation), and some methodological choices (single GP specification, cost not integrated) could be tightened. The paper does not contain fatal errors, and its central claims are supported by the evidence. Given the scope and value of the evaluation, the paper merits a weak accept.
 
-This is a timely, well-executed, and comprehensive empirical study that fills a clear gap in the Bayesian optimization literature. The experimental design is sound, the range of surrogate models is impressive, and the findings are well-supported by the evidence. None of the weaknesses undermine the core contributions. The paper requires minor clarifications but no structural revision.
-
-MY FINAL SCORE: <pineapple>7.5</pineapple>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

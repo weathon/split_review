@@ -1,13 +1,22 @@
-Now I have a thorough understanding of the paper and can verify the reviewer claims against the actual content. Let me produce the consolidated review.
+Now I have all the information I need. Let me compile the final review.
+
+---
 
 ## Summary
-This paper proposes SpikeBERT, a spiking transformer for text classification that adapts the Spikformer architecture (originally designed for vision) by replacing its dimension-level spiking self-attention with token-level attention and substituting vision-specific modules (convolution+batch norm) with language-appropriate ones (linear+layer norm). To train this deep SNN, the authors introduce a two-stage knowledge distillation method: (1) pre-training that aligns hidden features between BERT and SpikeBERT on unlabelled text, and (2) task-specific distillation from a fine-tuned BERT. Experiments on six text classification benchmarks (English and Chinese) show SpikeBERT outperforms prior SNN baselines and achieves near-BERT accuracy with substantially lower theoretical energy consumption.
+
+This paper proposes SpikeBERT, a spiking neural network (SNN) for language tasks built by adapting Spikformer (a vision spiking transformer) for text processing. The core contribution is a two-stage knowledge distillation method from BERT: Stage 1 aligns embeddings and hidden features on unlabeled text, Stage 2 fine-tunes on task-specific data using logits and feature alignment losses. Experiments on six text classification datasets (English and Chinese) show SpikeBERT outperforms existing SNN baselines (SNN-TextCNN and direct-trained Spikformer) by ~3.5% absolute accuracy on average, while achieving theoretical energy savings of ~70% relative to BERT.
 
 ## Strengths
-- **Targeted architectural adaptation from vision to language**: The paper makes sensible, well-motivated modifications to Spikformer — changing the spiking self-attention from dimension-level (D×D) to token-level (N×N), replacing SPS with word embeddings, and swapping conv+BN for linear+LN. The resulting model consistently outperforms the directly-trained Spikformer baseline across all six datasets (e.g., MR: 80.69 vs. 76.38, SST-2: 85.39 vs. 81.55 in Table 1), demonstrating the combined effectiveness of these changes.
-- **Two-stage distillation enables training a deep SNN for language**: The ablation study (Table 3) convincingly shows that both stages are essential — removing Stage 1 (pre-training distillation) drops average accuracy by −3.23%, and removing Stage 2 (task-specific distillation) drops it by −3.16%. The breakdown of loss components further reveals that logits loss has the largest individual impact (−3.03%), providing useful insight into what drives distillation success.
-- **Breadth of evaluation across languages and datasets**: The method is tested on six datasets spanning English (MR, SST-2, SST-5, Subj) and Chinese (ChnSenti, Waimai), with results averaged over 10 random seeds, supporting claims of cross-lingual applicability.
-- **Transparent ablation of loss components**: Table 3 systematically removes each loss term and data augmentation in Stage 2, leaving no ambiguity about their relative importance — this is a well-structured ablation.
+
+- **Substantial accuracy improvement over prior SNN approaches for language**: SpikeBERT achieves 80.20% average accuracy across six benchmarks, outperforming SNN-TextCNN (76.71%) and the directly-trained Spikformer (77.36%) by more than 3 percentage points on average, with up to 5.42% improvement on individual datasets (Table 1, Section 4.3). This is a meaningful advance for deep SNNs in NLP.
+
+- **Two-stage distillation method validated by thorough ablation**: Removing Stage 1 or Stage 2 each causes ~3.2% average accuracy drop (Table 3, Section 4.5). The ablation further decomposes Stage 2 loss components, showing logits loss has the largest impact (3.03% drop) while cross-entropy loss contributes little (0.17% drop). This provides clear evidence that both stages are necessary and identifies which knowledge transfer mechanism matters most.
+
+- **Energy efficiency demonstrated with concrete estimates**: SpikeBERT consumes only ~27.82% of BERT's theoretical energy on average across six datasets (Table 2, Section 4.4), with the largest per-dataset reduction reaching 73.63% (Subj). The paper correctly notes that this energy advantage is distinct from model compression methods and depends on neuromorphic hardware.
+
+- **Cross-lingual validation**: Evaluation spans English (MR, SST-2, SST-5, Subj) and Chinese (ChnSenti, Waimai) datasets, demonstrating the method generalizes beyond a single language (Table 1, Section 4.1).
+
+- **Architectural adaptation is clearly described**: The paper explains the modifications from Spikformer — replacing SPS with word embeddings, convolution+BN with linear+LN, and changing attention from D×D to N×N — with a clear motivation for each change (Section 3.2, Fig. 1).
 
 ## Weaknesses
 
@@ -15,46 +24,55 @@ This paper proposes SpikeBERT, a spiking transformer for text classification tha
 None.
 
 ### Major
-- **Missing ablation of core architectural modifications**: The paper changes the attention map from D×D (dimension-level) to N×N (token-level) and replaces conv+BN with linear+LN, but never isolates these changes. Without an ablation that trains the original Spikformer architecture (with its D×D attention and conv+BN modules) using the same two-stage distillation pipeline, it is impossible to attribute the performance gain to the proposed architectural changes rather than to the distillation method alone. Table 1 shows the directly-trained Spikformer baseline — but that baseline uses neither distillation nor the proposed architecture, conflating two variables.
-- **Energy consumption calculation lacks transparency**: Table 2 reports concrete energy values (e.g., 28.03 mJ for SpikeBERT vs. 102.24 mJ for BERT on MR) and a ~72% average reduction, but the paper does not specify: (a) the formula used to convert FLOPs/SOPs to energy, (b) the per-operation energy values assumed (e.g., from Horowitz 2014: ~0.9 pJ for AC vs. ~4.6 pJ for MAC on 45nm CMOS), or (c) the firing rates of SpikeBERT needed to compute SOPs in a principled way. Since SpikeBERT's SOPs sometimes exceed BERT's FLOPs (e.g., 28.47 G vs. 22.46 G on ChnSenti) yet the claimed energy is lower, the reader needs the calculation details to assess whether the reduction is realistic. The paper acknowledges this is an "estimate" (line 391), but the central advantage of SNNs must be verifiable.
+None. The core claims are supported by evidence; no weakness invalidates the paper's central contribution.
 
 ### Minor
-- **"State-of-the-art SNNs" claim is too broad**: The paper compares against only two SNN baselines — SNN-TextCNN (a shallow TextCNN-based SNN) and a directly-trained Spikformer. Other SNN language models cited in the paper (e.g., SpikeGPT, cited as zhu2023spikegpt) are not compared against or discussed regarding why they are not comparable (e.g., different task type). The claim should be qualified to "state-of-the-art among SNNs for text classification" or similar.
-- **Hidden dimension D not specified**: The paper uses D throughout the architecture description (e.g., "X_s ∈ R^{T×L×D}" on line 166) but never states its value. If SpikeBERT matches BERT-base's 768, this should be stated explicitly, as it affects both capacity comparison and the energy calculation.
-- **Stage 1 pre-training details omitted**: The paper specifies the corpus (Wikipedia + BookCorpus for English, Chinese Wikipedia for Chinese) but does not report how many sentences were sampled, the number of pre-training steps/epochs, or the training duration. This hampers reproducibility.
-- **Time-step ablation (Figure 2a) reported only on Chinese datasets**: The paper states results "on ChnSenti and Waimai datasets" but does not include English datasets in this analysis, limiting the generality of the finding that T=4 is optimal.
-- **Depth vs. performance trade-off not discussed**: The paper observes that deeper models do not improve performance (Figure 2b) and cites prior work supporting this. However, if deeper SNNs do not help, the choice of 12 layers for SpikeBERT warrants justification — could a 6-layer model achieve similar accuracy with even lower energy?
-- **Feature alignment analysis missing**: The paper aligns hidden features between BERT and SpikeBERT in Stage 1 but provides no analysis (e.g., CKA similarity, representation overlap) showing that the student actually learns similar representations. This would strengthen the claim that distillation transfers linguistic knowledge.
-- **Layer alignment rule incomplete**: The paper specifies aligning features every ⌈B/M⌉ layers "if B > M" (line 221), but does not specify the behavior when M ≥ B (student has more or equal layers to teacher).
+
+1. **"Comparable to BERT" claim is somewhat overstated.** The abstract and conclusion frame SpikeBERT as achieving "comparable results to BERTs," but Table 1 shows a systematic accuracy gap averaging 4.13% (84.33 vs. 80.20), with individual gaps as large as 6.94% on MR (87.63 vs. 80.69). To the paper's credit, Section 4.3 does quantify the exact 4.13% gap ("a small drop..."). However, the abstract/conclusion language glosses over this difference. "Competitive" or "narrowing the gap" would be more precise. This does not undermine the paper's value — the contribution is still clear — but the framing should be aligned with the evidence.
+
+2. **Energy consumption methodology is underspecified.** Table 2 reports FLOPs for BERT and SOPs for SpikeBERT, then derives energy using Horowitz (2014) numbers. However, the paper does not explain: (a) how SOPs are counted — whether they account for actual spike rates (which depend on threshold, input, and time steps) or assume maximum spike activity; (b) whether the SOP numbers already include the time step dimension (T=4); (c) the specific energy-per-operation values used for FLOPs and SOPs. SpikeBERT's SOP count (e.g., 28.47 G for ChnSenti) is larger than BERT's FLOP count (22.46 G), yet the energy is much lower — this is plausible given the per-operation cost difference but deserves explicit explanation. The general approach is standard in SNN literature, but the lack of detail weakens the rigor of the energy claim.
+
+3. **Token-wise (N×N) vs. dimension-wise (D×D) attention choice is heuristic without ablation.** The paper states: "we think that the features shared with words in different positions by attention mechanism are more important than those in different dimensions" (Section 3.2), then changes the SSA attention map from D×D to N×N. No analysis or ablation is provided to support this claim. Given that the binary nature of Q_s, K_s, V_s makes N×N attention compute a fundamentally different quantity (coincidence counts of spikes) than softmax attention, this design choice is non-trivial. The paper should either ablate both variants or acknowledge the choice as heuristic.
+
+4. **SNN baseline comparison is narrow.** The paper compares against only one prior SNN approach (SNN-TextCNN) plus a direct-trained version of its own architecture. While SpikeGPT is cited in related work as a spiking language model, it is not included as a baseline. The paper's claim of outperforming "state-of-the-art SNNs" would be strengthened by a broader comparison. (Note: SpikeGPT is a generative model, so direct comparison on classification is not straightforward — but the general point about narrow baselines stands.)
 
 ### Trivial
-- "state-out-of-art" typo on line 332 (missing "f" in "state-of-the-art").
+None.
 
 ## Nice-to-Haves
-- A brief limitations section acknowledging that the method requires a fully pre-trained and fine-tuned BERT teacher, and that the energy advantage during inference should be weighed against the training cost (including the teacher).
-- Validation performance and hyperparameter selection process: the paper does not clarify whether reported test results were obtained after tuning on a held-out validation set.
-- Discussion of whether the method extends to other tasks (e.g., sequence labeling, QA) since BERT teachers exist for those tasks.
+
+- The paper mentions attempting direct MLM/NSP pretraining and failing (Section 3.3) but provides no details about the setup (depth, learning rate, time steps). Including these details would strengthen the motivation for distillation and serve as a useful negative result for the community.
+- The hyperparameter choices for neuron threshold (0.25 in SSA vs. 1.0 elsewhere) and the scaling factor τ=0.125 are not explained or ablated. A brief sensitivity analysis (even on one dataset) would help assess how robust the method is to these spiking-specific parameters.
+- The paper focuses on text classification. Adding a sentence scoping future work to other NLP tasks (e.g., sequence labeling, QA) would align the title's "language" framing with the actual evaluation scope.
 
 ## Removed Points
-- **Criticism about garbled equation text (Stage 1 formula)**: The reviewer noted "the phrasing is garbled" — this is a parser artifact from PDF extraction, not an error in the original submission.
-- **Criticism about "Directly-trained Spikformer comparison is unfair" under 1st Critical Issue**: The paper's claim is about SNNs *for text classification*, and SpikeGPT is a generative model not directly comparable. The SOTA claim is kept as a Minor weakness about scope, not as a Major one about missing comparison.
-- **Criticism about the average column mixing languages (Table 1)**: The reviewer acknowledged this is fine. This is a presentation preference, not a substantive issue.
-- **Criticism about using different BERT teachers for English and Chinese**: Different languages naturally require different tokenizers/vocabularies. This is standard practice and not a weakness.
-- **"Cannot be independently verified" framing**: Any phrasing questioning the existence of cited artifacts was removed per the hard rules.
-- **Generic strengths from Strength Finder**: Removed any strengths that were generic/superficial or that conflict with verified weaknesses.
+
+- **Demand for SpikeGPT comparison (from Harsh Critic Point 2)**: Removed because SpikeGPT is a generative spiking language model, not a classifier. Adapting it for text classification with a task head is not a standard or trivial baseline, and the ask constitutes scope creep. The underlying concern about narrow baselines is kept (Minor Weakness #4), but the specific SpikeGPT demand is removed.
+- **Criticism about "state-out-of-art" typo**: Removed per instructions — typographical nitpicks are not author errors (they are likely parser artifacts).
+- **Criticism that the paper lacks justification for D×D vs. N×N being "necessary"**: Kept in softened form (Minor Weakness #3) — the point that no ablation supports this choice is valid, but the claim that the paper asserts it as "necessary" overstates the paper's language. The paper says "we think" and "most importantly," which is heuristic, not a formal necessity claim.
 
 ## Novel Insights
-The most interesting observation from the reviews is the apparent paradox in the energy numbers: SpikeBERT's synaptic operations (SOPs) can exceed BERT's floating-point operations (FLOPs) — e.g., 28.47 G SOPs vs. 22.46 G FLOPs on ChnSenti — yet the claimed energy is ~70% lower. This highlights a key point about SNN energy evaluation that is often glossed over: SOPs count spike-driven AC operations (much cheaper per operation than MACs), so raw operation counts are not comparable across ANN and SNN. The paper would benefit from explicitly walking readers through this arithmetic. Beyond that, the reviews surface no insight not already in the paper.
+
+The reviews surface a recurring tension: the paper's results are genuinely solid (clear improvement over SNN baselines, well-structured ablation, plausible energy savings), but the framing consistently reaches one step beyond what the evidence supports. The "comparable to BERT" language, the underspecified energy methodology, and the heuristic architectural choice all share this character — the paper has real contributions but would benefit from more measured presentation. The most interesting insight from the reviews is that the logits loss dominates the Stage 2 contribution (3.03% drop when removed), far exceeding feature loss (1.90%) and embedding loss (1.74%). This suggests that for SNN distillation, task-specific output distribution matters more than hidden feature alignment, which could inform future SNN training strategies beyond this specific architecture.
 
 ## Suggestions
-1. Add an ablation experiment that trains the **original Spikformer architecture** (D×D attention, conv+BN modules) using the same two-stage distillation pipeline. This would isolate the contribution of the proposed token-level attention and linear+LN modifications.
-2. Provide a step-by-step energy calculation in the appendix or main text, including: the assumed per-operation energy values (e.g., from Horowitz 2014), the formula linking SOPs to energy, and the dataset-specific firing rates of SpikeBERT. This is essential for the paper's central energy-efficiency claim.
-3. Qualify "state-of-the-art SNNs" to "state-of-the-art among SNNs for text classification" and explicitly note which SNN baselines were compared and why others (e.g., generative models) are not included.
-4. Specify the hidden dimension D of SpikeBERT (presumably 768, matching BERT-base) and add the missing Stage 1 training details (number of steps, epochs, sentences sampled).
-5. Include English datasets in the time-step ablation (Figure 2a) to strengthen the generality of the optimal T=4 finding.
+
+1. **Revise the abstract and conclusion** to replace "comparable results to BERTs" with language like "competitive with BERTs while narrowing the gap from prior SNN approaches" or "achieves results within 4% of BERT with ~70% less energy." The data is already in the paper — align the narrative claims with it.
+2. **Specify the SOP computation methodology**: Report whether SOPs account for actual spike rates or assume maximum activity, clarify that the time step dimension T=4 is factored in, and state the per-operation energy values used (e.g., E_FLOP = X pJ, E_SOP = Y pJ on 45nm CMOS from Horowitz 2014).
+3. **Add an ablation comparing N×N vs. D×D attention** on at least one dataset. If the results are similar, acknowledge both variants are viable; if N×N is better, this becomes a non-trivial architectural finding.
+4. **Expand the SNN baseline discussion**: While adding SpikeGPT is not straightforward due to task differences, the paper could discuss how SpikeBERT's performance compares roughly to other spiking approaches for language (e.g., noting that SpikeGPT targets generation, not classification, so direct comparison is left for future work).
+5. **Add a brief sensitivity analysis** for the threshold (0.25 vs. 1.0) and τ=0.125 hyperparameters, or at minimum note that these values were chosen based on a small validation set.
 
 ## Score and Decision
-This paper addresses a worthwhile problem — bringing energy-efficient spiking transformers to language tasks — and makes reasonable architectural and methodological contributions. The two-stage distillation approach is well-ablated, the evaluation is broad across languages, and the results are consistently positive. However, two significant gaps prevent the paper from being fully convincing in its current form: the lack of ablation isolating the architectural changes from the distillation method, and the incomplete specification of the energy calculation. These are fixable but non-trivial. The paper is a good submission that needs major revision before it meets its own evidentiary standards.
+
+The paper makes a genuine contribution: it demonstrates that a deep spiking transformer can be trained for text classification via two-stage distillation, achieves meaningful accuracy gains over prior SNN methods, and quantifies substantial theoretical energy savings. The weaknesses are all addressable — none threaten the core findings. The ablations are well-executed and informative. The paper is clearly written and the method is reproducible.
+
+**Originality**: Good — adapting Spikformer for language and the two-stage distillation from BERT to SNN is a novel combination.  
+**Importance**: Good — energy-efficient NLP is an increasingly relevant problem.  
+**Claims support**: Adequate — main claims are supported, but some framing (comparable to BERT) and methodology (energy computation) need tightening.  
+**Soundness**: Good — ablation study is strong; main experimental results are clear.  
+**Clarity**: Good — well-structured, clear figures, method is explained in sufficient detail.  
+**Value to community**: Good — provides a practical recipe for training deep SNNs for language and a useful negative result about direct MLM/NSP pretraining.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL DECISION: <orange>Accept</orange>

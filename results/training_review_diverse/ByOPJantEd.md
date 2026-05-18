@@ -1,22 +1,22 @@
-Now I have all the information I need. Let me construct the final consolidated review.
+Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
 
 ## Summary
 
-This paper proposes Wigner kernels, a class of body-ordered rotationally equivariant kernels for atomistic machine learning. The core innovation is an iterative evaluation (the "Wigner iteration") that computes body-ordered density-correlation kernels directly in kernel space, avoiding the exponential explosion of explicit feature-space expansions that plagues methods like ACE. The approach achieves state-of-the-art accuracy on QM9 (4.3 meV for energies, outperforming Allegro and other equivariant NNs), demonstrates systematic convergence with body order on gold clusters, and provides a unified treatment of scalars, vectors, and tensors.
+The paper introduces "Wigner kernels" — body-ordered, rotationally equivariant kernels for atomistic machine learning that are computed iteratively via Clebsch-Gordan contractions (the "Wigner iteration"). The key idea is to evaluate body-ordered kernels directly in kernel space, avoiding the exponential growth of explicit feature-space methods like ACE. The method is demonstrated on gold clusters, random methane configurations, and the QM9 benchmark, achieving competitive accuracy (4.3 meV MAE on QM9 energies) with low angular momentum cutoffs.
 
 ## Strengths
 
-- **Wigner iteration eliminates the exponential feature growth of body-ordered expansions.** The iterative kernel construction (Eq. 12) costs linearly in maximum body order ν for fixed angular truncation, in contrast to ACE-like expansions where the feature count scales as (a_max · n_max · λ_max)^ν. This is the paper's central intellectual contribution and is clearly motivated and derived (Sec. 2.3–2.4).
+1. **Exponential-to-linear cost reduction in body order**: The Wigner iteration computes body-ordered kernels without ever constructing the exponentially large feature vector. Gold cluster results (Fig. 1) show systematic improvement up to ν=6, with ν=4 already outperforming squared-kernel methods — confirming the practical benefit of the kernel-space approach.
 
-- **State-of-the-art accuracy on QM9 for both scalar and tensorial properties.** Table 1 reports 4.3 meV test MAE for QM9 energies, surpassing Allegro (4.7 meV), PaiNN (5.9 meV), and other specialized equivariant architectures. For dipole moments (Fig. 3), Wigner kernels avoid the saturation seen in λ-SOAP methods at large training set sizes. That a kernel method can still outperform extensively tuned deep networks on a decade-old benchmark is noteworthy.
+2. **Strong QM9 energy accuracy**: Table 1 reports 4.3 meV (±0.1) MAE on the full QM9 dataset, surpassing Allegro (4.7 meV) and all other models in the comparison — the single strongest quantitative evidence for the method's predictive power.
 
-- **Systematic convergence with body order on a genuinely many-body system.** The gold cluster experiments (Fig. 1) show monotonic improvement from ν=2 to ν=6, with ν=6 matching LE-ACE. This directly validates that the kernel captures physically meaningful high-order correlations and that the body-ordered truncation is well-founded.
+3. **No explicit radial-element basis truncation**: The method requires no radial or chemical-element basis (Sec. 2.3, Eq. 5). On QM9 (5 elements, 110k training points), the learning curve shows no saturation (Fig. 4), consistent with approaching the full-basis limit.
 
-- **Unified equivariant formulation for scalars, vectors, and tensors.** The same Wigner iteration (Eq. 12) constructs kernels satisfying exact SO(3) equivariance (Eq. 4) for any angular channel λ. The paper demonstrates this for both scalar energies (λ=0) and vector dipole moments (λ=1), avoiding the heuristic mixing of invariant and covariant components used in SA-GPR.
+4. **Systematic body-order ablation**: Gold cluster results (Fig. 1) provide a clean ablation: ν=2 saturates, ν=3 improves, ν=4−6 yield progressively lower errors — confirming the kernel correctly isolates body-order contributions and that high-body-order terms are physically needed.
 
-- **Theoretical insight into why low λ_max suffices.** Section 3.2 provides a concrete explanation: the tensor-product structure of the Wigner iteration "incorporates higher frequency components in their functional form, much like sin² ωx contains components with frequency 2ω." This rationalizes why λ_max=3 works where explicit feature models require λ up to 20, and is a genuine intellectual contribution beyond the method itself.
+5. **Competitive accuracy despite low λ_max**: On methane (Fig. 2) and QM9 (Fig. 4), the model uses only λ_max=3 and outperforms methods requiring much higher angular cutoffs (e.g., LE-ACE uses λ_max=10 on methane). The paper provides a mechanistic explanation (tensor products of low-λ kernels intrinsically generate higher angular frequencies).
 
-- **Chemical-element scalability.** The Kronecker-delta construction in Eq. 13 keeps the kernel cost independent of the number of elements, a practical advantage directly leveraged on the 5-element QM9 dataset.
+6. **Tensorial targets without saturation**: On QM9 dipole moments (Fig. 3), Wigner kernels avoid the saturation seen in λ-SOAP kernels as training set size increases, demonstrating complete body-ordered equivariant kernels can capture long-range tensorial behavior from local correlations.
 
 ## Weaknesses
 
@@ -24,66 +24,55 @@ This paper proposes Wigner kernels, a class of body-ordered rotationally equivar
 None.
 
 ### Major
-None.
+
+1. **Missing derivation connecting the Wigner iteration to the body-ordered kernel definition.** The paper defines body-ordered kernels via an integral over rotated densities (Eq. 5), then presents an iterative formula (Eq. 9) said to compute them. No reasoning is given for why the iteration yields the same object as the integral definition. The recursion resembles the tensor-product structure of ACE features, but the paper neither shows the equivalence nor cites a source where it is established. Since the contribution rests on the iteration being correct and complete, a sketch of the derivation or a clear reference is needed before the reader can assess whether the method implements the claimed kernel or some different subspace of correlations.
+
+2. **No description of how KRR was actually solved for datasets with ≥10⁵ training points.** The paper reports learning curves for gold clusters (105k structures) and QM9 (training sets up to 110k structures) stating "Kernel ridge regression (KRR)" is used throughout. A dense KRR solve scales as O(N³), which is infeasible at N=110k on ordinary academic resources. The paper mentions sparse KRR only as a future possibility (line 163: "it would be comparatively simple to avoid this scaling implementing a sparse KRR framework"), implying it was NOT used. No iterative solver, low-rank approximation, or other strategy is disclosed. Line 292 states "The steep computational cost is largely due to the use of full KRR models," confirming the experiments used full KRR without describing how the linear system was solved. This makes the results unverifiable and the method's practical feasibility impossible to assess. The authors must specify the actual algorithm (e.g., conjugate gradient, Nyström approximation, or other) and report its computational cost.
 
 ### Minor
 
-- **λ_max not reported for the gold cluster experiment.** The paper states λ_max=3 for methane (line 215) and QM9 (line 250), but the gold cluster experiments (Sec. 3.1) do not specify λ_max used. Since computational cost scales as λ_max⁷, and the paper's own argument is that low λ_max works, this omission should be fixed. (It is likely small — the paper notes "aggressive truncation" in the conclusions — but the experiment section should state the exact value.)
+3. **No empirical runtime or memory benchmarks.** Section 2.4 discusses theoretical scaling (λ_max⁷, worse than traditional SO(3) products at λ_max⁵) and notes favorable properties, but no wall-clock times, memory footprints, or inference costs are reported for any experiment. For a methods paper claiming a practical computational advantage, this is a notable omission. Training time, inference time, and memory usage for each benchmark — alongside a representative baseline (e.g., LE-ACE) — would substantiate the claimed benefits.
 
-- **No ablation study on λ_max for any dataset.** The paper's central practical claim is that low λ_max is sufficient, yet it never systematically sweeps λ_max to show where accuracy saturates or degrades. An ablation on even one dataset (e.g., QM9 or gold) showing that increasing λ_max does not materially improve accuracy would significantly strengthen the evidence. Without it, the reader cannot assess whether reported performance is robust or an artifact of a particular truncation.
+4. **"State-of-the-art" claim is somewhat stronger than the evidence.** The abstract and results state Wigner kernels "reach[ed] state-of-the-art accuracy on QM9." The comparison table (Table 1) is explicitly drawn from the Allegro reference and includes 7 models, the most recent being Allegro (2022). Within this set, the claim holds, but the unqualified "state-of-the-art" suggests dominance over all published methods, when the comparison is limited. The paper would benefit from a more precise qualifier (e.g., "competitive with the best published models" or "state-of-the-art among the methods compared in Ref. [allegro]").
 
-- **Learning curves lack error bars except for the final QM9 point.** The QM9 final point is averaged over 16 splits (Table 1), and the early QM9 points over 10 runs (Fig. 4 caption). But for gold clusters and methane (Figs. 1–2), the paper does not state whether multiple seeds or error bars are shown. Variance in the low-data regime is important for judging model capacity and statistical robustness.
+5. **Element handling via δ-functions and its consequences underexplored.** Kernels between different chemical species are set to zero (Eq. 8, line 150). The paper presents this as an advantage of avoiding an explicit element basis, but a δ-function on elements is itself a strong basis choice that decouples the representation of different species. The consequences of this choice for multi-element transferability and for datasets with many elements are not discussed.
 
-- **The computation of the ν=1 kernel's rotation integral is not explicitly described.** Equation 13 defines the ν=1 kernel with an integral over SO(3) weighted by a Wigner D-matrix. The paper states these "yield a Gaussian overlap, which can be computed analytically," but the sentence is truncated (likely a parser artifact removing what would be a brief explanation or reference). While the existence of closed-form expressions for such integrals is standard knowledge, the main text should either provide the formula or cite a reference that does, to keep the method section self-contained.
-
-- **Force training is not supported.** The paper acknowledges this (Fig. 2 caption) but does not discuss it as a limitation in the conclusions. For many atomistic applications (e.g., molecular dynamics), force predictions are essential. This limits the method's current applicability relative to competing approaches.
+6. **Missing hyperparameter details.** The paper mentions cross-validation and dual annealing but does not report the ranges searched for ν_max, λ_max, cutoff radius, regularization α, or how these were chosen. This makes the experiments difficult to reproduce or compare fairly.
 
 ### Trivial
 
-- The paper should explicitly clarify that the phrase "without a basis" refers to avoiding a radial/element basis expansion — angular truncation (λ_max) remains, and the paper acknowledges this. The title and abstract could be read as claiming no basis at all, which is slightly imprecise. (The paper itself mostly gets this right by specifying "radial-chemical basis" in the abstract.)
+7. **Body-order vs. angular resolution are conflated in the analysis**, but the paper itself acknowledges this (lines 219–220: "The combined effect of increasing ν complicates the interpretation of ablation studies, making it difficult to disentangle the effects of correlation order and of angular resolution"). This self-awareness is commendable. A simple ablation comparing ν=3/λ_max=3 vs. ν=2/λ_max=6 would strengthen the mechanistic claim, but its absence is not a weakness — it is a natural direction for future work.
 
 ## Nice-to-Haves
 
-- **Wall-clock timing or memory benchmarks.** The paper gives theoretical scaling (λ_max⁷, linear in ν) but no actual runtime or memory measurements. Even a rough comparison (e.g., "training on 110k QM9 molecules takes X hours on Y hardware") would help readers gauge practical applicability.
-
-- **Sensitivity analysis on the cutoff radius.** The locality assumption is central; showing how results vary with cutoff would strengthen the evaluation.
-
-- **Investigation of whether increasing λ_max closes the gap to LE-ACE on methane.** The methane comparison shows Wigner kernels (λ_max=3) competitive with LE-ACE (l=20). A brief check of whether higher λ_max further improves WKs would settle whether the method is truly data-limited or angular-resolution-limited here.
+- Algorithm pseudocode for the Wigner iteration (initialization, Clebsch-Gordan contractions, termination condition) would aid reproducibility.
+- Error bars on all learning curves (not just the final QM9 point) would strengthen statistical claims.
+- An ablation experiment separating body-order effects from angular resolution effects (e.g., ν=3/λ_max=3 vs. ν=2/λ_max=6 on methane) would clarify the mechanistic explanation in Sec. 3.2.
 
 ## Removed Points
 
-These points were raised by reviewers but are removed for the following reasons:
-
-1. **"Method requires an angular basis despite claiming 'without a basis'"** — The paper's claim is about avoiding the *radial-chemical* basis explosion. Angular truncation λ_max is explicitly acknowledged as a remaining limitation (lines 166–168). The reviewer conflates two different truncation axes. The paper's terminology is precise enough in context.
-
-2. **"Does not compare to Glielmo et al. 2018"** — Factually wrong. The paper cites and discusses Glielmo et al. 2018 in the Related Work section (line 61): "Ref. [glie+18prb] introduces density-based body-ordered kernels, and it proposes their analytical evaluation for low body orders."
-
-3. **"Handling of multiple chemical elements is not explained"** — Factually wrong. Line 150 explains: "where the δ_{a_i a_{i'}} term simply indicates that kernels between atoms of different chemical species are set to zero."
-
-4. **"Scaling discussion is misleading"** — The paper explicitly states "the steep scaling with λ_max is a potential drawback" (line 166) and discusses λ_max⁷ vs. λ_max⁵. The claim of linear scaling with ν is explicitly qualified as being for fixed λ_max. The paper is balanced and not misleading.
-
-5. **"Baseline comparisons are not controlled"** — The gold cluster comparison uses the same radial transform and optimizes a single hyperparameter for LE-ACE. The QM9 comparison follows the Allegro protocol with 110k/10k/test split, which is standard and fair. Methane comparisons reference published values. These are standard practices in the field; the reviewer's demands for controlled re-training of every baseline would be unusual.
-
-6. **"One-body kernel never used in results"** — The paper states it "will be useful in Section~[appendix] to define non-linear kernel functions" (line 158). The appendix is stripped by the parser; this is an artifact, not an omission.
-
-7. **Various formatting/style nitpicks and demands for appendix content** — Per hard rules, these are parser artifacts or out of scope.
+- **"KRR on ≥10⁵ points is practically impossible"** — downgraded from fatal/implausible to Major (missing implementation detail). Iterative solvers (conjugate gradient) are standard for large KRR and do not require O(N³). The concern is the lack of disclosure, not inherent impossibility.
+- **"State-of-the-art claim is overstated because MACE/Equiformer achieve <4 meV"** — removed per the rule that I cannot verify missing related works without external sources. The paper's comparison table is self-contained and shows Wigner kernels leading all models listed.
+- **"Missing derivation" characterized as fatal** — downgraded to Major. The method is clearly defined and can be implemented from Eq. 9; the missing connection to Eq. 5 is a conceptual gap that affects understanding but does not invalidate the empirical results.
+- **Various formatting/style nitpicks** — removed per parser-artifact rules.
 
 ## Novel Insights
 
-Beyond the paper's own contributions, the reviews surface one genuinely novel observation: the paper's explanation for why low λ_max suffices (Sec. 3.2) — that the iterative tensor-product construction intrinsically mixes higher angular frequencies — provides a principled justification for a phenomenon observed empirically across many recent equivariant ML models (NequIP, MACE, Allegro). The reviews helpfully contextualize this as potentially the paper's most broadly impactful insight, extending beyond kernel methods to equivariant neural network design.
+The Harsh Critic correctly identifies that the paper's two most consequential gaps are at the exact points where the authors took intellectual shortcuts: (1) asserting the equivalence between the integral definition and the iterative construction without proof, and (2) treating the KRR solver as a black box when its computational demands are extraordinary for the dataset sizes involved. These are not random omissions — they are the two steps where the paper transitions from known mathematics (body-ordered expansions, spherical tensor contractions) to its claimed novelty (kernel-space evaluation without basis truncation). The fact that both transitions are underspecified suggests the authors may be overestimating how much of the connection is "obvious" to readers outside the immediate ACE community. Conversely, the Strength Finder's identification of the non-saturating dipole learning curves (Fig. 3) as a key finding is well-placed: this result is arguably more interesting than the raw QM9 energy number, because it demonstrates a qualitative capability (tensorial targets without feature-space explosion) rather than a quantitative increment on a saturated benchmark.
 
 ## Suggestions
 
-1. Report λ_max for all experiments explicitly, especially the gold cluster dataset.
-2. Add a λ_max ablation study for at least one dataset (gold or QM9) to empirically support the claim that low λ_max is sufficient.
-3. Include error bars / multiple-seed information in all learning curves.
-4. Add a brief explanation or citation for the analytical evaluation of the ν=1 kernel's rotation integral to make the methods section self-contained.
-5. Consider adding wall-clock timing information to help readers assess practical cost.
-6. Explicitly discuss the force-training limitation and potential extensions in the conclusions.
+1. Provide a self-contained derivation or explicit reference showing that the Wigner iteration computes the kernel in Eq. 5. Even a short paragraph explaining that the ν-fold tensor product of the ν=1 density overlap, when symmetrized via the SO(3) integral, yields the Clebsch-Gordan recursion would suffice.
+
+2. Disclose the actual algorithm used for the KRR linear system at N=110k. If conjugate gradient was used (standard practice), state that. Report training time, inference time, and memory footprint for at least one representative benchmark.
+
+3. Replace unqualified "state-of-the-art" with a precise qualifier matching the comparison scope.
+
+4. Report the hyperparameter search ranges and final selected values for ν_max, λ_max, cutoff radius, and regularization α.
+
+5. Add algorithm pseudocode showing the full computation of a kernel between two atomic environments.
 
 ## Score and Decision
 
-Based on the above: the paper's core contribution is novel and clearly explained; the experimental validation is strong across multiple diverse benchmarks (gold, methane, QM9 energies and dipoles); and the method achieves genuine state-of-the-art results. The weaknesses are real but minor — mostly missing hyperparameter reporting, one missing ablation, and presentation gaps. None undermine the central claims. This is a solid acceptance.
-
-MY FINAL SCORE: <pineapple>8</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

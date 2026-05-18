@@ -1,87 +1,76 @@
-Now I have a comprehensive understanding of the paper. Let me synthesize the final review.
+Now I have a thorough understanding of the paper. Let me compose the final consolidated review.
 
 ---
 
 ## Summary
 
-P3DTrack proposes a novel 2D MOT paradigm that learns 3D object representations from pseudo labels generated via Structure-from-Motion (SfM), without requiring LiDAR or depth annotations. The method (1) generates pseudo 3D object positions by clustering SfM-reconstructed points inside 2D bounding box frustums across frames, (2) jointly learns a 3D representation head alongside a GNN-based association module, and (3) uses a 3D Kalman Filter at inference for motion modeling. Experiments on KITTI and Waymo show competitive results, with particularly strong association gains on KITTI.
+This paper proposes P3DTrack, a 2D MOT paradigm that learns 3D object representations from monocular video using Structure-from-Motion (SfM) to generate pseudo-3D training labels, without requiring LiDAR or depth annotations. The 3D representation is jointly learned with a GNN-based association module. Experiments on KITTI and Waymo Open Dataset show consistent improvements over competitive baselines, particularly in association metrics (AssA +3.0 on KITTI) while adding minimal inference overhead (~12 ms).
 
 ## Strengths
 
-1. **Novel pseudo 3D label generation from 2D tracklets alone.** The idea of using SfM reconstruction combined with 2D tracking labels to generate 3D supervision is creative and principled. Section 3.1 and Figure 2 describe the pipeline (SfM reconstruction → intra-frame clustering with threshold δ → inter-frame clustering with threshold κ → matching to tracklets). Table 5 confirms that the learned 3D representation substantially outperforms both raw SfM positions (which collapse on moving objects, 52.5 MOTA) and a pretrained depth model (MiDaS v3), directly validating that the pseudo labels provide useful supervision.
+1. **Novel pseudo-3D label generation pipeline enables 3D representation learning without LiDAR or depth annotations.** The paper details a principled approach (Sec. 3.1, Fig. 2) combining SfM scene reconstruction with intra-frame and inter-frame point clustering (IntraPC, InterPC) to isolate object points and match them to 2D tracklets. This is a genuine methodological contribution — prior depth-based MOT methods either require pretrained depth estimators or 3D ground truth.
 
-2. **Strong association results on KITTI test set.** P3DTrack achieves the highest AssA and the lowest number of ID Switches among all methods that use no additional human annotations or pretrained models on autonomous driving datasets (Table 2). The +3.0 AssA improvement over the next best method is a clean, substantiated win for the core claim that learned 3D representation improves data association.
+2. **Strong association performance on KITTI test set.** The method achieves an AssA of 63.3 (+3.0 over QDTrack) and only 99 ID switches (Table 2), outperforming both 2D MOT methods and monocular 3D MOT methods that use annotated 3D ground truth. This directly demonstrates the central claim that learned 3D representation improves data association.
 
-3. **Ablation cleanly isolates the contribution of 3D representation learning.** Table 3 shows a stepwise decomposition: baseline (57.4 MOTA) → +low-score matching (+2.4) → +GNN association learning (+1.8) → +3D representation (+2.4). The 3D representation contributes substantially beyond the already-improved association pipeline, and the ablation design is sound.
+3. **Efficient inference with negligible overhead.** Table 8 shows only 12 ms latency increase (~5.5%) and modest parameter/memory growth, making the approach practical for online tracking.
 
-4. **Ablation on 3D-vs-appearance weight demonstrates complementary value.** Table 7 shows that combining both modalities (α=0.4) is optimal, while using only the learned 3D representation (α=1) still achieves non-trivial tracking (61.9 MOTA), confirming the 3D representation captures discriminative information independent of appearance.
-
-5. **Practical efficiency.** Table 8 reports minimal overhead: +12ms latency (5.5%), modest parameter increase. The method is practical for real-time use.
-
-6. **Honest scope delineation.** Section 4.1 explicitly states that surveillance-style datasets without camera motion (MOT17, MOT20) are unsuitable, grounding the evaluation in the appropriate setting.
+4. **Hyperparameter analysis provides insight into design choices.** The paper systematically studies detection/appearance thresholds (Table 6) and the 3D similarity weight α (Table 7), showing that α=0.4 balances MOTA/IDF1 and that both appearance and 3D components contribute.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Generalization from static-object pseudo labels to moving objects is insufficiently validated.** The pseudo 3D labels are generated from SfM, which reconstructs only static scene points; moving objects are filtered as outliers. The paper explicitly states "we only label static objects" (line 73). The 3DRL module is therefore trained exclusively on static objects, yet at test time is applied to all objects including moving vehicles and pedestrians. The paper's justification (line 105) — "whether the object is moving does not affect 3D object representation learning, because the network does not distinguish the object movement in one frame" — conflates single-frame appearance with learned position prediction. While there is logic to the argument (the network predicts 3D position from appearance features in a single frame, and movement is a temporal phenomenon), the paper provides no direct evidence. Table 5 shows the learned representation outperforms SfM-only (which definitely fails on moving objects), but this is indirect. An explicit breakdown of MOTA/IDF1 on static vs. moving subsets, or even qualitative 3D track visualizations for moving objects, is needed to substantiate the core claim for the most challenging cases.
+1. **Insufficient analysis of pseudo label coverage and generalization to moving objects.** The paper acknowledges that SfM can only reconstruct static scenes and that "we only label static objects" (line 73), arguing the network generalizes because it "does not distinguish the object movement in one frame" (line 105). However, the paper does not report: (a) what fraction of training tracks receive a pseudo 3D label vs. being supervised only by 2D labels, (b) how tracking performance differs on sequences dominated by moving vs. static objects, or (c) whether the 3D representation degrades for fast-moving objects. Since the core claim is that pseudo-3D labels from SfM can benefit general 2D MOT, the absence of this analysis weakens the evidence. The Table 5 comparison with SfM (which fails on moving objects) partially addresses this, but a systematic breakdown is needed.
 
-2. **Marginal and qualified state-of-the-art claim on Waymo.** On the Waymo validation set (Table 1), P3DTrack achieves 74.1 MOTA (+0.3 over QDTrack) but loses on IDF1 (77.9 vs. 79.5). The paper attributes the IDF1 drop to the CenterNet detector's lower recall, which is a reasonable explanation but does not change the fact that the identity-consistency metric favors the baseline. Moreover, the comparison uses different backbones (DLA-34 vs. Faster R-CNN). The paper's framing — "state-of-the-art performance on [Waymo]" — overstates the case. The KITTI results are substantially stronger and should be foregrounded; the Waymo results should be described as competitive.
+2. **Insufficient baselines on Waymo Open Dataset.** Table 1 compares only one competitor (QDTrack). Given that WOD is the larger of the two main datasets and the paper claims "state-of-the-art performance" on it, a single baseline is insufficient to support this claim. On KITTI the comparison is thorough, but the WOD results need at least a few more published methods (e.g., ByteTrack variants, FairMOT, or more recent transformer-based trackers that report on WOD) to contextualize the 0.3 MOTA gain over QDTrack.
+
+3. **Ablation study confounds the 3D representation contribution with the GNN module in Table 3.** The step from "+ Low-quality detections" to "+ Association learning (GNN) + jointly learning 3D representation" is a single jump of +4.2 MOTA / +3.8 IDF1 that bundles two components. Table 4 partially addresses this by comparing different representations within what appears to be the same association pipeline, and the "Appearance only" row effectively serves as the ablation the critic requests. However, the "Appearance + 3D KF w/o 3D rep" baseline is underspecified: the paper does not state where the depth for the 3D Kalman Filter comes from (SfM? MiDaS? other?). This matters because the 3D KF baseline is a critical comparison point for isolating the benefit of the learned 3D representation.
 
 ### Minor
 
-3. **Pseudo-label generation pipeline is underspecified for reproducibility.** The paper provides thresholds δ=0.5 and κ=30 but omits several critical details: (a) which SfM software was used (COLMAP? OpenSfM? — only the generic Schönberger & Frahm 2016 citation is given); (b) how "low speed of ego-motion" filtering is quantified (no threshold or criterion); (c) how the five-camera setup on Waymo is handled (are all cameras used jointly for SfM? separately?); (d) units and coordinate frame for δ (meters in world coordinates?); (e) coverage statistics — what fraction of tracklets receive pseudo labels? The paper's core innovation depends on this pipeline, and insufficient detail hinders independent verification and adoption. (Note: Algorithm 1 was likely in an appendix stripped by the parser, so details deferred to it may exist but are inaccessible.)
+1. **Training schedule appears without justification.** The paper uses 6 epochs for detection, 1 epoch for 3D representation, and 4 epochs for association learning. A brief rationale or ablation on training duration would help readers assess whether the 3DRL module is adequately trained.
 
-4. **"Jointly learned" is misleading.** Training proceeds in stages: detection (6 epochs) → 3DRL (1 epoch) → association (4 epochs), with modules frozen sequentially. This is staged or sequential training, not end-to-end joint optimization. The terminology should be adjusted.
-
-5. **ID Switches not reported for Waymo.** IDS (identity switches) is the most direct metric for the claimed association improvement, yet it is reported only for KITTI (Table 2), not for Waymo (Table 1). This should be added.
-
-6. **All ablations on FRONT camera only.** The paper states this (line 167) but does not verify that findings generalize to other cameras, which may have different viewpoints, occlusion patterns, and object scales.
+2. **No discussion of SfM failure cases or fallback behavior.** The paper notes that "not all scenes can be reconstructed well" and that videos with low ego-motion speed are filtered, but does not discuss how the method handles sequences where SfM partially fails (e.g., insufficient texture) or whether the tracker degrades gracefully to appearance-only association.
 
 ### Trivial
 
-7. **Absolute baseline latency not reported.** Table 8 gives relative overhead (12ms, 5.5%) but not the baseline FPS, so absolute speed cannot be calculated.
+- The paper defers algorithmic details to the appendix (stripped by the parser), but the main text could include the key thresholds (δ=0.5, κ=30, reported on line 176) more prominently in the methodology section rather than implementation details.
 
 ## Nice-to-Haves
 
-- Include at least one depth-based MOT baseline (e.g., a tracker using MiDaS depth for a 3D KF) on the same Waymo split to empirically validate the claim that joint learned 3D representation is superior to explicit depth-based approaches.
-- An ablation that removes the appearance feature entirely and relies solely on the learned 3D representation (a clean row in Table 7 with α=1 and no appearance) would more directly show how far the 3D signal can go alone.
-- A qualitative video of 3D tracks for moving objects (e.g., pedestrians crossing) would substantially strengthen the static-to-moving generalization argument.
-- Coverage statistics: what fraction of tracklets receive pseudo 3D labels, and how does the method perform on sequences where SfM reconstruction quality is poor?
+- A quantitative comparison with a fixed pretrained depth model (e.g., MiDaS) providing depth for a 3D KF, evaluated on the full validation set rather than only qualitatively (Table 5).
+- A discussion of the computational cost of the offline SfM label generation step to contextualize the practical overhead of adopting this paradigm.
+- Reporting the percentage of tracks that receive pseudo-3D labels in the training set.
 
 ## Removed Points
 
-*These points are flagged to be removed; treat them with caution.*
+The following reviewer points were removed or weakened after cross-checking against the paper:
 
-- **Criticism about missing depth-based MOT baseline**: The reviewer claimed "no depth-based MOT baseline is included in the experiments." This is factually incorrect — Table 5 compares with MiDaS v3 depth features within the same tracking framework. A full depth-based *pipeline* (e.g., Khurana et al.) is not included, but that is a nice-to-have, not a missing baseline.
-- **"No depth-based baseline" in Strengthening section**: Same point reiterated by the reviewer; downgraded to Nice-to-Haves above.
-- **Criticism about abstract claiming "3D association is nearly trivial" being too strong**: This quote refers to LiDAR-based 3D MOT (ImmortalTracker), which the paper correctly cites. The paper uses this as motivation, not as a claim about its own method. This is a framing misreading, not a paper error.
-- **Complaint about "no empirical testing" of the three objections to depth-based methods**: The paper's contribution is its own method, not a comparative study of depth-based approaches. The objections are motivating arguments, not experimental claims. This is scope creep.
-- **Weakness about "complex set of heuristics" in Section 3.3 not being isolated by ablation**: The ablation in Table 3 *does* isolate components — the 3D representation adds +2.4 MOTA on top of the improved matching pipeline. The critic's claim that low-score matching gives the largest single delta (+2.4) is true, but that does not negate the 3D representation's contribution.
-- **Various formatting/style nitpicks**: These are parser artifacts, not author errors.
+- **Claim that the ablation lacks a variant with GNN matching *without* 3D representation**: The paper's Table 4 includes an "Appearance only" row which uses the GNN association pipeline with only appearance features, directly providing this comparison. The critic's assertion that this ablation is missing is factually incorrect. (Removed as factually wrong.)
+- **Claim that the paper's justification for moving-object generalization is "weak"**: This is a judgment call, not a factual error. The argument (line 105: "the network does not distinguish the object movement in one frame") is a standard single-frame inference argument and defensible. The genuine weakness is the *lack of empirical analysis*, not the logic of the justification itself. (Reformed into Major weakness #1 above.)
+- **Questions about missing appendix content**: The parser strips appendices from all papers. (Removed per hard rule.)
+- **Formatting/style nitpicks**: None present in the original criticism.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a key concern (static-to-moving generalization) that the paper's own reasoning addresses only partially, but this is a standard scientific gap rather than a novel observation.
+None beyond the paper's own contributions. The reviews primarily surface verification gaps (pseudo label coverage analysis, WOD baseline breadth) rather than offering new interpretations of the method.
 
 ## Suggestions
 
-1. **Address the static-to-moving concern directly**: Partition the Waymo validation set into static-only and moving-object subsets and report MOTA, IDF1, and IDS on each. Even a simple qualitative figure showing predicted 3D tracks for moving pedestrians would substantially strengthen the paper.
-2. **Reframe the Waymo results**: Replace "state-of-the-art" with "competitive results" for Waymo, and foreground the stronger KITTI association gains. Include IDS in the Waymo table.
-3. **Expand pseudo-label documentation in the main text or a public supplement**: Specify the SfM software, define "low ego-motion" quantitatively, describe multi-camera handling for Waymo, state units for δ, and report coverage statistics (fraction of tracklets with pseudo labels).
-4. **Correct the "jointly learned" terminology** to "sequentially trained" or "staged training" to accurately reflect the training procedure.
+1. On WOD, add at least 2–3 more published 2D MOT baselines (e.g., ByteTrack variants, FairMOT, or recent transformer-based trackers that report WOD results) to contextualize the performance claim.
+2. Report the percentage of training tracks that receive pseudo-3D labels, and evaluate tracking performance separately on sequences with predominantly moving vs. static objects.
+3. Specify the depth source for the "3D KF w/o 3D rep" baseline in Table 4, and add an explicit row in Table 3 that isolates the GNN module without 3D representation from the full method.
+4. Add a brief discussion of SfM failure modes (e.g., low-texture scenes) and whether the tracker has any fallback mechanism.
+
+---
+
+**Overall assessment**: The paper proposes a genuinely novel and well-motivated approach to 2D MOT. The core idea — learning 3D object representations from pseudo labels derived via SfM, without LiDAR or depth annotations — is interesting and the KITTI results convincingly demonstrate its value for data association. However, the paper's central claim of state-of-the-art performance on WOD is under-supported by a single baseline, and the analysis of pseudo label coverage and moving-object generalization is incomplete. These are addressable gaps rather than fundamental flaws. The contribution is real and the method is likely sound.
 
 ## Score and Decision
 
-**Originality**: Good — the idea of learning 3D representation from SfM-derived pseudo labels for 2D MOT is novel.  
-**Importance**: Moderate — addressing occlusion-driven association errors is a meaningful problem, though the ego-centric scope limits breadth.  
-**Claims support**: Moderate — strong on KITTI, weaker on Waymo (marginal MOTA, lower IDF1).  
-**Soundness**: Adequate — the ablations are well-designed, but the static-to-moving generalization gap is a real unresolved concern.  
-**Clarity**: Good — the paper is well-structured and the methodology is clearly described despite missing some implementation details.  
-**Value to community**: Moderate-positive — the idea is likely to inspire follow-ups on video-based 3D representation learning for tracking.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,18 +1,18 @@
-Now I have all the information I need. Let me write the final consolidated review.
+I have now thoroughly cross-checked all reviewer claims against the paper. Let me compile the final review.
+
+---
 
 ## Summary
 
-This paper proposes Classifier-Free Diffusion Generation (CFDG), a data augmentation method for Offline-to-Online RL that uses a conditional diffusion model with classifier-free guidance to generate both offline-like and online-like synthetic transitions during online fine-tuning. The key insight, supported by t-SNE distribution analysis, is that offline and online data play distinct roles in O2O RL (diversity vs. stability) and should be augmented separately rather than treated as a single pool. CFDG is designed as a plugin compatible with existing O2O algorithms (IQL, PEX, APL), and experiments on D4RL benchmarks report a 15% average improvement on Locomotion and 11% on AntMaze over the unaugmented baselines.
+This paper proposes Classifier-Free Diffusion Generation (CFDG), a data augmentation method for Offline-to-Online (O2O) RL that uses a conditional diffusion model with classifier-free guidance to generate synthetic data for both offline and online data separately. The key insight is that offline and online data serve different purposes in O2O RL (diversity vs. policy alignment), so augmenting both independently with a single conditional diffusion model yields better results than prior methods that augment only one type. CFDG is integrated with IQL, PEX, and APL and evaluated on 16 D4RL tasks, reporting a 15% average improvement.
 
 ## Strengths
 
-- **Clear distribution analysis motivates the core design choice.** The paper visualizes offline, online, and EDIS-generated data distributions using t-SNE (Figure 1), showing that offline data is more evenly distributed while online data is more dispersed. This analysis directly motivates the decision to perform separate augmentation for each data type—a concrete rationale that is often absent in data-augmentation-for-RL papers.
+- **Novel and well-motivated approach to simultaneous data augmentation**: The paper identifies a genuine gap in prior work — SynthER augments only online data and EDIS augments from offline data only — and proposes a conditional diffusion model that generates both types in a single pass. Using classifier-free guidance with distinct labels for offline and online data is a clean design choice that avoids training two separate generative models. The ablation study (Figure 3) directly validates that augmenting *both* types outperforms augmenting only online data across all four environments tested.
 
-- **CFDG improves multiple O2O RL algorithms across diverse tasks.** Table 1 shows that integrating CFDG with IQL, PEX, and APL yields consistent improvements (15% on Locomotion, 11% on AntMaze) across a range of D4RL environments. The method is tested with three different base algorithms covering two distinct data-usage paradigms, supporting the claim of versatility.
+- **Breadth of empirical validation across algorithms and tasks**: CFDG is evaluated with three different O2O algorithms (IQL, PEX, APL) covering both data-usage paradigms (fixed 1:1 ratio and OORB sampling), on 12 locomotion and 4 AntMaze tasks from D4RL. Table 1 reports normalized scores averaged over 5 seeds for all 16 tasks, with CFDG improving or matching the baseline in nearly every case. This breadth supports the claim that the method generalizes beyond a single algorithm or environment.
 
-- **Ablation confirms the benefit of dual-source augmentation.** Figure 3 demonstrates that augmenting only online data with CFDG outperforms the baseline, and augmenting both offline and online data yields further gains—especially on halfcheetah-medium-replay-v2 and walker2d-random-v2. This validates the paper's central thesis about separate augmentation.
-
-- **Single diffusion model generates both data types.** The method trains a single conditional diffusion model that generates both offline-like and online-like samples (via label conditioning), avoiding the overhead of training two separate generative models. Algorithm 1 makes the training-and-generation loop explicit.
+- **Consistent hyperparameter configuration**: The paper uses a fixed synthetic data ratio \(r=1/3\), a fixed 8:2 ratio of generated online-to-offline data, and only two different \(T_{\text{diff}}\) values (10K for APL, 100K for IQL/PEX) across all tasks and environments. This indicates the approach is not heavily over-tuned and can be applied with minimal adjustment, which is a practical strength.
 
 ## Weaknesses
 
@@ -22,53 +22,51 @@ None.
 
 ### Major
 
-- **Head-to-head comparison against SynthER and EDIS is too narrow to support the claimed superiority.** The paper claims that "our approach outperforms existing data augmentation methods such as SynthER and EDIS" (contributions) and that CFDG surpasses "current SOTA data augmentation methods" (Section 4.2). However, the direct comparison (Figure 2) is conducted on only **three environments** (halfcheetah-medium-replay-v2, hopper-medium-replay-v2, walker2d-medium-replay-v2) with **one base algorithm** (IQL). Table 1—which reports the main results across all tasks—does not include SynthER or EDIS as baselines at all. The core comparative claim therefore rests on a thin empirical foundation. Without evidence across more environments and with other base algorithms (PEX, APL), the assertion of superiority is not adequately established.
-
-- **Ablation does not isolate the effect of classifier-free guidance (CFG).** The paper identifies two key differences from prior model-based methods: "(i) the diffusion model utilizes classifier-free guidance [and] (ii) it performs data augmentation on both offline data and online data" (Section 4.3). The ablation in Figure 3 tests (ii) by comparing "augment only online" vs. "augment both," but both variants use CFG. There is **no comparison to a version that uses standard conditional diffusion without CFG**. Since CFG is listed as a contribution and a "key design choice," the reader cannot tell whether observed gains come from conditional generation itself or from the CFG mechanism specifically. This gap weakens the technical validation.
+- **Missing measures of variance in the main results table (Table 1)**. The primary quantitative claim — a 15% average improvement — rests on Table 1, which reports normalized scores averaged over 5 random seeds but provides no standard deviations, confidence intervals, or per-seed breakdowns. For a field where RL experiments are known to be high-variance, this omission is the single biggest weakness. The learning curves in Figures 2 and 3 show shaded regions (variance) for selected tasks, which partially addresses the concern, but the headline table — which readers will use to judge the core claim — lacks the most basic uncertainty quantification. Without it, the reader cannot assess whether the reported improvements are consistent or driven by noise on a few tasks. This is not a minor omission; it directly weakens the credibility of the central empirical contribution.
 
 ### Minor
 
-- **No confidence intervals or standard deviations reported.** Learning curves in Figures 2 and 3 are reported as means over 5 seeds without error bars or shaded regions. Table 1 states results are "assessed across 5 random seeds" but does not report variance. The paper even uses the phrase "statistical significance" (Section 4 opening paragraph) without providing any significance tests. Given the high variance typical of MuJoCo and especially AntMaze tasks, the reader cannot assess whether reported improvements are reliable or within the noise.
+- **Limited comparison with model-based augmentation methods**. Section 4.2 compares CFDG against SynthER and EDIS only on IQL as the base algorithm, and only through learning curves (Figure 2) on what appears to be 3–4 environments. There is no tabular summary of these comparisons across the full suite of tasks or over the other base algorithms (PEX, APL). The paper's claim that "CFDG outperforms current SOTA data augmentation methods" is supported by suggestive but limited evidence. A systematic tabular comparison (including variance) would substantially strengthen this claim.
 
-- **Extension of APL to AntMaze is not described.** The paper states "since APL did not conduct experiments on the AntMaze dataset, we carried out our experiments according to its original setup" (Section 4.1). However, AntMaze performance is known to be sensitive to hyperparameter choices (e.g., conservative regularization strength, tuning schedules). How APL was adapted—whether the same hyperparameters were used, or whether additional tuning was performed—is not explained, making it difficult to assess the fairness of the comparison.
+- **Several critical implementation details are missing**. The paper does not specify: (i) what data representation the diffusion model operates on (state-action pairs, transitions \((s,a,r,s')\), or something else); (ii) how the condition label is encoded (discrete class, one-hot, learned embedding); (iii) the numerical values of the guidance weight \(w\) and unconditional dropout probability \(p_{\text{uncond}}\), both of which are key hyperparameters in classifier-free guidance. The architecture of the denoising network is also not described beyond "Elucidated Diffusion Model." These details are essential for reproducibility.
 
-- **No sensitivity analysis for the data generation ratio.** The synthetic data ratio \(r\) and the offline/online generation ratio (8:2) are fixed across all tasks with no justification beyond empirical convenience. The conclusion itself acknowledges that "the ratio can significantly impact performance in different environments," yet no analysis is provided showing how results vary with these settings or whether the chosen values are near-optimal across tasks.
+- **Incomplete ablation study**. Figure 3 compares baseline (no augmentation) vs. augmenting only online data vs. augmenting both offline and online data. However, the `offline-only` augmentation condition is not tested, and there is no baseline comparing CFDG against simply mixing more raw (non-generated) data. This makes it difficult to isolate whether the benefit comes from data *generation* or simply from having *more data*. The paper also does not ablate the use of classifier-free guidance against, say, two separate unconditional diffusion models.
 
-- **No discussion of computational cost.** The paper does not report the time, GPU resources, or wall-clock overhead of training the diffusion model and generating synthetic samples during online RL. Since diffusion models are computationally intensive, this omission is relevant for practitioners evaluating whether the performance gains justify the added cost.
+- **Distribution of improvements is uneven, and this is not discussed**. Table 1 shows that on several tasks the improvement is negligible (e.g., IQL on walker2d-med-exp: 113.4 vs. 113.7), while a few tasks show large gains (e.g., hopper-random). The 15% average may be driven by a small number of tasks. The paper should discuss where CFDG helps most and why.
+
+- **No discussion of potential instability from the iterative training loop**. The diffusion model is retrained periodically on the evolving online buffer, generating new synthetic data that is then used for policy training, which changes the online buffer, which changes the diffusion model again. This feedback loop could potentially lead to distribution shift or instability, but the paper does not address this.
 
 ### Trivial
 
-- The t-SNE analysis (Figure 1) is referenced but the key observations are purely qualitative; no quantitative distributional distance (e.g., KL divergence, MMD) is reported. This limits the strength of the motivation but does not affect the validity of the experiments.
+- The paper does not report computational cost (training time, sample generation cost) despite claiming "reduced time costs" from using a single conditional model. A rough comparison would be useful.
 
 ## Nice-to-Haves
 
-- A sensitivity study varying the synthetic data ratio \(r\) and the offline/online generation ratio on one or two representative tasks, to help guide practical usage.
-- Reporting wall-clock time per environment step with and without CFDG, so readers can assess the cost-benefit trade-off.
-- An analysis of synthetic data quality (e.g., measuring the Q-function's Bellman error on synthetic vs. real transitions, or computing MMD to the real data distribution).
+- Integrating CFDG with Cal-QL (another O2O method) would further strengthen the generality claim, but is not required.
+- Providing a sensitivity analysis of the key hyperparameters (guidance weight \(w\), ratio of generated online-to-offline data 8:2, synthetic data ratio \(r=1/3\)) would address concerns about arbitrary choices.
+- A brief discussion of whether generated transitions are physically plausible (respecting environment dynamics) would be useful given known risks in generative replay for RL.
 
 ## Removed Points
 
-- **Criticism that Table 1 is an image / not machine-readable:** The table is presented as a figure in the paper. While a text table would be preferable, this is a formatting/presentation choice and does not affect the scientific validity of the results. Moved to Removed as a pure formatting nitpick.
-- **Criticism about t-SNE not being shown:** The t-SNE plot (Figure 1) is embedded as an image in the original PDF. Its absence in the extracted text is a parser artifact, not an author error.
-- **Criticism about missing architecture details (denoising steps, etc.):** The paper specifies that it builds on the Elucidated Diffusion Model (Karras et al., 2022) and provides key hyperparameters (buffer size, T_diff, r, etc.). Remaining architectural details (e.g., exact denoising step count) are standard for the EDM framework and would be in the appendix, which is stripped by the parser. These constitute trivial implementation nitpicks under the hard rules.
-- **Criticism about the EDIS critique being "simplistic":** This is a matter of opinion about the paper's rhetorical framing, not a factual error about its content. The paper's argument that online data is more aligned with the current policy than EDIS-generated data is scientifically valid.
-- **Strength Finder claims about "consistently outperforming" being too strong:** The strength is valid in that on the 3 environments tested, CFDG does outperform. The limitation on scope is already captured in the Major weakness above.
+These points were removed after verification against the paper; they are included here for completeness but were not incorporated into the final assessment:
+
+- **Request for VAE/GAN/adding-noise baselines**: The paper already compares against the relevant SOTA methods (SynthER, EDIS) in this specific line of work. Adding VAE/GAN/ noise baselines would broaden the paper's scope unnecessarily and is scope creep. (Harsh Critic, Critical Issue 2, last sentence)
+- **Request for Cal-QL comparison**: This amounts to "the paper should also compare against another baseline" — a reasonable suggestion but not a weakness of the paper as scoped. Moved to Nice-to-Haves.
+- **Criticism that T_diff values are not reported**: The paper explicitly reports T_diff as 10K for APL and 100K for IQL/PEX (line 164). The critic's concern about *justification* rather than *reporting* is valid and kept in Minor; the factual claim that values were missing is incorrect and removed.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the main strengths and gaps accurately but do not identify unexpected connections or deeper implications not already stated in the paper.
+None beyond the paper's own contributions. The reviews surface the expected concerns about statistical rigor and method clarity but do not identify novel implications or connections the paper itself misses.
 
 ## Suggestions
 
-1. **Expand the direct comparison with SynthER and EDIS.** At minimum, add the SynthER and EDIS baselines to Table 1 across all environments and base algorithms tested. This would directly validate the core comparative claim.
-2. **Add an ablation comparing CFG vs. standard conditional diffusion** (without CFG). This would isolate whether CFG is providing meaningful gains beyond simple conditional generation.
-3. **Report standard deviations or confidence bands** for all main results and learning curves, and remove the unsupported claim of "statistical significance" unless proper tests are conducted.
-4. **Describe how APL was adapted to AntMaze**, including any hyperparameter changes made relative to the original APL setup.
-5. **Add a brief sensitivity analysis** for the data ratio \(r\) on a representative task, and discuss the practical implications.
+1. **Add standard deviations or per-seed results to Table 1.** This is the single highest-impact improvement. Even a supplementary table with per-seed numbers would substantially increase confidence in the results.
+2. **Provide a tabular comparison with SynthER and EDIS across all environments and base algorithms**, ideally including variance measures. This would move the comparison from "suggestive learning curves on a few tasks" to a systematic result.
+3. **Specify the missing method details**: data format fed to the diffusion model, condition encoding, guidance weight \(w\) value, unconditional dropout probability \(p_{\text{uncond}}\), and a brief architecture description.
+4. **Add the missing ablation conditions**: offline-only augmentation and a "more raw data" baseline (mixing additional ungenerated data) to isolate the effect of generation from the effect of more data.
+5. **Discuss the distribution of improvements** — what characterizes the tasks where CFDG helps most vs. least — to provide insight beyond the aggregate average.
 
 ## Score and Decision
 
-The paper proposes a sensible, well-motivated data augmentation technique for O2O RL. The core insight—separately generating offline-like and online-like data with a single conditional diffusion model—is clear and the initial results are promising. However, the experimental validation has two structural gaps that prevent the paper from making a fully convincing case: (1) the head-to-head comparison against SynthER and EDIS is limited to 3 environments with 1 algorithm, yet the paper claims superiority broadly; and (2) the ablation does not isolate the effect of classifier-free guidance despite listing it as a key contribution. These are addressable in revision but nontrivial to fix within a rebuttal period. The paper would be a solid contribution once these gaps are filled.
-
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

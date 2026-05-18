@@ -1,72 +1,68 @@
-Now I have a thorough understanding of the paper and can verify each claim. Let me produce the final consolidated review.
+Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
 
 ## Summary
 
-RODIN presents an end-to-end architecture for 3D vision-language understanding that processes posed RGB-D frames directly (rather than precomputed mesh-sampled point clouds). It combines an ODIN 2D→3D encoder (initialized from 2D pretrained weights) with a novel mask-language decoder that updates visual features during query refinement, and a text decoder for question answering. The model achieves strong results across referential grounding (SR3D, NR3D, ScanRefer), language-prompted instance segmentation (ScanNet200, Matterport3D), and 3D QA (ScanQA, SQA3D).
+RODIN presents a 2D-3D vision-language transformer that directly processes posed RGB-D frames (sensor inputs) without requiring reconstructed meshes or ground-truth proposals. The architecture extends ODIN's 2D-3D backbone with a novel mask-language decoder and text decoder, initializing from COCO-pretrained Mask2Former-Swin and finetuning end-to-end across referential grounding, segmentation, and QA tasks. The paper reports SOTA results on SR3D (+19.9%), NR3D (+13.6%), ScanRefer (+13.8%), ScanNet200 language-prompted segmentation (+7.2%), ScanQA (+4.1%), and SQA3D (+3.3%).
 
 ## Strengths
 
-- **State-of-the-art results on multiple 3D VL benchmarks using only sensor inputs.** RODIN achieves the best reported numbers on referential grounding (SR3D, NR3D, ScanRefer), language-prompted segmentation (ScanNet200), and QA (ScanQA, SQA3D) — crucially, without relying on mesh-sampled point clouds or ground-truth proposals. These results are directly supported by Tables 1–3.
+1. **Consistent SOTA across three task families with a single architecture.** RODIN achieves substantial improvements on referential grounding (Table 1), language-prompted segmentation (Table 2), and 3D QA (Table 3). The +19.9% on SR3D and +13.8% on ScanRefer (Det setup) are large margins that cannot be explained by any single confound. This breadth of improvement supports the paper's core architectural claims.
 
-- **Carefully motivated architectural design with informative ablations.** The paper provides systematic ablations (Tables 4, 5) that isolate the value of: mask decoding over box decoding (especially at IoU@0.75), updating visual tokens during query refinement (critical for grounding, unnecessary for boxes), 2D pretraining, and the mask-bounding-box loss. These experiments give concrete evidence for the design choices and make the paper's insights reproducible.
+2. **Novel architectural insight validated by ablations.** The ablation study (Tables 4–5) cleanly demonstrates that updating visual features during query refinement is essential for mask-based decoding but not for box-based decoding (Table 5b). This is a nontrivial design principle for future 3D VLU models and is convincingly separated from confounds (ODIN's open-vocabulary head, Object2Scene's box head).
 
-- **Direct RGB-D input enables embodied deployment.** RODIN's ability to process raw posed RGB-D frames (iPhone-style) without requiring mesh reconstruction simplifies the inference pipeline. The paper demonstrates that existing methods suffer a ~5% drop when switching from mesh to sensor point clouds, while RODIN avoids this degradation and even outperforms mesh-based methods — a practically important finding for robotics and AR applications.
+3. **Practical robustness to sensor input degradation.** The paper quantifies the 5.15% drop existing methods suffer when moving from mesh to sensor point clouds (lines 12, 117), and shows RODIN outperforms even mesh-based baselines while using harder sensor inputs. This directly supports the practical claim of suitability for embodied deployment.
 
-- **Practical inference efficiency.** The model processes a 90-frame scene in ~1050ms with ~15GB VRAM on an A100, making it viable for real-world deployment despite using a 130M backbone plus frozen 220M text encoder.
+4. **Joint training across heterogeneous tasks.** RODIN uses a single training run and forward pass across grounding, segmentation, and QA datasets (line 101), unlike prior works that use separate training or multi-stage pipelines. The ablations and results are generated from the same jointly-trained model.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
 
-- **Misleading improvement claims against weak baselines.** The paper states "19.9% on SR3D, 13.6% on NR3D, 13.8% on ScanRefer" as gains "over all prior methods" (lines 4, 22). These large margins appear to be computed against weak sensor-input baselines (e.g., 3D-Vista-Sensor or BUTD-DETR-Sensor), not against the strongest mesh-based methods (PQ3D). The best prior on SR3D (Det) achieves ~76 (mesh); RODIN achieves ~80 (sensor) — a ~5% relative gain, not 19.9%. The paper does not clearly decompose which margins refer to which baselines. The abstract and introduction should explicitly state that the large gains are against prior sensor-based methods, and separately report gains against the mesh-based SOTA.
-
-- **Overclaimed novelty: "first end-to-end model that leverages pretrained 2D features."** The paper claims to be "the first end-to-end model that leverages pretrained 2D features and finetunes them for 3D vision-language reasoning" (lines 26, 175). This is directly contradicted by BUTD-DETR (Jain et al., 2022a), which the paper itself cites as a baseline — BUTD-DETR is an end-to-end model that uses pretrained 2D features, lifts them to 3D, and finetunes them for 3D referential grounding. The legitimate novelty of RODIN lies elsewhere: (a) operating on raw RGB-D frames rather than mesh point clouds, (b) the specific architecture combining ODIN's 2D↔3D attention backbone with a mask-language decoder that updates visual tokens, and (c) joint training across multiple VL tasks. The "first" framing invites skepticism and should be replaced with these specific claims.
+1. **Asymmetric comparison in language-prompted segmentation (Section 4.2, Table 2).** RODIN receives all 200 class names concatenated in a single forward pass, while PQ3D processes one class at a time (line 131: "our model can simultaneously decode masks for all objects mentioned in the sentence" vs. PQ3D "has to supply one object at a time"). The paper acknowledges this asymmetry but does not control for it — e.g., by running RODIN in a single-class-per-pass mode. The reported +7.2% AP@25 on ScanNet200 may partly reflect the contextual advantage of seeing all category names simultaneously (disambiguating "chair" vs. "armchair") rather than architectural improvements alone. This weakens the segmentation contribution claim, but the paper's other strong results (referential grounding, QA) are unaffected by this concern.
 
 ### Minor
 
-- **Joint training and frame selection are confounded with architectural gains.** RODIN is trained jointly across 7 datasets (SR3D, NR3D, ScanRefer, ScanNet200, Matterport3D, ScanQA, SQA3D), while baseline methods may not be. The paper asserts this is "similar in scale to datasets used by prior SOTA methods like PQ3D and 3DVista" (line 101) but does not ablate the effect. Additionally, RODIN uses a specific frame-selection strategy (5 CLIP-relevant + 10 FPS frames) during training that is not evaluated versus alternatives like uniform sampling or full-frame training. Without ablations, the reader cannot attribute the gains to architecture vs. training recipe.
+1. **No open-vocabulary or zero-shot evaluation.** The paper's premise is that 2D foundational features can be effectively injected into 3D VLU. A natural test would be evaluating on unseen categories or held-out scenes without task-specific training. While the paper does not claim open-vocabulary capabilities for itself, such an experiment would significantly strengthen the claim that the 2D pretraining is being "effectively leveraged" (the key term in the paper's hypothesis, line 20). As it stands, the benefits of 2D pretraining are demonstrated only in-domain.
 
-- **No limitations section or failure analysis.** The paper does not discuss limitations such as reliance on accurate camera poses, depth sensor noise sensitivity, inability to handle dynamic scenes, or failure modes with transparent/reflective surfaces. A brief discussion would strengthen scientific honesty. Similarly, there are no qualitative visualizations of predicted masks or failure cases, which is a standard expectation for a vision-language grounding paper. Figure 1 shows an overview but no error analysis.
+2. **Referential grounding comparison is partially asymmetric.** RODIN operates on sensor inputs, while some baselines (notably PQ3D) are evaluated on mesh inputs and could not be retrained on sensor data (line 113). The paper argues this favors RODIN because sensor inputs are harder — a reasonable argument — but does not provide the symmetric comparison (RODIN on mesh) that would fully settle the issue. The paper does retrain 3D-VisTA and BUTD-DETR on sensor data, which mitigates this concern, but the overall comparison remains imperfect.
 
-- **Noun chunker used but not described or evaluated.** The paper mentions "an off-the-shelf noun chunker to localize noun phrases" (line 43) but does not specify which chunker, report its accuracy, or ablate its impact on grounding performance. This is a potential source of error that is left unexamined.
-
-- **Masked cross-attention mechanism underspecified.** The description states it "follows Mask2Former and use[s] a masked variant where each query only attends to the points falling within the corresponding instance mask predicted by the previous layer" (line 47). The paper does not explicitly state that the mask comes from the *previous layer's* prediction — this should be made explicit for reproducibility. (It is reasonable to assume this follows Mask2Former, but stating it would help.)
-
-- **Missing comparison with other recent RGB-D methods.** The evaluation does not include LLaVA-3D (Zhu et al., 2024a) or EmbodiedScan (Wang et al., 2023), which also operate on posed RGB-D data. Including these would strengthen the claim of SOTA on sensor inputs.
+3. **No qualitative output visualizations.** The paper lacks any examples of predicted masks, bounding boxes, or failure cases. For a paper introducing a mask-based decoder for 3D grounding, qualitative outputs would help readers understand what the model captures (e.g., mask quality, boundary accuracy, common failure modes). This is a presentation gap rather than a technical flaw.
 
 ### Trivial
 
-- The abstract states a "5-10% drop" for baselines on sensor data, while the experiments section reports the measured value as "5.15%" — these are consistent (5.15% is within 5-10%) but the range in the abstract and the precise figure in the experiments could be harmonized.
+1. **Ambiguity in the masked cross-attention description.** It is not explicitly stated whether the language tokens (concatenated with object queries) attend to visual tokens through the mask, or whether they have a separate attention pattern (lines 55–58). The mechanism is inferable from the equations but could be clearer.
+
+2. **Unclear source of the 5.15% drop statistic.** The paper states "both single-stage methods like BUTD-DETR and two-stage methods like 3DVista have a performance drop of 5.15%" (line 117), but it is ambiguous whether this is an average across methods or each method individually exhibits exactly 5.15%. The intro says "a 5.15% performance drop" (line 12) referring broadly to "existing 3D approaches."
 
 ## Nice-to-Haves
 
-- A direct comparison between RODIN using sensor vs. mesh inputs (analogous to the diagnostic done for baselines) would powerfully demonstrate the method's robustness to sensor noise. Currently the paper shows prior methods drop 5% on sensor data, but does not run this same diagnostic on RODIN itself.
-- An ablation of single-dataset vs. joint training would isolate the contribution of multi-task learning.
-- A simple 2D baseline (e.g., GroundingDINO per frame → lift to 3D) would test whether the 3D architecture adds value beyond 2D→3D projection.
-- Sensitivity analysis to depth/pose noise would strengthen the embodied claims.
+- **Ablate the necessity of 3D attention blocks.** The paper uses ODIN's alternating 2D–3D attention mechanism. An ablation testing whether a purely 2D backbone (with multi-view aggregation) suffices for the language tasks would directly test the claim that 3D geometric information is important.
+- **Run RODIN in single-class-per-pass mode for segmentation** to disentangle the architectural contribution from the multi-class input advantage.
+- **Report RODIN on mesh point clouds** for referential grounding to enable fully symmetric comparison.
+- **Clarify hyperparameter tuning** for the retrained baselines (3D-VisTA, BUTD-DETR) on sensor data.
 
 ## Removed Points
 
-- **Criticism about "5–15% drop":** The critic claims the paper says "5–15%" for sensor-vs-mesh drop. The paper actually says "5-10%" (abstract) and "5.15%" (experiments, line 117). The 15-20% figure is about GT→predicted proposals, a different comparison. This is a factual error by the reviewer.
-- **Criticism that RODIN "also operates on point clouds (derived from RGB-D), not raw images":** The paper accurately describes RODIN as operating on posed RGB-D frames. The ODIN backbone internally lifts images to 3D feature clouds — this is architecturally different from methods that take precomputed mesh point clouds as input. The distinction is clear in the paper.
-- **Criticism about missing closed-vocabulary segmentation baselines (Mask3D, ODIN):** The paper explicitly notes (line 131) that Mask3D and ODIN use a closed-vocabulary protocol (softmax over fixed classes), while RODIN uses a language-prompted protocol following PQ3D. The comparison is apples-to-oranges unless PQ3D's closed-vocabulary version is also included, which the paper already discusses.
-- **Strength Finder's claim of "first end-to-end model that directly processes posed RGB-D sensor frames":** While the "first" claim about "using pretrained 2D features" is overreaching (see Major weakness #2), the more specific claim about processing raw RGB-D frames vs. mesh point clouds is defensible. However, this strength is retained with the caveat that the paper's own framing needs correction.
+- **"First end-to-end model" overclaim.** The harsh critic truncated the paper's claim: the full text specifies "in object detection, referential grounding and question answering" (line 26). Within this specific scope (all three tasks jointly end-to-end), the claim appears defensible. Removed as a misunderstanding of the paper's wording.
+- **"Noun chunker output not described in supervision."** The paper describes matching predicted segments to noun phrases via dot-product between queries and language tokens supervised with BCE loss (lines 76–82). The noun chunker's role is clear enough — it identifies which phrases to match against. Removed as a misreading.
+- **Criticism about sensor baseline adaptation details.** While the paper could say more about hyperparameter tuning for retrained baselines, the reviewer provides no evidence the results are unreliable. This is standard practice in the field. Moved to Nice-to-Haves.
 
 ## Novel Insights
 
-The key insight that emerges from the reviews — beyond the paper's own contributions — is that *architecture design critically determines whether 2D pretraining transfers effectively to 3D*. The finding that mask decoding with visual token updates is essential for language grounding (while box decoding works without it) is a nuanced architectural insight that deserves emphasis. Additionally, the demonstration that sensor-input models can *exceed* mesh-based SOTA simply by choosing the right architecture challenges the field's reliance on reconstructed meshes and suggests that investing in better 2D→3D feature lifting may be more fruitful than pursuing cleaner 3D geometry.
+None beyond the paper's own contributions. The most interesting finding from the review process is that the key design principle — updating visual features during query refinement matters for mask decoding but not box decoding — is specific enough to serve as actionable guidance for future work, and the paper supports it with clean ablations that separate it from confounds (Table 5b). However, this is already stated in the paper.
 
 ## Suggestions
 
-1. **Recalibrate all improvement claims.** Clearly separate gains against sensor-input baselines from gains against mesh-input SOTA. Report margins relative to the strongest relevant baseline in each setting, not the weakest.
-2. **Replace the "first" claim** with specific, defensible novelty statements (e.g., "first model to combine ODIN's 2D↔3D alternating attention with a mask-language decoder that updates visual features end-to-end on raw RGB-D frames").
-3. **Add ablations of joint training and frame selection** to unconfound these factors from architectural contributions.
-4. **Add a limitations section and qualitative results** (predicted masks, failure cases).
-5. **Include comparisons with LLaVA-3D and EmbodiedScan** to strengthen the sensor-input SOTA claim.
+1. **Control the segmentation comparison.** Add a single-class-per-pass variant of RODIN on ScanNet200 so readers can attribute the +7.2% to architecture vs. input format. The existing multi-class input capability remains a genuine advantage of the architecture, but separating the two effects would substantially strengthen the paper.
+2. **Add a small open-vocabulary experiment.** Even a qualitative study (e.g., grounding descriptions to objects not seen during training) or evaluation on COCO 3D / a held-out subset of ScanNet200 would significantly support the paper's key hypothesis about 2D foundational features.
+3. **Include qualitative visualizations.** Show predicted masks on several scenes alongside ground truth, with at least one failure case. This helps readers assess the quality of the mask outputs beyond aggregate metrics.
 
 ## Score and Decision
 
-**Originality:** The architecture (ODIN backbone + mask-language decoder with visual token updates for 3D VL) is genuinely novel, but the novelty claims in the paper are overreaching. **Importance:** The question of how to effectively transfer 2D pretraining to 3D is important, and the sensor-vs-mesh robustness finding is practically relevant. **Claims:** The central claim of SOTA performance is supported, but the magnitude of improvement vs. actual baselines is overstated. **Soundness:** The methodology and ablations are sound; the main concerns are about evaluation framing and confounds, not about correctness of results. **Clarity:** The architecture description is clear, but the comparison presentation in Table 1 could be better organized. **Value:** The paper makes a genuine contribution — a strong architecture for 3D VL from sensor data — but the presentation issues undermine its credibility.
+This is a strong paper with clear contributions: an architecture that effectively combines 2D pretrained features with 3D geometric reasoning, operates on practical sensor inputs, and achieves large margins over prior work across three task families. The main concerns are the asymmetric segmentation comparison (the most significant weakness, though it affects only one of several claim families) and the absence of open-vocabulary evaluation that would naturally accompany the "foundational features" framing. Neither undermines the paper's core contribution of an effective, end-to-end architecture for sensor-based 3D VLU. The paper would be strengthened by addressing these in a revision.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

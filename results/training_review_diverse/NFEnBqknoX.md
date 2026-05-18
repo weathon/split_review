@@ -1,82 +1,93 @@
-Now I have all the information I need. Let me compile the final review after carefully cross-referencing every claim.
+Now I have a thorough understanding of the paper and all reviewer claims. Let me produce the final consolidated review.
+
+---
 
 ## Summary
 
-This paper introduces Discrete Inversion, the first inversion method for discrete diffusion models, spanning both multinomial diffusion and masked generative models (e.g., Paella, VQ-Diffusion, RoBERTa). The key idea is to record residuals between model predictions and actual targets during the forward process (using the Gumbel-Max trick as the discrete analog of the Gaussian reparameterization trick), then inject those residuals during editing to control content manipulation without predefined masks or attention maps. Experiments demonstrate lossless inversion for masked generative models and competitive editing across image and text domains.
+This paper introduces Discrete Inversion, a method for inverting discrete diffusion models (multinomial diffusion and masked generative models) by recording residuals between target and predicted logits using the Gumbel-max trick—analogous to recording Gaussian noise in DDPM Inversion for continuous diffusion. The approach is evaluated on image editing (Paella, VQ-Diffusion on PIE-Bench) and text sentiment editing (RoBERTa), demonstrating near-perfect reconstruction and competitive editing quality.
 
 ## Strengths
 
-- **First inversion method for a class of models where none existed.** The paper correctly identifies that ODE-based inversion (DDIM, flow matching) does not apply to discrete spaces, and prior SDE-based approaches (CycleDiffusion, DDPM Inversion) are defined only for continuous diffusions. The method fills this gap and is validated across two discrete model families (multinomial diffusion and masked generative models).
+1. **First inversion method for discrete diffusion models, with strong empirical reconstruction.** The paper provides the first demonstration of precise inversion for discrete diffusion models, including both multinomial diffusion and masked generative models. Reconstruction results are near-perfect: PSNR=inf, SSIM=1.00 for VQ-Diffusion image inversion (Table 1) and 100% hit rate for text inversion (Table 4), while masked generation baselines fail completely. This is a genuine capability advance for discrete generative models.
 
-- **Near-perfect reconstruction without cross-attention manipulation.** Table 1 shows PSNR=inf, MSE=0, SSIM=1.0, LPIPS=0.0 for Paella (masked generative model), meaning the inverted tokens are identical to the original after VQ-VAE encoding. The paper transparently notes that VQ-VAE quantization introduces its own errors, but the inversion in the token space is lossless. This compares favorably against the inpainting baseline (LPIPS 0.46, SSIM 0.50).
+2. **Competitive structure preservation in image editing.** Discrete Inversion with Paella achieves the lowest structure distance (11.34) among all compared methods (Table 2), including continuous diffusion models (DDIM+SD1.4 with various editing techniques). Background preservation metrics (PSNR, LPIPS, MSE, SSIM in Table 3) also favor the proposed method, supporting the claim that the latent space encodes structural information from the original image.
 
-- **Effective editing with strong structure preservation.** On the PIE-Bench benchmark (Table 2), Discrete Inversion with Paella achieves the lowest structure distance (11.34) among all compared methods, including continuous diffusion models (DDIM+SD1.4 with P2P: 14.22). The background preservation metrics (Table 3) are also strong, demonstrating that the recorded z_t latent space retains structural information while enabling semantic changes.
+3. **Cross-modal validation.** The method is validated across two image model architectures (Paella, VQ-Diffusion) and a text model (RoBERTa), with consistent positive results. This cross-modal scope makes the versatility claim credible.
 
-- **Demonstrates an unexpected capability: turning a masked language model into a generative editor.** Section 4.2 shows that RoBERTa (trained only for understanding/classification tasks) can, via Discrete Inversion, perform controlled text editing with high structure preservation (Table 5). This is a genuinely novel finding—the method provides a generative capability that the original model was not designed for.
-
-- **Theoretical motivation for information scheduling.** Remark 3.1 derives a closed-form mutual information I(z_t; x_0) for a Gaussian DDPM, showing information decays with t. This analysis, while in the continuous setting, provides principled motivation for scheduling the injection parameters λ and is clearly scoped as a "prototypical example" to guide intuition.
+4. **Clear conceptual framing and practical utility.** The paper correctly identifies a real limitation of existing discrete models—the inability to inject information from the input during editing beyond brute-force masking. The proposed method addresses this gap and enables editing without predefined masks, attention map manipulation, or ODE trajectories (which discrete models lack).
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
-None. The paper's core contribution (the inversion method itself) is validated by lossless reconstruction, and the editing experiments demonstrate meaningful capability even if some baselines are imperfect. Each identified weakness is addressable rather than structural.
+
+1. **Poor exposition quality in Section 3.2 undermines trust in the method's presentation.** The methods section contains sentence fragments (line 113 begins with "Since" without a completed main clause; a dangling "Since" ends line 114; line 117 begins with lowercase "the" as an orphaned fragment), abrupt topic transitions (a statement about latent space guarantees at line 115–116 interrupts the masked-model derivation mid-flow), and hyperparameter discussion (lines 119–120) inserted before the core latent definition appears at line 179. While the *mathematical definitions* are present and correct ($z_t$ for both model classes, three noise injection strategies with equations), the organization and prose quality are substantially below the standard expected for a conference paper. A reader unfamiliar with DDPM Inversion would struggle to reconstruct the algorithm from this section. This is not a parser artifact—the fragments and disjointed flow are structural issues in the text as written.
+
+2. **Critical ablations and parameter studies are absent.** The paper introduces three noise injection strategies (linear, variance preserving, max), states "linear strategy gives best results" (line 206), but provides no ablation table or quantitative comparison. The hyperparameters $\tau$, $\lambda_1$, $\lambda_2$ are described as allowing "finer control over the editing process" (line 119), yet no systematic study of their effect is presented. Since these parameters directly control the editing-quality trade-off, the absence of any analysis is a significant gap.
 
 ### Minor
 
-- **No quantitative comparison of the three noise injection strategies.** The paper introduces Linear, Variance Preserving, and Max strategies (Section 3.2) and states "linear strategy gives best results" (line 206), but provides no table, figure, or ablation to support this claim. Since this is a key design choice that users must make, showing its impact on reconstruction quality vs. edit strength would significantly strengthen the method's motivation.
+3. **Text evaluation relies on a proprietary, black-box classifier (ChatGPT-4).** The evaluation reports structural preservation and sentiment correctness using ChatGPT-4 as an oracle (Section 4.2, Table 5). The prompts used to query ChatGPT are deferred to the supplementary materials. Using a proprietary model whose behavior can change with updates makes exact reproduction impossible. While LLM-as-judge is increasingly common, its use here as the sole evaluation methodology for a central empirical claim is a weakness.
 
-- **Text editing evaluation lacks statistical rigor.** Table 5 reports 99.79% structure preservation for Discrete Inversion—a very high number—but the paper does not report sample size, confidence intervals, or variance. The evaluation uses ChatGPT-4 as a classifier, which is reasonable but has reproducibility concerns (changes to ChatGPT versions affect results). A standard automated evaluation (e.g., BLEU + HuggingFace sentiment classifiers) on a public benchmark like Yelp or IMDB would complement the ChatGPT evaluation and improve reproducibility.
+4. **Novelty articulation could be sharper.** The paper correctly acknowledges its connection to DDPM Inversion (Huberman-Spiegelglas et al., 2024), describing the approach as "generaliz[ing] the concept" (Related Work). However, it does not fully articulate *why* extending inversion to discrete spaces is technically non-trivial. The Gumbel-max trick substitution is mathematically natural, and the paper would benefit from identifying specific difficulties (e.g., the absence of an ODE trajectory is mentioned but not analyzed; the non-differentiable sampling step is noted but its implications for information control are not explored).
 
-- **Editing hyperparameters τ, λ₁, λ₂ are not reported for the specific experiments.** These are introduced in the method section but their values for Tables 2–5 are deferred to supplementary materials. While the supplementary was stripped by the parser, a self-contained main text would benefit from stating the used values or at least the range explored.
+5. **The Gaussian mutual information analysis (Section 3.3) is tangentially relevant.** This section derives mutual information for a toy Gaussian DDPM and plots it in Figure 3. The paper acknowledges it is a "prototypical example" and uses it to motivate $\lambda$ scheduling (deferred to Supplementary). It provides some theoretical intuition, but it is not directly about discrete models and does not connect to the proposed method's specific design decisions. It would be stronger if paired with an analogous discrete analysis or explicitly linked to the noise injection strategies.
 
-- **The method section is somewhat more fragmented than necessary.** The transition between masked generative models and multinomial diffusion (Section 3.2) is abrupt: the definition of z_t changes between the two cases (z_t = y_0 − ŷ_{0|t} for masked vs. z_t = y_{t-1} − ŷ_{t-1} for multinomial), and this is not explicitly reconciled. The core equations are present and correct, but a cleaner exposition with a unified perspective would help readers unfamiliar with the discrete diffusion family.
-
-- **Continuous diffusion comparison is informative but confounded.** The paper compares against DDIM+Stable Diffusion v1.4 with Prompt-to-Prompt (Tables 2–3). While this provides useful context, the two approaches differ in architecture (U-Net vs. Paella), resolution (512×512 vs. 256×256), and data representation (pixel latent vs. VQ-VAE tokens). The cross-architecture gap makes it difficult to attribute metric differences to the inversion method alone. The paper's primary comparison (masked generation with the same model) is more controlled, and the continuous comparison should be read as context rather than a controlled experiment.
+6. **Cross-architecture comparisons in Table 2 mix multiple confounds.** Discrete Inversion on Paella/VQ-Diffusion is compared against Stable Diffusion v1.4 with DDIM inversion. These differ in model capacity, training data, tokenization (VQ-VAE vs. latent diffusion), and inference compute. The headline metric ("lowest structure distance 11.34") is informative but the paper does not discuss these confounds. This does not invalidate the results, but readers should interpret the comparison cautiously.
 
 ### Trivial
-None.
+
+7. **The "Since" fragments and orphaned sentences in Section 3.2 (lines 113–117)** should be repaired for grammatical completeness and logical flow.
+
+8. **Table/Figure references and equation formatting contain minor garbling** (line 198: "$\tilde{y}=$" missing backslash rendering; stray numerals on lines 123–176 appear to be figure artifacts). These are likely parser issues in the extracted text rather than the original submission.
 
 ## Nice-to-Haves
 
-- **Ablation replacing z_t with random noise.** The reviewer's suggestion of ablating the inversion component by injecting random residuals instead of recorded ones would directly isolate the contribution of the recorded latent. This would be a clean control experiment.
-- **Empirical information analysis for discrete models.** Expanding the Remark 3.1 analysis to the discrete setting (e.g., measuring reconstruction accuracy as a function of corrupted z_t) would directly validate the theoretical intuition in the paper's actual setting.
-- **Standard text evaluation metrics.** Adding BLEU, ROUGE, or a HuggingFace sentiment classifier as complementary metrics to the ChatGPT evaluation would improve reproducibility.
-- **Sensitivity analysis on τ, λ₁, λ₂.** Showing how editing results vary with these hyperparameters on a small validation set would demonstrate user control and method robustness.
+- An ablation table comparing the three noise injection strategies and varying $\tau$, $\lambda_1$, $\lambda_2$ would significantly strengthen the paper.
+- Replacing or supplementing the ChatGPT-4 evaluation with standard automated metrics (e.g., a trained sentiment classifier, BLEU/ROUGE for structure) would improve reproducibility.
+- A brief analysis of why editing works better for masked generative models than multinomial diffusion (mentioned in the conclusion but not analyzed) would be informative.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviewers are flagged for removal; treat them with caution:
 
-- **"Method is not described with sufficient clarity to assess correctness"** (Reviewer's Critical Issue 1). While the presentation could be cleaner, the core equations (z_t definitions, the 3 injection strategies, the Gumbel-Max trick connection) are all present in the main text. Algorithms 1 and 2, referenced for detailed steps, exist in the original submission and were stripped by the parser. The reviewer's "draft that was never completed" characterization is overstated and partially reflects parser-inserted garbled text (hard rules require ignoring formatting artifacts).
-
-- **"Mutual information analysis is irrelevant to the discrete setting"** (Reviewer's Critical Issue 4). The paper explicitly states this is "a simple yet prototypical example" used to "motivate exploring different scheduling strategies." Using a tractable continuous case to build intuition for a harder discrete problem is a standard practice in ML. The analysis is not presented as proof but as motivation—a valid role.
-
-- **Criticism questioning inversion reconstruction results ("does the method simply store the exact token sequence?").** The paper's footnote (Table 1) directly explains that PSNR=inf arises because the inverted tokens are identical after VQ-VAE encoding, which is precisely the point—lossless inversion in the token space. The VQ-VAE's own quantization errors are a separate matter that the paper acknowledges.
-
-- **"Pure formatting/style nitpicks"** (reviewer's comments about Figure 2 caption, section numbering, "draft-like" prose). These are parser artifacts or minor style preferences, not evaluation-relevant criticisms.
-
-- **"Missing baseline/weak baseline" framed as fatal.** The paper compares against the natural baseline (masked generation with the same Paella model) and provides cross-architecture context (DDIM+SD1.4). Given that no prior discrete inversion exists, masked generation is the de facto approach; the comparison is appropriate. The claim that this is a "strawman" ignores the fact that this IS the only available method on the same model.
+- **"Algorithm pseudocode is missing"**: The paper references "Algorithm 1" and "Algorithm 2." These were likely in environments stripped by the parser; the rules instruct us to treat this as a parser artifact.
+- **"PSNR=inf undermines editing claims"**: The paper explains that identical reconstruction arises because the inversion preserves the token sequence. Perfect reconstruction does not prevent editing—the latents are modified during editing. This is a strength, not a tension.
+- **"λ₁+λ₂=1 contradicts earlier formulation"**: The λ₁+λ₂=1 constraint applies specifically to the variance-preserving strategy. The linear strategy only requires λ₂>0. These are separate strategies with separate parameterizations; there is no contradiction.
+- **"Section 3.3 is irrelevant and should be removed"**: The section provides a prototypical Gaussian analysis to motivate λ scheduling. While tangential, it is not irrelevant. It belongs as a Minor weakness, not a removal-worthy one.
+- **"Equations are partially garbled"**: The equations in the extracted text are intact and coherent (linear strategy eq. 186–188, variance preserving eq. 194–198, max strategy eq. 202–203). The garbling the reviewer perceives appears to be formatting artifacts from the PDF extraction, not content errors.
+- **Several generic strength entries from the Strength Finder**: Claims like "this paper addressed an important problem" without specific evidence were filtered.
 
 ## Novel Insights
 
-The reviews converge on a point that the paper itself does not fully articulate: the Discrete Inversion framework reveals an unexpected duality between the Gumbel-Max trick in discrete spaces and the Gaussian reparameterization trick in continuous spaces. By treating residuals in logit space as the discrete analog of noise in continuous diffusion, the method shows that BERT-style masked language models (trained purely for understanding/classification) can be repurposed as generative editors without any generative fine-tuning. This is more surprising than the paper's framing suggests—it implies that the forward masking process of models like RoBERTa already encodes a reversible trajectory, and inversion merely unlocks it. A deeper analysis of why this works (e.g., what properties of the masked training objective enable this reversibility) would be a valuable follow-up.
+None beyond the paper's own contributions. The reviews largely converge on the same observations: the method is conceptually straightforward and the experiments are broadly supportive, but the exposition and evaluation rigor need improvement. The harsh critic's claim that the method is impossible to evaluate is not supported by the actual mathematical content of the paper.
 
 ## Suggestions
 
-1. Add a table comparing reconstruction quality and edit success across the three noise injection strategies (Linear, Variance Preserving, Max). This is the single most actionable missing ablation.
+1. **Rewrite Section 3.2 entirely.** Structure it as: (a) establish the analogy between Gaussian reparameterization and Gumbel-max trick, (b) present the inversion algorithm for masked generative models with a clean definition of $z_t = y_0 - \hat{y}_{0|t}$, (c) present the inversion algorithm for multinomial diffusion with $z_t = y_{t-1} - \hat{y}_{t-1}$, (d) discuss hyperparameters and noise injection strategies, each with motivation. Include a diagram or pseudocode showing the inversion-and-editing pipeline end-to-end.
 
-2. Report the specific values of τ, λ₁, λ₂ used for each experiment in the main text, and include a sensitivity analysis showing how varying these affects the edit quality vs. structure trade-off.
+2. **Add ablation studies** comparing the three noise injection strategies quantitatively and showing the effect of varying $\tau$, $\lambda_1$, $\lambda_2$ on the editing quality / reconstruction fidelity trade-off.
 
-3. For the text experiments, add a public benchmark evaluation (e.g., Yelp sentiment flip) with standard metrics (BLEU + a known sentiment classifier) to complement the ChatGPT evaluation. Report sample sizes and 95% confidence intervals.
-
-4. Restructure Section 3.2 to first define the unified principle (residual recording via the Gumbel-Max trick), then instantiate it separately for masked generative models and multinomial diffusion, making the differing z_t definitions easier to follow.
+3. **Strengthen text evaluation** by supplementing ChatGPT-4 evaluation with a standard sentiment classifier (e.g., a fine-tuned RoBERTa sentiment model) and reporting n-gram overlap metrics for structural preservation.
 
 ## Score and Decision
 
-This paper proposes the first inversion method for an important class of models (discrete diffusion) where none previously existed. The core idea is principled (Gumbel-Max trick as discrete counterpart to Gaussian reparameterization), the reconstruction results are essentially lossless for masked generative models, and the editing experiments demonstrate meaningful capability across two modalities. The main issues are missing ablations (noise injection strategy comparison, hyperparameter sensitivity) and limited rigor in the text evaluation, none of which invalidate the core contribution. The weaknesses are addressable in a revision and do not undermine the paper's central claim. I rate this paper as a solid accept.
+**Originality**: Moderate. Extending DDPM Inversion to discrete spaces via the Gumbel-max trick is a natural extension, but the paper is the first to do so and applies it to a meaningful range of architectures and modalities.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+**Importance of research question**: High. Controlled editing in discrete generative models is an important capability that has been lacking.
+
+**Claims well supported**: Partially. The reconstruction claims are strongly supported. The editing claims are moderately supported but missing ablation studies temper confidence.
+
+**Soundness of experiments**: Moderate. Reasonable metrics and benchmarks, but missing ablations and reliance on a proprietary evaluation oracle for the text domain are weaknesses.
+
+**Clarity of writing**: Below standard. Section 3.2 needs significant structural and prose revision.
+
+**Value to the research community**: Moderate. The method enables a new capability (discrete inversion) that will likely be built upon.
+
+The paper has a real and useful contribution—first inversion for discrete diffusion models—and the experimental results are broadly positive. However, the exposition quality in the core methods section is below the standard expected for a top conference, key ablations are missing, and the text evaluation relies on a non-reproducible oracle. These issues are fixable with revision but are substantive enough in the current form to warrant rejection. A substantially revised version could be competitive.
+
+MY FINAL SCORE: <pineapple>5.0</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

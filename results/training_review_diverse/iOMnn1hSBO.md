@@ -1,90 +1,105 @@
-Now I have a thorough understanding of the paper and can cross-check all reviewer claims against the actual text. Let me write the consolidated review.
+I now have a thorough understanding of the paper and the reviews. Let me write the final consolidated review.
 
 ## Summary
 
-This paper introduces three methods that extend conformal prediction to produce prediction sets that minimize a user-specified downstream decision loss while maintaining standard coverage guarantees. The contributions are: (1) a penalized conformal predictor that augments the APS non-conformity score with a loss penalty weighted by a tuned hyperparameter, (2) a hyperparameter-free separable penalized ratio method (Neyman-Pearson-inspired plug-in thresholding plus conformalization), and (3) for non-separable losses, a greedy optimization-based meta-algorithm that linearizes the loss through marginal gains and conformalizes the resulting sets. The methods are validated on four datasets including a real-world dermatology case study, showing substantial reductions in decision loss over standard conformal prediction.
+This paper introduces a framework for incorporating downstream decision losses into conformal prediction. The authors propose several methods: a penalized non-conformity score with hyperparameter tuning, a closed-form ratio-based method for separable losses (via Neyman-Pearson), and a greedy algorithm for non-separable losses. All methods come with standard conformal coverage guarantees. Experiments on CIFAR-100, ImageNet, iNaturalist, and the Fitzpatrick dermatology dataset demonstrate substantial reductions in decision loss (60-75%) over standard conformal prediction, along with a compelling case study producing clinically coherent prediction sets.
+
+---
 
 ## Strengths
 
-- **Novel problem formulation bridging decision-focused learning and conformal prediction**: The paper identifies a clear gap — standard conformal prediction provides coverage guarantees but ignores downstream utility, while decision-focused learning ignores uncertainty quantification. The paper defines a new objective (minimizing expected decision loss subject to coverage) and provides concrete algorithms to achieve it. This is well-motivated with practical examples (dermatology diagnosis).
+1. **Provable coverage guarantees for all proposed methods**: The paper rigorously proves that the Separable Penalized Ratio (Proposition labeled Neyman-Pearson, lines 115-121) and the greedy-based non-separable method (Proposition 3, lines 153-159) maintain standard conformal coverage bounds: \(1-\alpha \le P(Y \in S_{f(X)}) \le 1-\alpha + \frac{1}{n+1}\). These guarantees are correct and directly support the paper's central claim that coverage is preserved.
 
-- **Provable coverage guarantees for separable and non-separable losses**: Propositions 1–3 establish finite-sample marginal coverage guarantees matching standard conformal bounds. Proposition 2 shows 1−α ≤ P(Y∈S) ≤ 1−α+1/(n+1) for the separable penalized ratio; Proposition 3 extends this to the greedy-based non-separable method. The guarantees hold regardless of the quality of the base classifier.
+2. **Large and consistent empirical reductions in decision loss**: Across four datasets (CIFAR-100, iNaturalist, ImageNet, Fitzpatrick) and both separable and non-separable loss functions, the proposed algorithms achieve "reductions of 60-75% in loss" over standard conformal prediction (line 26). All three algorithmic variants (penalized conformal, separable penalized ratio, greedy optimizer) produce significantly lower decision loss, as shown in Figure 3 and the accompanying tables.
 
-- **Principled handling of non-separable decision losses**: The linearization of non-separable losses through marginal gains, followed by greedy optimization and conformalization, is a genuine innovation. This extends conformal prediction beyond the monotone-loss regime where conformal risk control applies, enabling losses such as hierarchy-coherence (coverage loss, maximum distance) that depend on set composition.
+3. **Clinically coherent prediction sets in a real-world healthcare case study**: On the Fitzpatrick dermatology dataset, the method produces prediction sets that "contain diagnoses within a common family of malignant epidermal diseases" while satisfying coverage guarantees (Figure 1 and Section 4.2). This demonstrates that the framework can incorporate domain-specific hierarchical knowledge to produce sets that are genuinely more actionable for high-stakes decision-making.
 
-- **Substantial and consistent empirical improvements**: Across four datasets (CIFAR-100, iNaturalist, ImageNet, Fitzpatrick), all proposed methods achieve lower decision loss than standard conformal prediction. Reductions of 60–75% are reported. The improvements hold for both separable and non-separable losses and across datasets of varying size and difficulty.
+4. **Learning-theoretic guarantee for hyperparameter selection**: Proposition 1 shows that the optimal penalty weight \(\lambda\) can be learned via empirical risk minimization with a finite-sample bound of order \(O(1/\sqrt{n})\), providing formal justification for the two-stage tuning strategy.
 
-- **Robustness to noisy base classifiers**: The ablation study on Fitzpatrick (Figure 4) demonstrates that the methods outperform standard conformal prediction even when the base classifier has low accuracy (0.2–0.4), showing practical value in settings where only imperfect models are available.
+5. **Closed-form optimal solution for separable losses via Neyman-Pearson lemma**: The paper generalizes prior work (which only handled set size, e.g., Sadinle 2019) to arbitrary separable losses, deriving an optimal thresholding rule grounded in classical statistical theory.
 
-- **Modular, post-hoc, and model-agnostic**: The methods operate as a post-processing step on any classifier's predictions without retraining, preserving the modularity that makes conformal prediction attractive for deployment.
+6. **Demonstrated robustness to noisy base classifiers**: Ablation on the Fitzpatrick dataset (Figure 4) shows that the decision-focused methods "benefit from decision-focused conformalization even when the underlying classifier is very noisy," outperforming base conformal at every accuracy level tested.
+
+---
 
 ## Weaknesses
 
 ### Fatal
-None.
+None. The paper's core claims—that the methods maintain coverage guarantees while reducing decision loss—are supported.
 
 ### Major
-None.
+
+1. **Insufficiently justified greedy algorithm for non-separable losses (Section 3.2.2, Eq. 8/150).** The greedy algorithm is presented as the hyperparameter-free solution for non-separable losses, but its design is not adequately explained. The paper states it is "for solving the plug-in optimization problem" (line 146) and cites Leskovec et al. (2007), but does not explain:
+   - Why the selection ratio \((M - \mathcal{L}(S^i \cup \{y\}))/(1 - \hat{p}(y|x))\) takes this specific form, or what role the denominator \(1 - \hat{p}(y|x)\) plays.
+   - How the greedy's constraint \(\hat{p}(y|x) \leq \alpha - p(S^i)\) relates to the plug-in problem's constraint \(\sum_{y \in S} p(y|x) \geq 1-\alpha\) (Eq. 140-141). The two constraints appear at odds—the greedy limits total probability to ≤ α (miscoverage) while the plug-in problem requires ≥ 1-α (coverage)—and the paper offers no reconciliation.
+   - Whether any approximation guarantees (e.g., for submodular optimization) carry over from the Leskovec et al. framework.
+
+   The coverage guarantee is unaffected (Proposition 3 holds for any ordering), and the empirical results show the greedy works. But the paper claims the greedy "solves" the plug-in problem, and this claim is not supported by the text. Since the greedy is a centerpiece of the non-separable hyperparameter-free approach, this gap weakens the paper's presentation of one of its stated contributions.
 
 ### Minor
 
-- **Experimental results lack measures of variability**: All figures report only median-of-means across 10 runs with no error bars, confidence intervals, or standard deviations (Figures 3, 4). With only 10 trials, random variation could affect the observed magnitudes. While the consistent direction of improvement across all datasets is reassuring, the absence of uncertainty quantification makes it impossible to assess the statistical significance of the claimed 60–75% reductions.
+1. **Absence of experimental comparison with conformal risk control (Angelopoulos et al. 2022).** The paper identifies risk control as "most closely related to our work" (line 42) and claims it "does not directly optimize the expected value" and "may sacrifice coverage." These are comparative claims without empirical backing. While the two frameworks solve different problems (coverage guarantee vs. risk control), a direct comparison on at least one dataset and loss would help readers understand when the proposed methods offer practical advantages. This is the most impactful missing experiment.
 
-- **Greedy optimizer lacks analysis of approximation quality and computational cost**: For non-separable losses, the greedy algorithm (Eq. 3) is presented as a plausible heuristic, but the paper provides no analysis of its suboptimality gap, no discussion of conditions under which greedy is near-optimal (e.g., submodularity of the loss), and no empirical runtime measurements. For large label spaces (e.g., ImageNet with 1000 classes), evaluating the greedy criterion per test instance could be expensive, and the paper's claim that it is "lightweight" (Section 1) is unsupported. The connection between the greedy criterion (Eq. 3) and the loss being optimized is not formally justified.
+2. **Ambiguity in non-separable results interpretation.** The paper states that "penalized conformal methods, when appropriately tuned, tend to outperform the other methods we tested on CIFAR100, ImageNet, and iNaturalist" (line 191). It is unclear whether "other methods" includes the greedy optimizer in the non-separable setting. Since the greedy is presented as the hyperparameter-free alternative, readers need to know whether it underperforms penalized conformal on larger datasets, and if so, under what conditions each method is preferable.
 
-- **No dedicated limitations discussion**: The paper lacks a limitations section. Important caveats are acknowledged only in passing or not at all: (a) the separable ratio method assumes the classifier's probability estimates are reasonable, (b) the greedy optimizer may be expensive for large label sets, (c) coverage guarantees are marginal and may not be informative for individual instances, (d) the penalized conformal method adds a hyperparameter that may be difficult to tune with limited data (though the paper notes this implicitly in Section 4.2).
+3. **Sensitivity to the coverage level \(\alpha\) is not explored.** All experiments fix \(\alpha = 0.1\) (line 170). The trade-off between decision loss and coverage at different \(\alpha\) values is not discussed or shown. This is important for practitioners who may need to balance coverage stringency against set quality.
 
-- **Baseline comparison could be more explicit**: The paper repeatedly refers to "base conformal method" and "baseline conformal prediction sets" without explicitly naming the baseline. The context makes clear it is APS (Adaptive Prediction Sets, Romano et al. 2020) using score ρ(x,y), since all proposed scores build on ρ. However, explicitly stating "our baseline is APS with score ρ(x,y)" would improve clarity and reproducibility.
+4. **Computational cost not discussed.** The greedy method requires per-instance optimization; for large label spaces (ImageNet has 1000 classes), this could be expensive. The paper does not report runtimes or discuss computational feasibility, which is relevant for practical deployment.
 
-- **Synthetic hierarchies for CIFAR-100 and ImageNet may not capture meaningful decision structure**: The paper generates hierarchies via clustering of classifier representations (Section 4.1), which may not correspond to any real-world decision-relevant taxonomy. Only iNaturalist and Fitzpatrick use expert-defined hierarchies. While the paper is transparent about this, the empirical demonstration on synthetic hierarchies is weaker evidence that the methods would transfer to authentic domain-specific utility functions.
+5. **Sensitivity to synthetic hierarchy construction not discussed.** For CIFAR-100 and ImageNet, hierarchies are generated via clustering on the classifier's final-layer representations (line 172). The quality of these hierarchies likely affects performance, especially for non-separable losses like coverage and max distance. The paper does not discuss sensitivity to this choice or whether results might differ with alternative hierarchy constructions.
 
-- **Random penalty assignment for separable loss not motivated**: The separable loss experiment uses penalties randomly sampled from {i/4 : i∈[4]} (Section 4.1). No rationale is given for this choice or why it represents a realistic cost structure. A more informative experiment would use costs reflecting actual decision-relevant differences (e.g., test costs, treatment costs, label acquisition costs).
+6. **Cleaned Fitzpatrick dataset.** The paper is transparent about the cleaning procedure (lines 169-170) and tables separate both versions (Table 1). However, the 60-75% loss reduction claim in the contributions (line 26) and the conclusion are stated in aggregate without clarifying which datasets contribute most heavily. A more precise breakdown would prevent overinterpretation.
 
 ### Trivial
+None that survive filtering (parser artifacts and formatting issues are not author errors).
 
-- **Grid search parameters for the hyperparameter λ not reported**: The paper states λ is chosen via grid search (Section 3.1) but does not specify the grid size, range, or number of values tried. This makes the tuning burden opaque.
+---
 
 ## Nice-to-Haves
 
-- **Quantitative comparison to conformal risk control (CRC)**: The paper discusses CRC in related work (Section 3, approx. 3 sentences) and correctly notes that CRC controls expected loss for monotone-decreasing losses without guaranteeing coverage. However, a quantitative comparison on at least one loss where CRC is applicable (e.g., set size) would help position the contributions relative to the closest prior work and demonstrate the practical advantage of methods that guarantee coverage while minimizing loss.
+- A comparison to conformal risk control on at least one dataset and one non-separable loss would empirically anchor the paper's claimed advantages.
+- A decision-guide table summarizing which method to use under which conditions (separable vs. non-separable loss, large vs. small dataset, high vs. low classifier accuracy) would sharpen the practical contribution.
+- Discussion of how the synthetic hierarchy construction for CIFAR-100 and ImageNet affects results, or a sensitivity analysis, would strengthen the non-separable experiments.
+- An ablation varying \(\alpha\) (e.g., 0.05, 0.1, 0.2) on at least one dataset would help practitioners understand the coverage-loss trade-off.
 
-- **More detailed distinction between this work and CRC**: The distinction — CRC controls expected loss at a preset level without coverage guarantees, while the proposed methods guarantee coverage and minimize loss — is critical and deserves more emphasis and formal comparison.
-
-- **Runtime analysis of the greedy optimizer**: Reporting per-instance runtime for the greedy method (especially on ImageNet with 1000 classes) would help practitioners assess the computational trade-offs.
+---
 
 ## Removed Points
+These points are flagged to be removed; treat them with caution.
 
-These points are flagged per the instructions as invalid, misinformed, or out of scope. Treat them with caution.
+- **"The paper states that the hyperparameter-free separable ratio method 'can also be used when the underlying classifier is noisy' (Figure 4). This is a nice ablation, but the experiment only shows that all methods degrade with worse classifiers, not that the ratio method is specifically robust to noise."** — This criticism misreads the paper. The paper claims (line 193) that "our method benefits from decision-focused conformalization even when the underlying classifier is very noisy, demonstrating that our method outperforms base conformal methods at any level of accuracy." This is a relative claim (benefits over baseline at all noise levels), not an absolute claim that the ratio method is "specifically robust to noise." The experiment supports the stated claim.
 
-- **Criticism about missing Tables** (\\ref{table: separable_vs_vanilla}, etc.): The reviewer noted these tables are missing from the extracted text. The parser strips tabular content; these tables exist in the original submission. Not a paper flaw.
+- **"The Neyman-Pearson argument for optimality under separable loss (Proposition 3) is sound but could be more clearly connected to the literature on cost-sensitive classification."** — This is a presentational preference, not a weakness.
 
-- **Criticism that Proposition 1 "does not discuss how the bound degrades with the grid size"**: The bound in Proposition 1 explicitly contains the term log(2|H|/δ), which depends on |H| (the grid size). The reviewer missed this — the bound does capture grid size dependence.
+- **"The paper uses synthetic hierarchies for CIFAR-100 and ImageNet via clustering. This is a pragmatic choice, but the quality of these hierarchies likely affects the results... A short discussion would strengthen the analysis."** — This is a reasonable observation but is already captured under Minor weakness #5 above (synthetic hierarchy sensitivity). The reviewer's version was overly speculative.
 
-- **Criticism about "no comparison to existing decision-aware methods" implying this is an evidential gap**: The paper discusses conformal risk control in the related work section and correctly identifies the different regime (monotone-decreasing losses only). The proposed methods explicitly handle losses that are not monotone, which CRC cannot. This is a scope difference, not a missing comparison.
+- **Several presentation and formatting nitpicks from the reviewer** — These are parser artifacts or style preferences, not substantive weaknesses.
 
-- **Criticism that "the three tables that are supposed to contain numerical comparisons are missing from the extracted text entirely"**: Same as first point — parser artifact.
-
-- **"The paper should state that CRC controls expected loss without guaranteeing coverage"**: The paper already states: "it does not directly optimize the expected value of the chosen function, and depending on such function, controlling for the expected value of the chosen loss can be at expense of statistical coverage." This adequately distinguishes the approaches.
-
-- **Criticism about "synthetic hierarchies" being "questionable" and claiming results "may not transfer"**: The paper is transparent that CIFAR-100 and ImageNet use synthetic hierarchies. The results on these datasets still demonstrate that the algorithms work as intended. The primary validation datasets with expert hierarchies (iNaturalist, Fitzpatrick) show the same patterns. This is a scope consideration, not a weakness.
+---
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface useful suggestions for strengthening the empirical presentation but do not identify a structural gap or a different interpretation of the results that would change the paper's narrative.
+The primary novel observation emerging from this review is that the paper's core contribution is strongest in the **separable loss setting** (clean Neyman-Pearson derivation, closed-form solution, clear coverage guarantees) and weaker in the **non-separable setting** (where the greedy algorithm functions more as a heuristic validated empirically than as a principled optimizer). This asymmetry is not surprising—non-separable optimization is genuinely harder—but it suggests that the paper's practical value may be highest for problems where decision losses decompose into label-wise costs. The real-world healthcare case study succeeds precisely because the coverage loss (counting intersected hierarchy categories) can be effectively handled by the greedy ordering even without formal optimality guarantees. This suggests a useful practical principle: when domain structure can inform label ordering (as hierarchies do), even a heuristic greedy can produce substantially more coherent sets, and the conformalization step provides a safety net for coverage regardless.
+
+---
 
 ## Suggestions
 
-1. Add error bars (bootstrap CIs or standard deviations) to all quantitative figures and report the full result tables with variability measures.
-2. Add a brief discussion of the greedy algorithm's approximation properties — even a note that losses satisfying submodularity would have known guarantees, and that in general the method is a heuristic.
-3. Include a dedicated limitations paragraph in the conclusion.
-4. Explicitly name the baseline (APS with score ρ(x,y)) and its parameters in the experiment setup.
-5. Report the grid size and range used for λ tuning.
-6. Add a comparison to conformal risk control on at least one monotone loss where CRC is applicable, to empirically demonstrate the trade-off.
-7. Report empirical runtime of the greedy optimizer per instance, especially on ImageNet.
+1. **For the greedy algorithm**: Either (a) provide a derivation connecting the greedy selection rule to the plug-in optimization problem, explaining the role of \(1 - \hat{p}(y|x)\) and the constraint \(\hat{p}(y|x) \leq \alpha - p(S^i)\), or (b) characterize it explicitly as a heuristic (not a solution to the plug-in problem) and show on a small controlled experiment that it produces sets close to the optimal plug-in solution. A brief connection to the submodular optimization literature (if applicable) would add rigor.
+
+2. **Add at least one empirical comparison to conformal risk control** on a representative loss (e.g., coverage loss on iNaturalist). This would help readers understand when the proposed methods genuinely outperform the closest existing baseline.
+
+3. **Clarify the non-separable results** by explicitly stating which methods are being compared on each dataset for each loss, and under what conditions the greedy method is preferable to penalized conformal.
+
+4. **Add a brief note on computational cost** (wall-clock time or number of operations) for the greedy method, especially on ImageNet (1000 classes), to help practitioners assess feasibility.
+
+5. **Include an ablation on \(\alpha\)** for at least one dataset, showing how decision loss changes at different coverage levels.
+
+---
 
 ## Score and Decision
 
-The paper makes a clear, well-motivated contribution to an important problem. The methods are novel, theoretically grounded (coverage guarantees are proven), and empirically validated across diverse settings including a real-world medical use case. Weaknesses are primarily in presentation quality — missing variability measures, incomplete reporting of implementation details, and lack of analysis of the greedy heuristic — rather than structural flaws. These are addressable and do not undermine the core contributions.
+This paper makes a genuine contribution by bridging decision-focused learning with conformal prediction, providing several concrete algorithms with coverage guarantees, and demonstrating strong empirical results including a compelling healthcare case study. The separable loss methods are clean and well-founded. The main weaknesses—insufficient justification of the greedy algorithm and the absence of a risk control comparison—are real but not fatal; they affect presentation and positioning rather than correctness. The paper's core claims (coverage preserved, loss reduced) are supported.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

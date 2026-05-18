@@ -1,18 +1,24 @@
-Now I have a thorough understanding of the paper. Let me produce the final consolidated review.
+I now have all the information needed to produce a consolidated review. Let me analyze the key factual issues I've identified.
+
+**Critical finding:** The Harsh Critic's claim that "w/o Dropout" (54.0 F1) corresponds to "removing the docstring definitions" is **factually incorrect**. The paper (line 87) defines "Class dropout" as a regularization technique that randomly deletes some input classes during training — it does NOT remove docstrings or definitions from the guidelines content. The "w/o Dropout" ablation simply removes this regularization.
+
+Let me now write the final consolidated review.
+
+---
 
 ## Summary
 
-GoLLIE proposes fine-tuning a CodeLLaMA-based LLM to follow annotation guidelines for zero-shot Information Extraction (IE). The key idea is to represent IE schemas as Python classes with docstrings (guidelines) and annotations as executable lists, then train the model with regularization techniques that force it to attend to the guidelines rather than memorize label names or datasets. Evaluated on 17 unseen IE tasks, GoLLIE (7B) achieves 55.3 average F1, outperforming the same-backbone baseline without guidelines (42.3) and prior SoTA (Instruct-UIE, 42.6). The ablation identifies representative annotation candidates as the critical component.
+This paper proposes GoLLIE, a Code-LLaMA model fine-tuned to follow annotation guidelines for zero-shot information extraction (IE). The key idea is to represent annotation schemas (label definitions as docstrings + representative examples as code comments) in a structured Python code format and train the model with carefully designed regularization to force it to attend to the guidelines rather than memorizing label names or datasets. Evaluated across 17 datasets covering NER, EE, and EAE, GoLLIE (7B) achieves an average zero-shot F1 of 55.3 — a 13-point gain over the same-backbone baseline (42.3) and significantly outperforming prior zero-shot IE methods. The 34B version reaches 60.0. The ablation study shows that representative annotation candidates are a critical component.
 
 ## Strengths
 
-1. **Clear and significant zero-shot gains over the same-backbone baseline.** The 13.0 F1 improvement (Table 2, 55.3 vs. 42.3) cleanly demonstrates that fine-tuning to follow guidelines provides substantial benefit, holding the model architecture, training data, and all other factors fixed. This is the paper's strongest and most controlled result.
+**1. Large and consistent zero-shot gains across diverse domains.** GoLLIE (7B) achieves an average zero-shot F1 of 55.3 across 17 evaluation sets, outperforming the baseline (42.3) by 13 points and surpassing the Instruct-UIE SoTA (42.6) by over 15 points (Table 2). The 34B version reaches 60.0. Gains are consistent across most individual datasets, with particularly large improvements on polysemous or domain-specific labels (e.g., AI: +26.8, Literature: +23.3 over baseline).
 
-2. **Ablation study cleanly isolates the key ingredient.** Removing representative annotation candidates drops zero-shot F1 from 55.3 to 49.9 (p=2.2e-10), while removing all guideline information drops it to 42.3 (p=5.1e-13) (Table 3). This rigorous decomposition validates the design intuition that concrete annotation examples in the guidelines are critical.
+**2. Well-designed training framework that preserves supervised performance.** Despite the regularization used to force guideline following, GoLLIE's supervised results (Table 1) are within 0.3 F1 of the baseline (73.0 vs. 73.3), and the 34B model improves the supervised average to 75.0. This shows the regularization does not degrade in-domain capability while enabling zero-shot generalization — a non-trivial design achievement.
 
-3. **Python code-based representation is a practical design choice.** Representing schemas as classes with docstrings and output as executable Python lists (Section 3.1, Figure 2) leverages code pretraining, unifies diverse IE tasks (NER, RE, EE, EAE, SF) under one format, and makes parsing trivial via code execution. This is a clean engineering contribution.
+**3. Honest and informative error analysis.** The paper manually examines specific labels (Table 4) and documents cases where GoLLIE correctly follows guidelines but the gold annotations do not (e.g., *Time* in MultiNERD), where polysemous labels benefit greatly from guidelines (*Media*: 13.6→69.1, *Trailer*: 0.0→76.4), and where coarse/ambiguous labels remain challenging. This nuanced analysis strengthens confidence in the method's genuine utility.
 
-4. **Honest error analysis with concrete failure modes.** The paper systematically examines where GoLLIE succeeds (polysemous labels like Media, Vulnerability Patch) and fails (ambiguous Miscellaneous categories, conflicts between fine/coarse entities, strong label preconceptions from pretraining). This provides a grounded understanding of the method's limitations rather than glossing over them.
+**4. Model scaling demonstrates consistent improvement.** Increasing from 7B to 34B yields monotonic gains on average zero-shot F1 (55.3→57.2) and on most individual datasets, while the 7B version already surpasses prior SoTA — showing the method is effective even at modest sizes.
 
 ## Weaknesses
 
@@ -20,67 +26,55 @@ GoLLIE proposes fine-tuning a CodeLLaMA-based LLM to follow annotation guideline
 None.
 
 ### Major
-
-1. **Guideline creation from evaluation-data dev splits compromises the strictness of the zero-shot evaluation.** The paper states that "when such guidelines are not publicly available, we ask human experts to create them, based on the annotations from the development split" (§ Experimental Setup, line 137). For zero-shot evaluation datasets where official guidelines did not already exist, human experts wrote guidelines informed by the dev-split annotations of those same datasets. The model then receives these guidelines at test time. While this does not constitute direct data leakage (the model never sees target examples), it means the guidelines encode dataset-specific annotation conventions (e.g., whether pronouns count as Person, whether years are labeled as Time) that were derived from the evaluation data's own distribution. This departs from a strict zero-shot protocol where the model should have no information about the target annotation scheme beyond label names.
-
-   **Why this matters:** The claim of "zero-shot" generalization to unseen schemas is weakened if the guidelines used at inference were themselves crafted with knowledge of those schemas' annotations. The paper does not provide a per-dataset breakdown of which zero-shot datasets had pre-existing official guidelines and which had guidelines created post-hoc from the dev split, making it impossible for the reader to assess which evaluations are affected.
-
-2. **Evaluation metrics are not specified for most tasks, hindering reproducibility and fair comparison.** The paper specifies metrics only for CASIE (partial matching for arguments, line 135). For NER on CrossNER, MultiNERD, FabNER, etc., the paper never states whether exact span match, partial span match, or token-level F1 is used. Since Table 2 compares GoLLIE against prior SoTA numbers (Instruct-UIE, PromptNER, etc.), the reader cannot verify whether the same metric was used across systems. If GoLLIE uses a more lenient criterion, the reported gains could be partially artifactual.
+None.
 
 ### Minor
 
-1. **Label overlap between training and evaluation datasets inflates the zero-shot numbers, and the per-dataset breakdown for unseen labels is absent.** The paper acknowledges this overlap (lines 254–255) and provides an aggregate seen/unseen comparison in Figure 2. However, this figure is relegated to a small wrapfigure with no exact F1 numbers. The reader cannot tell, for example, whether the strong result on MultiNERD (76.0) is driven by seen labels or truly reflects generalization to novel labels. A table with per-dataset seen/unseen F1 scores would be far more informative.
+**1. Ablation does not cleanly separate the contribution of descriptive definitions from representative candidates.** The ablation study (Table 3) tests regularization components, not content components. Removing candidate sampling regularization causes the largest drop (55.3→49.9), but there is no condition that isolates "definitions only (no candidates)" vs. "candidates only (no definitions)." The paper's central narrative emphasizes "annotation guidelines" broadly, but the current evidence does not disentangle whether the gain comes primarily from the descriptive definitions (docstrings) or from the in-context examples (candidates). Both are part of the guidelines, so the core claim stands, but the mechanism is less clear than it should be.
 
-2. **The baseline definition (no guidelines) is underspecified.** The paper defines the baseline as "the model without guidelines" (line 80), but it is not stated whether this baseline receives class definitions (without docstrings) or just label names. Figure 3 (an image) suggests the baseline gets class names only, but this should be explicit in the text. The baseline sets the bar for the entire contribution, so clarity here is important.
+*(Note: The Harsh Critic's specific claim that "w/o Dropout" (54.0) corresponds to "removing docstring definitions" is factually incorrect — "w/o Dropout" refers to removing class dropout regularization, defined in Section 3.3 as randomly deleting some input classes during training, not removing definitions from the input. I remove that specific claim as a factual error, but the broader concern about ablation granularity is valid.)*
 
-3. **Statistical test for ablation p-values is not specified.** The paper reports one-sided p-values (line 297) but does not state which test (e.g., paired bootstrap, permutation test) was used. The "w/o Shuffling" row shows a *higher* score (55.9 vs. 55.3) with p=0.072, which the paper correctly notes as non-significant. However, the lack of test specification makes the other significant results (Dropout, Candidates) harder to fully evaluate.
+**2. Guideline construction from the development split introduces a subtle confound.** The paper states (line 137) that when guidelines are not publicly available, human experts create them "based on the annotations from the development split." This means guidelines are reverse-engineered from the data rather than being pre-existing, natural task descriptions. While the test split is not used, guidelines crafted post-hoc by looking at dev-split annotations could be more informative than guidelines that existed before the dataset was created. The paper does not discuss how this might affect results or report which datasets used expert-created vs. publicly available guidelines. This does not invalidate the results, but it is a methodological detail that should be acknowledged and ideally controlled for.
 
-4. **Data modifications to Ontonotes 5 and TACRED are not quantified.** The paper says Ontonotes 5 training data was "reduced drastically" and TACRED was converted from RE to SF (line 135), but provides no numbers. This limits the reader's ability to assess the comparability of these supervised results.
-
-5. **Figure 1's caption is vague.** "GPT results are not available for all domains" does not clarify which domains are covered, which are missing, and why. Since this figure is used to motivate the paper, the incompleteness should be explained.
+**3. Per-dataset seen/unseen label breakdown would strengthen the zero-shot analysis.** The paper provides an aggregate analysis of seen vs. unseen labels (Figure 3), which is helpful, but individual dataset results in Table 2 are not disentangled. The reader cannot directly assess how much of GoLLIE's strong performance on, say, WikiEvents NER (80.7 F1) versus FabNER (24.8 F1) is attributable to schema overlap with training data versus genuine zero-shot generalization to novel schemas. A per-dataset breakdown would make the zero-shot claims more precise.
 
 ### Trivial
-- The "w/o Shuffling" result (55.9) being non-significantly higher than the full model (55.3) mildly undercuts the motivation for including this regularization, though the paper does acknowledge it.
+None.
 
 ## Nice-to-Haves
-- A table showing per-dataset F1 on the strictly unseen label subset (separate from seen labels) would directly test the claim of generalization to new schemas.
-- A limitations paragraph discussing the requirement for high-quality guidelines and the practical scenarios where such guidelines might or might not be available would strengthen the paper's honesty.
-- A per-dataset breakdown of which zero-shot evaluation datasets had pre-existing official guidelines vs. post-hoc created guidelines from the dev split.
+
+- **A finer-grained ablation** with conditions that isolate "definitions only (no candidates)" and "candidates only (no definitions)" would cleanly resolve what drives the gain. If definitions alone yield non-trivial improvement over the baseline (42.3), this strengthens the claim about guideline understanding rather than example matching.
+- **A Code-LLaMA prompted with guidelines (no fine-tuning) baseline** would isolate the effect of fine-tuning from the backbone model's capability. Currently, the comparison is between fine-tuned models with/without guidelines.
+- **Correlation analysis** between guideline quality (length, specificity, number of exceptions) and per-label improvement would deepen the contribution and provide practical guidance for writing effective guidelines.
+- **Clarification of which datasets** had publicly available guidelines vs. expert-created ones, along with an analysis of whether results differ between these groups.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-- **Criticism about SoTA column mixing methods without indication**: The SoTA column in Table 2 has clear citations per entry (e.g., \citep{DBLP:journals/corr/abs-2304-08085}). The paper is sufficiently transparent. Removed as factually inaccurate.
-- **"Label overlap inflates zero-shot results" framed as a fatal flaw**: The paper acknowledges and partially addresses this with Figure 2 (seen vs. unseen). The remaining concern is about presentation (exact numbers, per-dataset), which is moved to Minor.
-- **"Guideline sourcing is a structural flaw that cannot be fixed"**: The paper discloses the practice. While a valid concern, the framing as an unfixable structural flaw is overstated — even with this concern, the controlled comparison against the same-backbone baseline remains valid, and the concern can be addressed with better transparency and re-evaluation on strictly pre-existing guidelines. Downgraded from "fatal" to Major.
-- **Error analysis described as purely anecdotal**: The paper provides a systematic table (Table 4) with label-level F1 scores and categorizes failure modes. This is a reasonable error analysis for an empirical paper. Moved to Removed Points as incorrect.
-- **Demand for a "dedicated appendix paragraph" for metric definitions**: Not having a dedicated paragraph is a minor clarity issue, not a fatal omission. Already covered in Minor weakness #2.
-- **"Run controlled zero-shot using only publicly available guidelines" as a required action**: This is a strengthening suggestion, not a weakness. Moved to Nice-to-Haves.
+- **"w/o Dropout = removing docstring definitions" (from Harsh Critic's Critical Issue 3):** This claim is factually incorrect. The paper defines "class dropout" (Section 3.3) as a regularization technique that randomly deletes some input classes during training. The "w/o Dropout" ablation (54.0 F1) removes this training-time regularization — it does not remove docstrings or definitions from the guidelines. The reviewer conflated the name "dropout" with "dropping definitions." The valid concern (ablation doesn't separate definitions from candidates) is retained in Minor Weakness #1 above with corrected evidence.
+- **Generic complaints about missing details** that are standard practice to defer (e.g., "undisclosed hyperparameters"): Not present and not relevant.
+- **Claims that the paper "should not be accepted without addressing these issues"** are softened to match the actual severity of the concerns.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The review process confirms the paper's main findings while highlighting the need for greater transparency in the evaluation protocol.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. Add a supplementary table specifying, for each zero-shot evaluation dataset: (a) whether official guidelines existed prior to this work or were created from the dev split, (b) the exact evaluation metric used (exact span match, partial match, etc.), and (c) F1 on the strictly unseen label subset per dataset.
-2. Explicitly state in §3.2 what information the baseline receives (label names only? class definitions without docstrings?).
-3. Specify the statistical test used for p-values in the ablation.
-4. Clarify the Figure 1 caption to state which domains GPT results cover and why others are missing.
+1. Conduct a cleaner ablation with four conditions: (a) full guidelines (definitions + candidates), (b) definitions only (no candidates), (c) candidates only (no definitions), (d) baseline (no guidelines). This would cleanly resolve whether the improvement comes from understanding descriptive rules or from having in-context examples, and would make the paper's central claim more precise.
+2. For the guideline construction issue, either (a) run a controlled experiment using only datasets with publicly available pre-existing guidelines, or (b) explicitly list which evaluation datasets used expert-created vs. publicly available guidelines and report results separately for each group.
+3. Provide per-dataset breakdowns of seen vs. unseen label performance in addition to the aggregate Figure 3.
 
 ## Score and Decision
 
-Assign a score based solely on your assessment of the paper's quality after review.
+This paper makes a genuine contribution: presenting a method that leverages annotation guidelines (in a structured code format) to achieve substantial zero-shot IE improvements, with thorough evaluation and an honest error analysis. The concerns identified are real but addressable and do not undermine the core empirical finding that providing guidelines at inference time, combined with appropriate fine-tuning, yields large gains over baselines that lack this information. The paper is publishable in its current form and would be strengthened by addressing the above points.
 
-The paper makes a genuine contribution: showing that fine-tuning an LLM specifically to follow annotation guidelines yields substantial zero-shot IE gains, with a clean ablation identifying the key component. The code-based representation is practical and well-designed. The error analysis is honest and informative.
+**Originality:** The use of structured code-based guidelines with carefully designed regularization is novel and goes beyond prior instruction-tuning approaches for IE.
 
-However, the zero-shot evaluation is partly compromised by the creation of guidelines from evaluation-data dev splits for datasets without pre-existing guidelines, and the evaluation metrics are underspecified. These issues do not invalidate the core claims (the controlled baseline comparison is robust), but they do weaken the comparison against prior SoTA (Instruct-UIE) and limit the strictness of the zero-shot claim.
+**Quality:** Strong empirical evaluation across 17 datasets, 5 tasks, and 3 model scales. Ablation and error analysis are present and informative.
 
-The paper is solid but has real methodological concerns that need addressing. It should be accepted contingent on these being resolved in the final version.
+**Clarity:** The paper is clearly written and the method is well-described.
 
-Score: 6.5
-Decision: Accept
+**Significance:** The approach offers a practical path toward reducing annotation costs for new IE tasks/domains.
 
 MY FINAL SCORE: <pineapple>6.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

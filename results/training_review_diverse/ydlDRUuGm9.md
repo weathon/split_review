@@ -1,85 +1,69 @@
-I have thoroughly cross-checked all reviewer claims against the paper. Let me now produce the final consolidated review.
-
----
+Now I have all the information needed. Let me write the consolidated review.
 
 ## Summary
 
-This paper provides both theoretical and empirical comparisons between Kolmogorov-Arnold Networks (KANs) and multi-layer perceptrons (MLPs), focusing on two axes: representation/approximation capacity and spectral bias during training. It proves representation theorems showing mutual embeddability (MLP→KAN without overhead; KAN→MLP with a grid-size-dependent parameter blowup, absent the SiLU term), derives approximation rates for deep KANs on Sobolev spaces via these embeddings, and analyzes the Hessian of a single-layer KAN to argue for reduced spectral bias. Experiments on 1D frequency fitting, Gaussian random field regression, and a 1D Poisson equation support the claim that KANs learn high frequencies more readily than MLPs.
+This paper provides a theoretical and experimental comparison of Kolmogorov-Arnold Networks (KANs) and multi-layer perceptrons (MLPs), focusing on two axes: (1) expressiveness via representation theorems and approximation rates, and (2) spectral bias in training dynamics. The paper proves that MLPs can be exactly represented by KANs of comparable size (and vice versa with a width penalty proportional to grid size), derives optimal approximation rates for KANs on Sobolev spaces, and analyzes the spectral bias of single-layer KANs by showing their Hessian is well-conditioned (condition number bounded by a constant times input dimension, independent of grid size). Experiments on 1D frequency fitting, Gaussian random fields, and a Poisson PDE demonstrate that KANs learn high-frequency components substantially faster than MLPs, even when MLPs are given more parameters and more training iterations.
 
 ## Strengths
 
-- **Formal representation equivalence (Theorems 3.1 and 3.2):** The paper rigorously establishes that any ReLU$^k$ MLP can be exactly represented by a KAN of comparable size (width $W$, depth at most $2L$, grid size $G=2$), and any KAN without the SiLU nonlinearity can be represented by an MLP whose width scales as $O(GW)$. These results give a precise theoretical account of the relative expressiveness of the two architectures and formalize the intuition that KANs can be parametrically more efficient for large grid sizes.
+1. **Novel representation theorems (Theorem 1 and Theorem 2).** The paper proves that any ReLU$^k$ MLP can be exactly represented by a KAN of depth at most $2L$ and grid size 2 (Theorem 1), establishing that KANs are at least as expressive as MLPs. Conversely, Theorem 2 shows that KANs (without SiLU) can be represented by MLPs with a width penalty of $O(G)$, suggesting KANs with large grids may be more parameter-efficient for certain functions. These are clean, rigorous results that directly support the paper's expressiveness claims.
 
-- **Novel spectral-bias analysis for shallow KANs (Theorem 4.1):** The Hessian analysis of the least-squares loss for a single-layer KAN shows that the condition number is bounded by $O(d)$ (independent of the grid size $G$), in contrast to the $\Omega(n^4)$ scaling reported for two-layer ReLU MLPs. This is a genuine theoretical contribution that identifies a concrete mechanism—well-conditioned B-spline Gram matrix—by which KANs can avoid the severe frequency bias of ReLU networks. The paper is transparent that this analysis covers only the single-layer, SiLU-free case.
+2. **First theoretical analysis of spectral bias in KANs (Theorem 3).** The paper proves that the Hessian of a single-layer KAN's least-squares loss has eigenvalue ratio bounded by $Cd$ (independent of grid size $G$), in contrast to the $n^4$ scaling for two-layer ReLU MLPs. This is the first formal result explaining why KANs may not exhibit the strong low-frequency bias of MLPs, and it provides a rigorous starting point for understanding KAN training dynamics.
 
-- **Consistent experimental evidence across multiple problems:** The 1D wave (Figures 1–2), GRF (Figures 3–4), and Poisson (Figure 5) experiments all show the same qualitative pattern: KANs learn high-frequency content substantially better than MLPs, even when MLPs are given more parameters and more training steps. This cross-task consistency strengthens the empirical case that the reduced spectral bias is a genuine architectural property, not an artifact of a single benchmark.
+3. **Compelling experimental demonstration of reduced spectral bias.** The 1D frequency fitting experiment (Figures 1–2) is particularly striking: KANs with sufficient depth and grid size learn all frequencies nearly simultaneously, while MLPs with 10× more parameters and 10× more training iterations still fail on high-frequency components. The GRF and PDE experiments extend this finding to higher dimensions and more realistic tasks, with the GRF experiments showing that KANs outperform MLPs on rough (high-frequency) functions while MLPs remain competitive on smooth functions.
 
-- **Practical hyperparameter insights:** The paper systematically varies depth, width, and grid size for KANs and shows how these interact with spectral bias. The finding that larger grid sizes and depths enable simultaneous learning of all frequencies, and that reduced spectral bias can lead to overfitting in data-scarce regimes, provides actionable guidance for practitioners. The connection between grid extension and multi-level learning is also discussed.
+4. **Approximation rates for KANs on Sobolev spaces (Corollary 1).** By combining the MLP-to-KAN representation theorem with existing results for ReLU networks, the paper derives optimal approximation rates $O(L^{-2s/d})$ for very deep KANs on Sobolev spaces. This extends the theoretical foundation for KANs beyond the compositionally smooth functions covered by the original KAT theorem.
+
+5. **Systematic investigation of hyperparameter effects and the overfitting trade-off.** The experiments vary depth, width, and grid size, providing practical guidance (larger grids for rough functions, shallower nets for smooth functions). Section 4.3 explicitly demonstrates that KANs' reduced spectral bias leads to overfitting on noisy data, and that increasing training samples alleviates this—a nuanced finding that acknowledges the trade-off rather than overselling KANs.
 
 ## Weaknesses
 
-### Fatal
-None.
-
 ### Major
-None.
+
+1. **Gap between the spectral bias theory and the experiments.** The theoretical analysis (Section 4.1) is limited to a single-layer KAN, which is a linear model. The experiments, however, use deeper KANs (depth 2–4) with grid extension. The paper explicitly acknowledges this limitation (lines 20, 155, 431), stating the analysis is "necessarily highly simplified and heuristic" and that "future work includes developing theory which can describe the training of deeper KANs." Nonetheless, the framing in the abstract ("we demonstrate that KANs are less biased toward low frequencies than MLPs") and the conclusion overstate what the theory actually proves. The theory shows that a *single-layer* KAN's Hessian is well-conditioned—it does not formally establish that *deep* KANs inherit this property, nor does it connect the B-spline Gram matrix eigenvectors to Fourier frequency modes. The empirical results are convincing on their own, but the theoretical claim about deep KANs remains a conjecture supported by heuristic intuition and experimental evidence, not by the mathematical analysis presented. The authors should recalibrate the theoretical claim to explicitly state what is proven (shallow case) and what is conjectured (deep case).
 
 ### Minor
 
-- **Spectral-bias theory is restricted to single-layer KANs without SiLU, while all experiments use deeper KANs with SiLU.** The paper is fully transparent about this gap (Section 4.1 explicitly calls the analysis "necessarily highly simplified and heuristic" and states "we only analyze a single layer"), but this means the theoretical result does not directly cover the architectures evaluated. The experiments serve as empirical evidence, and the theory provides intuition for the shallow core, but the central claim that "KANs are less biased toward low frequencies" rests more on the experiments than the theory for the deep case. Adding even a heuristic argument for how depth interacts with the well-conditioned basis would narrow this gap.
+2. **Disconnect between the two halves of the paper.** The representation/approximation theorems (Section 3) and the spectral bias analysis (Section 4) are presented as separate contributions that do not reinforce each other. The representation theorems show KANs and MLPs can represent each other, which would suggest *similar* training dynamics if architecture alone determined spectral bias. But the spectral bias experiments show *different* training dynamics. The paper never reconciles this tension—e.g., by arguing that the B-spline parameterization (rather than the function class) drives the difference. This makes the paper read as two independent studies rather than a unified argument. While having two contributions is not a flaw per se, the lack of integration weakens the narrative.
 
-- **The KAN→MLP representation theorem (Theorem 3.2) and the spectral-bias theory both assume $w_b=0$ (no SiLU).** This is an acknowledged limitation, but it leaves open the question of whether the SiLU term significantly affects either expressiveness or spectral bias. Since the default KAN implementation includes SiLU and the experiments use it, the theoretical bounds technically apply to a variant of the architecture. A simple ablation experiment (KAN with $w_b=0$ vs. standard KAN) would clarify whether the assumption is benign.
-
-- **GRF and PDE experiments lack variance information.** The 1D wave experiments average over 10 random phase seeds, but the GRF and PDE results are reported without error bars, confidence bands, or mention of multiple trials. Extending the same reporting standard to all experiments would increase confidence in the conclusions.
-
-- **No experiments directly validate the single-layer theory.** The theory applies strictly to $L=1$ KANs without SiLU, but every experiment uses deeper KANs. A controlled experiment comparing a single-layer KAN against a single-hidden-layer MLP (where the theory directly applies) would provide a cleaner bridge between the theoretical and empirical contributions.
+3. **No formal connection between Hessian conditioning and Fourier-frequency learning.** Theorem 3 bounds the condition number of the Hessian in parameter space, showing gradient descent converges at roughly equal rates in all parameter-space directions. The experiments then measure frequency-domain learning (Fourier coefficients of the learned function). The paper implicitly equates "all parameter-space directions converge equally" with "all frequency components are learned equally," but does not establish this bridge formally. This is a conceptual gap, though the experimental results (particularly the 1D Fourier plots) provide strong empirical evidence that the connection holds in practice.
 
 ### Trivial
-None.
+
+4. **Limited scope of the PDE experiment.** The Poisson equation experiment is 1D with a single high-frequency parameter sweep. While clean and reproducible, this is a simple setting; the paper would benefit from at least one higher-dimensional PDE or more complex problem to strengthen the practical relevance claim.
 
 ## Nice-to-Haves
 
-- An ablation study removing the SiLU term ($w_b=0$) to test whether the theoretical assumptions are benign for spectral bias in practice.
-- Error bars or confidence bands on the GRF and PDE figures.
-- A brief discussion or experiment involving Fourier feature networks or SIRENs, which the paper already cites in the introduction but does not compare against empirically.
-- A controlled comparison where MLP and KAN parameter counts are matched (even if the design choice to give MLPs more resources strengthens the empirical case, a matched-control experiment would isolate the architectural cause).
+- A parameter-matched and training-budget-matched comparison in the 1D setting (width/grid-size sweep where KAN and MLP have comparable total parameters) would further isolate the architectural advantage. Currently the asymmetry favors the MLP (more parameters, more iterations), which makes the KAN's advantage *stronger* evidence, but a matched comparison would silence concerns cleanly.
+- The grid extension technique is highlighted as practically important but receives no theoretical treatment. A brief intuitive explanation of why multi-grid training helps high-frequency learning (beyond what the static-grid analysis already shows) would strengthen the practical narrative.
+- A direct measurement of the empirical NTK or Hessian eigenvalues for deeper KANs (depth 2–3) compared to MLPs would bridge the theory-experiment gap, though this is a substantial additional experiment.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points are flagged to be removed; treat them with caution:
 
-1. **"Experimental comparisons are not controlled for model size, depth, or training budget"** — The asymmetry in all experiments (MLPs given more parameters and/or more training iterations) favors the baseline, not the author's method. This is an intentionally asymmetric design that proves a stronger point. Per the hard rules, criticisms of unfair comparison are removed when the asymmetry favors the baseline.
-
-2. **"The paper does not cite recent work on spectral bias of other architectures (Fourier feature networks, SIRENs)"** — The paper explicitly cites SIRENs and Fourier feature mapping in the introduction (Section 1, lines 19–20). This criticism is factually wrong.
-
-3. **"The proofs are not provided in the parsed text (assumed in the appendix)"** — Per the hard rules, criticisms about missing appendix content are removed (appendix sections are stripped by the parsing pipeline and exist in the original submission).
-
-4. **Several presentation nitpicks and minor phrasing concerns** about whether the corollary "adds little" — the paper itself describes the corollary as following "immediately" from prior results; it is correctly labeled as a transfer of known rates to KANs.
+- *"The experimental comparisons are not controlled... asymmetry in capacity, training budget, and optimizer (L-BFGS vs. ADAM in some cases)"* — **Removed per hard rule**: the asymmetry favors the baseline MLP (more parameters, more iterations), making the KAN's advantage a stronger result. In the GRF and PDE experiments, both models use the same optimizer (LBFGS) with comparable iteration counts (500 vs. 500 for GRF; 200 vs. 200 for PDE). The claim about optimizer asymmetry is factually incorrect.
+- *"But MLPs with one hidden layer are also linear models in a lifted feature space... The paper does not address why the KAN case is fundamentally different beyond the condition number bound"* — **Removed**: the paper explicitly addresses this by contrasting the KAN's Hessian condition number ($Cd$, independent of grid size) with the two-layer ReLU MLP's condition number ($n^4$) in line 151. The condition number bound IS the difference.
+- *"A discussion of the computational cost of evaluating B-spline activation functions versus ReLU activations"* — **Removed per hard rule**: this is a nice-to-have, not a weakness.
+- *"The GRF plots and PDE plots are difficult to read... subfigure captions are partially garbled"* — **Removed per hard rule**: parser-induced formatting artifacts.
+- *"Missing related works"* — **Removed per hard rule**: cannot confirm without external sources.
+- *"Missing appendix, missing proofs in appendix"* — **Removed per hard rule**: parser strips appendices; they exist in the original submission.
 
 ## Novel Insights
 
-The most novel observation that emerges from reading the reviews against the paper is that the single-layer Hessian analysis (Theorem 4.1) and the B-spline conditioning result have an independent value that the paper under-leverages. The fact that the condition number depends only on $d$ (input dimension) and not on $G$ (grid size) is a strong statement, and the $d'(d-1)$ redundant eigenvectors are cleanly explained by the parameterization symmetry of B-splines across input dimensions. This analysis could stand as a useful lemma even if separated from the deep-learning context. The reviews do not surface additional novel insights beyond the paper's own contributions.
+The most interesting observation emerging from the reviews is the inherent tension between the two halves of the paper. The representation theorems (Section 3) show that KANs and MLPs can represent each other with bounded overhead—suggesting their *function classes* are similar. Yet the spectral bias experiments (Section 4) show dramatic differences in *training dynamics*. This tension implies that the advantage of KANs lies primarily in optimization/inductive bias rather than representation capacity. The paper would benefit from explicitly framing the narrative around this distinction: KANs do not necessarily represent more functions, but they learn different functions first. The well-conditioned Hessian of the shallow KAN is a first step toward formalizing this, but a deeper theoretical account of why the B-spline basis yields better conditioning than the ReLU basis in the NTK regime remains an open problem that the paper surfaces but does not resolve.
 
 ## Suggestions
 
-1. **Add a shallow-KAN experiment ($L=1$, $w_b=0$) to directly test Theorem 4.1.** This would close the largest gap between theory and experiment and would not require changing the paper's scope.
-2. **Include an ablation comparing standard KANs ($w_b\neq0$) against KANs with $w_b=0$** on at least the 1D wave problem, to verify that the SiLU term does not materially affect spectral bias.
-3. **Add error bars or individual-trial visualizations** to the GRF and PDE results to match the reporting standard of the 1D experiments.
-4. **In the concluding remarks, explicitly separate the two evidential threads:** (a) the rigorous theory for shallow KANs without SiLU, and (b) the empirical evidence for deeper KANs with SiLU. The current conclusion blends them into "we have demonstrated" without distinguishing the strength of support.
+1. **Recalibrate the theoretical claims.** Rewrite the abstract, introduction, and conclusion to clearly distinguish what is proved (shallow KANs have a well-conditioned Hessian, suggesting reduced spectral bias) from what is observed experimentally (deep KANs exhibit reduced spectral bias across several tasks). The phrase "we demonstrate that KANs are less biased toward low frequencies than MLPs" is acceptable for the empirical finding but should not be presented as a proven theoretical result for deep KANs.
+
+2. **Add at least one controlled comparison with matched parameter counts.** While the current asymmetry (MLP advantaged) makes the results stronger, a cleaner comparison where both models have similar total parameters and training budgets would eliminate a persistent source of reader skepticism. The 1D setting is simple enough to do this cleanly.
+
+3. **Acknowledge the spectral bias theory explicitly as a shallow-KAN result in the title or section header.** The current section title is "Spectral bias theory for shallow KANs," which is appropriate, but the abstract and introduction should more prominently signal that the theory covers the shallow case while the experiments extend to the deep case.
 
 ## Score and Decision
 
-**Originality:** Moderate–high. The representation theorems are new and the spectral-bias analysis for KANs has not appeared elsewhere.
-
-**Importance of research question:** High. KANs are a rapidly growing area, and understanding their fundamental properties relative to MLPs is of broad interest.
-
-**Claims well supported:** Reasonably. The theoretical claims are precise and caveated. The experimental claims are supported by consistent qualitative patterns, though the lack of controlled comparisons and variance information weakens the quantitative support.
-
-**Soundness of experiments:** Moderate. The qualitative trend is convincing, but the absence of matched-size comparisons, error bars on two of three experiments, and an ablation for the SiLU term are clear limitations.
-
-**Clarity of writing:** Good. The paper is well-structured, notation is clear, and limitations are honestly acknowledged.
-
-**Value to the research community:** Good. Provides a theoretical foundation for understanding KAN expressiveness and training dynamics that practitioners and theorists can build on.
+The paper makes genuine contributions: first rigorous spectral bias analysis for KANs, novel representation theorems, new approximation rates, and compelling empirical evidence. The main weakness—the gap between shallow theory and deep experiments—is acknowledged by the authors and does not invalidate the empirical findings, which stand on their own. The paper is publishable with revisions to recalibrate the strength of the theoretical claims.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

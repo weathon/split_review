@@ -1,89 +1,75 @@
-Now I have thoroughly verified the paper against the reviewer claims. Let me write the consolidated review.
+Now I have all the evidence I need. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes Polyak Parameter Ensemble (PPE), a method that constructs a parameter-level ensemble by maintaining a running weighted average of model parameters across epochs, with the key novelty being an exponentially increasing weighting scheme (λ > 1) over uniform weights (λ = 1.0). The method is evaluated primarily on knowledge graph embedding (KGE) models (DistMult, ComplEx, QMult) across multiple link prediction benchmarks, with a brief CIFAR-10 visualization. The core idea is simple and builds on well-known Polyak averaging.
+This paper proposes Polyak Parameter Ensemble (PPE), a method that constructs a parameter-level ensemble by maintaining a running weighted average of model parameters at each epoch interval during training of a single model. The authors apply PPE primarily to knowledge graph embedding models (DistMult, ComplEx, QMult) on link prediction and multi-hop reasoning tasks, and also include a CIFAR-10 image classification experiment. The claimed advantage is improved generalization with zero additional cost at test time — the same memory and latency as a single model.
 
 ## Strengths
 
-- **Consistent improvements on KGE benchmarks**: Tables 4–6 report that PPE improves Hits@N and MRR for DistMult, ComplEx, and QMult across seven link prediction benchmarks (FB15K-237, YAGO3-10, NELL-995 variants, UMLS, KINSHIP, Mutagenesis, Carcinogenesis). The paper states that "PPE consistently improves the link prediction performance … on all datasets" (Section 5). This breadth across KGE models and datasets is the paper's main empirical contribution.
+- **Cost-free ensemble at test time.** PPE requires no architectural changes, no extra training, and produces a single set of parameters at test time. This is a genuinely practical advantage over prediction-level ensembles (e.g., Bagging, Snapshot Ensembles) that multiply test-time memory and latency. The paper clearly articulates this advantage (Section 1) and verifies that no runtime overhead was detected in practice (Section 5).
 
-- **Benefits scale with model capacity**: Table 8 shows that for embedding dimension d ≥ 32, DistMult with PPE achieves higher scores in 81 out of 96 comparisons, while performing worse in only 6. The effect is more pronounced at larger d, which is a nontrivial empirical finding supporting the paper's claim.
+- **Consistent improvements across KGE models and datasets.** The experimental results (Tables 4–6) show that PPE consistently improves MRR and Hits@N over the final-epoch baseline for DistMult, ComplEx, and QMult on FB15K-237, YAGO3-10, NELL-995 variants, UMLS, KINSHIP, Mutagenesis, and Carcinogenesis. The effect holds across multiple KGE model families and a diverse set of dataset sizes and domains.
 
-- **Zero inference-time overhead**: The method requires no architectural changes, no additional parameters at test time, and no extended training time. The paper confirms "Throughout our experiments, we did not detect any runtime overhead of using PPE" (Section 5). This practical advantage over prediction-level ensembles is genuine and well-motivated.
+- **Benefits scale with model capacity.** Table 8 demonstrates that the improvement from PPE becomes more pronounced as the embedding dimension \(d\) grows, with the method outperforming the baseline on 81 out of 96 scores for \(d \geq 32\). This scaling behavior is a useful finding for practitioners working with large embeddings.
 
-- **Effectiveness on multi-hop reasoning**: Table 7 shows improvements in average MRR, Hit@1, and Hit@3 across all eight query types on UMLS, extending the method's applicability beyond simple link prediction.
+- **Clean experimental design isolating the averaging effect.** By fixing the cutoff epoch \(j=200\) across all datasets and not using validation-loss feedback (line 135), the authors ensure the observed improvements come from the averaging mechanism itself rather than from implicit early stopping or validation-set leakage. This makes the ablation cleaner.
 
 ## Weaknesses
 
 ### Fatal
-None.
+None. The results are not fabricated or fundamentally invalid — the core finding (epoch-level averaging improves over the final checkpoint) is reproducible in principle.
 
 ### Major
 
-- **The averaging window definition creates a potentially degenerate configuration.** Section 4.1 states j = 200 as the cut-in epoch for averaging, while N ∈ {200, 250}. When N = 200, the averaging window (epochs j+1 to N) is empty, meaning PPE collapses to zero or the final model — i.e., no averaging occurs at all. The paper never specifies which datasets use N = 200 vs. N = 250, nor does it explain the choice. If any dataset uses N = 200, the reported improvements on that dataset cannot come from the proposed method. This is not a nitpick — it is a methodological gap that undermines the experimental design. The authors must clarify this, or re-run experiments with consistent N > j.
+- **Missing comparison to the most relevant baselines: SWA and standard Polyak averaging.** The paper compares PPE only to the final-epoch checkpoint, not to Stochastic Weight Averaging (Izmailov et al., 2018, cited at line 36) or to standard mini-batch-level Polyak averaging over the same training trajectory. Since PPE with uniform weights is explicitly described as "applying the Polyak averaging technique at each epoch interval" (lines 10, 90), the novel claim must be that epoch-level granularity and/or exponential weighting provides benefit over these existing approaches. Without direct experimental comparison under an identical compute budget, the paper cannot support this claim — the observed improvements may be obtainable with simpler, well-known averaging schedules. This is the most significant gap in the paper.
 
-- **The claimed generality to image classification is essentially unsupported.** The abstract and introduction claim improvements on "11 benchmark datasets ranging from multi-hop reasoning to image classification," yet the sole non-KGE evidence is Figure 1 — a visualization of CIFAR-10 accuracy curves with no architecture description, no hyperparameters, no tabular results, and no baseline comparisons. This is not a valid experiment; it is an illustration. Either the authors should provide a proper CIFAR-10 evaluation (network architecture, training setup, test accuracies with and without PPE, comparison to SWA/uniform averaging) or withdraw the generality claim and scope the paper to KGE models.
+- **The fixed cutoff epoch \(j=200\) is not ablated and may be problematic.** The paper sets \(j=200\) for all datasets, even those trained for only 200 total epochs (line 133: \(N \in \{200, 250\}\)). For \(N=200\), this means the averaging window is the very last epoch or less — effectively no averaging at all — yet results are still reported as improved. For \(N=250\), the window is 50 epochs. No ablation is provided to show how performance varies with \(j\), and no justification is given for choosing 200 over any other value. This makes it difficult to assess whether the method is robust or relies on a carefully tuned hyperparameter.
+
+- **Single-run results reported without variance.** All results in Tables 4, 5, 7, and 8 appear to come from single runs with no standard deviations, confidence intervals, or multi-seed statistics. For a method whose stated advantage includes "more stable training" (line 13), stability across runs is directly relevant. The 10-fold cross-validation on Mutagenesis and Carcinogenesis (Table 6) is a partial exception but covers only two small datasets. The field norm for KGE (Ruffinelli et al., 2020, whose setup the paper follows) often uses single runs, but the paper's own claims about stability make the lack of variance reporting more consequential here.
 
 ### Minor
 
-- **No variance or statistical significance reported.** All results in Tables 4–8 are single numbers. Given that mini-batch SGD is stochastic, small improvements (e.g., <1 MRR point in some entries of Table 8) cannot be assessed without standard deviations or multiple seeds. While single-run evaluation is common in parts of the KGE literature, the paper should at minimum acknowledge this limitation, and ideally report means over 3–5 runs.
+- **CIFAR-10 experiment is under-reported.** The image classification experiment is presented only as a qualitative figure (Figure 1) with no model architecture, no training hyperparameters, no quantitative test accuracy, and no comparison to a non-PPE baseline in the text. This does not constitute a reproducible experimental result and weakens the claim that PPE "generalizes across tasks."
 
-- **The "cost-free" claim overstates the training cost.** The paper calls PPE "a cost-free ensemble technique in training and testing time concerned" (Section 1). While test-time memory is indeed that of a single model, during training PPE must maintain a running weighted average of all parameters, which requires storing a second parameter copy in memory — effectively doubling the training memory. This trade-off should be acknowledged.
+- **Theoretical justification does not match the experimental setup.** The derivation in Section 3 uses \(T=2, N=2\) with equal weights from epoch 1 onward to argue that averaging reduces the influence of later noisy updates. But the experiments use a cutoff \(j=200\), where epochs 1–200 receive zero weight. The paper does not reconcile this discrepancy. The theory as presented motivates full-trajectory averaging; what is actually evaluated is late-stage averaging.
 
-- **The dynamic α determination via validation loss is described but never used, creating confusion.** Section 3.1 describes an "early-stopping-like" dynamic weighting scheme, but Section 4.1 states "we did not dynamically determined α by tracking the validation loss." Presenting a variant that is never evaluated and then saying it was not used is confusing. This should be clearly labeled as future work or removed from the method description.
+- **Limited exploration of the exponential growth rate \(\lambda\).** Only \(\lambda \in \{1.0, 1.1\}\) are tested (line 133). The paper proposes exponential weight growth as a mechanism but provides almost no analysis of how \(\lambda\) affects performance or guidance on how to set it.
 
-- **The direct comparison of exponential (λ=1.1) vs. uniform (λ=1.0) weighting is limited.** Table 8 provides this comparison only for DistMult on two datasets (UMLS, KINSHIP). The main results tables (4–6) do not separately break out λ=1.0 vs. λ=1.1 for ComplEx and QMult, making it difficult to assess whether the exponential weighting specifically — as opposed to parameter averaging generally — is what drives improvements across all models. The paper's central claim is about exponential weighting, so this comparison should be shown for all model-dataset combinations.
+- **Memory overhead of maintaining a running parameter average is not discussed.** The paper claims "no additional computational cost" but maintaining a running average requires storing a second copy of all parameters in memory (the same cost as SWA). This is worth acknowledging, even if the cost is modest relative to prediction-level ensembles.
 
-- **Missing comparison to Stochastic Weight Averaging (SWA).** SWA (Izmailov et al., 2018) is cited in related work but never used as a baseline. SWA is the most closely related method (parameter averaging over a trajectory segment, often with a cyclical LR schedule). While the paper does compare λ=1.0 (uniform) vs. λ=1.1 (exponential), adding SWA would strengthen the positioning and demonstrate that the specific weighting scheme, not just any averaging, adds value.
+- **Minor inconsistencies.** The Introduction claims benefits dissipate at \(d \leq 4\) (line 21), but the Discussion states they dissipate for \(d < 16\) (line 195). The abstract claims "11 benchmark datasets" but only 10 are clearly identifiable in the main paper (UMLS, KINSHIP, NELL-995 h25, NELL-995 h50, NELL-995 h100, FB15K-237, YAGO3-10, Mutagenesis, Carcinogenesis, CIFAR-10), and results for NELL-995 h100 are not presented in the main tables.
 
 ### Trivial
-- Figure 1 caption describes "the figure on the right" but the figure appears to contain multiple plots; the relationship between the figure and the caption text is unclear in the extracted text.
+- No pseudocode/algorithm box is provided, which would improve reproducibility of the running-average update procedure.
+- The title phrase "Exponential Parameter Growth" could be misinterpreted as referring to the number of parameters growing rather than the ensemble weights.
 
 ## Nice-to-Haves
-- An ablation on the cut-in epoch j (e.g., 50%, 80%, 90% of training) to show robustness to this hyperparameter.
-- An analysis of why performance degrades for very low embedding dimensions (d ≤ 4 / d < 16) — the paper notes this but does not explain it.
-- A discussion of limitations, including that benefits diminish at low model capacity and that the method has not been tested outside KGE and a single CIFAR-10 visualization.
+
+- An ablation of the cutoff epoch \(j\) (e.g., \(j \in \{0, 50, 100, 150, 200\}\)) would directly address the gap between theory and practice.
+- Reporting multi-seed statistics (mean and std over 3–5 seeds) for the main results would strengthen the stability claims.
+- A discussion of how the exponential weights are normalized in practice (the paper states \(\sum \alpha_i = 1\) but exponential growth requires re-normalization) would improve clarity.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-1. **"The paper never compares PPE to standard Polyak averaging."** — Factually wrong. The paper has λ ∈ {1.0, 1.1}, and λ = 1.0 is explicitly described as uniform weights / standard Polyak averaging at epoch intervals (Section 3: "Using positive equal ensemble weights α_i = 1/N corresponds to applying the Polyak averaging technique at each epoch interval"). Table 8 directly compares λ = 1.0 vs. λ = 1.1.
-
-2. **"The paper never states how the weights are normalized to sum to 1."** — Factually wrong. Section 3 states "α_i s.t. Σ_i^N α_i = 1" directly in the definition of PPE.
-
-3. **"The derivation with T=2 and N=2 is mathematically trivial and does not add insight."** — Subjective opinion about presentation, not a technical weakness. The derivation is a pedagogical illustration.
-
-4. **Criticisms about the supplementary material / appendix being missing.** — The parser strips these sections; they exist in the original submission.
-
-5. **Formatting/style nitpicks** — These are parser artifacts, not author errors.
-
-6. **"Tables 4–6 are reported as screenshots with small, low-contrast text"** — This is a formatting artifact from PDF extraction, not a content issue with the original submission.
+- **Criticism that SWA/Polyak are "absent from the discussion."** This is partially incorrect: Izmailov et al. (2018) is cited at line 36, and the paper explicitly connects PPE to Polyak averaging multiple times (lines 10, 21, 90). The core concern (missing experimental comparison) is preserved in Major weaknesses; the incorrect claim of total absence is removed.
+- **Criticism about training set scores being reported as a weakness.** The paper explicitly states the rationale for reporting training scores ("to detect possible impacts on the training performance," line 157). This is a design choice, not an error.
+- **Generic formatting/style nitpicks.** Removed per instructions.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not reveal any deeper insight not already present in the paper. The observation about the j/N consistency issue is a methodological critique, not a novel research insight.
+The most interesting observation is the scaling behavior: PPE's benefit grows with embedding dimension \(d\) and essentially vanishes for small \(d\). This suggests that the method is compensating for optimizer noise that scales with model capacity — a plausible mechanism worth investigating further. However, the paper does not provide a theoretical account of why this scaling occurs, so this remains an observation rather than a developed insight. Beyond this, the reviews do not surface a genuinely novel insight beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Clarify the j/N relationship immediately.** Report which datasets use N = 200 vs. N = 250 re-run experiments with consistent N > j, or justify why j = 200 is valid for all settings.
-2. **Either add a proper CIFAR-10 experiment** (with architecture, hyperparameters, tabular test accuracies, baselines) or remove the image classification claim from the title/abstract and scope the paper to KGE models.
-3. **Report variance.** Run each configuration with at least 3 random seeds and report mean ± std.
-4. **Expand the λ = 1.0 vs. λ = 1.1 comparison** to all model-dataset combinations (ComplEx, QMult on all datasets), not just DistMult on two datasets.
-5. **Add SWA as a baseline** on a subset of datasets to directly benchmark against the most related prior work.
-6. **Acknowledge the training memory cost** of maintaining a second parameter copy.
+1. **Add experimental comparisons to SWA and mini-batch Polyak averaging** under the same training budget. This is the single highest-impact change: it would clarify whether the epoch-level granularity or the exponential weighting (as opposed to the general concept of parameter averaging) is responsible for the gains reported.
+2. **Run an ablation on the cutoff epoch \(j\)** to show how performance depends on the averaging window length and to reconcile the theory with the experiments.
+3. **Report the CIFAR-10 experiment with full quantitative results** (architecture, hyperparameters, final test accuracy with and without PPE, and ideally multiple seeds).
+4. **Add multi-seed standard deviations** for at least the three largest datasets (FB15K-237, YAGO3-10, NELL-995 h50) to support the stability claim.
+5. **Include a pseudocode algorithm** showing exactly when and how the running average is updated, and clarify the weight normalization procedure for the exponential case.
 
 ## Score and Decision
 
-The paper proposes a simple, plausible variant of parameter averaging. The core idea is not without merit, and the KGE experiments are reasonably broad in model and dataset coverage. However, the paper has two major problems: (1) the epoch window inconsistency (j = 200 with N ∈ {200, 250}) could render the method degenerate on some datasets, and the paper provides no clarification; (2) the claimed generality beyond KGE is supported only by a figure with no experimental detail — essentially absent evidence. Combined with the lack of variance reporting, limited direct comparison of the key variable (uniform vs. exponential weighting across all models), and overstated "cost-free" claim, the paper in its current form does not meet the bar for acceptance. The weaknesses are correctable with a major revision, but the paper as submitted is not ready.
+The paper proposes a simple, practical technique and provides consistent empirical evidence that it improves KGE link prediction over the final-epoch baseline. The method's main strength — cost-free test-time ensemble — is real and well-articulated. However, the experimental evaluation has a critical gap: the most natural baselines (SWA, standard Polyak averaging) are absent, and without them the claim of novelty or superiority cannot be evaluated. Combined with the unablated cutoff epoch, single-run results, and under-reported CIFAR-10 experiment, the contribution as presented is not yet convincingly established as new or practically superior to existing averaging techniques. The paper would need the suggested comparisons to reach the bar for acceptance.
 
-**Originality**: 3/10 — The idea is a minor variant of existing parameter averaging (Polyak/SWA).
-**Importance**: 5/10 — Parameter averaging is a useful technique; exponential weighting is a plausible refinement.
-**Claims support**: 3/10 — Central claim is inadequately tested; epoch window issue undermines confidence.
-**Soundness**: 3/10 — Methodological gap in evaluation design; no variance; overclaimed generality.
-**Clarity**: 5/10 — Generally readable but confusing about dynamic α and the j/N issue.
-**Value**: 4/10 — Could be useful for KGE practitioners after proper validation.
-
-MY FINAL SCORE: <pineapple>4.0</pineapple>
+MY FINAL SCORE: <pineapple>5.0</pineapple>
 MY FINAL DECISION: <orange>Reject</orange>

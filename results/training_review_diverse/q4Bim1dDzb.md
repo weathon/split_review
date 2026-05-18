@@ -1,81 +1,77 @@
-Now I have a thorough understanding of both the paper and the reviews. Let me construct the final consolidated review.
+Now I have verified all claims against the paper. Let me produce the consolidated review.
 
 ---
 
 ## Summary
 
-This paper proposes UniVoxel, a method for inverse rendering that encodes scene properties into two explicit voxel grids — one for a signed distance field (geometry) and one for a semantic field (materials and illumination). Illumination is modeled by predicting per-point Spherical Gaussian (SG) parameters from the semantic field via lightweight MLPs, avoiding expensive multi-bounce ray tracing. The central claim is that training takes 18 minutes per scene (40× faster than MII, 12× faster than Nvdiffrec-mc) while achieving competitive or better reconstruction quality on both synthetic and real-world benchmarks.
+This paper proposes UniVoxel, a unified voxelization framework for inverse rendering that jointly learns geometry (SDF), materials (albedo, roughness), and illumination by encoding a scene into explicit voxel grids with lightweight MLP decoders. The key innovation is using local Spherical Gaussians (SGs) to model incident light radiance per 3D position, which avoids expensive multi-bounce ray tracing and integrates seamlessly into the voxelized representation. The method reduces per-scene training from hours to 18 minutes (claiming 40× over MII and 12× over Nvdiffrec-mc) while achieving competitive reconstruction quality on synthetic and real-world benchmarks.
 
 ## Strengths
 
-- **Dramatic training speedup (18 minutes per scene):** The paper demonstrates that UniVoxel reduces per-scene training to 18 minutes — 40× faster than MII and over 12× faster than Nvdiffrec-mc (Abstract, Section 1, Section 4.3). This directly supports the core efficiency claim and is a significant practical advance over implicit methods.
+1. **Drastic training time reduction with clear quantitative support.** The paper reports that UniVoxel reduces per-scene training to 18 minutes, with specific speedup factors (40× vs. MII, 12× vs. Nvdiffrec-mc) stated in both the contributions list (Section 1) and the experimental results (Section 4.3). These claims are accompanied by quantitative metrics (PSNR, SSIM, LPIPS) on the MII synthetic dataset showing competitive or superior quality at a fraction of the training cost.
 
-- **Competitive reconstruction quality despite the speedup:** On the MII synthetic dataset, UniVoxel outperforms or matches NeRFactor, MII, Nvdiffrec-mc, and TensoIR across most metrics (PSNR, SSIM, LPIPS) for novel view synthesis, albedo, and relighting (Table 1, Section 4.3). The paper also shows qualitative results on real-world NeRD scenes where the method produces plausible normals and albedo maps where environment-map-based TensoIR struggles (Figures 4, 5).
+2. **Unified illumination modeling via local Spherical Gaussians eliminates multi-bounce ray tracing.** The method predicts per-point SG parameters from the voxelized semantic field using a lightweight MLP (Eq. 7), enabling efficient querying of incident radiance from any direction. This design directly addresses the computational bottleneck of prior methods that require environment-map-based visibility computation or multi-bounce ray tracing. The ablation study in Section 4.4 (Table 2) quantitatively confirms that the SG-based illumination model is both faster and higher-quality than environment-map, SH, and MLP-based NeILF alternatives.
 
-- **Novel SG-based illumination modeling eliminates multi-bounce ray tracing:** The method models local incident light radiance with per-point Spherical Gaussians (Section 3.4), learning SG parameters from the same semantic field used for materials. This design enables joint modeling of direct lighting, indirect lighting, and light visibility without the expensive multi-bounce ray tracing required by environment-map-based approaches. Ablation results confirm this SG approach achieves better quality and shorter training time than environment-map, SH, or NeILF alternatives (Table 2).
+3. **Competitive reconstruction quality across diverse benchmarks.** On the MII synthetic dataset, UniVoxel "outperforms other methods in most metrics" (Section 4.3). On the NeRD real-world dataset, it produces plausible normals, albedo, and roughness, with qualitative comparisons against NeRFactor, MII, Nvdiffrec-mc, and TensoIR (Figures 3–5). The method handles both fixed and varying illumination conditions, the latter via learnable view embeddings (Section 3.4).
 
-- **Memory-efficient via multi-resolution hash encoding:** UniVoxel can optionally adopt multi-resolution hash encoding (Section 3.3) to achieve higher effective resolution with low memory cost. The "UniVoxel(Hash)" variant achieves higher relighting quality at only a minor training-speed trade-off (Section 4.3), demonstrating practical flexibility.
+4. **Comprehensive ablation studies that validate key design decisions.** The paper ablates the illumination model (SG vs. envmap vs. SH vs. NeILF MLP) in Table 2 and individual loss terms (reconstruction, smoothness, white-light regularization, SG regularization) in Table 3. These ablations demonstrate the necessity of each component and isolate the efficiency/quality contributions of the proposed design.
 
-- **Extension to varying illumination conditions:** The method incorporates per-view embeddings (Section 3.4) to handle scenes captured under changing illumination. On challenging NeRD scenes with varying lighting, UniVoxel produces plausible reconstructions where environment-map-based TensoIR fails (Figure 5), showing a generalization advantage of the unified SG approach.
+5. **Memory optimization via multi-resolution hash encoding.** The paper recognizes the memory cost of explicit voxel grids and provides a hash-encoded variant (UniVoxel(Hash)) that achieves higher relighting quality at the cost of a slight decrease in speed (Section 4.3), showing practical flexibility.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
+
 None.
 
 ### Minor
 
-1. **Speed comparison against the most relevant explicit baseline (TensoIR) is not explicitly quantified in the text.** The paper prominently reports "40× faster than MII" and "over 12× faster than Nvdiffrec-mc" (Abstract, Section 1), but does not give an equivalent speed-up ratio for TensoIR, which is the closest explicit competitor. TensoIR already trains in ~1–2 hours, so the gap to 18 minutes (~3–6×) is still meaningful but smaller than the improvement over implicit methods. Not stating this explicitly weakens the efficiency narrative. The table presumably contains this information, but calling it out in the text would significantly help readers judge the practical significance.
+1. **Ambiguity in training-time comparison methodology.** The paper's central efficiency claim (40× over MII, 12× over Nvdiffrec-mc) depends on knowing exactly what is included in each baseline's reported training time. The paper states only that "the training time of other baselines is measured on the same machine" (Section 4.2). Several baselines have multi-stage pipelines (e.g., MII involves NeRF pretraining, Nvdiffrec-mc uses Monte Carlo sampling, TensoIR has its own coarse-to-fine schedule). The paper does not specify whether it used each baseline's official implementation with default settings, whether the reported times include all stages end-to-end (including pretraining), or whether the timing reflects single-seed runs. This ambiguity weakens the central speedup claim and should be resolved in a revision.
 
-2. **The white-light regularization (`L_white`) is insufficiently evaluated on real-world data with colored illumination.** The method introduces a regularization that penalizes color shifts in incident light (Section 3.5), effectively assuming nearly white illumination. While the ablation shows this helps on synthetic data, the NeRD real-world dataset includes scenes with colored/varying lighting where this prior could bias the material-lighting decomposition (absorbing color shifts into albedo rather than lighting). The paper provides qualitative results on these scenes but **no quantitative metrics for decomposed albedo or material quality under colored lighting**. Without this, the method's generalizability to strongly colored real-world illumination remains uncertain.
+2. **Ad-hoc roughness correction without analysis.** The paper applies a 1.5 power correction to the predicted roughness during relighting, noting "the optimization bias towards higher roughness values" (Section 4.2). This correction is a post-hoc fix applied to compensate for a known bias in the learned representation, yet the paper provides no analysis of this bias, no ablation showing relighting results without the correction, and no physical justification for the 1.5 exponent. While this does not invalidate the overall contribution, it undermines confidence that the material decomposition is fully disentangled and that the roughness estimates are physically meaningful rather than compensation artifacts.
 
-3. **No discussion of failure cases or limitations.** The paper lacks a section (or even a paragraph) discussing scenarios where the method might struggle — e.g., scenes with strong interreflections, highly specular surfaces, extreme non-white lighting, or fine geometric detail below the voxel resolution. While the paper's contributions are clear, including a brief limitations discussion would strengthen the presentation and help guide future work.
-
-4. **The number of incident light samples is fixed at 128 with no ablation.** The sampling resolution for incident lights is set to 128 Fibonacci-sphere samples (Section 4.2). This is a key hyperparameter affecting both quality and speed; varying this (e.g., 64, 256) would strengthen the evaluation of the SG representation's efficiency claim. [Moved to Nice-to-Haves — see below.]
+3. **Missing quantitative results for varying-illumination NeRD scenes.** On the three NeRD scenes captured under varying illumination, the comparison against TensoIR is limited to qualitative figures (Figure 5). The paper states that "TensoIR fails to recover the geometry and materials" but provides no quantitative metrics for these scenes (PSNR, SSIM, LPIPS, or relighting-specific metrics). Since handling varying illumination is presented as a key capability enabled by the view-embedding extension (Section 3.4), quantitative validation on these scenes would substantially strengthen this claim.
 
 ### Trivial
-None.
+
+- The coarse/fine stage iteration count (10k each, fixed) is not ablated. A learning curve showing when the method converges relative to baselines, or an ablation on iteration count, would clarify whether the schedule was tuned and how robust the method is to this hyperparameter.
 
 ## Nice-to-Haves
 
-- An ablation varying the number of incident light samples (e.g., 64, 128, 256) would strengthen the evaluation of the SG illumination model's efficiency claims. If 128 is sufficient, that is good evidence; if fewer suffice, the speed advantage grows.
-- An explicit limitations paragraph or failure-case analysis would strengthen the paper's completeness.
-- Adding quantitative metrics (PSNR/SSIM/LPIPS) for albedo and relighting on the NeRD real-world scenes would solidify the real-world evaluation.
+- An ablation comparing the SG-light-field *with* voxelization against an MLP that directly predicts SG parameters from coordinates (without the voxelized semantic field). This would isolate the benefit of the voxelized representation from the SG representation itself. The paper's existing MLP(NeILF) baseline does not fully serve this purpose since NeILF uses a different architecture and task.
+- Reporting GPU memory usage for the voxel grids (with and without hash encoding), and comparing against TensoIR's tensor-factorized memory footprint.
+- Visualizing learned SG lobes (amplitudes, sharpness) at selected surface points as evidence that the SGs capture indirect illumination patterns rather than just direct lighting plus learned visibility.
+- Specifying the number of training images per scene for the NeRD real-world dataset.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviews are excluded per the guidelines:
 
-1. **"Tables are stripped by the PDF parser, so core evidence is missing"** — Removed per instructions: this is a parser artifact (LaTeX `\input` commands), not an author error. The tables exist in the original submission.
-
-2. **"The incident light field should be evaluated at the surface point, not at every ray sample; the paper does not clarify how SG parameters are combined"** — Removed as factually incorrect. The paper explicitly states (lines 155–157): "Then we obtain the h(r) along the camera ray r by the volume rendering shown in Eq. 4 with κ_i replaced by h(x_i). Thus, we can efficiently query incident light radiance from an arbitrary direction at a surface point." The integration is clearly specified.
-
-3. **"The hash-based variant should be the primary method"** — Removed as an opinion/presentation preference; the dense grid version is a defensible baseline design choice, and the hash variant is presented as a flexible option.
+- **Missing supplementary / appendix content** (references to "Sec. C", truncated "results are presented in Sec."): The parser strips supplementary sections from all papers; these exist in the original submission. Per hard rules, this criticism is removed.
+- **Few-view generalization concern** ("Real-world NeRD scenes have only 8–16 images? ... Generalizing to few-view settings is an important challenge"): The paper does not claim few-view reconstruction; this is a request to expand the paper's scope beyond its intended contribution.
+- **"Ethiopian Head" geometry robustness question** ("Could the authors comment on whether UniVoxel's SDF-based geometry is more robust to that scene?"): This is a discussion question, not a weakness.
+- **Efficiency breakdown suggestion** (break total time into forward/backward/loss/visibility components): This is a nice-to-have analysis, not a weakness. Already covered in Nice-to-Haves section above.
+- **SG lobe visualization suggestion** (visualize lobes as evidence of modeling indirect illumination): Already covered in Nice-to-Haves above.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface a useful practical concern (white-light prior evaluation on colored real-world data) but do not introduce fundamentally novel perspectives beyond what the paper already discusses.
+None beyond the paper's own contributions. The reviews surface useful clarifications and ablation requests but do not identify a fundamentally new angle that the paper itself misses.
 
 ## Suggestions
 
-1. **Explicitly state the speed-up over TensoIR** (e.g., "3–6× faster than TensoIR") in the abstract and introduction alongside the MII and Nvdiffrec-mc comparisons. This addresses the most natural reader question about efficiency gains over the closest explicit competitor.
+1. **Clarify training-time methodology explicitly.** Add a paragraph in the experimental setup stating: (a) whether official implementations were used for each baseline, (b) whether the reported times include all stages (pretraining + main training) end-to-end, and (c) whether multiple seeds were run and, if not, that single-seed results should be interpreted accordingly.
 
-2. **Add quantitative metrics for albedo and relighting on the NeRD real-world scenes** (or at minimum a discussion of the white-light prior's impact on scenes with colored lighting). If the white-light prior distorts albedo on scenes with strongly colored illumination, acknowledge this as a limitation.
+2. **Analyze the roughness correction.** Show relighting results without the 1.5 power correction, provide a quantitative comparison, and either justify the correction physically or replace it with a principled approach (e.g., adding a roughness regularization term that directly penalizes the bias during training).
 
-3. **Add a brief Limitations paragraph** in the conclusion or as a separate subsection, covering: (a) reliance on the white-light assumption, (b) voxel resolution constraints on fine geometry, (c) potential issues with strong interreflections or highly specular materials.
-
-4. **Clarify the caption/title of the speed comparison**: ensure the training time for TensoIR is called out in the running text so readers can directly compare without parsing the table.
+3. **Add quantitative metrics for varying-illumination experiments.** For the three NeRD scenes with varying illumination (Figure 5), report PSNR/SSIM/LPIPS for novel view synthesis and, where ground truth relighting is available, relighting-specific metrics. Even if ground truth under novel illumination is unavailable for real-world scenes, quantitative NVS metrics would strengthen the claim.
 
 ## Score and Decision
 
-This paper makes a clear, well-motivated contribution: a unified voxelization framework that jointly learns geometry, materials, and illumination for inverse rendering, with a novel per-point SG illumination model that eliminates multi-bounce ray tracing. The 18-minute training time is a genuine practical advance. The method is technically sound, the ablations are informative, and the experiments cover appropriate benchmarks. The weaknesses are minor and addressable (explicit TensoIR speed comparison, deeper evaluation of the white-light prior on real-world colored lighting, and a limitations discussion). The paper is ready for acceptance with these revisions.
-
-**Score:** 7.5
-
-**Decision:** Accept
+The paper presents a technically sound and practically meaningful advance in inverse rendering efficiency. The unified voxelization design is well-motivated, the SG-based illumination model elegantly avoids multi-bounce ray tracing, and the experimental results demonstrate substantial speed gains with competitive quality. The weaknesses identified are fixable with clarifications and additional analysis — none threaten the core contribution. I recommend acceptance.
 
 MY FINAL SCORE: <pineapple>7.5</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

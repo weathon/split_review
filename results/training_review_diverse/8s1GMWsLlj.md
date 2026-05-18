@@ -1,20 +1,20 @@
-Now I have a thorough understanding of the paper. Let me write the consolidated review.
+Now I have all the information I need. Let me write the consolidated review.
 
 ## Summary
 
-This paper investigates why Learning Rate Rewinding (LRR) outperforms pruning-at-initialization (PaI) methods for sparse neural networks. The authors challenge the conventional view that LRR's success comes primarily from better mask identification or sparsity-induced regularization, arguing instead that LRR's repeated cyclic training schedule is the dominant driver. They show that training PaI masks (SNIP, Synflow, random) with cyclic schedules dramatically boosts their performance—outperforming LRR at low sparsity. At high sparsity, they identify that coupling between the parameter initialization and the mask is the missing ingredient, and propose SCULPT-ing (cyclic training of a sparse mask followed by one-shot magnitude pruning) which matches or exceeds LRR on ImageNet with ResNet50 while requiring fewer training epochs.
+This paper empirically investigates why iterative pruning methods like Learning Rate Rewinding (LRR) succeed, arguing that their repeated cyclic training schedule—rather than superior mask identification or implicit regularization—is the primary driver. It demonstrates that applying cyclic training to pruning-at-initialization (PaI) masks substantially boosts their performance, and identifies that at high sparsity, a coupled parameter–mask initialization (not mask structure alone) is the missing ingredient. The paper proposes SCULPT-ing (cyclic sparse training → one-shot magnitude pruning → retraining), which matches LRR on CIFAR100 and ImageNet with ResNet18/50 while requiring fewer training epochs than LRR.
 
 ## Strengths
 
-1. **Clear isolation of cyclic training as a key success factor for LRR.** Figure 2 demonstrates that a dense network trained with repeated cycles improves generalization beyond standard training and reaches LRR-like peaks, separating the optimization effect from pruning-specific regularization. This directly challenges the prevailing attribution to sparsity-induced regularization.
+1. **Demonstrates that cyclic training drives much of LRR's success**: The paper shows that a dense network trained with repeated cyclic learning rate schedules matches or exceeds LRR's peak performance (Fig. 2a,b), and that cyclic training alone boosts PaI methods (random, SNIP, Synflow) to outperform LRR at low sparsities (Fig. 4). This directly challenges the prevailing attribution of iterative pruning's gains to superior mask identification.
 
-2. **Cyclic training dramatically boosts PaI methods, outperforming LRR at low sparsity on CIFAR datasets.** Figure 4 shows across CIFAR10/100 and ImageNet that cyclic training lifts SNIP, Synflow, and even random masks to competitive levels, with cyclic PaI surpassing LRR at sparsities below ~80% on CIFAR10/100. This is a non-trivial finding that challenges the belief that early overparameterization is essential for LRR's sign-flipping ability.
+2. **Identifies parameter–mask coupling as the critical missing ingredient at high sparsity**: Figure 5 provides clear evidence that an LRR-trained mask with a random initialization performs no better than a cyclically trained random mask, while the same mask with a warmup initialization recovers full LRR performance. This isolates the coupling effect from mask structure.
 
-3. **The coupling analysis (Figure 5) is insightful and cleanly executed.** Showing that an LRR mask with a random initialization performs no better than a random mask after cyclic training, while the same mask with a warmup initialization recovers full LRR performance, cleanly decouples mask quality from initialization coupling. This pinpoints the specific deficit of PaI methods at high sparsity.
+3. **Proposes SCULPT-ing, which matches LRR at high sparsity with lower computational cost**: SCULPT-ing achieves performance comparable to LRR on CIFAR100 and ImageNet with ResNet18/50 (Figs. 7, 8b,c), using fewer training epochs (e.g., 450 vs 900 for ResNet50/ImageNet at 90% sparsity).
 
-4. **Mechanistic analysis (linear mode connectivity, Hessian eigenvalues) supports the optimization narrative beyond raw accuracy numbers.** The paper provides evidence that cyclic training enables loss-landscape exploration and finds flatter minima (Figure 3), which goes beyond a simple "more epochs help" claim.
+4. **Provides mechanistic insight**: Linear mode connectivity analysis (Fig. 3) shows cyclic training "jumps" between local optima while one-cycle training remains in a single basin; Hessian eigenvalue analysis further shows cyclic training converges to flatter minima, linking the procedure to better generalization.
 
-5. **SCULPT-ing achieves strong results on larger architectures.** On ImageNet with ResNet50, SCULPT-ing starting from a 50% sparse random mask matches or exceeds LRR at all reported sparsities (Figure 8c), while requiring approximately half the training epochs at 90% sparsity (450 vs. 900). This demonstrates the practical viability of sparse-from-scratch training.
+5. **Shows that parameter signs alone suffice for coupling**: Figure 8(a) demonstrates that using only the sign pattern from a warmup initialization (with random magnitudes) together with an iteratively pruned mask can match LRR performance up to 90% sparsity.
 
 ## Weaknesses
 
@@ -22,57 +22,48 @@ This paper investigates why Learning Rate Rewinding (LRR) outperforms pruning-at
 None.
 
 ### Major
-
-1. **No variance or statistical significance reported for any experiment.** All accuracy curves appear to be single-run without error bars, confidence intervals, or even a statement about number of seeds. Given that many key comparisons involve differences of 1–3 percentage points (e.g., SCULPT vs. LRR on ImageNet ResNet50 in Figure 8c, or the small gap between LRR mask + random init vs. random mask on ImageNet in Figure 5c), it is impossible to assess whether these differences are meaningful. This is the single most impactful methodological gap and should be addressed with at least 3–5 runs with error bands on the main figures.
-
-2. **Several claims use language that slightly overstates the evidence.** The abstract says PaI with cyclic training "even outperform[s] standard iterative pruning methods" without the low-sparsity qualifier that the body provides. The paper uses "dominant" to describe cyclic training's role (abstract, Section 4), but the results at high sparsity show that coupling is equally essential—LRR still beats cyclic PaI by a large margin on ImageNet at 80% sparsity. The paper's own narrative is more nuanced than these strongest claims, and aligning the language with the evidence would strengthen the paper.
+None. The paper's core claims are credible and supported by the experiments.
 
 ### Minor
 
-1. **The claim that "the mask learnt by LRR with a random initialization is no better than a random mask" is not fully robust across all settings.** On ImageNet (Figure 5c), the LRR mask + random init curve appears slightly above the random mask curve at high sparsity (~65% vs ~63% at 80% sparsity). The categorical "no better" statement would benefit from statistical testing or softer wording, especially since the paper does not specify whether the random init is the same seed LRR started from or an independent draw.
+1. **SCULPT-ing failure on ResNet20/CIFAR10 is under-analyzed**: On CIFAR10 with ResNet20, SCULPT-ing improves over cyclic PaI but does not match LRR (Fig. 7a). The paper attributes this to the small parameter size making the network "less resilient to single-shot pruning" but provides no targeted analysis to support this conjecture. Was the gap due to the large pruning ratio in the single shot? Would a more gradual pruning (e.g., two smaller steps) close the gap? Is the problem that cyclic training on a very small network does not sufficiently couple parameters to the mask? Without investigation, the reader cannot tell whether this reveals a fundamental limitation of the method or a fixable implementation detail. Given that SCULPT-ing is proposed as a general method, this blind spot is notable.
 
-2. **Computational savings claim is based on epoch count, not actual runtime or FLOPs.** The paper states SCULPT requires 450 epochs vs. LRR's 900 at 90% sparsity. However, training a 50% sparse network in standard frameworks (without sparse-aware implementations) does not automatically halve the per-epoch cost—dense operations in batch norm and convolutions still run on the full parameter count. The paper does not specify whether sparse acceleration (e.g., cuSPARSE) is used. Adding wall-clock time comparisons would substantiate the claim.
+2. **Computational cost comparison uses epoch ratio rather than actual compute**: The paper states SCULPT-ing achieves similar performance to LRR "in half the number of epochs" (e.g., 450 vs 900 for ResNet50/ImageNet at 90% sparsity). However, SCULPT-ing trains a sparse network throughout while LRR trains a dense network in early cycles, so the actual FLOP or wall-clock savings are larger than the epoch ratio suggests (SCULPT-ing is even cheaper per epoch). The paper does not provide FLOP, GPU-hour, or wall-clock time comparisons. Since reduced computation is one of SCULPT-ing's main advertised advantages, providing concrete compute measurements (or at minimum acknowledging the per-epoch savings) would substantially strengthen this claim.
 
-3. **Several experimental details needed for reproducibility are missing.** The paper does not report: learning rate schedule specifics (exact cycle length, LR range, warmup details), weight decay, batch size, data augmentation pipeline, or the number of seeds. While some of these are standard for the respective architectures/datasets, full specification would aid independent reproduction.
+3. **The "signs are sufficient" experiment is incomplete**: Figure 8(a) shows that warmup parameter signs (with random magnitudes) plus an iteratively pruned mask can match LRR under cyclic training. However, this leaves open whether the specific signs from warmup are necessary, or whether any consistent sign assignment would work. A control where signs are fixed randomly (rather than taken from warmup) before cyclic training would sharpen the conclusion about whether this "sign information" is truly task-specific or merely a consequence of having signed (non-zero) parameters.
 
-4. **The "signs are sufficient" experiment (Figure 8a) uses an iteratively pruned mask (from WR/LRR), not a PaI mask**, so it does not directly inform how to close the gap for PaI methods. This is a mechanistic insight about what makes initialization coupling work, but its practical implication for improving PaI is indirect. The paper could clarify this distinction.
+4. **One-cycle vs. cyclic comparison is not a controlled ablation**: The paper compares cyclic and one-cycle schedules "extended over the same number of training epochs" (Fig. 2d) and concludes cyclic is better for sparse networks because it "jumps between optima." However, the two schedules differ in multiple respects (peak learning rates, number of restarts, total steps at high LR), not just the presence of cycles. A cleaner ablation—e.g., a cosine schedule with and without restarts—would better isolate the role of multiple restarts. The current evidence is suggestive but not definitive on this mechanistic claim.
 
-5. **On ResNet20 (CIFAR10), SCULPT-ing does not match LRR** at any sparsity (Figure 7a). The paper acknowledges this and attributes it to small architecture size, but this limits the generality of SCULPT-ing as a universal bridge.
+5. **Linear mode connectivity analysis is limited in scope**: The LMC evidence that cyclic training "jumps between optima" (Figures 3, 6) is presented only for 90% sparsity on CIFAR10 with ResNet20. While the analysis is used as mechanistic support rather than a central result, showing these patterns at additional sparsities and datasets would strengthen the generality of the explanation.
 
 ### Trivial
-None.
+- The paper's framing in the abstract and introduction slightly overstates the "challenge" to mask identification, which could mislead casual readers. The actual analysis is more nuanced (the paper clearly shows at high sparsity, coupling of mask *and* initialization matters), and the body correctly reflects this. A small reframing in the abstract to better signal the coupling story would improve clarity.
 
 ## Nice-to-Haves
 
-- A wall-clock time or FLOP comparison between SCULPT-ing and LRR on the same hardware.
-- Linear mode connectivity analysis for SCULPT-ing's pre- and post-pruning checkpoints to directly verify that the one-shot pruning step creates a coupled initialization.
-- Cosine similarity or parameter distance metrics between the pruned weights and their initialization as direct evidence of coupling.
-- A sensitivity study on the number of initial training cycles in SCULPT-ing.
+- **Confidence intervals or multiple seeds** for key comparisons (e.g., SCULPT-ing vs LRR on ResNet50/ImageNet), especially where curves are close (e.g., cyclic PaI methods in Fig. 4).
+- **Sensitivity analysis of SCULPT-ing's pre-pruning cycles** for at least one setting (e.g., ResNet50 on ImageNet) to show the method is robust to this choice.
+- **Sensitivity to starting sparsity in SCULPT-ing** (e.g., starting from a 90% sparse mask) to clarify the method's practical window of applicability.
+- **Deeper analysis of why magnitude pruning creates effective coupling** in the one-shot SCULPT-ing step, beyond the observation that it "minimally changes the neural network function." Measuring alignment between retained parameters' directions and the loss gradient, or checking whether the pruning step preserves linear mode connectivity, would strengthen the method's principled basis.
 
 ## Removed Points
-
-These points are flagged to be removed; treat them with caution.
-
-- **Criticism that the paper should compare with dynamic sparse training methods (RiGL, SET, MEST, GraSP, Synflow with longer training).** Removed per Hard Rules: "DO NOT mention missing related works" and scope creep — the paper is about understanding LRR vs. PaI, not about benchmarking against every sparse training approach.
-- **Criticism that "the paper does not explain why a random mask plus cyclic training plus one-shot pruning creates coupling."** Removed: the paper explicitly states (lines 118, 134) that magnitude pruning minimally changes the network function and thus couples the parameters to the final mask. The mechanism is asserted and supported by the pruning criteria comparison in Figure 9a.
-- **Criticism about missing appendix content (e.g., Figure 18, Figure 16 references).** Removed: the parser strips appendix sections from all papers; these exist in the original submission.
-- **Criticism that the "signs are sufficient" experiment does not directly inform how to improve PaI.** The experiment's purpose is mechanistic — understanding coupling — not a direct PaI improvement method. This criticism misunderstands the experiment's role in the narrative.
+None. All weaknesses identified by the reviewers were factually correct and substantive after verification against the paper. The "generic strength" filter was applied: all listed strengths from the Strength Finder were specific, cited, and conflicted with no verified weaknesses.
 
 ## Novel Insights
-
-The reviews collectively raise a tension that the paper itself could address more directly: SCULPT-ing uses a *random* mask and achieves LRR-level performance on large networks (ResNet50), which undermines the narrative that LRR learns a superior mask. If a random mask with the right cyclic training + coupling can match LRR, then mask quality matters significantly less than the field has assumed. The paper acknowledges this tension in passing (line 107: "Our analysis is inconclusive whether LRR masks alone are better aligned with a learning task than PaI masks") but does not foreground this as one of its central findings. This potential reframing — that the value of iterative pruning is almost entirely in its training procedure and initialization coupling, not in mask discovery — is a deeper claim than the paper currently makes, and one that the evidence partially supports. A stronger paper would lean into this and discuss its implications for the lottery ticket hypothesis and for practical sparse training.
+None beyond the paper's own contributions. The reviews identify refinements and missing controls but do not surface an independent novel perspective on the work.
 
 ## Suggestions
 
-1. **Add error bars** (min 3–5 seeds) to all main figures (Figures 4, 5, 7, 8) so readers can assess the significance of observed differences, especially the SCULPT vs. LRR comparisons on ImageNet.
-2. **Soften the strongest claims** in the abstract and introduction to match the nuance present in the body — particularly the qualifier "at low sparsity" for outperforming iterative pruning, and avoid "dominant" when coupling is equally critical at high sparsity.
-3. **Add wall-clock time or FLOP measurements** to substantiate the computational savings claim of SCULPT-ing.
-4. **Provide the full training configuration** (LR schedule specifics, weight decay, batch size, augmentation) in an appendix or supplementary material for reproducibility.
-5. **Discuss the limitations** of SCULPT-ing more explicitly: it does not work on small architectures (ResNet20), the initial sparsity is a hyperparameter, and the magnitude pruning step requires retraining.
+1. Provide FLOP, GPU-hour, or wall-clock time measurements for the key SCULPT-ing vs. LRR comparison on ResNet50/ImageNet.
+2. Add a control to the "signs are sufficient" experiment (Fig. 8a) using randomly assigned signs to determine whether the specific warmup signs are necessary.
+3. Investigate the ResNet20/CIFAR10 failure mode more concretely — e.g., try a two-step SCULPT-ing with a smaller intermediate pruning step.
+4. Include a cleaner ablation of the cyclic vs. one-cycle comparison (cosine with and without restarts) to isolate the role of multiple restarts.
+5. Add LMC analysis at additional sparsities or on a second dataset to strengthen the mechanistic claim.
+6. Refine the abstract's framing to more precisely reflect that at high sparsity, coupling between mask and initialization (not purely cyclic training) is required — this nuance is already present in the body.
 
 ## Score and Decision
 
-This is a solid empirical paper with a clear narrative, informative mechanistic analysis, and a proposed method that works well on large-scale benchmarks. The main weaknesses — lack of error bars, mild overclaiming, and incomplete reproducibility details — are addressable and do not undermine the core contributions. The paper makes genuine progress in understanding why iterative pruning works and demonstrates a practical path to competitive sparse-from-scratch training.
+The paper makes a solid empirical contribution. Its central insights — that cyclic training is a major driver of iterative pruning's success, that coupling between mask and initialization is the missing ingredient at high sparsity, and that SCULPT-ing can achieve this coupling with reduced computation — are well-supported by a thoughtful set of experiments. The weaknesses are real but bounded: they concern depth of analysis in specific areas (ResNet20 failure, missing controls, incomplete computational cost quantification) rather than fundamental flaws. These are addressable with additional experiments and clearer presentation.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,20 +1,20 @@
-Now I have a thorough understanding of the paper and can verify the reviewer claims. Let me produce the final consolidated review.
+Now I have all the information needed. Let me write the consolidated review.
 
 ## Summary
 
-This paper proposes LiMAC, a lightweight gated architecture for mobile phone app control that combines a small Action Transformer (AcT, ~500M parameters) with a fine-tuned VLM (Florence2 or Qwen2-VL). AcT handles action-type prediction and click-target selection (via a contrastive objective), while the VLM is invoked only for actions requiring text generation (inputting text, opening apps). Evaluated on AndroidControl and Android-in-the-Wild (AitW), LiMAC consistently outperforms both fine-tuned VLMs and prompt-engineered GPT-4o baselines while being faster and smaller.
+This paper introduces LiMAC, a lightweight gated architecture for mobile app control that combines a small Action Transformer (AcT) with a fine-tuned VLM. AcT handles most actions (type prediction and click-target selection) while the VLM is invoked only for text-generation actions. The paper evaluates on AitW and AndroidControl datasets, showing that LiMAC with a fine-tuned Florence2 (820M + 520M params) achieves 72.2% and 63.1% overall accuracy respectively, outperforming both prompt-engineered GPT-4o baselines and monolithic fine-tuned VLMs, while running faster.
 
 ## Strengths
 
-- **Gated architecture achieves a superior accuracy-efficiency trade-off**: LiMAC with Florence2 raises overall accuracy from 57.0% to 63.1% on AndroidControl while cutting inference time from 0.50s to 0.34s (Table 1). Against GPT-4o-based M3A (~10.64s), it is ~30× faster (0.34s). The gating design is the key insight: a small model handles most actions; the VLM is called only when needed.
+- **Practically effective architecture with strong empirical results.** LiMAC (AcT + Florence2) consistently outperforms all baselines on both datasets: 72.2% vs. 70.8% (Florence2 alone) on AitW, and 63.1% vs. 57.0% on AndroidControl (Table 1). The gains are larger against GPT-4o baselines (up to ~42% relative improvement) and Qwen2-VL (70.9% vs. 51.0% on AitW). These results are substantial and practically meaningful for mobile deployment.
 
-- **Novel contrastive click-targeting works well**: AcT's InfoNCE-based objective for UI element selection achieves 77.4% click-target accuracy on AitW, outperforming Florence2 (76.2%) and dramatically beating Qwen2-VL (53.2%) (Table 3). On AndroidControl it reaches 65.4%, competitive with GPT-4o-based M3A (77.1%) at a fraction of the cost.
+- **Transparent modular ablation study.** Table 2 decomposes the architecture into type/click/text modules and evaluates 15 combinations across four base models. This clearly shows the source of gains: AcT improves action-type and click-target prediction, while the fine-tuned VLM handles text generation. The breakdown in Table 3 confirms AcT's action-type accuracy (86.9 on AitW vs. Florence2's 86.4, 82.3 vs. 79.6 on AndroidControl) and click-target accuracy (77.4 vs. 76.2 on AitW, 65.4 vs. 62.0 on AndroidControl).
 
-- **Modular design consistently outperforms all baselines**: The ability to mix-and-match components (type/click/text modules) yields the best reported accuracy on both datasets: 72.2% on AitW and 63.1% on AndroidControl using AcT + AcT + Florence2 (Table 2). The modularity also provides robustness — LiMAC degrades gracefully when UI trees are missing, unlike text-only baselines that collapse (e.g., T3A drops from 53.1% to 26.9% on AitW).
+- **Robust to missing or noisy UI trees.** The ablation in Table 4 shows that removing text embeddings barely changes overall accuracy (63.0% vs. 63.1%), while removing images causes a steep drop (56.0%). This demonstrates practical robustness for scenarios where UI trees are imprecise or unavailable — a realistic deployment concern.
 
-- **Ablations validate core design choices**: Removing image embeddings drops overall accuracy from 63.1% to 56.0% (Table 4), confirming visual information is critical. Fine-tuning CLIP adds 3.1 points (63.1% vs 60.0%). These controlled experiments ground the design in clear evidence.
+- **Fine-tuned small VLMs rival GPT-4o on text generation.** Florence2 (820M) achieves 84.2% text accuracy on AitW vs. GPT-4o-based T3A's 66.5% and M3A's 67.3% (Table 3), showing that task-specific fine-tuning of small VLMs can outperform large API-based models for the text-generation sub-task.
 
-- **Small fine-tuned VLMs match/exceed GPT-4o on text generation**: Florence2 (820M) achieves 84.2% text accuracy on AitW, far surpassing GPT-4o-based T3A (66.5%) and M3A (67.3%) (Table 3). This is a standalone empirical finding of value to the community.
+- **Comprehensive evaluation design.** Two datasets, six baselines (including three GPT-4o variants), systematic ablations, and separate reporting of action-type, click-target, and text accuracy. The paper is honest about dataset-dependent optimal configurations (e.g., M3A for click on AndroidControl outperforms AcT for clicks on that dataset).
 
 ## Weaknesses
 
@@ -22,62 +22,57 @@ This paper proposes LiMAC, a lightweight gated architecture for mobile phone app
 None.
 
 ### Major
-- **Missing architectural and training details for AcT**: The Action Transformer is the paper's core contribution, yet the paper provides no information about its depth, hidden dimension, number of attention heads, feed-forward size, dropout, layer normalization scheme, learning rate, batch size, gradient accumulation, optimizer, number of training steps, or weight initialization. The only size information is "~500M parameters" and "+520M" in Table 1. Similarly, the CLIP fine-tuning details (dataset split, epochs, learning rate) are absent. For a method paper, these omissions are a serious reproducibility gap that must be addressed before the work can be built upon.
+None. The paper's core claims are supported by the evidence presented.
 
 ### Minor
-- **The large Qwen2-VL improvement (51.0→70.9 on AitW) needs more analysis**: While this improvement is explainable (AcT replaces Qwen2-VL's weak click-targeting of 53.2% with 77.4%), the paper does not verify that the Qwen2-VL baseline was reasonably tuned. A learning-curve sweep for LoRA hyperparameters or a brief breakdown showing how the component errors compound to produce the 51.0% overall would significantly strengthen confidence. As presented, a skeptical reader could question whether a different LoRA configuration might narrow the gap.
 
-- **Text embeddings ablation shows minimal impact but this is under-analyzed**: Table 4 shows that removing text embeddings yields nearly identical overall accuracy (63.0 vs 63.1) and slightly *higher* click-target (65.7 vs 65.4) and action-type accuracy (83.2 vs 82.3). The paper correctly notes "minimal impact" but does not analyze *why* — e.g., whether text helps for specific action types, or whether BERT embeddings are noisy due to OCR errors in AitW. The direction of the change (no-text sometimes better) weakly conflicts with the design motivation for multi-modal UI encoding.
+- **The "30× faster" claim mixes local vs. API deployment paradigms without sufficient disambiguation.** The 30× figure (0.34s vs. 10.64s) compares LiMAC's local inference time against the M3A baseline's API call time, which includes network latency and queuing. Against locally-run Florence2, LiMAC is only 1.5× faster (0.34s vs. 0.50s). While the practical benefit is real (local deployment is genuinely faster), the framing suggests an architectural speed advantage that is partly a deployment advantage. The paper should clarify this distinction explicitly when stating the 30× figure.
 
-- **No variance or statistical significance reported**: All results appear to be from single runs. Without multiple seeds or confidence intervals, it is unclear whether the observed improvements (especially the small 1.4-point gain over Florence2 on AitW) are statistically meaningful.
+- **No uncertainty quantification.** All results are reported as single point estimates without confidence intervals, standard deviations, or even a statement that results are stable across runs. Given the modest dataset sizes (13K and 18K episodes) and some small differences in ablations, readers cannot assess statistical significance. Reporting bootstrap confidence intervals or multi-seed means would strengthen confidence in the comparisons.
 
-- **Only relaxed accuracy is reported**: The paper uses a relaxed evaluation (bounding-box containment for clicks, Jaccard ≥0.5 for text). While the authors acknowledge a strict metric exists, not reporting it leaves readers unable to assess how much the relaxed threshold masks errors.
+- **The "novel contrastive objective" claim is overstated.** The method uses cosine similarity with InfoNCE loss and a learnable temperature — a standard combination from CLIP/MoCo. Applying it to UI element selection is a reasonable engineering adaptation, not a methodological novelty. The paper would be better served by framing this as an effective application of existing contrastive methods.
+
+- **AcT's exact parameter count and composition are unclear.** Table 1 lists LiMAC's additional size as "+520M" alongside the VLM, but it is not stated how many of those parameters belong to AcT's transformer vs. the CLIP encoder. A clear breakdown would help readers understand the model's footprint.
+
+- **Relaxed accuracy metric is defined but its quantitative effect is not shown.** The paper uses "relaxed accuracy" throughout but does not report strict accuracy for comparison. Reporting both would let readers calibrate how much the relaxation affects absolute numbers.
 
 ### Trivial
-- The abstract's "up to 42% compared to prompt-engineering baselines" is not precisely traceable to the numbers in Table 1; the exact calculation method (absolute vs relative, which specific comparison) would benefit from clarification.
+- The paper uses "this of courses" (line 313) — a minor typo.
+- The caption for Table 1 has duplicate/conflicting labels (``\label{tab:results}`` and ``\label{tab:combined_res}`` on the same float).
 
 ## Nice-to-Haves
-- An analysis of gating decisions: how often is the VLM invoked per dataset? What is the gating accuracy (does AcT correctly decide when to call the VLM)?
-- A per-action-type breakdown of overall accuracy, clarifying which action types drive the gains.
-- A comparison or discussion of DigiRL (cited but not compared). The paper notes DigiRL's different training setup, which is a reasonable justification for not including it, but a brief quantitative framing would strengthen the literature positioning.
-- Reporting strict accuracy alongside relaxed to give a complete picture.
+- An analysis of failure cases or when the gating mechanism helps vs. hurts (e.g., does forcing the VLM to follow AcT's predicted action type ever propagate errors?).
+- Training time / FLOPs comparison to complement the inference time numbers.
+- Clarification on whether the 30× claim could be separated into "architectural speedup" vs. "deployment advantage" for clarity.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+These points from the reviewers were evaluated against the paper and removed:
 
-- **"Qwen2-VL baseline appears under-tuned, inflating gains"**: The reviewer claimed the 51.0% overall accuracy is suspiciously low given component accuracies of 81.7 action-type and 70.5 text. However, the paper explains (Section 4.2) that overall accuracy requires both type AND spec to be correct — Qwen2-VL's low click-target accuracy (53.2%) naturally drags down overall since clicks are common. The large gap is structurally consistent, not evidence of under-tuning. The concern is weakened to a minor request for verification (see Minor weaknesses).
+1. **"The central comparison is confounded / gains come entirely from AcT replacing VLM on type and click"** — This is not a confound; it is the intended design. The paper's modular ablation (Table 2) transparently decomposes the contribution of each module. Table 3 further isolates AcT's performance on type and click prediction vs. the VLM's performance on those sub-tasks. System-level comparison of LiMAC vs. a fine-tuned VLM is standard and appropriate. The paper never claims the gating mechanism itself produces the gains — it claims the *combined architecture* outperforms monolithic alternatives, which the data support.
 
-- **"Subscript error in similarity equation"**: The reviewer claimed `\|p\|_r` should be normalized per row, but the paper already states "where ||p||_r is the L2 norm of each row of p." The description is correct.
+2. **"The paper does not isolate whether AcT alone outperforms the VLM on type and click prediction"** — Factually incorrect. Table 3 directly compares AcT vs. Florence2 vs. Qwen2-VL on action-type accuracy (86.9 vs. 86.4 vs. 81.7 on AitW) and click-target accuracy (77.4 vs. 76.2 vs. 53.2 on AitW). This is exactly the requested isolation.
 
-- **"Not clear whether VLM is used during training or only at inference"**: The paper clearly states (Section 3.5, lines 173-174) that the VLM is used during inference, and Section 3.4 describes fine-tuning the VLM separately.
+3. **"The modular combination experiments show optimal config is dataset-dependent, undercutting the claim of universal superiority"** — The paper explicitly acknowledges this (Section "Combining Different Modules," lines 311–315) and discusses why. Transparency about dataset-dependent optimal configurations is a strength, not a weakness.
 
-- **"Missing appendix details"**: The paper references an appendix (`\cref{appdx:datasets}`) that was stripped by the PDF parser; these details exist in the original submission.
+4. **"Dataset-dependence should be discussed as a limitation with suggestions for selection"** — Already discussed in the paper (lines 311–315). The paper suggests practical considerations (cost vs. accuracy trade-off).
 
-- **"Tables are dense and hard to parse"**: A subjective formatting opinion, not a substantive weakness.
+5. **"Missing comparison of training time or FLOPs"** — Move to Nice-to-Haves. The paper's primary efficiency claim is about inference time for deployment, not training cost. A reasonable ask but not a core flaw.
 
-- **"Missing comparison to DigiRL"** (as a weakness): Discussed in Related Work (Section 5); different training paradigms make direct comparison non-trivial. Moved to Nice-to-Haves.
-
-- **"End marker not explained for variable-length episodes"**: The paper describes the sequence construction clearly (Section 3.2, lines 136-146), including the end marker and how inference processes up to timestep t.
-
-- **"Text-ablation finding undermines the design"**: The reviewer overstated this — overall accuracy is *higher* with text (63.1 vs 63.0), and the paper appropriately frames the result as showing robustness. The differences are within noise range.
+6. **"The paper does not analyze failure cases"** — Move to Nice-to-Haves. Common in conference papers; not a required element for acceptance.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews do not surface a perspective the paper itself does not address.
+The most interesting observation arising from this review is the asymmetry the paper reveals about model specialization: a purpose-built small transformer (AcT, ~520M parameters including CLIP encoder) outperforms both fine-tuned VLMs (Florence2 at 820M) and GPT-4o at *action-type and click-target prediction* — the structured, classification-like sub-tasks — while the VLM excels at free-form text generation. This suggests that for mobile app control, the bottleneck is not language understanding but structured perception and action selection. The gating strategy exploits this: use a cheap specialized model for the bottleneck tasks and only invoke the expensive language model when generative text is required. This division-of-labor finding is genuinely useful for the app-agent community and suggests that further progress may come from better structured perception models rather than larger VLMs.
 
 ## Suggestions
-
-1. Add a dedicated hyperparameter table for AcT (layers, hidden dim, heads, FF size, dropout, optimizer, LR, batch size, training steps, gradient accumulation) and for CLIP fine-tuning.
-2. Verify the Qwen2-VL baseline with a hyperparameter sweep (LoRA rank, LR) and report the best result; even if unchanged, document the sweep.
-3. Report results with at least 3 random seeds for the main comparisons (AcT+VLM vs VLM alone).
-4. Add a brief analysis of the text-ablation finding — e.g., per-action-type breakdown showing where text embeddings help/hurt.
-5. Report strict accuracy alongside relaxed accuracy.
-6. Clarify whether the "40%/42%" numbers in the abstract/intro refer to absolute or relative improvement, and cite the specific table cells.
+- Add confidence intervals or at minimum report results over multiple seeds for the main tables.
+- Clearly separate "local model inference time" from "end-to-end API call time" when stating the speedup claims, or qualify that the 30× figure partly reflects the cloud-to-local deployment difference.
+- Reframe the "novel contrastive objective" to "contrastive objective adapted from existing methods" to match the actual contribution.
+- Report strict accuracy alongside relaxed accuracy for calibration.
+- Break down AcT's parameter count (transformer vs. CLIP encoder vs. other components).
 
 ## Score and Decision
-
-The paper proposes a well-motivated architecture with a clear division of labor between a lightweight transformer and a VLM. The core idea (gated inference, contrastive click-targeting) is practical and the experimental results are consistently positive across two datasets. However, the missing architectural and training details are a significant reproducibility gap for a method paper, and the Qwen2-VL baseline requires stronger verification. These issues are addressable in revision.
 
 MY FINAL SCORE: <pineapple>6.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,18 +1,20 @@
-Now I have a thorough understanding of the paper and all the review inputs. Let me compose the final consolidated review.
+I've thoroughly verified all claims against the paper. Let me now produce the consolidated review.
+
+---
 
 ## Summary
 
-The paper introduces CoST, a framework for graph reasoning that alternates between training a Graph Neural Network (GNN) and a Pre-trained Language Model (PLM) using a variational objective. Rather than jointly training both models (which is computationally infeasible for large graphs), CoST iteratively optimizes each model while keeping the other fixed, using pseudo-targets sampled from the fixed model to guide the training of the active model. The framework is evaluated on homogeneous graphs (Amazon, MAG, CitationV8, GoodReads) and heterogeneous knowledge graphs (FB15k237, WN18RR, Wikidata5M), achieving state-of-the-art results.
+This paper proposes CoST, a framework that combines structural and textual information for graph reasoning tasks by alternatingly training a graph neural network (GNN) and a pre-trained language model (PLM). The training is motivated by a variational objective that factorizes candidate targets, enabling the two models to be optimized in alternation rather than jointly, which avoids scalability issues on large graphs. The paper reports state-of-the-art results across homogeneous and heterogeneous graph reasoning benchmarks including FB15k237, WN18RR, and Wikidata5M.
 
 ## Strengths
 
-- **Alternating training enables scalable integration of GNN and PLM**: The paper proposes a principled alternating optimization scheme (Theorem 2.1, Algorithm 1) that addresses the scalability bottleneck of joint GNN+PLM training. Empirical results (Tables 2–5) show consistent improvements over both structure-only and text-only baselines across six datasets, confirming that the alternating scheme effectively combines both modalities.
+- **Consistent empirical gains across diverse benchmarks.** CoST achieves the best MRR and Hits@k on all homogeneous datasets (AmazonSports, AmazonClothing, MAGGeology, MAGMath in Table 2; CitationV8, GoodReads in Table 3) and all heterogeneous datasets (FB15k237, WN18RR in Table 4; Wikidata5M in Table 5). The gains over strong structure-only methods like NBFNet and A\*Net on heterogeneous benchmarks (e.g., +4.2 MRR on FB15k237) are particularly meaningful because those baselines use the same structural information and the comparison is well-controlled.
 
-- **Consistent state-of-the-art performance across diverse graph reasoning benchmarks**: CoST achieves the best MRR and Hits@k scores on homogeneous graphs (AmazonSports, AmazonClothing, MAGGeology, MAGMath, CitationV8, GoodReads) and heterogeneous knowledge graphs (FB15k237, WN18RR, Wikidata5M), often surpassing resource-intensive LLM-based methods (GraphGPT, LLaGA, LINKGPT) as well as strong structure-based methods like NBFNet.
+- **Architecture-agnostic improvement verified by ablation.** Ablation experiments in Figure 3a show that CoST improves three different GNN backbones (RGCN, CompGCN, NBFNet) on FB15k237 and WN18RR. This demonstrates that the framework's benefit generalizes beyond a single GNN architecture choice.
 
-- **Architecture-agnostic improvement demonstrated via ablation**: The ablation study (Figure 3a) shows that CoST improves over three different GNN backbones (RGCN, CompGCN, NBFNet) on FB15k237 and WN18RR, with consistent gains. Convergence analysis (Figure 3b) also shows rapid convergence, validating the stability of the alternating training procedure.
+- **Scalability to large graphs.** Experiments on CitationV8 (2.3M nodes) and Wikidata5M (4.5M nodes) show that CoST scales where joint training of GNN and PLM would be prohibitive, directly addressing the key challenge stated in the introduction.
 
-- **Clear motivation with illustrative example**: Figure 1 provides a concrete scenario (Kylian Mbappé team membership) where purely structural reasoning fails but textual information resolves ambiguity, effectively motivating why combining text and structure is essential.
+- **Rapid convergence of alternating training.** Convergence analysis in Figure 3b on FB15k237 and WN18RR shows near-optimal performance within a few alternating steps, mitigating the concern that alternating procedures require costly iterative cycles.
 
 ## Weaknesses
 
@@ -21,52 +23,61 @@ None.
 
 ### Major
 
-- **Theory-empirics disconnect between the variational objective and the implemented losses**: The paper claims a theoretically grounded variational framework (Theorem 2.1), but the actual training objectives in Equations (9) and (12) are heuristic contrastive losses using pseudo-targets sampled from the fixed model. The term \(\mathcal{O}(\theta^2)\) in Theorem 2.1 is never defined or explained. The entropy term in the KL divergence is dropped with only the qualitative justification that it is "intricate and unstable" (line 112). The paper does not show that the contrastive losses in (9) and (12) are consistent with optimizing the claimed ELBO. This gap between the theoretical framing and the implemented algorithm weakens the methodological contribution — the value of the paper rests primarily on the empirical results rather than the theoretical derivation.
+1. **Theory-practice gap between the variational derivation and the actual algorithm.** The paper presents Theorem 2.1 claiming equivalence between the original GNN objective and a variational bound, then derives alternating updates motivated by ELBO maximization and KL divergence minimization. However, the transition from "minimize KL divergence" to "sample hard pseudo-targets from a multinomial distribution and optimize a contrastive loss" (Equations 8-9 for the PLM, and Equation 11-12 for the GNN) is heuristic, not derived. The paper states the KL is "challenging" to optimize and then "alternatively" uses pseudo-targets, but never explains why the contrastive objective in Equation 9 approximates the KL minimization. The GNN optimization (Section 2.3.2) is similarly approximated via sampling without showing how the weighted contrastive objective (Equation 12) follows from the ELBO. This gap does not invalidate the empirical results, but it means the variational framing gives an "illusion of rigor" rather than a tight derivation. The paper would be stronger if it either (a) provided a noise-contrastive estimation argument connecting the loss to the KL, or (b) dropped the variational framing and presented the method as an empirically motivated co-training heuristic.
+
+2. **The GNN backbone used in homogeneous graph experiments (Tables 2, 3) is not specified.** The paper states the GNN-based baselines are GCN, GraphSAGE, and GATv2, but never states what GNN architecture CoST itself uses for these datasets. This makes it impossible to determine whether CoST's large improvements over the GNN baselines come from the alternating training or simply from using a stronger GNN backbone. (Note: the critic's claim that NBFNet is used is an assumption — the paper does not state this.) On heterogeneous graphs (Table 4), where the backbone is NBFNet and baselines include NBFNet, the comparison is fair and the gains are credible. But the homogeneous graph results, which constitute a substantial portion of the empirical demonstration, are difficult to interpret without this information.
+
+3. **No ablation isolating the alternating training from the backbone choice on the homogeneous graphs.** A natural controlled experiment would be to compare CoST's full alternating training against the same GNN backbone with static PLM embeddings (no alternating updates), on the same datasets where the backbone is identified. On heterogeneous graphs, the ablation in Figure 3a partially addresses this by showing improvement over the pre-trained GNN model, but on homogeneous graphs no such isolation is provided. Combined with Weakness 2, the reader cannot attribute the homogeneous-graph gains to the claimed innovation.
 
 ### Minor
 
-- **Missing error bars and statistical significance**: No standard deviations, confidence intervals, or significance tests are reported for any experiment (Tables 2–5). While single-run evaluation is common in KG completion benchmarks, the central claim of state-of-the-art performance rests on unquantified point estimates. The improvements are generally large and consistent across datasets, which partially mitigates this concern, but variance reporting would substantially strengthen the evidence.
+1. **No comparison against a "fixed PLM + same GNN backbone" baseline on any dataset.** The paper compares CoST against structure-only baselines and text-only baselines, but the most direct way to isolate the value of alternating training is to compare CoST against its own GNN backbone using static (unfine-tuned) PLM embeddings. This comparison would cleanly measure what the alternating update adds. On heterogeneous datasets, the pre-trained GNN model (before alternating training) serves as a weak proxy for this, but the paper does not explicitly frame it as such or ensure the backbone matches.
 
-- **Incomplete specification of experimental setup affecting reproducibility**: The paper does not clearly state which PLM architecture (BERT-base, BERT-large, RoBERTa?) is actually used as the encoder for CoST's own experiments — BERT is mentioned only for baseline methods. The GNN backbone used for CoST's main results (vs. the ablation study which tests multiple backbones) is not specified. Hyperparameters \(\gamma\) and \(\tau\) (Equation 12) are introduced with no values or sensitivity analysis. The update steps \(L\) and decoder network \(g\) are not parameterized. Some of these details may reside in the appendix (which the parser strips), but the main text lacks sufficient detail for independent implementation.
+2. **Standard deviations / confidence intervals are not reported for any result.** Given the paper's strong claims ("state-of-the-art across representative benchmark datasets"), the absence of variance estimates makes it impossible to assess whether the reported gains are statistically reliable or could stem from run-to-run variance. While single-run evaluation is not uncommon in graph reasoning, the field increasingly expects some measure of variability.
 
-- **Limited analysis of the pretrained GNN underperformance**: The paper notes (line 264) that "the pretrained GNN model in CoST falls slightly behind key baselines" and attributes this to "the difficulty of unaltered language models in providing effective text representations." This is a relevant observation that would benefit from deeper analysis — e.g., does the PLM provide poor initial embeddings? What changes during alternating training that fixes this? The brief attribution is plausible but not investigated.
+3. **Computational cost is not discussed.** The alternating training involves updating both a GNN and a PLM, each of which is independently expensive. On datasets like Wikidata5M (4.5M nodes) and CitationV8 (2.3M nodes), wall-clock time, GPU-hours, and memory requirements would be important for practitioners evaluating whether the method is practical for their use case.
 
 ### Trivial
 None.
 
 ## Nice-to-Haves
-
-- Sensitivity analysis for the weighting hyperparameters \(\gamma, \tau\) in Equation (12) and for the number of sampled positives/negatives would help understand the method's robustness.
-- A comparison with a fine-tuned PLM+GNN baseline (e.g., using gradient checkpointing or sampling to make joint training tractable) would clarify whether the alternating scheme is essential or if a simpler approach suffices.
-- A qualitative analysis (e.g., case study showing how text representations change after alternating training) would complement the quantitative results.
+- An analysis of how the GNN and PLM pseudo-targets evolve (agreement rate, confidence calibration) would provide a direct sanity check on the assumption that alternating updates make their predictions mutually informative.
+- Additional discussion of hyperparameter sensitivity for \(L\) (number of alternating steps), \(\gamma\), and \(\tau\) would strengthen reproducibility, though these are manageable in supplementary material.
+- The PLM objective (Equation 9) is written as a softmax ratio; clarifying whether this is a binary cross-entropy or a multi-class InfoNCE loss would help implementation.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
+The following points from the original reviews were removed per consolidation rules:
 
-- "Table 1 is garbled by OCR" / "Tables 2 and 3 are difficult to read due to OCR artifacts" / "Equation (10) is garbled" / "Table 6 is unreadable" — These are parser-induced artifacts from extracting text/math from PDF; the original submission does not have these issues.
-- "The notation \(\mathbb{P}\mathbb{L}\mathbb{M}\) is unorthodox" — Pure formatting/style nitpick; does not affect scientific content.
-- "Several recent graph+text methods... are missing from the discussion" — Per policy, I cannot confirm the existence or relevance of unnamed missing references.
-- "The pretrained GNN underperformance is not discussed" — Factually incorrect: the paper explicitly discusses this on line 264, attributing it to "the difficulty of unaltered language models in providing effective text representations."
-- "Without more baselines (e.g., other GNN variants with text), it is unclear how competitive CoST really is on these larger graphs" — Scope creep; the paper's chosen baselines (BERT + topological contrastive learning) are defensible for its setting.
-- "The paper should also cover Y / domain Z / additional tasks" — Demands for breadth outside the paper's stated scope.
+1. **"CoST uses NBFNet as its GNN backbone for homogeneous graphs"** — The paper does not state what backbone CoST uses for homogeneous graph experiments. This claim is an unsupported assumption and is removed. The underlying concern (missing specification) is preserved as Major Weakness 2.
+
+2. **"Missing hyperparameters (epochs, learning rates, convergence criteria)"** — Per the instruction to remove nitpicks about reproducibility such as undisclosed hyperparameters, this is removed. The broader issue about missing experimental details is captured in Major Weakness 2.
+
+3. **Strength Finder claim about "theoretical grounding"** — Removed because it conflicts with the verified weakness about the theory-practice gap. The alternating training framework is a genuine contribution, but the theoretical derivation is incomplete.
 
 ## Novel Insights
 
-None beyond the paper's own contributions. The reviews surface the theory-empirics gap as the central tension but do not identify new directions or insights not already implicit in the paper's framing.
+None beyond the paper's own contributions.
 
 ## Suggestions
 
-1. **Bridge the theory-empirics gap**: Either provide a self-contained derivation showing how the contrastive losses in Equations (9) and (12) arise from the variational bound in Equation (6), or explicitly reframe the contribution as a heuristic alternating training method motivated (but not derived) by variational inference. Define the \(\mathcal{O}(\theta^2)\) term.
-2. **Add error bars**: Report means and standard deviations over at least 3 random seeds for all main results.
-3. **Specify experimental details clearly in the main text**: State which PLM variant and which GNN backbone are used for CoST's primary results. Report key hyperparameters (learning rates, batch sizes, \(L\), \(\gamma\), \(\tau\)).
-4. **Deepen the analysis of the pretrained GNN underperformance**: Investigate why the initial PLM embeddings are suboptimal and what the alternating procedure specifically recovers.
+1. **Clarify the GNN backbone for all experiments.** Specify what architecture CoST uses on each dataset, ideally in the experimental setup section or a dedicated reproducibility table.
+
+2. **Add a controlled baseline: same GNN backbone with static PLM embeddings.** On at least the heterogeneous datasets where the backbone is known (NBFNet), compare against NBFNet + frozen BERT embeddings. This directly isolates the benefit of alternating training.
+
+3. **Either tighten the variational derivation or honestly reframe the method as a heuristic co-training scheme.** If the contrastive loss with hard pseudo-targets cannot be rigorously derived from the KL divergence, the paper should acknowledge this explicitly rather than presenting the variational argument as the core intellectual framing.
+
+4. **Report standard deviations** (at least across 3-5 seeds) for the main results, particularly the state-of-the-art claims.
+
+5. **Include computational cost information** (training time, GPU memory, number of alternating cycles) for at least one large-scale dataset.
 
 ## Score and Decision
 
-The paper proposes a plausible and empirically effective framework for combining GNNs and PLMs in graph reasoning, with strong results across multiple benchmarks. The core weakness is the gap between the claimed variational derivation and the implemented heuristic contrastive losses — this does not invalidate the empirical contribution but means the paper's value rests on the experimental results rather than the theory. The missing variance reporting and incomplete experimental specifications are addressable concerns.
+This paper tackles a genuinely difficult and important problem — integrating structural and textual information for graph reasoning without the prohibitive cost of joint GNN+PLM training. The empirical results on heterogeneous benchmarks (where the backbone is known and the baselines include strong methods like NBFNet) are credible and meaningful. The ablation studies demonstrate that the framework benefits multiple GNN architectures. These are real contributions.
 
-Given that the paper presents a novel framework with consistent SOTA results across diverse benchmarks, but has a significant theory-empirics gap and incomplete reproducibility details, the paper is a borderline accept with major revisions needed.
+However, two interconnected problems weaken the paper. First, the missing specification of the GNN backbone on homogeneous graphs — combined with the lack of an ablation isolating the alternating training from the backbone choice — makes a substantial fraction of the empirical results difficult to interpret. Second, the variational derivation is presented as a principled motivation but the actual algorithm is a heuristic approximation, creating a mismatch between the paper's framing and its practice. Neither issue alone is fatal (the heterogeneous experiments and architecture ablations support the core claim), but together they prevent the paper from being fully convincing in its current form.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+The paper needs a major revision to address these gaps. On balance, the paper's contributions are genuine but not yet presented with sufficient rigor and completeness.
+
+MY FINAL SCORE: <pineapple>5.5</pineapple>
+MY FINAL DECISION: <orange>Reject</orange>

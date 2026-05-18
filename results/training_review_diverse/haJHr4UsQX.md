@@ -1,98 +1,68 @@
-Now I have a thorough understanding of the paper and can verify each reviewer claim against the actual content. Let me construct the final consolidated review.
-
----
+Now I have all the information I need. Let me synthesize the final review.
 
 ## Summary
 
-This paper proposes COGT (Causally-Ordered Generative Training), a method for improving compositional understanding in Vision-Language Models. Instead of standard autoregressive or fully-parallel token prediction, COGT uses a dependency parser to construct a Causal Graphical Model (CGM) that defines a partially-ordered, semi-parallel generation strategy. The decoder predicts each word conditioned only on its syntactic ancestors in the dependency tree rather than on all preceding tokens, which the paper argues removes spurious correlations. Evaluated on five compositional benchmarks (ARO, SugarCrepe, VL-CheckList, ColorSwap, FG-OVD) with CLIP, XVLM, and InstructBLIP backbones, COGT achieves large improvements over prior work, including methods trained on substantially larger datasets.
-
----
+This paper proposes COGT (Causally-Ordered Generative Training), a method for vision-language compositional understanding. COGT uses an off-the-shelf dependency parser to build a Causal Graphical Model (CGM) defining dependency relations among words, then trains a decoder to predict tokens following a semi-parallel, partially-ordered strategy guided by this CGM — each word is conditioned only on its ancestors in the dependency tree. Extensive experiments on five compositional benchmarks across multiple VLM backbones (CLIP, XVLM, InstructBLIP) show large and consistent improvements over prior methods.
 
 ## Strengths
 
-1. **Superiority over standard generative prediction strategies**: Table 1 shows that COGT outperforms Sequential-AR, Fully-Parallel, and Mixed (the CapPa-like strategy) on all five compositional benchmarks, with an average accuracy improvement of +17.77 points over Fully-Parallel. This directly supports the claim that dependency-guided semi-parallel generation is more effective than either pure autoregressive or fully-parallel prediction.
+- **Large and consistent outperformance over prior state-of-the-art methods.** COGT-CLIP trained only on COCO (~100K images) beats the second-best method DAC-LLM (trained on CC3M, 3.3M images) by 12.27 points on average across all five benchmarks (Table 3). COGT-CLIP+ widens the gap to ~22 points. This directly supports the claim of "large margin" improvement and is the paper's strongest empirical evidence.
 
-2. **New state-of-the-art across multiple VLMs and training regimes**: In Table 3, COGT-CLIP (trained on COCO only) outperforms the second-best CLIP-based method (DAC-LLM, trained on CC3M) by 12.27 points on average. Table 5 shows COGT-XVLM+ and COGT-InstructBLIP+ surpassing Cap and CapPa (pre-trained on 1B image-text pairs) despite using far less data. These gains are consistent across backbones.
+- **Superiority over generative methods trained on orders-of-magnitude larger data.** COGT-XVLM+ achieves 96.66% on ARO, surpassing CapPa (93.99%) and Cap (93.06%), both pre-trained on a private 1B image-text dataset (Table 5). This shows that the CGM-guided strategy is more data-efficient than standard generative pre-training.
 
-3. **Preservation of general VLM capabilities**: Table 6 shows that COGT does not degrade standard image classification performance; linear probing of the frozen CLIP visual encoder shows improved accuracy on CIFAR-10 (+2.14%), CIFAR-100 (+1.72%), and ImageNet (+0.63%) compared to the original CLIP, addressing a known concern that compositional fine-tuning often harms non-compositional skills.
+- **Ablation evidence that CGM-based semi-parallel prediction outperforms alternatives.** In Table 1, COGT obtains 93.37% average accuracy, outperforming Sequential-AR (88.52%), Fully-Parallel (75.60%), and the Mixed strategy (86.02%) under a controlled setting (frozen CLIP encoder, same decoder size, COCO training). This supports the core methodological claim that the CGM-guided factorization is beneficial.
 
-4. **Ablation isolating key design choices**: Table 2 systematically ablates the dependency parser (3 parsers compared), mask-specific tokens (syntactic-type conditioning), and number of visual encoder layers. The results validate each component: using a better parser improves results, dropping mask-specific tokens causes a −2.69% drop, and dropping the penultimate visual layer causes a −4.75% drop.
+- **Component analysis validates individual design choices.** Table 2 shows that using the best parser (Deep Biaffine + RoBERTa), mask-specific tokens, and two-layer visual features each contributes measurably to performance. Dropping mask-specific tokens costs −2.69 points; using only the last CLIP layer costs −4.75 points.
 
-5. **Generality across visual backbones and model families**: The method is successfully applied to CLIP (encoder-only), XVLM (fusion encoder), and InstructBLIP (encoder–decoder) with consistent improvements (Tables 3, 4, 5), showing the approach is not tied to a specific VLM architecture.
+- **Preserves or improves general VLM capabilities on standard tasks.** Linear probing results (Table 6) show COGT-CLIP+ achieves the highest top-1 accuracy on CIFAR-10, CIFAR-100, and ImageNet among CLIP-based methods, outperforming even the original frozen CLIP encoder. This counters the degradation commonly reported by prior compositional fine-tuning methods.
 
----
+- **Architecture-agnostic and applicable to diverse VLM backbones.** COGT is successfully applied to CLIP (encoder-only), XVLM (cross-modal encoder), and InstructBLIP (generative decoder-based model) in Tables 3–5, each time setting new state-of-the-art results for that backbone.
 
 ## Weaknesses
 
 ### Fatal
+
 None.
 
 ### Major
 
-1. **Potential bias from dependency parser behavior on negative test captions**: At inference, COGT computes the log-likelihood of each candidate caption by first parsing it with the dependency parser. If a negative example is ungrammatical or syntactically unusual (even if not as extreme as the excluded ARO Order tasks), the parser may produce an unreliable or degenerate tree, which could artificially lower its score and inflate discrimination accuracy. The paper acknowledges and excludes the two ARO Order tasks (COCO Order, Flickr Order) where this is most obvious, but does not analyze whether the problem persists for other benchmarks. For instance, even grammatical swaps like "the grass is eating the horse" could yield different attachment structures than the positive caption. The paper provides no analysis of parser behavior on positive vs. negative test captions and no control experiment (e.g., comparing with a fixed random tree or a deterministic canonical order). This is a **genuine evidential gap**: without such analysis, it is unclear how much of the reported gains (often 10–20+ points) are due to the method's design versus an incidental grammaticality filter from the parser. The paper's core claims depend on this evidence.
+- **The ablation in Table 1 confounds prediction order with architectural differences.** The central claim is that the CGM-based partial ordering is the driver of improvement. However, the three compared strategies use different attention mechanisms: Sequential-AR uses standard causal self-attention, Fully-Parallel uses only cross-attention (no inter-token attention), and COGT uses Dependency Guided Attention (masked tokens attend to visible ancestor tokens). Because both the prediction order AND the attention mechanism differ, the observed gains cannot be cleanly attributed to the partial ordering alone. A controlled comparison that keeps the attention mechanism fixed and varies only which tokens are conditioned on (all previous tokens vs. ancestors only vs. none) would directly test whether the partial order confers a benefit beyond the architectural change. Without this, the specific claim that "the CGM partial order" is the source of improvement is weakened, though the overall empirical superiority of COGT as a method remains well-supported by the large margins across multiple benchmarks.
 
 ### Minor
 
-2. **Missing ablation control: random tree structure**: The ablation in Table 2 compares different parsers and shows that a better parser gives better results. However, this does not isolate whether the *specific linguistic structure* of the dependency tree matters, or whether *any* sparse tree-based partial order (preserving the same level count and branching factor) would work equally well. A control experiment using random trees would directly test whether the gains come from the parser's syntactic/semantic knowledge or simply from the sparsity of the conditioning set. Without this, the attribution to linguistic structure is weaker than it could be.
+- **The exact CLIP model variant is not specified.** The paper does not state which CLIP model (e.g., ViT-B/32, ViT-L/14) is used in any experiment. Architecture affects the number and resolution of visual tokens, total parameter count, and baseline performance — without this information, it is difficult for readers to assess whether gains partially reflect using a stronger CLIP backbone than the baselines. Similarly, the paper uses two-layer visual features (last + penultimate layer), but it is unclear whether all compared methods had access to this richer representation or only a single layer.
 
-3. **The "causal" framing overreaches the method's actual operations**: The paper repeatedly invokes Causal Graphical Models, causal sufficiency, and removal of spurious correlations via a causally-motivated factorization. In practice, the method uses a dependency tree as a *partial order* for token prediction, not as a causal diagram over which interventions, do-operators, or counterfactuals are defined. The paper states it "interprets" syntactic dependencies as causal (Sec. 3, lines 54, 75), but no causal reasoning (e.g., showing that the tree captures genuine causal mechanisms rather than correlations) is provided beyond this assertion. The technical contribution — dependency-guided semi-autoregressive factorization — is valid and interesting on its own terms. The causal language adds rhetorical weight without empirical or theoretical justification and risks misleading readers. The paper would be stronger if it either provided concrete causal reasoning or reframed the contribution as "syntactic-dependency-guided" or "linguistically-structured" generation.
+- **Results are reported without confidence intervals or error bars.** All results are single numbers without standard deviations or ranges. While the margins in Tables 3–5 are very wide (mitigating concern), the ablation experiments (Tables 1, 2) show smaller differences where variance information would help assess stability. Standard errors over a few seeds should be reported at least for the main comparisons.
 
-4. **No explicit limitations section**: The paper does not discuss limitations such as: dependency parser requirements (not available for all languages/domains), the 45-category vocabulary possibly not covering all syntactic phenomena, increased inference overhead from parsing each candidate caption, and sensitivity to parser errors on rare constructions. While some of these are implicitly acknowledged, an explicit discussion would strengthen the paper.
+- **The "causal" framing is stronger than the evidence supports.** The paper repeatedly invokes causal language ("causal dependencies," "spurious associations," "causally sufficient") based on an off-the-shelf dependency parser that returns syntactic/semantic relations — not formally established causal mechanisms. The paper partially acknowledges this (Section 3: "While the causal dependency relations in C may not be exhaustively described by G..."), but the overall language overstates the rigor of the causal interpretation. The work is better described as using a parser-defined Bayesian network to factorize the joint distribution. This does not affect the empirical results but would benefit from more measured language.
 
 ### Trivial
-None.
 
----
+None.
 
 ## Nice-to-Haves
 
-- **Comparison with Wazni et al. (2024)**: The paper cites Wazni et al. (2024), which also uses a dependency parser for compositional reasoning. Including this baseline (or explaining why it is not directly comparable) would help benchmark the contribution.
-- **Inference speed / overhead**: A brief report on the runtime overhead of parsing each candidate caption during inference would be useful for practitioners.
-- **Explicit limitations section** (as noted above in Minor).
-- **Parser failure analysis on positive vs. negative pairs**: Even a small-scale manual inspection of whether the parser produces the same quality of tree for positive and negative captions would greatly increase confidence in the results.
-
----
+- An analysis of what kinds of compositional errors COGT still makes — particularly cases where the dependency parser produces an incorrect tree — would deepen understanding of the method's boundaries.
+- The reviewer's suggestion to run an ablation that fixes the Dependency Guided Attention mechanism and varies only the conditioning sets (ancestors only vs. all past tokens vs. no inter-token attention) would strengthen the attribution of gains to the CGM ordering specifically.
 
 ## Removed Points
 
-These points are flagged to be removed; treat them with caution.
-
-1. **"The authors include a new benchmark (FG-OVD) but do not describe its construction in the main text; since the appendix is stripped, we assume it is described there."** — This is a comment about content deferred to the appendix, which the parser stripped. The original submission contains this material; the point is based on a parser artifact, not an author error. *Removed per rule about missing appendix content.*
-
-2. **"The vocabulary used by common parsers (e.g., Universal Dependencies) is typically around 30-40 tags, so 45 is plausible. The appendix likely lists these."** — This is speculation about appendix content, not a weakness. *Removed per rule about missing appendix content.*
-
-3. **Any formatting/style nitpicks, typos, or parser artifacts** — Not present in the reviews reviewed.
-
----
+- **FG-OVD "not described in the main text"** — Removed because this is factually incorrect. The paper describes FG-OVD in lines 108–109 of Section 4, including its origin, task construction (replacing attributes like color/material/texture in object-specific captions), and how it is used in an image-to-text retrieval setup.
 
 ## Novel Insights
 
-The most interesting insight from the reviews is the tension between the paper's causal framing and its actual operations. The dependency-guided factorization is a genuinely novel and effective architectural choice, but calling it "causal" invites scrutiny that the method is not designed to satisfy (no interventions, no counterfactuals). This suggests an opportunity: a follow-up could explore whether actual causal mechanisms (e.g., via structured interventions on the dependency tree during training) could further improve compositional understanding, moving from "structurally-motivated factorization" toward genuinely causal reasoning. The second insight is that the parser-as-grammaticality-filter hypothesis (raised by the harsh critic) is a legitimate concern that the authors should systematically refute — the simplest control (random tree ablation) would simultaneously test both this and the causal attribution claim.
-
----
+Beyond the paper's own contributions, the most interesting cross-review insight is the tension between the paper's strong empirical results and the difficulty of cleanly attributing them to any single component. The ablation confound means we cannot fully disentangle whether the gains come from (a) the CGM-defined partial order, (b) the Dependency Guided Attention mechanism itself, or (c) the interaction of the two. The fact that the method works consistently across three different backbone architectures (CLIP, XVLM, InstructBLIP) suggests that the gain is robust, but the precise mechanism remains somewhat underspecified. This is a common pattern in systems papers that compare "holistic methods" — the whole is clearly better, but which part drives the improvement is harder to isolate.
 
 ## Suggestions
 
-1. **Address the parser bias concern directly**: Analyze a sample of positive and negative test captions from all five benchmarks to check whether the dependency parser produces systematically different tree quality (e.g., attachment accuracy, degenerate outputs) on negatives vs. positives. Report the findings even if the effect is small.
-
-2. **Add a random tree ablation**: Replace the dependency tree with a random tree (preserving the same number of nodes, levels, and branching factor) in the inference pipeline. If COGT with random trees still outperforms the baselines, the gains are from sparsity; if the real dependency tree is substantially better, the gains are from linguistic structure. Either outcome is informative.
-
-3. **Recalibrate the causal language**: Either (a) provide concrete causal reasoning (e.g., show that the factorization supports intervention-based reasoning, or formalize why syntactic dependencies can be interpreted as causal mechanisms in the linguistic domain), or (b) replace "causal" with "syntactic-dependency-guided" or "linguistically-structured" throughout the paper. The technical contribution is strong enough to stand on its own without overclaimed causal branding.
-
-4. **Add a dedicated Limitations section** covering parser dependency, language/domain coverage, inference overhead, and potential grammaticality bias.
-
----
+1. In the main text, specify the exact CLIP variant (model size, patch size) for every experiment.
+2. Add standard deviations or bootstrapped confidence intervals to the main results, especially for ablation experiments.
+3. Consider running an additional ablation that keeps the Dependency Guided Attention architecture fixed and varies only the conditioning sets (ancestors-only vs. all-previous-tokens vs. no-tokens) to isolate the effect of partial ordering.
+4. Tone down the "causal" language and describe the approach more neutrally as a parser-guided factorization of the joint distribution.
 
 ## Score and Decision
 
-Based on my assessment: the paper makes a clear, well-motivated, and empirically demonstrated contribution. The core technical idea (dependency-guided semi-autoregressive factorization) is novel and produces impressively large improvements across multiple backbones and benchmarks. The main concerns are: (1) a potential parser-bias confound that needs analysis but is unlikely to fully explain the large and consistent gains, (2) a missing control experiment that would strengthen the attribution, and (3) an overstated causal framing. None of these are fatal; all are addressable in revision. The paper's strengths — new SOTA results, thorough ablation, generality across architectures, and preservation of non-compositional capabilities — clearly outweigh the weaknesses.
-
-**Originality**: Good. The dependency-guided semi-autoregressive generation is a novel combination of ideas.  
-**Importance**: High. Compositional understanding is a recognized weakness of VLMs, and the paper makes substantial progress.  
-**Claims support**: Good but not complete. The parser bias concern is the main gap.  
-**Soundness**: Good. Experiments are thorough and well-controlled internally.  
-**Clarity**: Good. The method description is clear and reproducible.  
-**Community value**: High. The results set a new bar and the FG-OVD benchmark is a useful addition.
+This paper presents a novel, well-motivated method with extensive experiments and remarkably strong empirical results. The core idea — using a parser-derived factorization to guide generative training — is clever, and the gains are large, consistent, and demonstrated across multiple backbones and benchmarks. The main weaknesses (ablation confound, missing CLIP variant specification, no error bars, overclaimed causality) are real but addressable. The significance of the contribution, especially the data efficiency gains, outweighs the current shortcomings.
 
 MY FINAL SCORE: <pineapple>7.0</pineapple>
 MY FINAL DECISION: <orange>Accept</orange>

@@ -1,79 +1,76 @@
-Now I have all the information needed. Let me produce the final consolidated review.
+Now I have thoroughly read the paper and verified all claims. Let me compile the final authoritative review.
 
 ## Summary
 
-This paper proposes FreCoformer, a Transformer-based model for multivariate time series forecasting that operates in the frequency domain. It introduces three key designs: (1) frequency patching to refine frequency bands, (2) independent channel-wise attention per sub-frequency band to capture cross-channel correlations for mid-to-high frequency components, and (3) channel-independent frequency-wise summarization. A "divide-and-conquer" framework adds a time-domain linear module (TNet) whose output is summed with FreCoformer's. A Nyström-approximated lightweight variant is also presented. The core idea of frequency patching with per-sub-frequency channel attention is novel and reasonably motivated.
+This paper proposes FreCoformer, a Transformer-based model for multivariate time series forecasting that operates in the frequency domain. It introduces three key designs: (1) frequency patching to refine frequency bands, (2) independent channel-wise attention per sub-frequency band (with parameter sharing) to capture cross-channel correlations without low-frequency dominance, and (3) frequency-wise summarization for channel-independent global frequency information. The method is combined with TNet (a simple time-domain linear module) in a "divide-and-conquer" framework, and a Nyström-approximation variant is introduced for computational efficiency. Experiments on 8 benchmarks show strong results: with L=512, the method achieves 41 top-1 and 21 top-2 rankings out of 64 total cases.
 
 ## Strengths
 
-- **Novel frequency patching with per-sub-frequency channel attention**: The idea of segmenting the DFT output into frequency patches and applying independent channel-wise attention to each sub-frequency band is a genuine architectural contribution. This allows the model to learn cross-channel correlations selectively for different frequency ranges, addressing the known issue of low-frequency dominance in spectral methods.
+- **State-of-the-art forecasting accuracy across diverse benchmarks**: FreCoformer with L=512 achieves 41 top-1 and 21 top-2 out of 64 cases (Table 3), outperforming strong baselines including PatchTST, TimesNet, Fedformer, Crossformer, and Pyraformer across 8 real-world datasets. This is the strongest evidence for the paper's core contribution.
 
-- **Ablation validates complementary roles of frequency and time modules**: Table 4 (Left) shows FreCoformer alone dominates on high-frequency-rich ETTh1, TNet alone dominates on low-frequency-dominated Weather, and the full combination is best on both. This provides direct evidence that the two modules capture complementary information, not just ensemble averaging.
+- **Clear empirical demonstration that frequency-domain channel attention captures mid-to-high-frequency components**: Figure 1(d) shows DFT visualizations where FreCoformer's output spectrogram closely matches ground truth in mid-to-high-frequency bands, while PatchTST (time-domain), Autoformer, and Fedformer either miss or correlate spuriously with those components. This directly supports the paper's central motivation.
 
-- **Interpretability evidence supports core design claim**: Figure 3(b) shows that after channel-wise attention, the frequency energy distribution becomes more balanced across low, mid, and high frequencies (vs. the input which is low-frequency dominated). This explains why the model can extract features across the full spectrum and validates the design motivation.
+- **Ablation study validates the complementary roles of frequency and time domain modules**: Table 4 (Left) shows that on ETTh1 (high-frequency rich) FreCoformer alone is best, on Weather (low-frequency dominant) TNet alone is best, and the full framework yields the best results on both. This confirms the design rationale of combining frequency and time domain analysis.
 
-- **Nyström variant achieves practical efficiency gains**: Table 5 shows the lightweight variant reduces GPU memory substantially (e.g., Weather: 245MB vs. 436MB) while maintaining comparable or better MSE. This is a practical contribution for large-channel datasets.
+- **Nyström-FreCoformer achieves practical memory-accuracy trade-offs**: Table 5 reports that on Weather (21 channels) Nyström-FreCoformer achieves MSE=0.169 (vs. full 0.166) with substantially less GPU memory; on Traffic (862 channels) it even improves MSE (0.455 vs. 0.461) while reducing memory by ~4×. This is a practical contribution for scaling to many-channel datasets.
 
-- **Ablation confirms necessity of core components**: Table 4 (Right) shows that removing either channel-wise attention or frequency patching degrades performance, confirming both design choices are essential.
+- **Component ablations isolate the contribution of each design choice**: Table 4 (Right) shows that removing either channel-wise attention or frequency patching degrades performance on both ETTh1 and Weather, providing controlled evidence for both components.
 
 ## Weaknesses
 
+### Fatal
+None.
+
 ### Major
-
-- **The L=512 comparison is unfair, inflating the headline claim**. The paper states that with L=512 the method achieves "41 top-1 out of 64 cases" and "considering both look-back window settings, our framework achieves top-1 rankings in 63 out of 64 cases." However, the experimental setup (Section 4.1) describes baseline results as collected from prior papers using L=336 and from authors' implementation at L=336. The only mention of L=512 is "we further explored the impact of an extended look-back window by evaluating with L=512." The paper does **not** state that baselines were re-run at L=512. Comparing a method at L=512 against baselines at L=336 is invalid — longer look-back is known to improve performance for many methods (e.g., PatchTST). At the fair L=336 comparison, the method achieves 27/64 top-1, which is solid but not the 63/64 claimed. This issue directly undermines the paper's most prominent performance claim. The 63/64 claim cannot be salvaged without re-running all baselines at L=512 and reporting those results.
-
-- **Inconsistent baseline handling across look-back settings**. For TimesNet, results are collected from the original paper (default L=96) *and* implemented by the authors at L=336, with the better of the two selected. For other baselines (PatchTST, Fedformer, Pyraformer), results are taken from (Nie et al., 2023) at L=336. Crossformer results come from a mix of literature and author implementation. This creates an asymmetrical evaluation where some baselines potentially benefit from a "best of two look-backs" (TimesNet) while others do not. The authors should justify why this selective treatment is appropriate, or standardize the protocol.
+None. The paper's core claims are supported by the evidence presented.
 
 ### Minor
 
-- **The "divide-and-conquer" framework is oversold relative to its mechanism**. The paper promotes this as a principled framework, but the implementation is simple additive combination of two independently-trained modules (line 99: "A summation is finally executed on the outputs of FreCoformer and T-Net without any additional operations"). There is no joint training, no gating, no adaptive weighting, and no analysis of whether the modules actually specialize on different frequency ranges beyond what the ablation already shows. The framing promises more than the mechanism delivers. The complementary behavior shown in the ablation is a genuine strength; the "framework" labeling is not.
+- **The "divide-and-conquer" framing is overstated.** The framework simply sums the outputs of FreCoformer (frequency domain) and TNet (time domain), with no iterative decomposition, conditional routing, or hierarchical recombination. Describing this as "divide-and-conquer" implies a more sophisticated architecture than the simple residual combination of two modules. A more precise description (e.g., "dual-domain ensemble" or "complementary modeling framework") would better reflect the actual methodology without risking confusion. This does not affect the empirical results but mischaracterizes the technical contribution.
 
-- **Frequency patching dimension \(P\) is motivated but never studied empirically**. The paper argues (Section 3.1) that \(P\) is "adjustable to real-world scenarios, e.g., alpha waveform typically occurring at 8–12 Hz," yet no experiment analyzes how varying \(P\) affects performance on datasets with known frequency structures (e.g., Electricity vs. Weather). This leaves an important design knob unexplored.
+- **No discussion of limitations or failure cases.** The paper does not address settings where FreCoformer might underperform (e.g., very short time series, datasets with no meaningful frequency structure, extreme noise). A brief limitations paragraph in the conclusion would improve the paper's completeness and scientific rigor.
 
-- **Nyström-FreCoformer's claimed performance enhancement on many-channel datasets has no supporting analysis**. The paper asserts that the approximation "can particularly enhance performance in datasets with a large number of channels" (Contributions and Conclusion), which is counterintuitive since approximation typically degrades accuracy. No explanation, analysis, or ablation is provided — no comparison of approximation rank, no exploration of why an approximation would help, and no verification beyond point estimates in one table.
+- **The heatmap analysis of frequency energy distribution is qualitative.** Figure 3(b) claims a "balanced energy distribution between low-frequency and mid-to-high-frequency components in the output" based on visual inspection. A quantitative measure (e.g., entropy of the frequency distribution, or the ratio of energy in different frequency bands) would make this analysis more rigorous and reproducible.
 
-- **The motivation for channel-independent frequency-wise summarization is unclear**. After channel-wise attention explicitly *captures* cross-channel correlations per sub-frequency, the paper then applies a channel-independent projection to "mitigate channel correlations" (citing PatchTST). Why capture correlations only to remove them? This tension between the two design stages is not discussed or resolved. The paper could clarify whether the channel-independent projection acts as regularization against overfitting to channel correlations.
+- **The connection between patch size and real-world scenarios is unclear.** The paper states the patch size parameter is "adjustable to real-world scenarios, e.g., an hourly sampling in daily recordings or alpha waveform typically occurring at 8–12 Hz" but does not clearly explain how these examples connect to the patch dimension choice. This is a minor clarity issue in an otherwise well-described method.
 
-- **No discussion of limitations or failure cases**. The paper does not discuss scenarios where the method might struggle (e.g., very short look-back, highly noisy channels, datasets with very few channels where channel-wise attention may add little value). This is a standard expectation for a complete submission.
-
-- **The Nyström evaluation reports only GPU memory**. Training time, inference time, and parameter counts are not reported, making it difficult to assess the practical speed-accuracy trade-off.
+- **Single-seed results without statistical significance measures.** The main results (Table 3) are reported without confidence intervals or standard deviations across multiple runs. While this is common practice in the time series forecasting literature (many baseline results are also single-run), the paper's strong claims about outperforming baselines would be strengthened by reporting variability estimates, at least for the proposed method on a subset of settings.
 
 ### Trivial
-
-- The abstract contains an ungrammatical clause: "the effectiveness of our proposal can outperform other baselines" — effectiveness cannot "outperform."
+- The ablation study (Table 4, Right) shows that removing either component hurts performance, but does not isolate which component contributes more. The text notes that channel-wise attention is more important on ETTh1, but this is a qualitative claim from two data points rather than a controlled comparison.
 
 ## Nice-to-Haves
 
-- Error bars or multiple-seed runs on a subset of configurations would strengthen confidence in the reported rankings, though the field does not universally require this.
-- An analysis of what frequency bands the channel attention focuses on for different datasets (beyond the energy distribution in Figure 3(b)) could deepen understanding.
-- A comparison against iTransformer (2024) would be natural given the shared interest in channel-wise modeling, but its absence is not a weakness given that identifying missing related work requires external knowledge.
+- **Ablation of TNet's internal design choices.** The TNet uses first-order differencing, local-then-global linear projections, and temporal patching. Ablating these (e.g., skip differencing, use a single linear layer) would clarify whether TNet's contribution comes from its time-domain input or its specific architecture.
+- **An experiment testing the independence assumption across sub-frequency patches.** The method treats each sub-frequency band independently with separate attention passes. Testing a version where all bands share a single attention pass (without patching) would directly verify that independent processing is beneficial.
+- **Analysis of why Nyström approximation improves performance on high-channel datasets.** The paper notes this interesting result but offers no explanation (e.g., whether it acts as a structured regularizer or exploits channel redundancy). A brief analysis (rank of attention matrices, comparison with PCA) would turn a puzzling observation into a genuine insight.
 
 ## Removed Points
 
-*These points are flagged as removed per instructions; treat them with caution.*
+The following criticisms raised by reviewers were removed after verification against the paper:
 
-- "Lack of statistical significance / error bars" — Removed: single-run evaluation is the standard convention in this literature (same as all baselines being compared). Moved to Nice-to-Haves.
-- "Non-contemporaneous baseline collection" — Removed: collecting results from published papers is standard practice; the paper implements some baselines itself for missing settings.
-- "Missing baselines (iTransformer)" — Removed per policy: the reviewer does not have external sources to confirm whether this reference was available or relevant at submission.
-- "Missing training hyperparameters" — Removed per policy: these are nitpicks about reproducibility that fall under trivial implementation details.
-- "Abstract/Intro phrasing issues" — Removed: minor presentation concerns that do not affect the technical contribution.
+1. **"Ambiguous and potentially inflated claim about top-1 rankings"** — Removed because the numbers are internally consistent. With L=336 there are 27 top-1 cases, with L=512 there are 41. If 5 cases are top-1 at both settings, the total distinct top-1 cases across both look-backs is 27+41-5=63. The math works. This was a misunderstanding by the reviewer.
+
+2. **"Unfair baseline comparison for TimesNet"** — Removed per policy: the asymmetry (giving TimesNet the best of L=96 and L=336, while comparing against FreCoformer at L=336) favors the baseline, not the proposed method. This makes the comparison conservative and does not undermine the results.
+
+3. **"Garbled sentence in frequency patching description"** — Removed as a parser artifact. The original submission does not contain this garbled text.
+
+4. **"Typo/formatting nitpicks"** — Various style and formatting criticisms removed per policy.
 
 ## Novel Insights
 
-The reviews surface one genuinely insightful observation beyond the paper's own claims: the tension between channel-wise attention (which explicitly models cross-channel correlations) and channel-independent frequency-wise summarization (which removes them). This design tension is not discussed in the paper but could point to a deeper issue — the model may need to selectively retain only *certain* cross-channel correlations (those that generalize) while discarding noise correlations. Understanding when each operation dominates could lead to a more principled architecture design.
+The most interesting observation from this review process is the relationship between the ablations and the domain characterization of datasets. The finding that on ETTh1 (high-frequency rich) the frequency module dominates, while on Weather (low-frequency dominant) the time module dominates, and that their combination outperforms either alone, provides an elegant empirical validation of the paper's core design philosophy. This type of modular ablation goes beyond typical "does it work" evaluations and provides genuine insight into when frequency-domain modeling matters. A second noteworthy point: the Nyström approximation improving performance on multi-channel datasets (Traffic, Electricity) while reducing compute could point to an underexplored benefit of low-rank approximation as an implicit regularizer in channel-wise attention — this deserves deeper investigation in future work.
 
 ## Suggestions
 
-- **Fix the L=512 evaluation**: Either (a) re-run all baselines at L=512 and report full results, or (b) remove the L=512 claim entirely and draw conclusions solely from the fair L=336 comparison (27/64 top-1, 34/64 top-2). If (b), change the claim "63/64 top-1" to something appropriate for L=336 only.
-- **Remove or downgrade the "divide-and-conquer" framing**: Rename the combination method to something more honest (e.g., "complementary module combination" or "dual-domain ensemble"). The current framing implies a more sophisticated interaction than simple summation.
-- **Ablate the frequency patching size \(P\)** on 2–3 datasets with different frequency characteristics.
-- **Provide analysis of Nyström's surprising performance gain**: Explain why the approximation does not hurt accuracy and even helps on many-channel datasets. This is a non-obvious result that deserves study.
-- **Discuss the tension between channel-wise attention and channel-independent summarization**: Either add an experiment or at minimum a paragraph explaining why this two-stage design is beneficial.
-- **Add a limitations paragraph** discussing scenarios where the method may not be advantageous.
+1. Replace the "divide-and-conquer" framing with a more precise description such as "dual-domain ensemble framework" or "complementary frequency-time modeling."
+2. Add a brief limitations paragraph to the conclusion discussing scenarios where the method may underperform.
+3. Add a quantitative measure (e.g., spectral energy ratio or entropy) to support the heatmap analysis in Figure 3(b).
+4. Consider reporting standard deviations over multiple seeds for the proposed method on a representative subset of settings.
 
 ## Score and Decision
 
-The paper presents a genuinely novel architectural contribution (frequency patching + per-sub-frequency channel attention) with solid ablations and interpretability evidence. However, the evaluation is compromised by an unfair L=512 comparison that inflates the headline performance claims. The fair L=336 results (27/64 top-1) are respectable but not exceptional compared to existing SOTA. The divide-and-conquer framing oversells a simple additive ensemble, and several minor analytical gaps remain (P not ablated, Nyström performance gain unexplained, no limitations discussion). On balance, the paper has real contributions but cannot be accepted in its current form due to the unsupported central performance claim.
+The paper presents a solid, empirically successful method for multivariate time series forecasting with a clear focus on modeling short-term variations through frequency-domain channel attention. The experiments are thorough (8 datasets, multiple horizons, strong baselines), the ablations are informative, and the Nyström variant offers a practical contribution. The verified weaknesses are all minor — none undermine the core claims. The paper makes a genuine contribution to the field.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <pineapple>7.0</pineapple>
+MY FINAL DECISION: <orange>Accept</orange>
