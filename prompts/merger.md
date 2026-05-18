@@ -11,6 +11,16 @@ NOTE: If the paper is not accessible, completely incomplete, broken, or inaccess
 Before including any weakness, verify: (1) does the paper actually have this problem, or did the reviewer
 misread a section? (2) if the paper partially addresses this concern, is the addressal unreasonable or is
 the reviewer ignoring it? Quote the relevant section if needed to justify keeping or removing the criticism.
+
+## Filtering Discipline (apply aggressively)
+
+The harsh critic sweeps general areas (method soundness, evaluation validity, comparison fairness, evidence strength, internal coherence, significance). This produces some real findings and some category-driven noise. Be aggressive in stripping the noise:
+
+- For every retained weakness, you must be able to point to a specific sentence, equation, figure, or table in the paper that the weakness applies to. If the criticism is framed generally ("the evaluation lacks rigor", "baselines may not be fair", "evidence is weak for the claims") without a concrete anchor, REMOVE it.
+- If a weakness reads like an area-of-concern sweep ("could the metric be measuring a proxy?", "are confounders controlled?") rather than a specific identified problem, REMOVE it. The harsh critic was asked to use those areas only as lenses; do not let speculation that surfaced through that sweep enter the final review.
+- If the harsh critic asserts something is "fatal" or "structural" but the assertion depends on information not present in the paper (e.g., "the appendix may specify X but…", "assuming Y is the case…"), DEMOTE it to at most Minor or REMOVE it. A fatal flaw must be unambiguous given what is on the page, not a speculative gap.
+- If two reviewers raise the same concern in different framings, merge them; do not let duplication inflate the weakness count.
+- Default to fewer weaknesses than the inputs contain. The merger's job is to compress, not to union.
  
 
 Note: For the following rules, REMOVE means moved it to a new section called Removed Points, do not completely remove them from the review
@@ -52,7 +62,7 @@ implementation details, or large artifacts impractical to include in a submissio
 - Be careful with the Strength Finder: a lot of its claimed strengths can be invalid. 
 Remove strengths that are generic, strengths about whether the problem is important, strengths that are delusional, superficial, sycophancy, and strengths drawn from pure pseudoscience. Only keep strengths that are concrete, specific to this paper, and grounded in real evidence. try this one later 
 
-- FUNDAMENTAL ISSUES: If any weakness is severe enough to undermine the paper's core claims or it is simpilly "not even a paper", it overrides all strengths. The overall assessment must reflect this severity rather than averaging strengths and weaknesses or softening the judgment with "could be strong with revisions."
+- FUNDAMENTAL ISSUES: If any weakness is severe enough to undermine the paper's core claims or it is simply "not even a paper", it overrides all strengths. The overall assessment must reflect this severity rather than averaging strengths and weaknesses or softening the judgment with "could be strong with revisions." However: a weakness only counts as fundamental if it is verifiable from the paper as written — not from speculation about a stripped appendix, missing supplementary, or assumed-but-unverified setup. Speculative-fatal claims (e.g., "if the normalization were X, the reported values would be impossible") should not trigger a score collapse; demote them to Major or Minor and proceed normally.
 
 - Similarly, if the paper made real contributions do not reject just because it has some weaknesses - every paper has some. A strong, well-supported contribution should be scored high — do not pull a clearly strong paper down to the middle out of caution. The same calibration discipline that demands low scores for fatally-flawed papers demands high scores for genuinely strong ones. 
 
@@ -156,7 +166,7 @@ After you finish writing a review, assign a score to the review.
 
 {{CALIBRATION_INSTRUCTION}}
 
-If the FUNDAMENTAL ISSUES was triggered on top, rate the paper low accordingly. 
+If the FUNDAMENTAL ISSUES was triggered on top — and the triggering weakness is verifiable from the paper as written, not speculative — rate the paper low accordingly. Do not collapse the score on a single speculative-fatal claim. 
 
 
 

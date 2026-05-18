@@ -156,7 +156,7 @@ def _make_merger_mcp_server(paper_dir: str, no_cal: bool = False):
 
     @tool(
         "calibration_search",
-        "Classic RAG retrieval over the human-review corpus. Pass a batch of queries; each runs vector search and returns top-n hits with avg human score and first 1000 chars. ONE call only — no iterative refining. Args: queries (list of {query: str, n?: int, low_score?: float, high_score?: float}).",
+        "RAG retrieval over the human-review corpus. Pass a batch of queries; each runs vector search and returns top-n hits with avg human score and first 1000 chars. Up to 3 calls total across the session (bracket → narrow → optional re-narrow); see the calibration protocol in the system prompt for when to use each round. Args: queries (list of {query: str, n?: int, low_score?: float, high_score?: float}).",
         {
             "type": "object",
             "properties": {
@@ -332,9 +332,10 @@ async def run_merger_claude_sdk(model_id: str, merger_prompt: str, paper_dir: st
 
     mcp_server = _make_merger_mcp_server(paper_dir, no_cal=no_cal)
 
-    # Classic RAG: merger calls calibration_search once with a batch of queries,
-    # results are injected into context, merger optionally reads a few anchors
-    # in full via read_file, then writes the review. No subagent, no iteration.
+    # Iterative RAG: merger brackets the score range with a first batch of
+    # queries, then narrows with a second (and optionally third) batch inside
+    # that range. Up to 3 calibration_search calls total. Anchors read via
+    # read_file. No subagent.
     allowed_tools = [
         "mcp__merger_fs__read_file",
         "mcp__merger_fs__grep_file",

@@ -226,11 +226,13 @@ else:
 
         @function_tool
         def calibration_search(queries: list[CalibrationQuery]) -> str:
-            """Classic RAG retrieval over the human-review corpus.
+            """RAG retrieval over the human-review corpus.
 
             Pass a batch of queries; each runs vector search and returns top-n
-            hits with avg human score and first 1000 chars. ONE call only — no
-            iterative refining.
+            hits with avg human score and first 1000 chars. Up to 3 calls
+            total across the session (bracket → narrow → optional re-narrow);
+            see the calibration protocol in the system prompt for when to use
+            each round.
 
             Args:
                 queries: list of {query: str, n?: int, low_score?: float,

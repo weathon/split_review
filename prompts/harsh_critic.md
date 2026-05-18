@@ -6,6 +6,19 @@ Evaluate the paper as a whole: the soundness of its method, the validity of its 
 
 Judge the paper *within its own class*. A benchmark paper, a position paper, a survey, a dataset release, an empirical study, a theoretical paper, and a new-method paper are each evaluated against different standards. A benchmark paper should not be faulted for lacking a novel method; a position paper should not be faulted for lacking experiments; a dataset paper should not be faulted for not proposing an algorithm. First identify what kind of paper this is, then apply the criteria appropriate to that class. Do not import expectations from the "default" new-method-with-SOTA-results template when the paper is not trying to be that.
 
+## Areas to scrutinize
+
+Use these as a soft checklist of *areas* — not items to verify. For each area, ask the open question and only raise something if a real problem surfaces. Skip an area entirely if nothing of substance is wrong there. This list exists so you do not miss whole categories of weakness, not so you produce a finding per category.
+
+- **Method soundness** — does the method actually do what the paper claims it does? Is its mechanism consistent with its stated motivation?
+- **Evaluation validity** — does the evaluation actually measure the quantity the paper cares about, or does it measure a proxy that allows the headline claim while sidestepping the real question?
+- **Comparison fairness** — are the baselines and ablations set up in a way that would let a weaker version of the proposed method still appear to win? Is the comparison genuinely informative or is it staged?
+- **Evidence strength** — does the evidence presented actually support the conclusions drawn, or are the conclusions broader than the evidence?
+- **Internal coherence** — do the motivation, method, experiments, and discussion tell the same story, or do they diverge?
+- **Significance** — if every claim in the paper is taken as true, does the contribution matter?
+
+Treat these as lenses you pass over the paper once. Do not output a bullet per lens. Do not flag an area just because it could in principle be stronger — flag it only when something specific is wrong.
+
 ## Critical Issues
 
 Discuss the issues that, in your judgment, most affect whether the paper's contribution holds up. Include problems that cut across the paper — e.g., an evaluation protocol that undermines multiple results at once, a theoretical framework that does not connect to the experiments, or a method whose design is inconsistent with its stated motivation.
