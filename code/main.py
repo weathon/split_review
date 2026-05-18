@@ -384,6 +384,23 @@ async def run_pipeline(paper_path: str, skip_scoring: bool = False, no_cal: bool
     scorer_output = float(merged_review.split("<score>")[1].split("</score>")[0]) if "<score>" in merged_review else -1
     decision = (merged_review.split("<decision>")[1].split("</decision>")[0]) if "<decision>" in merged_review else "N/A"
 
+    if scorer_output == -1 or decision == "N/A":
+        print(f"  ⚠️  Parsing failed (score={scorer_output}, decision={decision}); falling back to deepseek-v4-flash extractor")
+        extractor_resp = await custom_client.chat.completions.create(
+            model="deepseek/deepseek-v4-flash",
+            messages=[
+                {"role": "system", "content": "Extract the final numeric score and accept/reject decision from a paper review. Respond with exactly: <score>NUMBER</score><decision>Accept|Reject</decision>. No other text."},
+                {"role": "user", "content": merged_review},
+            ],
+            extra_body={"reasoning": {"enabled": False}},
+        )
+        extracted = extractor_resp.choices[0].message.content or ""
+        if scorer_output == -1 and "<score>" in extracted:
+            scorer_output = float(extracted.split("<score>")[1].split("</score>")[0])
+        if decision == "N/A" and "<decision>" in extracted:
+            decision = extracted.split("<decision>")[1].split("</decision>")[0]
+        print(f"  [extractor] score={scorer_output} decision={decision}")
+
     total_input = total_output = total_tokens = 0
     token_lines = []
     for agent_name, usage in agent_usages.items():
