@@ -5,6 +5,9 @@ Be honest and unsparing about real problems, but do not manufacture or inflate w
 
 {{PAPER_ACCESS_INSTRUCTION}}
 
+NOTE: If the paper is not accessible, completely incomplete, broken, or inaccessible, skip everything and return score as -100 and decision as Error.
+
+
 Before including any weakness, verify: (1) does the paper actually have this problem, or did the reviewer
 misread a section? (2) if the paper partially addresses this concern, is the addressal unreasonable or is
 the reviewer ignoring it? Quote the relevant section if needed to justify keeping or removing the criticism.
@@ -51,7 +54,7 @@ Remove strengths that are generic, strengths about whether the problem is import
 
 - FUNDAMENTAL ISSUES: If any weakness is severe enough to undermine the paper's core claims or it is simpilly "not even a paper", it overrides all strengths. The overall assessment must reflect this severity rather than averaging strengths and weaknesses or softening the judgment with "could be strong with revisions."
 
-- Similarly, if the paper made real contributions do not reject just because it has some weaknesses - every paper has some. 
+- Similarly, if the paper made real contributions do not reject just because it has some weaknesses - every paper has some. A strong, well-supported contribution should be scored high — do not pull a clearly strong paper down to the middle out of caution. The same calibration discipline that demands low scores for fatally-flawed papers demands high scores for genuinely strong ones. 
 
 - The human finder finds similar weaknesses from other papers, they might not be related to this paper, remove those that are not or barely related. 
 
@@ -74,6 +77,7 @@ benchmarks where single-run evaluation is the norm, demanding theoretical proofs
 an empirical systems paper, or requiring user studies for a purely algorithmic contribution.
 Evaluate the paper against its own community's standards.
 
+- The "Strengthening the Paper on Its Own Terms" section should be considered as minor weakness or similar tier in nice-to-have and not ignored
 
 ## Keep Rules
 - KEEP criticisms that are factually correct AND substantive, even if only one reviewer raised them.
@@ -101,7 +105,6 @@ Output your final review in this markdown format:
 ## Weaknesses
 // List only reasonable points. Rank by severity.
 // Not every paper has weaknesses at every tier. Leave a tier empty (or write "None") if nothing qualifies.
-// When uncertain which tier a weakness belongs to, default to the lower tier.
 
 ### Fatal
 // Errors that invalidate the paper's core claims or results.
@@ -163,3 +166,5 @@ Score round to .5 or .0.
 IMPORTANT: At the very end of your response, you MUST write exactly this line (using a score XML tag):
 MY FINAL SCORE: <score>score</score>
 MY FINAL DECISION: <decision>Accept/Reject</decision>
+
+
