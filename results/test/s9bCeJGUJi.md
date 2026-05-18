@@ -85,5 +85,5 @@ None beyond the paper's own contributions. The reviews do not surface any insigh
 
 **Overall assessment:** The paper tackles an important and timely problem, and the empirical trend is promising. However, a core technical component (gradient-based reweighting) is described so vaguely that it cannot be reproduced, the training loss functions are never defined, and the experimental results lack any statistical validation. These are structural problems that go beyond presentation polish. The paper needs major revisions before it can be accepted.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

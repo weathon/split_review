@@ -381,8 +381,8 @@ async def run_pipeline(paper_path: str, skip_scoring: bool = False, no_cal: bool
         agent_usages["Merger"] = merger_usage
 
 
-    scorer_output = float(merged_review.split("<pineapple>")[1].split("</pineapple>")[0]) if "<pineapple>" in merged_review else -1
-    decision = (merged_review.split("<orange>")[1].split("</orange>")[0]) if "<orange>" in merged_review else "N/A"
+    scorer_output = float(merged_review.split("<score>")[1].split("</score>")[0]) if "<score>" in merged_review else -1
+    decision = (merged_review.split("<decision>")[1].split("</decision>")[0]) if "<decision>" in merged_review else "N/A"
 
     total_input = total_output = total_tokens = 0
     token_lines = []
@@ -501,7 +501,7 @@ def stratified_sample(papers: list[dict], n_per_bin: int, seed: int) -> list[dic
 
 
 def parse_score(text: str) -> float | None:
-    match = re.search(r"<pineapple>([\d.]+)</pineapple>", text)
+    match = re.search(r"<score>([\d.]+)</score>", text)
     return float(match.group(1)) if match else None
 
 

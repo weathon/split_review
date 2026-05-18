@@ -59,5 +59,5 @@ None beyond the paper's own contributions. The reviews do not surface an observa
 4. Report variance (range or standard deviation) across at least 3 seeds for the real-world experiments and some simulated ablations.
 5. Add a learning curve or convergence comparison supporting the noise schedule claim (position: scaled-linear vs. squared-cosine for both).
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

@@ -69,5 +69,5 @@ None beyond the paper's own contributions. The reviews do not surface an insight
 
 This is a solid theoretical contribution. The main result (Theorem 2) is clearly stated, technically sound, and meaningfully generalizes prior work. The lower bound for ridge and the PCR result establish an interesting contrast. The primary concern is that Theorem 5's statement is not visible in the extracted main text, but this is likely a parser artifact. The paper makes a genuine advance in understanding benign overfitting under covariate shift.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

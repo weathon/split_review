@@ -67,5 +67,5 @@ The reviewer pool did not surface a genuinely novel observation beyond the paper
 **Clarity of writing:** 8/10 — Well-organized, clear motivation, and the architecture is explained effectively.  
 **Value to community:** 7/10 — The efficient length variant and the consistent (if small) improvements provide a useful, simple extension to MAE that others can build on.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

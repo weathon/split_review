@@ -80,5 +80,5 @@ The reviewers collectively identify one genuinely nuance that the paper itself d
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

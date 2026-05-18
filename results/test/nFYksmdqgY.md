@@ -68,5 +68,5 @@ The most interesting tension across the reviews is that while both the Harsh Cri
 
 The paper presents a well-motivated method with consistent empirical gains over strong baselines, and the core contributions (cross-modal contrastive initialization, inference-time image-free pipeline, out-of-domain generalization) are genuinely novel within the UMMT space. However, two documentation gaps — the ambiguous data split description and the inconsistent claim around Table 5 — prevent unconditional acceptance. These issues are addressable in a revision and do not undermine the core contribution, but they must be resolved before the paper can be fully trusted.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

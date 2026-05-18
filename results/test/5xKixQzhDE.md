@@ -66,5 +66,5 @@ None beyond the paper's own contributions.
 
 The paper makes a novel and clearly motivated contribution with strong empirical support across two domains. The weaknesses are addressable (ablations, reporting details) and do not undermine the core claims. The main theoretical claim is plausibly supported by the conceptual argument and deferred proof; the empirical evidence is robust enough to stand on its own.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

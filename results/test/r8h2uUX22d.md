@@ -67,5 +67,5 @@ Beyond the paper's own contributions, one observation that emerges from the revi
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

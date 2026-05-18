@@ -76,5 +76,5 @@ The observation that the GAN loss gradient and the CE loss gradient have class c
 
 Based on my assessment: the paper has a novel contribution, sound experimental design (within its 2-party scope), and convincing empirical results. The main weakness — the gap between the general VFL framing and the 2-party-only evaluation — is real but fixable and does not invalidate the core contribution. The remaining issues are minor. I recommend acceptance with a request to address the scope-evidence gap.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

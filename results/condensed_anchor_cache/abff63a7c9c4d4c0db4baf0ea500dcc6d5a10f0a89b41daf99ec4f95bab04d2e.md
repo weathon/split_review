@@ -1,0 +1,25 @@
+- Decision: Reject
+- Scores: 5, 5, 8, 6
+
+## Merged Review
+
+### Summary
+This paper introduces LIME (Less Is More for MLLM Evaluation), a refined benchmark for Multimodal Large Language Models (MLLMs). Using a semi-automated three-stage pipeline (model judgment with GPT‑4V and human annotators, semi-automated screening, leakage elimination) applied to 10 existing benchmarks across 6 task types, it filters out easy samples, wrong‑labeled samples, and answer‑leakage samples. LIME reduces the number of evaluation samples by 76% and evaluation time by 77%, while more effectively distinguishing model capabilities. The authors further find that traditional automatic metrics like CIDEr are insufficient for captioning and that excluding caption scores yields a more accurate overall performance assessment. Over 30 models are evaluated, and a similarity search system is built to study the gap between LIME and real‑world user queries. One reviewer (score 8, confidence 4) is substantially more positive, considering the method reasonable and the experiments comprehensive; the other three reviewers (scores 5, 5, 6) express multiple methodological and evaluation concerns.
+
+### Strengths
+- The problem of uninformative benchmarks is important and interesting to the MLLM community; the motivation (Figures 1 and 2) is clear and well‑supported.
+- The three‑stage filtering pipeline (using MLLMs as judges, semi‑automated screening, and leakage elimination) is novel and creatively leverages MLLMs themselves to curate a higher‑quality benchmark.
+- Removal of easy, meaningless, and erroneous data is a crucial step toward more efficient and reasonable MLLM evaluation. The use of GPT‑4V and human annotators for this filtering is thorough.
+- Comprehensive empirical validation: over 30 baseline models are evaluated, providing a significant body of analysis across multiple benchmarks and subtasks.
+- The construction of a similarity search system to investigate the gap between LIME and real‑world user queries demonstrates awareness of benchmark coverage limitations.
+- Thorough analysis of correlation between different subtasks.
+
+### Weaknesses
+- **Bias from judge models:** The filtering pipeline relies heavily on existing MLLMs (including GPT‑4V) as judges, which may introduce inherited biases. While multiple models are used, a more rigorous analysis of potential biases and their impact on benchmark composition is needed. Additionally, the sensitivity of the pipeline to the choice of judge models (e.g., using different combinations) is not explored, raising concerns that the filtered benchmark might inadvertently favor certain model architectures or training approaches.
+- **Statistical significance of reduced dataset size:** The paper does not explore whether the 76% reduction in samples affects the statistical significance of model comparisons or evaluation reliability. Trade‑offs between efficiency and reliability are insufficiently discussed; the minimum number of samples needed for reliable evaluation is not determined.
+- **Arbitrary task selection and weighting:** The choice of tasks and their weightings in the final benchmark appears somewhat arbitrary. A more systematic justification for which tasks are most important for evaluating MLLMs would strengthen the methodology.
+- **Limited scope: only filtering, no new domains/metrics:** The work only filters samples from existing benchmarks and does not introduce new evaluation metrics or task domains. It is unclear whether additional metrics (e.g., for assessing bias, hallucination, or knowledge leakage) or new domains beyond the filtered set should be included to fully evaluate MLLMs.
+- **Ignoring text‑only knowledge leakage:** The paper does not address scenarios where MLLMs answer correctly without “reading” the image, using only knowledge from their LLM component. This type of answer leakage should be considered in benchmark design.
+- **Missing comparison with other general MLLM benchmarks:** LIME does not compare with broader benchmarks such as MMMU or MMBench to verify whether easy or answer‑leakage samples also exist there, which would strengthen the generality of the filtering approach.
+- **Unsuitable evaluation metrics for open‑form outputs:** LIME reuses the original evaluation metrics of the integrated benchmarks (e.g., exact‑match accuracy for benchmarks like AI2D, ScienceQA, OCRBench, POPE). These metrics penalize semantically correct but syntactically different responses (e.g., “bike” vs. “bicycle”) and are inappropriate for evaluating open‑form MLLM outputs. The authors should instead use more appropriate metrics such as multiple‑choice questions, true/false classification, or GPT‑based scoring.
+- **Flawed answer‑leakage filtering:** To eliminate answer leakage, the authors perform a text‑only check using pure text LLMs, removing samples that LLMs can answer without the image. However, multimodal questions are encountered only during MLLM training, so the correct approach is to use MLLMs (not text‑only LLMs) to detect answer leakage. This methodological flaw undermines the validity of the leakage removal step.

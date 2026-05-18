@@ -71,5 +71,5 @@ The reviewers collectively surface a tension at the heart of the paper: STGG+ co
 
 The paper is a borderline case. Its contributions are real and the evaluation is thorough, but the missing ablation and incomplete validation of the self-criticism mechanism prevent the paper from being a strong accept at a top venue. With the suggested improvements, the paper would be substantially stronger.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

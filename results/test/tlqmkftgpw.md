@@ -103,5 +103,5 @@ The paper addresses an important problem, has a sound overall architecture, and 
 
 **Score: 6.5** — A solid paper with real contributions, held back by presentation gaps that affect reproducibility. I recommend acceptance with the expectation that the authors will address the reproducibility issues and clarify the derivation.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

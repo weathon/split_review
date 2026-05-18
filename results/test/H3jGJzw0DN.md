@@ -74,5 +74,5 @@ The paper's core direction—selective momentum on classification layers to comb
 
 However, the paper has three major problems: (1) the theoretical drift analysis that purports to show a (1−α) reduction factor is mathematically unsupported; (2) the most important baseline (FedAvgM, standard momentum FL) is absent, so the "partial" aspect cannot be evaluated; and (3) the main results lack any statistical rigor, which is especially problematic given the tiny margins in several comparisons. These issues collectively prevent acceptance in the current form. The contribution is incremental but potentially useful; a substantially revised version with corrected theory (or honest removal of the unsupported claim), the missing baseline, and proper error bars could be a moderate contribution to the FL literature.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

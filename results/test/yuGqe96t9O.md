@@ -88,5 +88,5 @@ None beyond the paper's own contributions. The reviewer analyses surface a recur
 
 **Value (3/4)**: The pre-trained encoder and the probabilistic formulation are likely to be useful to the materials informatics community. The uncertainty analysis provides a foundation for future work.
 
-**MY FINAL SCORE: <pineapple>6.5</pineapple>**
-**MY FINAL DECISION: <orange>Accept</orange>**
+**MY FINAL SCORE: <score>6.5</score>**
+**MY FINAL DECISION: <decision>Accept</decision>**

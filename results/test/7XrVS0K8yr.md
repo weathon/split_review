@@ -85,5 +85,5 @@ None beyond the paper's own contributions. The reviews surface the same gap the 
 
 **Value to community:** Potentially high if substantiated, but in current form provides no validated artifact, data, or insight. **1/5**
 
-MY FINAL SCORE: <pineapple>1.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>1.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

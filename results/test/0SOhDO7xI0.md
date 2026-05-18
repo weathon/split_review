@@ -68,5 +68,5 @@ The reviews surface an interesting tension in the paper: the central theoretical
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

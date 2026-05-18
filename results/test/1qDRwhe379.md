@@ -71,5 +71,5 @@ Beyond the paper's own contributions, the reviews surface an interesting tension
 
 This paper has a solid core: a well-motivated data filtering method that improves BERT-based CSC and reduces over-correction, supported by a thoughtful theoretical analysis. The experiments are comprehensive in comparing against alternative corpus-utilization strategies and studying hyperparameters. However, the paper is marred by a significant and verifiable problem: the abstract and conclusion claim state-of-the-art performance when the paper's own Table 1 clearly shows otherwise, and §5.1 even explicitly contradicts this claim. This is not a minor presentational issue — it is a factual error in the paper's central empirical assertion. Combined with the non-standard calibration preprocessing that is not validated on full data, the paper cannot be accepted in its current form. The underlying science is sound enough that with honest corrections, it could be a solid contribution, but as submitted the misrepresentation is too severe to overlook.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

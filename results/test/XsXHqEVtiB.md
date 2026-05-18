@@ -77,5 +77,5 @@ The reviews surface an important meta-point about GAN-based surgical AI evaluati
 
 The paper makes a credible effort at an important problem: surgical bleeding localization. The dataset creation is substantial, the instance segmentation results are solid, and the generalization from synthetic to real data is noteworthy. However, the paper's core contribution—the SBAM end-to-end framework for precise bleeding-point localization—lacks quantitative evaluation, and the stated improvement over the prior BAM framework is asserted but never demonstrated. These are structural gaps that prevent the central claims from being supported. The paper is not ready for acceptance in its current form but could become a solid contribution with the addition of the missing evaluation results.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

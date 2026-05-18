@@ -51,5 +51,5 @@ None beyond the paper's own contributions. The reviews largely converge on the p
 
 This paper presents a well-motivated, clean idea validated extensively across multiple model families, tasks, and quantization settings. The empirical results are consistent and practically meaningful. The weaknesses are incremental and addressable: the mechanistic interpretation could be tightened, and the GPTQ ablation asymmetry needs clarification, but neither threatens the core contribution. The paper is a solid contribution to the LLM quantization literature.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

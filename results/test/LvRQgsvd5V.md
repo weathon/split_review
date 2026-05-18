@@ -61,5 +61,5 @@ None beyond the paper's own contributions. The reviews surface the tension betwe
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

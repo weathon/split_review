@@ -83,5 +83,5 @@ None beyond the paper's own contributions.
 
 6. **Use actual LaTeX tables** for numerical results rather than embedded images, and provide dataset statistics.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

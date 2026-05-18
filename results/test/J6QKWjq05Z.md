@@ -80,5 +80,5 @@ However, the paper's first claimed contribution — a proof of contraction in me
 
 The empirical contributions (TreeDQN with MSLE loss, sample efficiency improvements) are real and valuable. A revised version that either fixes or removes the theoretical claim, strengthens the evaluation, and provides full architectural details could merit acceptance.
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>4.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

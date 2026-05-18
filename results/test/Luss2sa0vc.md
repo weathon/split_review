@@ -65,5 +65,5 @@ None beyond the paper's own contributions.
 
 The paper makes a solid contribution: it identifies and addresses a genuine gap in articulated object manipulation benchmarks, provides a usable environment with 277 objects across 9 categories, and shows empirically that adaptive demonstrations matter. The weaknesses are real but limited to presentation and scope — none invalidate the core contribution. The simulation experiments are thorough and the results are credible. The paper should be accepted.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

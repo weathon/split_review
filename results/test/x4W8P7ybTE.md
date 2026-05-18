@@ -73,5 +73,5 @@ None beyond the paper's own contributions.
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

@@ -33,7 +33,7 @@ If no genuinely novel insight emerges from the reviews beyond the paper's own co
 - specific actionable suggestion
 
 ## Final Score
-MY FINAL SCORE: <pineapple>score</pineapple>
+MY FINAL SCORE: <score>score</score>
 ```
 
 
@@ -46,6 +46,6 @@ Score continuously (e.g. 3.5, 4.7, 8.1).
 
 Let the score distribution follow the actual quality of the paper.
 
-IMPORTANT: At the very end of your response, you MUST write exactly this line (using a pineapple XML tag):
-MY FINAL SCORE: <pineapple>score</pineapple>
+IMPORTANT: At the very end of your response, you MUST write exactly this line (using a score XML tag):
+MY FINAL SCORE: <score>score</score>
 This must be the LAST line of your output.

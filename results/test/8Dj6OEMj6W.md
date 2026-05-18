@@ -63,5 +63,5 @@ None beyond the paper's own contributions. The harsh critic's framing around the
 
 The paper's core idea—training LLMs on multi-turn self-correction trajectories with stepwise verification—is sound and the internal ablation (multi-round vs. single-round, within the same CoSC model) provides genuine evidence of its value. The design contribution (stepwise verification, multi-round training data construction, two-phase training) is meaningful. However, the primary comparison against ToRA is confounded by a >20× data imbalance, preventing attribution of the headline gains to the mechanism rather than to data scale. Combined with selective framing of proprietary model comparisons and overstated "inherent ability" language, the paper currently overclaims what its evidence supports. These issues are addressable with additional controlled experiments and revised presentation, but in its current form the evidence falls short of fully substantiating the central claims.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

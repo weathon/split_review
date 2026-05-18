@@ -71,5 +71,5 @@ None beyond the paper's own contributions.
 
 This paper makes a genuine theoretical contribution — constructing a basis for full similarity group equivariance — and shows competitive results. However, the omission of experimental comparisons against the most relevant prior work (SREN, RST-CNN) prevents the SOTA claim from being verified, and the "approximately shiftable" property is asserted without quantitative analysis. These issues are significant but fixable. The paper's core contribution is real and well-motivated, but the evidence presented is incomplete relative to the claims made.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

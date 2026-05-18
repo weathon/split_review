@@ -69,5 +69,5 @@ None beyond the paper's own contributions. The reviewers' analyses converge on t
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

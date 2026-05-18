@@ -68,5 +68,5 @@ The reviews surface a fundamental tension: the paper makes a genuinely novel con
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

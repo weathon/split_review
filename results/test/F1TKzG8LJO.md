@@ -60,5 +60,5 @@ None beyond the paper's own contributions. The reviews largely converge with the
 
 This paper makes a clear, novel contribution: demonstrating that coarse trajectory sketches are a practical and effective conditioning signal that enables task generalization beyond what language- or goal-conditioned policies can achieve. The experiments are well-designed, the results are strong and consistent across multiple trajectory input modalities, and the motion-similarity analysis provides solid evidence that the evaluation genuinely tests novel generalization. The weaknesses are minor and addressable — they concern depth of analysis rather than validity of results. The paper deserves acceptance.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

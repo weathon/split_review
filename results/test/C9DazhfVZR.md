@@ -79,5 +79,5 @@ The reviews reveal that the paper sits in an awkward spot between a methods pape
 
 This paper presents a genuinely novel idea — 2D-to-3D point cloud completion for echocardiography — with a thoughtfully designed architecture and promising quantitative results on a large synthetic dataset. However, two structural weaknesses prevent acceptance: (1) no validation on any real echocardiography data despite strong claims of clinical applicability, and (2) no baseline comparisons against prior methods or simpler alternatives, leaving the claimed "optimal performance" unsubstantiated. The paper would need substantial additional work (at minimum a real-data pilot and proper baselines) to be convincing. The score reflects a solid but incomplete submission.
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>4.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

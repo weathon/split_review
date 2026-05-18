@@ -75,5 +75,5 @@ The reviewer's most valuable observation is the tension between the clean theore
 
 The paper presents a clean theoretical framework for symmetrizing loss functions, proves a meaningful uniqueness result for the multi-class unhinged loss, derives two new loss functions (SGCE and α-MAE) that perform competitively across diverse noise benchmarks, and provides thorough experimental validation. The issues identified — overclaiming in the abstract, a theory-practice gap from normalization, looseness of one theoretical bound, and some missing analyses — are all addressable in revision and do not undermine the core contribution. The paper makes a solid contribution to the robust loss function literature.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

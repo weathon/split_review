@@ -81,5 +81,5 @@ None beyond the paper's own contributions. However, one observation emerges from
 **Clarity of writing:** Clear and well-structured.  
 **Value to community:** High. The pipeline enables reproducible multimodal search evaluation, and the benchmark fills a genuine gap.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

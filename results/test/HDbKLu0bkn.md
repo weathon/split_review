@@ -91,5 +91,5 @@ None beyond the paper's own contributions. The reviews converge on the paper's c
 
 The paper has a genuinely interesting core idea — periodic regularization as a distinct regime between static and per-step hyperparameter variation — and shows promising initial results on challenging FER datasets. However, the experimental evaluation lacks the rigor required to support the paper's central claims: no error bars, no multiple runs, missing architecture and RL implementation details, and an insufficient baseline set. These are not minor presentation issues but fundamental gaps that prevent a reader from assessing the reliability, significance, or reproducibility of the reported improvements. While the conceptual contribution is real, the paper as submitted is not yet ready for acceptance.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

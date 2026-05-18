@@ -76,5 +76,5 @@ None beyond the paper's own contributions. The reviews surface a key methodologi
 
 The paper proposes a reasonable idea but the evaluation has substantial gaps that prevent verification of the core claims. The lack of quantitative metrics alone makes the comparative claims unfalsifiable. Revision addressing the major issues could yield a publishable paper.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

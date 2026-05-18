@@ -79,5 +79,5 @@ None beyond the paper's own contributions. The reviews surface that the paper at
 
 The paper addresses a worthwhile problem and presents a reasonable conceptual framework, but the execution has three major flaws: (1) the core theoretical derivation is unsupported and mathematically questionable, (2) the experimental validation is far too weak to substantiate any claims of superior performance, and (3) the method description is too vague to be reproducible. These are structural issues, not incremental gaps. The paper cannot be accepted in its current form.
 
-MY FINAL SCORE: <pineapple>3.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>3.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

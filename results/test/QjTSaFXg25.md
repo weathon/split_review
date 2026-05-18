@@ -68,5 +68,5 @@ None beyond the paper's own contributions. The reviews surface no fundamentally 
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

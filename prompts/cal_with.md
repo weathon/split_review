@@ -2,18 +2,20 @@ Use comparative scoring to calibrate your final score against human-reviewed anc
 
 How retrieval works:
 
-1. Make ONE call to `calibration_search` with a batch of short natural-language queries. The tool runs vector search for each query in parallel and returns, for every query, the top-K matching human-review paths with their avg human score and first ~1000 chars. All results are injected into your context in a single response. You do not iterate.
+1. Make one call to `calibration_search` with a batch of short natural-language queries. The tool runs vector search for each query in parallel and returns, for every query, the top-K matching human-review paths with their avg human score and first ~1000 chars. All results are injected into your context in a single response. You do not iterate.
 
-2. From the returned list, pick a small number of anchors (typically 5-9) you actually want to read in full. Use `read_file` on each chosen path to inspect the full review. Do not re-call `calibration_search` — one batch is all you get.
+2. You can refine search terms in `calibration_search` for 1-2 times to get better results. 
 
-3. Score the paper relative to those anchors.
+3. From the returned list, pick a small number of anchors (typically 5-9) you actually want to read in full. Use `read_file` on each chosen path to inspect the full review. 
+
+4. Score the paper relative to those anchors.
 
 What to put in your batch of queries:
-- 2-3 queries by the paper's specific strength/weakness patterns. Do NOT restrict by score for these.
-- 3 queries that anchor each score band on a topic similar to the paper:
-   - "<topic>" with avg human score > 6 (high band)
-   - "<topic>" with avg human score around 5 (medium band)
-   - "<topic>" with avg human score < 4 (low band)
+- 2-3 queries that anchor each score band on a topic similar to the paper:
+   - "<topic>" with avg human score >=7
+   - "<topic>" with avg human score <=6 >=4
+   - "<topic>" with avg human score <=3
+
   You can pass `low_score` / `high_score` numeric filters to `calibration_search` per-query (see tool schema). Use these exact bands. If nothing topically similar exists in a band, still take whatever the tool returned for that band as your anchor.
 
 `calibration_search` schema: pass `queries: list[{query: str, n: int, low_score?: float, high_score?: float}]`. Default n=4 if unsure. The tool runs all queries and returns concatenated results, grouped by query.
@@ -28,5 +30,3 @@ Scoring rules:
 - Compare the paper under review with every single anchor paper
 
 When reporting your score, list every anchor paper that came back in the batch (not just the ones you read in full). For each anchor give the path, its avg human score, and one sentence on how it compares to the paper under review. The list must include at least one low-scoring (avg <=4), one medium-scoring, and one high-scoring (avg >=6) anchor.
-
-Hard constraint: exactly one `calibration_search` call. No iterative refining, no follow-up retrieval. After that, you may use `read_file` to read anchor files, then write your review and score.

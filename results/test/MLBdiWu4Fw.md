@@ -76,5 +76,5 @@ The paper makes a genuine contribution: InternVid is a large, well-constructed v
 
 **Significance:** 7/10 — A large-scale, well-characterized video-text dataset is valuable to the community, and the findings about curation vs. scaling are informative.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

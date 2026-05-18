@@ -68,5 +68,5 @@ Beyond the paper's own contributions, the reviews surface an important observati
 
 The paper makes a solid contribution — differentiable block-wise sparsity allocation is a well-motivated improvement over uniform layer-wise pruning, and the empirical results consistently favor BESA across model scales. The main weaknesses (the joint compression confound, the row-wise/layer-wise ambiguity, and the lack of variance reporting) are addressable and do not undermine the primary pruning results. With clarifications and a controlled joint compression ablation, the paper would be a strong contribution to the LLM pruning literature.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

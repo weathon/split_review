@@ -72,5 +72,5 @@ None beyond the paper's own contributions — the directional encoding idea is s
 
 The paper identifies a genuine limitation of current MGNNs — their inability to handle directional material behavior — and proposes a simple, well-motivated architectural fix that is supported by consistent experimental evidence. The weaknesses (unvalidated baseline on isotropic cases, lack of error bars, minor framing and reproducibility gaps) are real but do not undermine the core claim that the directional encoding improves anisotropic modeling. The contribution is novel within the GNN-for-physics literature and the experiments, while improvable, are sufficient to establish that the method works. With reasonable revisions addressing the major concerns, this would be a solid conference paper.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

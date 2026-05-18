@@ -70,5 +70,5 @@ The most interesting finding that emerges across the reviews is the asymmetry in
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

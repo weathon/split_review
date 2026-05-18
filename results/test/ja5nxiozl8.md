@@ -100,5 +100,5 @@ Beyond the paper's own contributions, the most interesting pattern across the re
 
 The paper makes genuine contributions: a principled formalization of experimental studies, a quantifiable definition of generalizability, and a practical algorithm backed by case studies. The weaknesses (primarily around the algorithm's validation in the main text and lack of baseline comparison) are real but addressable and do not undermine the core contributions. The paper is above the acceptance threshold.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

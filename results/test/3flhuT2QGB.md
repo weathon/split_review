@@ -67,5 +67,5 @@ The harsh critic correctly identifies that the paper's strongest experiment — 
 
 The paper presents a well-engineered framework with strong empirical results across multiple challenging settings, impressive efficiency gains, and thorough ablations on design choices. However, the central conceptual claim — that *synergy* between the two systems, rather than the specialist's architectural quality alone, drives performance — is under-supported by a missing same-architecture ablation. The data efficiency results, while striking, are partially confounded. These are substantive gaps but not fatal; the paper's contribution as a practical, high-performing system remains valuable. The paper is above the acceptance threshold but would benefit substantially from the recommended ablations.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

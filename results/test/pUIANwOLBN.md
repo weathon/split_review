@@ -75,5 +75,5 @@ None beyond the paper's own contributions. The reviews surface the paper's genui
 
 The paper identifies a genuine gap — the lack of a unified framework for understanding exploration in policy gradients — and proposes a clean, well-motivated set of criteria to fill it. The toy illustrations are effective and the writing is clear. However, the paper's central analytical contribution (the efficiency and attraction criteria in Section 4) rests on an unexamined and strong assumption that the probability of a positive gradient alone measures optimization efficiency. Moreover, the framework is proposed but never operationalized: no non-trivial results are derived, no comparative analysis is performed, and the criteria remain definitions without demonstrated analytical bite. These shortcomings are substantial enough that the paper, in its current form, does not constitute a complete contribution. With significant revision — particularly addressing the P(X > 0) assumption and demonstrating the framework's utility beyond description — the paper could become a strong submission.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

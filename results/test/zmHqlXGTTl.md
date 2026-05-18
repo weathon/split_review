@@ -76,5 +76,5 @@ The reviews collectively surface a tension that goes beyond this paper: evaluati
 
 **Rationale:** The paper makes a genuine contribution with the SciPG dataset and proposes a reasonable framework architecture. However, the evaluation has structural issues that prevent acceptance in its current form: (1) the alignment pipeline that generates all training labels is entirely unspecified, making the work unverifiable; (2) the extractor loss equations contradict the stated objective, raising doubts about implementation correctness; (3) the evaluation measures poster reconstruction rather than the claimed paper-to-poster generation task; and (4) no qualitative results are shown for a generation task. The dataset contribution is valuable, and the framework is plausible, but the experimental evidence does not convincingly support the effectiveness claims. Major revisions — particularly full alignment specification, loss correction, qualitative examples, and evaluation reformulation — are needed.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

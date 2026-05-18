@@ -74,5 +74,5 @@ The reviews surface an important observation not fully articulated in the paper:
 
 The paper tackles a genuine, underexplored problem (pixel-level sketch generation with controlled complexity) and presents a well-ablated, empirically strong solution. The main weakness — an underspecified complexity measure that as written would not produce the intended signal — is real but fixable without restructuring the paper. All other issues are missing details or minor concerns. The core contributions (adaptive scale selection, three-phase sampling) are empirically validated and produce state-of-the-art results on QuickDraw.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

@@ -69,5 +69,5 @@ None beyond the paper's own contributions. The reviews do not surface an observa
 
 This paper has novel theoretical ideas—the distance-based energy function and the MM-inspired global energy construction for layered transformers are creative contributions. The formal framework with clear assumptions is a strength. However, the paper's central claims (the \(L\geq 1\) bound and the \(N=O(D^2)\) scaling law) rest on derivations with uncontrolled approximations, and the key results are presented without sufficient rigor. The experiments, which should provide supporting evidence for these theoretical predictions, are described only as qualitative bullet points without any quantitative data. The gap between what is analyzed (memorization of a fixed pattern set) and what is claimed (understanding of pre-training behavior in large language models) is acknowledged but not resolved. The paper would need substantially stronger derivations and at least one quantitative experiment to be acceptable at a major venue.
 
-**MY FINAL SCORE: <pineapple>3.5</pineapple>**
-**MY FINAL DECISION: <orange>Reject</orange>**
+**MY FINAL SCORE: <score>3.5</score>**
+**MY FINAL DECISION: <decision>Reject</decision>**

@@ -78,5 +78,5 @@ None beyond the paper's own contributions. The reviews raise important methodolo
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

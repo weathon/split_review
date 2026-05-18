@@ -72,5 +72,5 @@ The reviews collectively highlight an interesting tension in this paper: the met
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

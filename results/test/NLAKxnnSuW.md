@@ -60,5 +60,5 @@ None beyond the paper's own contributions. The reviews confirm the paper's empir
 
 The paper makes a clear and well-validated contribution: substantial storage reduction (125–190×) for 4D Gaussian Splatting with maintained or improved quality and real-time rendering. The methodology is principled, the experiments are thorough, and the claims are appropriately scoped. The weaknesses are minor and addressable. I recommend acceptance.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

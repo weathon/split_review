@@ -78,5 +78,5 @@ The most striking insight across the reviews is that the paper's most novel find
 
 The paper makes a genuine contribution and the core benchmark is well-designed. However, the omission of Gemini 1.5 Pro from the skill retention evaluation (80% of the benchmark) is a significant gap that weakens the main conclusion about skill retention. This is addressable in a revision but limits the paper's strength as submitted.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

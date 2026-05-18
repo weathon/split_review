@@ -57,5 +57,5 @@ None beyond the paper's own contributions. The reviewers did not identify any un
 
 This paper presents a simple, well-motivated idea with broad experimental validation across architectures. The core contribution — training-free acceleration by trajectory stitching — is convincing and practically valuable. The main issues are (a) overclaiming "lossless" speedup without uncertainty quantification and (b) claiming prompt alignment improvement for stylized models without quantitative support. Both are fixable with language softening or additional experiments. The paper should not be accepted exactly as-is due to the unsupported third contribution claim, but the issues are fully addressable.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

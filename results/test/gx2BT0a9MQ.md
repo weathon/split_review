@@ -74,5 +74,5 @@ The reviews highlight an interesting tension: the paper's strongest evidence (Fi
 
 This is a strong systems paper with a clear contribution: three composable techniques that reduce ZeRO-3's cross-node communication by 4×, validated with thorough throughput experiments at up to 384 GPUs, a striking democratization result (matching 800 Gbps performance on 200 Gbps), and convergence evidence at practical model scales. The "naturally weight-quantized" claim is overblown and needs correction, and the hpZ memory overhead should be quantified, but neither undermines the core contribution. The paper is original, the experiments are sound, and the results are valuable to the community.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

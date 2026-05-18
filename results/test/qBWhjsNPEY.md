@@ -73,5 +73,5 @@ None beyond the paper's own contributions. The reviews surface valid clarificati
 
 The paper makes a legitimate contribution to an important problem (scaling ZO optimization for DNN training) with clear empirical evidence across multiple tasks. The weaknesses are presentation-level and clarificatory, not structural. The core claims are well-supported.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

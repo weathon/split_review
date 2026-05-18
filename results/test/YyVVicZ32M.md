@@ -82,5 +82,5 @@ An interesting observation emerges from the tension between the critic's first w
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

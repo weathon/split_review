@@ -73,5 +73,5 @@ None beyond the paper's own contributions.
 
 The paper makes a useful contribution with the CIGE metric, which is well-motivated and supported by solid evidence (robustness to sample size, noise detection, FID correlation). The RL fine-tuning application is interesting but significantly underspecified — the loss formulation lacks a valid gradient mechanism as written, which is a major gap in the core technical contribution. This is fixable with clarification/correction, but in its current form the fine-tuning component cannot be evaluated.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

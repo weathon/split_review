@@ -87,5 +87,5 @@ The most interesting observation across the reviews is the structural trade-off 
 
 **Overall assessment:** This paper addresses an important practical problem with a sensible approach and makes genuine contributions (datasets, simulation code, validated pipeline). However, the main experimental comparison has a structural confound: the reference-curve augmentation is not controlled for, making it impossible to attribute the observed improvement specifically to the physics content of the simulation rather than to the multi-channel input format. This does not invalidate the paper's contributions (the pipeline works, the datasets are valuable) but it substantially weakens the central scientific claim that "physics augmentation" drives the gain. The paper would be significantly strengthened by adding the recommended ablation experiments.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

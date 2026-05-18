@@ -65,5 +65,5 @@ None beyond the paper's own contributions.
 
 **Overall assessment**: The paper presents a novel approach to posterior mean estimation in diffusion-based inverse problems, with a clean theoretical motivation and strong empirical results. However, the experimental evaluation is weakened by comparing against only two baselines (one of which is clearly broken), and the theoretical framing overclaims the rigor of the connection between the variational inference theory and the practical algorithm. The core contribution is solid and the results are compelling, but the paper would benefit from broader comparisons and more honest characterization of its approximations.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

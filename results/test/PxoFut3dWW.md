@@ -61,5 +61,5 @@ None beyond the paper's own contributions. The paper is transparent about what i
 
 This is a clean, well-executed paper. The core contribution—a simple, theoretically grounded pruning metric that matches SparseGPT without weight update and at a fraction of the computational cost—is novel, well-motivated, and thoroughly validated across multiple model families, sizes, sparsity types, and evaluation metrics. The experiments are extensive (LLaMA and LLaMA-2 from 7B to 70B, three sparsity types, both perplexity and zero-shot evaluation, plus ablations on comparison groups, calibration sample size, and weight update effects). The paper is clearly written and appropriately frames its claims. The weaknesses are minor and do not affect the central contribution.
 
-MY FINAL SCORE: <pineapple>8.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>8.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

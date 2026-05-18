@@ -83,5 +83,5 @@ None beyond the paper's own contributions.
 
 The paper makes a solid contribution. The main issue is the unspecified text generation pipeline, which is fixable and does not undermine the core results (which are on image and audio). The Flowers102 comparison gap is a minor presentation issue, not a fatal flaw. I recommend acceptance.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

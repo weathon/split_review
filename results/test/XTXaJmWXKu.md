@@ -73,5 +73,5 @@ None beyond the paper's own contributions.
 
 The paper addresses a novel and well-motivated problem (continual nonlinear ICA), makes genuine theoretical contributions (especially the partial-impairment insight and the repeated-distributions analysis), and provides empirical evidence consistent with its theoretical predictions. However, the experimental validation is too narrow (synthetic data only, one CL method, no error bars, no z_c evaluation) and the theory-practice gap (identifiability matrices → GEM gradients) is not bridged. The paper has clear merit and I expect it to influence future work, but the empirical case needs strengthening.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

@@ -89,5 +89,5 @@ The most interesting observation emerging from the reviews is the tension betwee
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Weak Accept</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Weak Accept</decision>

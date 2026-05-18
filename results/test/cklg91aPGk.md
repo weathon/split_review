@@ -66,5 +66,5 @@ The most genuinely novel insight across both reviews is that the harsh critic co
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

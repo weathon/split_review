@@ -82,5 +82,5 @@ The most interesting observation from the reviews is that the paper's two main a
 
 The paper makes solid contributions—a novel decomposition method (TVC), empirical discovery of two causally relevant feature families for ICL, and a scaled-up SFC adaptation—all backed by open-source infrastructure. The main weaknesses are that the two analytical strands (TVC and SFC) are not directly integrated, the steering evidence is supplementary (not strictly proving necessity), and cross-model results are mentioned but not shown. None of these are fatal; they narrow rather than invalidate the contribution. The paper's claims are appropriately scoped (including an explicit limitations section). With relatively straightforward additions (overlap analysis, held-out clarification, cross-model summary), the paper would be notably stronger. In its current form, the contributions are solid enough to warrant acceptance.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

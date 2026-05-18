@@ -65,5 +65,5 @@ The reviews surface an interesting tension: the paper's strongest theoretical re
 
 The paper identifies a genuinely useful and surprisingly under-explored direction in cross-device FL, provides a clean algorithmic framework with theoretical backing, and shows compelling results on convex problems. However, the experimental evaluation is too narrow to fully support the claimed generality, and the missing FedProx comparison is a notable gap. The paper is a solid contribution but needs substantial revision before it is publication-ready.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

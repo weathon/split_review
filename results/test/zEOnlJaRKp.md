@@ -79,5 +79,5 @@ The reviews highlight one observation that goes beyond the paper's own framing: 
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

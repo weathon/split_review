@@ -56,5 +56,5 @@ The abstract describes a genuinely novel contribution — the unification of tex
 
 **Score: 3.0 / 10** — The paper's abstract promises a meaningful contribution, but the full content required for evaluation is absent due to parsing issues. This score reflects the inability to evaluate, not the quality of the underlying research.
 
-MY FINAL SCORE: <pineapple>3.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>3.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

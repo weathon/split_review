@@ -64,5 +64,5 @@ The most valuable observation emerging from this review — one that goes beyond
 
 Despite the tuning asymmetry — which is a real but not fatal issue, and one the paper is transparent about — the benchmark itself is a timely and needed contribution. The paper's core contribution (the datasets and their characterization) stands independently of any individual performance finding. The insights are useful and largely robust to the asymmetry (the asymmetry mostly *penalizes* GNNs, making their wins more, not less, convincing). The weaknesses are addressable and do not undermine the primary contribution.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

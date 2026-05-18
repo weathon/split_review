@@ -56,5 +56,5 @@ This paper cannot be evaluated on scientific merit because it does not present a
 **Clarity of writing**: Only the abstract is present; no body text to evaluate.
 **Value to research community**: Zero in its current form.
 
-MY FINAL SCORE: <pineapple>1.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>1.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

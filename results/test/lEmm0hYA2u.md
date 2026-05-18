@@ -77,5 +77,5 @@ This is a solid empirical paper with a clear contribution. The idea is simple ye
 **Clarity**: 7/10 — well-written and clear about contributions and limitations.
 **Value**: 7/10 — the findings are directly useful to practitioners.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

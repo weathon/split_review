@@ -74,5 +74,5 @@ None beyond the paper's own contributions. The reviews surface the gap between t
 
 The paper presents a well-motivated idea with a clean formalization and a compelling didactic analysis. The practical techniques (on-policy sampling, label balancing, advantage smoothing) are sensible. However, the experimental evaluation has significant gaps: missing reproducibility-critical details (base model, PRM architecture), a very small test set (100 problems from a single dataset), no comparison against existing iterative refinement methods, no error bars, and modest gains with learned PRMs. The in-context process supervision contribution, while novel in framing, lacks strong empirical evidence of practical benefit. A major revision addressing these issues could make the contribution credible.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

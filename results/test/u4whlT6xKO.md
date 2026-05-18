@@ -67,5 +67,5 @@ None beyond the paper's own contributions. The reviews largely converge on the s
 
 The paper's core contribution — DCoT as a fine-tuning method for multi-chain reasoning within a single inference step — is novel, well-motivated, and supported by consistent empirical results across model sizes and tasks. The overclaiming around "self-correction" is a real weakness in presentation but does not invalidate the core method or its empirical support. The paper would benefit from reframing this claim and adding several control analyses. Overall, the paper makes a solid contribution to the instruction-tuning and reasoning literature.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

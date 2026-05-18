@@ -60,5 +60,5 @@ The reviews converge on the observation that this paper's key insight — making
 
 **Score and Decision:** The paper proposes a principled, well-executed method for an important practical problem. The core technical contribution — integrating noisy-annotator modeling into meta-learning via differentiable closed-form EM — is novel and convincingly validated across extensive experiments. The main limitation is the indirect comparison to the most closely related prior work, which somewhat weakens the novelty claim but does not invalidate the contribution. The paper merits acceptance at a strong venue.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

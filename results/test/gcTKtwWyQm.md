@@ -69,5 +69,5 @@ This paper makes a genuine and novel contribution — it is the first method to 
 
 However, the evaluation has notable gaps: the method's effectiveness is effectively limited to OE-based detectors, the quantitative metrics do not independently validate semantic explanation quality, and there is no systematic comparison against alternative explanation approaches. These weaknesses are real but not fatal — they affect the strength of the claims rather than invalidating them. The paper would benefit from revision but its core contribution is solid.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

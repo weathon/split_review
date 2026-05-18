@@ -67,5 +67,5 @@ The most interesting observation from the reviews is that the paper's core contr
 
 The paper identifies a genuinely interesting empirical property (distributional equivalence), correctly diagnoses the insufficiency of prior Jensen-based explanations, and provides a clean theoretical framework that explains multiple observed behaviors of deep ensembles while also yielding a practical estimation scheme. The weaknesses are minor — a notation fix in one theorem, a missing theoretical bound for the binary approximation, and limited direct validation of the key property across settings — none of which undermine the core contribution. The empirical study is unusually thorough (3000 models). This is a solid paper with real contributions.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

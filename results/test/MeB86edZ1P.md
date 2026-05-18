@@ -50,5 +50,5 @@ None beyond the paper's own contributions.
 
 The core contribution — a biologically plausible, neuronally implementable orthogonal projection mechanism — is novel and well-motivated. The empirical results are consistently strong across diverse settings. The primary issues are in experimental rigor (missing error bars, missing hyperparameters) rather than in the method's validity. With these additions, the paper would be substantially stronger.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

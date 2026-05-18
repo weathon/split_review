@@ -85,5 +85,5 @@ The **region-aware LoRA injection** (Eq. 1–2) provides an interesting architec
 
 The paper makes a genuine contribution with clear evidence for its core claims. The weaknesses are real but addressable — none invalidate the central results. The paper merits acceptance with suggestions for improvement.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

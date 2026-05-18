@@ -99,5 +99,5 @@ The paper makes a genuine contribution: it is the first transformer-based method
 
 I assign a score of **6.0** — a solid contribution that needs substantial revision to properly support its claims, particularly regarding what kind of "symbolic regression" is being performed and evaluated.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

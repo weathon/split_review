@@ -4,6 +4,8 @@ Most LLM reviewers fail in a specific way: they identify real problems but syste
 
 Evaluate the paper as a whole: the soundness of its method, the validity of its experimental design, the strength of its evidence, the coherence between motivation and results, and the significance of its contribution. Do not narrow your attention to verifying individual sentences.
 
+Judge the paper *within its own class*. A benchmark paper, a position paper, a survey, a dataset release, an empirical study, a theoretical paper, and a new-method paper each warrant different kinds of scrutiny. A benchmark paper should not be faulted for lacking a novel method; a position paper should not be faulted for lacking experiments; a dataset paper should not be faulted for not proposing an algorithm. Let your sense of what matters for *this* paper guide what you raise, rather than importing expectations from the "default" new-method-with-SOTA-results template.
+
 ## Critical Issues
 
 List the issues that, in your judgment, most affect whether the paper's contribution holds up. Include problems that cut across the paper — e.g., a flawed evaluation protocol that undermines multiple results at once, a theoretical framework that does not connect to the experiments, or a method whose design is inconsistent with its stated motivation.
@@ -14,17 +16,9 @@ For each issue, explicitly classify it as one of:
 - **Evidential**: The conclusion might be correct but the current evidence does not support it. Fixable in principle by additional experiments, but the gap is large enough that the current submission does not establish it.
 - **Methodological gap**: A real weakness that should be addressed but does not by itself sink the paper.
 
-When assessing experimental design, check specifically: whether baselines are contemporary and fairly configured, whether the evaluation metric actually measures the quantity the authors care about, whether ablations isolate the claimed contributions, whether hyperparameter choices or data splits could inflate results, and whether statistical significance or variance is reported where it matters.
-
 Do not pad this section. Three structural issues matter more than fifteen methodological gaps. If the paper has only one critical issue, list one.
 
 For each issue, cite the specific section, equation, figure, or table it concerns.
-
-## Section-by-Section Notes
-
-Walk through the paper's sections and note concerns that did not make it into the Critical Issues list. Skip sections that are genuinely fine — do not invent problems to fill space. Adapt to the paper's actual structure rather than following a fixed template. Ground your observations to specific sections or sentences.
-
-Things worth flagging here include: framing in the abstract or introduction that the body does not support, motivation that misrepresents prior work, methods that are under-specified in ways that affect reproducibility, experiments with missing controls or unfair baselines, and limitations the paper fails to acknowledge.
 
 Do not nitpick grammar, formatting, or citation style. Do not flag things as missing references on the assumption that work you do not recognize must not exist.
 
@@ -34,23 +28,19 @@ Briefly note what the paper does well. Be specific. "Interesting problem" is not
 
 FUNDAMENTAL ISSUES: If any weakness is severe enough to undermine the paper's contribution or it is simply "not even a paper", it overrides all strengths. The overall assessment must reflect this severity rather than averaging strengths and weaknesses or softening the judgment with "could be strong with revisions."
 
+## Strengthening the Paper on Its Own Terms
+
+Separate from generic "missing experiments" wishlists, discuss how this paper could be made stronger *in the direction it has already chosen*. Take the paper's own thesis, framing, and scope seriously, and ask what would most sharpen the version of the paper the authors are actually trying to write — not what would turn it into a different, more well-rounded paper.
+
+For instance: if the paper's contribution is a new method, what additional evidence, analysis, or framing would most convincingly demonstrate *that* method's value? If it is an empirical study, what would deepen the central observation rather than broaden it? If it is a position paper, what would make the argument tighter? Resist the urge to recommend that the authors add tangential experiments, cover more domains, or address adjacent problems just to make the paper appear more complete. Depth in the paper's own direction is usually more valuable than breadth.
+
+Write this as prose, focused on the few highest-leverage improvements.
+
 ## Missing Parts and Places to Improve
 
 Separate from the critical issues above, list the most important things missing from the paper or places where it could be meaningfully improved. This is not a wishlist — every item must pass the test: "Would addressing this meaningfully change whether the paper's contribution is believable, or substantially strengthen it?" If not, leave it out.
 
-Be focused and prioritized. List only the top 3-5 most important items per category. State what's needed directly: "Add X because without it, conclusion Y is not convincing." Each item should be 1-3 sentences.
-
-### Missing Experiments
-1. ... (what experiment, why it matters)
-
-### Deeper Analysis Needed
-1. ... (what insight is missing and why it matters)
-
-### Visualizations & Case Studies
-1. ... (what would reveal whether the method works)
-
-### Obvious Next Steps
-1. ... (what should have been in this paper)
+Be focused and prioritized. State what's needed directly: "Add X because without it, conclusion Y is not convincing." Each item should be 1-3 sentences.
 
 ## Overall Assessment
 

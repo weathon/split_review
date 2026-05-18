@@ -94,5 +94,5 @@ None beyond the paper's own contributions. The core empirical observation (frequ
 
 The paper's core idea is interesting and the empirical finding about frequency bias under data scarcity is genuinely valuable. However, the experimental comparisons that form the main evidence for the proposed method's effectiveness are structurally confounded by uncontrolled architectural and input-dimensionality differences between FourierAugment and the baselines. This is not a minor oversight — it affects every accuracy result in the paper and cannot be dismissed. The paper would need substantial revision (ideally re-running experiments with proper controls) to support its claims.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

@@ -72,5 +72,5 @@ The key insight that emerges from combining the reviews is that the paper's stro
 
 The paper presents a well-motivated and carefully engineered system with clear advances in multi-sentence prompting for zero-shot TTS and strong experimental results against competitive baselines. The two major weaknesses (lack of direct decomposition validation and ungraded prosody interpolation) are addressable and do not invalidate the core contributions, but they prevent full confidence in the claimed mechanisms. The minor issues are straightforward to fix.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

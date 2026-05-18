@@ -69,5 +69,5 @@ This paper proposes a genuinely simple and well-motivated paradigm for synthetic
 **Clarity:** Good overall; some exposition issues (independence claim, race labels).  
 **Value:** Good — provides a practical, generator-agnostic methodology.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

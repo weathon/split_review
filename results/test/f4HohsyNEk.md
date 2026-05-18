@@ -77,5 +77,5 @@ None beyond the paper's own contributions. The reviews confirm the core value of
 
 The paper's core idea — initializing differentiable rasterization from volumetric neural fields to obtain watertight manifold meshes — is sound and practically valuable. The experimental results (as described) show meaningful improvements over prior mesh-based rendering methods, and the downstream application demonstrations are compelling. However, the paper is held back by several presentation and comparison issues: an overclaimed "first" priority statement, a missing timing table for the DiffMC speedup claim, an asymmetric resolution comparison with nvdiffrec, and unclear support for some quantitative claims. These are fixable in revision and do not undermine the core contribution, but they reduce confidence in the paper's current form. A revised version addressing these points could be a solid accept.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

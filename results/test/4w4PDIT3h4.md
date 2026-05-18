@@ -99,5 +99,5 @@ None beyond the paper's own contributions. The reviews surface the predictable t
 
 **Overall:** The paper addresses an important problem with a well-motivated idea and achieves promising results. However, the contribution is not yet fully substantiated: the segmentation model that enables the entire approach is unvalidated, the ablation does not isolate the mask's effect, and some reported improvements are marginal. These weaknesses require substantial additional analysis before the paper meets the bar for acceptance.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

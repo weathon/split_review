@@ -62,5 +62,5 @@ None beyond the paper's own contributions.
 
 This is a solid theoretical paper that introduces a well-motivated notion, provides multiple algorithmic constructions with non-trivial guarantees, and establishes a matching lower bound that is essentially tight. The only verifiable weakness in the main text is a minor mathematical inaccuracy in an intermediate claim of Algorithm 2's analysis that does not affect the correctness of the paper's conclusions. All other criticisms raised by the harsh critic pertain to content that exists in the appendix (stripped by the parser) and are therefore inapplicable. The core contributions — the definition, the upper/lower bound interplay, and the linear bandit extension — are genuine and significant.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

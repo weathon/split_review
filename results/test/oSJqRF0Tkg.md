@@ -77,5 +77,5 @@ None beyond the paper's own contributions. The reviews surface a useful tension 
 
 **Score based on axes**: Originality (6/10), Importance (8/10), Claim support (6/10), Soundness (7/10), Clarity (7/10), Community value (7/10).
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

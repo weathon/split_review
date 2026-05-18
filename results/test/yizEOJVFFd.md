@@ -92,5 +92,5 @@ The paper makes a genuine contribution: SAPO is a well-motivated, technically so
 
 **Value:** Positive — the method is practical and the results are useful to the community.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

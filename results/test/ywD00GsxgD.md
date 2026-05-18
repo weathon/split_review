@@ -73,5 +73,5 @@ This paper addresses a genuine practical problem (validation set scarcity in med
 
 **Decision: Accept (borderline)**
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

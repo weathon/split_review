@@ -83,5 +83,5 @@ The paper presents a well-motivated, practical method for refining coarse segmen
 
 **Score: 7.0** — A solid paper with clear contributions and thorough evaluation. The missing ablations and analysis gaps are worth addressing but do not undermine the core claims.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

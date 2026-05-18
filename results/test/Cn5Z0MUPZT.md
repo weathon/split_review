@@ -83,5 +83,5 @@ The reviews surface a tension that the paper does not fully resolve: the binary-
 
 The paper tackles a real problem (sparse rewards in code-generation RL) with a reasonable method and systematic experiments. However, the empirical evidence has critical gaps: no variance reporting for the central result, insufficient baselines to attribute gains to the PRM specifically, and no validation of PRM quality under distribution shift. These are major but addressable weaknesses. The paper's contributions — automated labeling, systematic integration strategies, data quality insights — are genuine and practically useful. On balance, the paper has enough substance to merit publication if the authors can address the statistical rigor and baseline concerns in revision, but in its current form the evidence is weaker than it should be for the claims made.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

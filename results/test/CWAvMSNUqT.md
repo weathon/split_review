@@ -66,5 +66,5 @@ A genuinely novel observation from synthesizing these reviews is that **the pape
 5. **List the specific training datasets** used (or cite the exact data mixture).
 6. **Include a brief computational cost comparison** (e.g., FLOPs, inference latency, GPU memory) for AllLayerPool vs. Last-Layer Trainable Pooling.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

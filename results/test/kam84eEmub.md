@@ -71,5 +71,5 @@ The key design principle that emerges across the reviews — and that goes beyon
 
 The paper makes a genuine methodological contribution (layerwise tokenization + autoregressive diffusion for DAGs), supports it with extensive experiments across three distinct real-world domains and a challenging synthetic benchmark, and demonstrates clear improvements over existing approaches on multiple axes (validity, surrogate quality, out-of-distribution generalization, and scalability). The weaknesses identified — the undiscussed within-layer ordering assumption and the lack of analysis of the surrogate-evaluation gap — are real but minor; they do not undermine the core claims. The paper's contributions are well-supported by its evidence.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

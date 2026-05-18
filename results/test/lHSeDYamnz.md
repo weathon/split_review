@@ -73,5 +73,5 @@ The paper makes a genuine and important empirical discovery — that quantizatio
 **Clarity**: Generally clear; the main text would benefit from stating the base model explicitly.
 **Value**: High — the paper opens a new evaluation axis for LLM unlearning that the community has overlooked.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

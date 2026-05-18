@@ -65,5 +65,5 @@ The most insightful observation from the review process is that the paper's cent
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

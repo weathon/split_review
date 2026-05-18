@@ -69,5 +69,5 @@ The most interesting tension across the reviews is that the same properties that
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

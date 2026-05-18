@@ -63,5 +63,5 @@ None beyond the paper's own contributions.
 
 The paper's controlled experiments, careful metrics, and cross-task validation make a genuine contribution to understanding how data composition drives OOD generalization and training stability in grammar learning. The weaknesses are limited to missing details and framing overreach—none threaten the core findings. With straightforward clarifications (characterizing the TI secondary task, softening causal claims, verifying memorization vs. tree-specific learning), the paper would be very strong.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

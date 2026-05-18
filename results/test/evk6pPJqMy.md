@@ -66,5 +66,5 @@ None beyond the paper's own contributions. The reviews surface that the dual-vie
 
 This is a solid benchmark/dataset paper. The core contribution—a comprehensive, multi-source biomedical KG with dual-view structure, multi-modal features, and extensive baselines—is genuine and well-supported. The weaknesses are addressable: some claims (particularly "automatically updatable") are somewhat oversold, and several construction details (confidence thresholds, hyperparameter configurations) are under-specified. None of these issues threaten the dataset's value or the validity of the benchmarking results. The paper is clearly within the acceptance threshold for a benchmark/dataset contribution.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

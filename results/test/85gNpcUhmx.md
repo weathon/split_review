@@ -62,5 +62,5 @@ None beyond the paper's own contributions. The reviews largely converge on the p
 
 **Originality**: The method combines existing ideas (PSMM from MCIBI, contrastive loss, self-training) in a novel way for lane detection, with a genuine contribution in the positive sample selection strategy and the domain-level aggregation framework. **Importance**: Unsupervised domain adaptation for lane detection is practically relevant for autonomous driving, and the paper shows consistent gains across diverse settings. **Claims**: Well-supported by ablation studies and comparisons. **Soundness**: The experimental design is appropriate; the main methodological gap is the underspecified PSMM update. **Clarity**: Generally clear, marred by the acronym inconsistency and the garbled OCR artifacts in the extracted text (not present in the original). **Value**: The method is reproducible (once the PSMM update is specified) and the results advance the state of the art on multiple benchmarks.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

@@ -98,5 +98,5 @@ This paper makes a real contribution: it identifies and characterizes a consiste
 **Clarity**: 6/10 — Generally clear despite the radius terminology inconsistency.
 **Value**: 6/10 — Potentially useful for code LLM interpretability and editing, but needs stronger validation.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

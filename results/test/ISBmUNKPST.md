@@ -91,5 +91,5 @@ The most interesting observation that emerges from synthesizing the reviews is t
 
 This paper makes a genuine contribution by releasing a sizable dual-source dataset for mental health counseling, a practical fine-tuning pipeline, and a revealing analysis of LLM-as-judge biases. However, the experimental validation has significant gaps: the lack of controlled comparison with existing datasets prevents isolating MentalChat16K's specific contribution, the evaluation framework's biases are documented but not resolved, and the statistical methodology inflates significance. The paper falls short of the rigorous validation expected for a "benchmark dataset" claim. With substantial revisions — especially adding a controlled dataset comparison and strengthening the evaluation — the work could be competitive. In its current form, it is a reasonable dataset release with incomplete validation.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

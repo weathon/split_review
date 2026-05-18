@@ -77,5 +77,5 @@ None beyond the paper's own contributions.
 
 The paper presents a genuinely novel and well-executed contribution to test-time adaptation for VLMs. The core idea (using text descriptions as semantic intermediaries for retrieval and adaptation) is creative, and the empirical results are strong and consistent across a large benchmark suite. The weaknesses are real but addressable — they concern missing analyses rather than flaws in the method itself — and do not undermine the paper's core claims.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

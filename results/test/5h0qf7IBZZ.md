@@ -79,5 +79,5 @@ The primary weakness is theoretical: the gradient derivation is not the exact re
 **Score:** 6.0  
 **Decision:** Accept
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

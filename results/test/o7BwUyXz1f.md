@@ -77,5 +77,5 @@ Beyond the paper's own contributions, the most interesting insight from the revi
 
 **Value to community**: 7/10 — The phenomenon and the simple R&D baseline are likely to be useful to CRL practitioners.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

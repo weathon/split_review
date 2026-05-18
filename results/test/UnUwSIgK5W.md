@@ -65,5 +65,5 @@ None beyond the paper's own contributions — the reviews surface known methodol
 
 The paper reports genuinely strong empirical results that advance the state of open-source code LLMs. However, it has two significant weaknesses that prevent the contribution from being fully established: (1) the claimed code-specific adaptations are not validated through proper ablation, making it unclear whether the code-specific modifications matter or whether the gains come from applying general Evol-Instruct to code plus more data; (2) using HumanEval for both model selection and final reporting inflates the headline numbers. These issues are fixable but as presented, the evidence falls short of convincingly supporting the claimed methodological novelty. The empirical outcomes are valuable, but the paper's central argument about the adaptations is unsubstantiated.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

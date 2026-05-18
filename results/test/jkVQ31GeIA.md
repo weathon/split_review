@@ -74,6 +74,6 @@ None beyond the paper's own contributions. The reviews do not surface insights t
 
 The paper proposes a well-motivated and clearly described method for autonomous iterative RAG. The three-part reasoning structure, automatic data synthesis pipeline, and graceful fallback mechanism are genuine design contributions. The primary weaknesses are at the minor level: a fragile data-synthesis heuristic, uneven data quality across benchmarks, underspecified implementation details, and a confounded evaluation setup. None of these are fatal — they are addressable in a camera-ready revision or rebuttal. The method is sound, the writing is clear, and the contribution (training LLMs to autonomously reason about when and what to retrieve) is timely and relevant. Based on the method alone, the paper merits acceptance pending verification of the experimental results (which are absent from the provided file due to parser truncation, not author omission).
 
-**MY FINAL SCORE: <pineapple>6.0</pineapple>**
+**MY FINAL SCORE: <score>6.0</score>**
 
-**MY FINAL DECISION: <orange>Accept</orange>**
+**MY FINAL DECISION: <decision>Accept</decision>**

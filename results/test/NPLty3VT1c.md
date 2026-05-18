@@ -86,5 +86,5 @@ The paper proposes a well-motivated architecture with genuine computational adva
 
 **Score: 5.0**
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

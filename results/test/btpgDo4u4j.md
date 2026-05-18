@@ -80,5 +80,5 @@ None beyond the paper's own contributions.
 
 The paper makes a genuine contribution: it is the first to unify continuous latent action representation learning with diffusion-based planning, provides a clean theoretical framing, and achieves strong results on high-dimensional offline RL tasks. The weaknesses are minor and addressable — none threaten the paper's core claims. The harshest criticisms from the reviewer were factually incorrect upon verification against the paper text.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

@@ -71,5 +71,5 @@ None beyond the paper's own contributions — the reviews surface useful present
 
 This paper makes a genuine first attempt at 1-bit FQT, proposes a well-motivated algorithm (AGP + SCQ), validates it across multiple architectures and tasks, and provides an honest assessment of its limitations. The weaknesses are minor — presentation issues and missing ablations — none of which threaten the core contribution. The paper would be notably strengthened by the suggestions above, particularly clarifying the speedup claims and adding training details for reproducibility.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

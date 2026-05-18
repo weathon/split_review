@@ -63,5 +63,5 @@ The most valuable insight from the reviews is that the paper would be significan
 
 The paper identifies a genuinely important problem and provides a simple, broadly applicable solution with mostly positive experimental evidence. However, two major weaknesses — an unsupported theoretical claim and an insufficiently justified mechanism — prevent the contribution from being fully convincing. The empirical results are promising but not airtight. With revisions to address the theoretical claim and a clearer articulation of the method's mechanism and scope conditions, the paper could be strong. In its current form, it is a borderline contribution.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

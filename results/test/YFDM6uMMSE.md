@@ -70,5 +70,5 @@ None beyond the paper's own contributions. The per-expert matching ablation (out
 **Clarity:** The main ideas are clearly communicated, though the PCA/decoder ambiguity needs resolution.  
 **Value:** The multi-headed matching strategy and the augmentation idea are likely to inspire follow-up work.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

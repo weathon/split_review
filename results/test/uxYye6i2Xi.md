@@ -74,5 +74,5 @@ None beyond the paper's own contributions. The reviews surface a tension between
 
 The paper makes genuine contributions — the SC-ML architecture is novel and well-motivated, and HRMAS is a reasonable first approach to systematic RSNN optimization. The improvements on two of four datasets are solid. However, the paper overstates its results (claiming "impressively improve" on all datasets when two show marginal gains), the scalability claim is unsupported, and the theoretical grounding of the IP step is heuristic. These issues are addressable in revision but undermine the current version's claims. A weak-to-moderate score is appropriate — the work is a step forward in an underexplored area but needs strengthening before it meets its own ambitions.
 
-**MY FINAL SCORE: `<pineapple>5.5</pineapple>`
-MY FINAL DECISION: `<orange>Reject</orange>`**
+**MY FINAL SCORE: `<score>5.5</score>`
+MY FINAL DECISION: `<decision>Reject</decision>`**

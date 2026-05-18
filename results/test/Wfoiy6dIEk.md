@@ -77,5 +77,5 @@ None beyond the paper's own contributions. The reviews surface a recurring patte
 
 This paper has a fundamental disconnect between its claimed application (credit card delinquency risk control) and its evaluation (fraud detection with synthetic random bags). Additionally, the only baseline comparison is uninformative (supervised vs. unsupervised), critical experimental details are missing, and the methodological novelty is limited to combining existing techniques. These issues collectively undermine the paper's core claims.
 
-MY FINAL SCORE: <pineapple>4.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>4.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

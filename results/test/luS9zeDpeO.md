@@ -72,5 +72,5 @@ The most interesting observation to emerge across the reviews is the tension inh
 
 The paper has real theoretical contributions (the optimality preservation proof and the convergence analysis) that are novel and sound. However, the empirical evaluation has a significant gap — the absence of comparison to the existing decentralized safe MARL methods the paper explicitly positions itself against — and the theory-practice gap is wider than what would support the claim that the theory "grounds" the practical algorithm. A major revision addressing the empirical comparison would be needed for the paper's full contribution to be convincingly demonstrated.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

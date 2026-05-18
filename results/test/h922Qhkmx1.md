@@ -63,5 +63,5 @@ This paper makes a genuine contribution by demonstrating that a single score mod
 
 The two major weaknesses — the incompletely justified Dirac inference and the statistically under-powered subjective evaluation — are both fixable with revisions. They do not invalidate the paper's core contribution (which is supported by multiple forms of evidence), but they do weaken the presentation of the key methodological novelty and the strength of the generation claims.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

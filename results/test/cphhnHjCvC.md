@@ -64,5 +64,5 @@ None beyond the paper's own contributions. The reviews surface legitimate analyt
 
 The paper makes a genuine and well-supported contribution: it identifies an important perceptual bottleneck in ImageNav, designs a targeted solution (DEBiT + two-stage pre-training), and achieves substantial SOTA improvements. The weaknesses — the unquantified "emergence" claim, the unexplained RPEV-only failure mode, mild confounds in the Instance-ImageNav comparison, and lack of statistical rigor — are real but addressable in revision. None of them invalidate the core empirical contribution. The paper is a solid methods contribution that advances the state of the art.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

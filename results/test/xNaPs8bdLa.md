@@ -88,5 +88,5 @@ The reviewer criticisms and strengths, taken together, reveal a fundamental tens
 
 **Overall**: The paper presents an interesting conceptual direction but is critically incomplete. The experimental section is entirely absent, the theoretical framing is imprecise, and the algorithmic specification is incomplete. These issues are decisive. A major revision that restores experimental validation, tightens the theory, and completes the algorithm specification would be needed.
 
-MY FINAL SCORE: <pineapple>3.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>3.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

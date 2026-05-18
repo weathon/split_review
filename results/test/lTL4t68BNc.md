@@ -89,5 +89,5 @@ The harsh critic raises a point worth noting: the gap between the theoretical fr
 
 **Value:** The method achieves consistent improvements across diverse settings and the IB-inspired design provides a principled alternative to purely empirical attention mechanisms.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

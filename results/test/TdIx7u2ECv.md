@@ -64,5 +64,5 @@ The most interesting observation that emerges from the reviews is the tension be
 
 This paper makes a genuine contribution: the dual-level safety design for HRL is well-motivated, the SafeAntMaze results are striking, and the ablation study is informative. The weaknesses are real but primarily relate to missing comparisons and incomplete analysis rather than flawed methodology. The missing SafetyLayer+HiRO comparison and the unclear MBPPOL selection are the most impactful issues. The paper would benefit from revision but the core ideas have merit.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

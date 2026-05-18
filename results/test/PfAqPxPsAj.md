@@ -72,5 +72,5 @@ The paper presents a genuinely novel architectural idea (language-conditioned st
 
 **Score**: 6.0 — a solid paper with a genuine contribution. It requires revision of the theoretical framing and additional analysis, but the core contribution is real and the empirical evidence is strong.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

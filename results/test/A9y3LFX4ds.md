@@ -86,5 +86,5 @@ Beyond the paper's own contributions, the most interesting takeaway from the rev
 
 The paper has a solid technical contribution and strong empirical results. However, the central conceptual claim is substantially overclaimed in a way that affects how the contribution should be evaluated. The weaknesses are addressable in revision, and the underlying methodology is sound. The paper would benefit from reframing and additional controls, but the core results are credible and interesting.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

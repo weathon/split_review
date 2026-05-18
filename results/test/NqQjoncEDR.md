@@ -57,5 +57,5 @@ None beyond the paper's own contributions. The paper's key insight — that sele
 
 This paper makes a genuine and valuable contribution by uncovering an overlooked mechanism in a widely-used family of methods. The theoretical observation is simple but important, the selective sampling ablation is a clean methodological contribution, and the empirical evidence is broad (5 datasets across vision, NLP, and tabular modalities). The paper is transparent about its limitations and does not overclaim. The weaknesses are minor framing and presentation issues, none of which threaten the core claims.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

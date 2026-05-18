@@ -66,5 +66,5 @@ This is a dataset paper, and on that axis the contribution is clear and substant
 
 Overall assessment: a solid dataset contribution that will serve the community well, held back from a higher score only by its overstated analytical claims.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

@@ -80,5 +80,5 @@ The paper proposes a novel and well-motivated framework with strong empirical re
 **Clarity**: 6/10 — Well-structured but missing key details (LLM, thresholds, datasets).  
 **Value**: 6/10 — Strong empirical results, but conceptual gaps limit the contribution's impact.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

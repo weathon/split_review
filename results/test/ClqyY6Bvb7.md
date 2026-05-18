@@ -69,5 +69,5 @@ The reviews reveal that the paper's main tension is not between its claims and e
 4. Add bootstrapped confidence intervals to the correlation matrix or acknowledge the small-n limitation more explicitly.
 5. Soften the "first" claim or qualify it precisely (e.g., "first modular framework with six-dimensional desiderata").
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

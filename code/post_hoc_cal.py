@@ -112,14 +112,14 @@ async def cal_paper(review):
 
     with open(os.path.join(review_path, review), "r") as f:
         full_review = f.read()
-    review_content = full_review.split("<pineapple>")[0].replace("MY FINAL SCORE:", "").strip()
+    review_content = full_review.split("<score>")[0].replace("MY FINAL SCORE:", "").strip()
 
-    raw_match = re.search(r"<pineapple>([\d.]+)</pineapple>", full_review)
+    raw_match = re.search(r"<score>([\d.]+)</score>", full_review)
     if not raw_match:
-        raise RuntimeError(f"[{paper_id}] no <pineapple> raw score found in review file")
+        raise RuntimeError(f"[{paper_id}] no <score> raw score found in review file")
     raw_score = float(raw_match.group(1))
 
-    decision_match_re = re.search(r"<orange>(.*?)</orange>", full_review, re.DOTALL)
+    decision_match_re = re.search(r"<decision>(.*?)</decision>", full_review, re.DOTALL)
     pred_decision = decision_match_re.group(1).strip() if decision_match_re else "N/A"
 
     if paper_id not in _gt_index:

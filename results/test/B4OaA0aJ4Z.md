@@ -70,5 +70,5 @@ The most striking finding from the cross-review is that the harsh critic's most 
 
 The paper makes a genuine contribution by providing a unified, standardized benchmark that covers an unprecedented range of time-series foundation models and evaluation settings. The benchmark infrastructure itself is solid, and the main comparative findings are useful. The single major weakness — the non-reproducible data-characteristic analysis — is fixable and does not invalidate the benchmark's core value. I recommend acceptance conditional on the authors providing the scoring methodology (or suitably reframing the analysis).
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

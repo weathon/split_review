@@ -67,5 +67,5 @@ The reviewers surface a genuine tension at the heart of the paper: the main UDA 
 
 The paper presents a conceptually clean modification to spectral contrastive learning with a unified theoretical framework and consistent empirical support. The main theoretical weakness — opaque presentation of the eigenvalue scaling in Proposition 3.2 — is a clarity issue rather than a substantive error, and the experimental scope is adequate but not extensive. The Neural Collapse connection and label-noise mitigation results are well-supported. With the presentation issues addressed, the paper's contributions are solid.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

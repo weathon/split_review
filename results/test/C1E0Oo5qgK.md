@@ -82,5 +82,5 @@ Beyond the paper's own contributions, the reviews collectively surface a useful 
 
 **Value:** Genuine practical utility for researchers and practitioners using guided diffusion.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

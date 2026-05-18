@@ -77,5 +77,5 @@ Beyond the paper's own contributions, the most interesting observation from the 
 
 The paper makes a genuine theoretical contribution and provides two working instantiations with competitive empirical results. The weaknesses are real but manageable: the Kirchhoff assumption gap can be addressed by checking the condition, and the SOTA claims can be tempered with appropriate statistical qualification. The core framework (holomorphic functional calculus for directed spectral GNNs) is novel and well-constructed.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

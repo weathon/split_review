@@ -82,5 +82,5 @@ None beyond the paper's own contributions. The key insight — that the conflict
 
 The paper has a genuinely novel perspective and a plausible algorithmic solution to a real problem. However, in its current form, the theoretical analysis is too opaque to verify the central claim, the experiments do not directly test that claim, and the complexity comparisons are stated without adequate derivation. The contribution is not yet convincingly established. Major revision is needed.
 
-MY FINAL SCORE: <pineapple>4.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>4.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

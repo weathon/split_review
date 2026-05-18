@@ -73,5 +73,5 @@ This paper describes a framework with ambitious scope and a novel modularization
 **Clarity of writing**: 5/10 — The architecture and features are described, but key concepts are vague.
 **Value to the research community**: 2/10 — Potentially valuable if validated, but currently unverifiable.
 
-MY FINAL SCORE: <pineapple>3.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>3.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

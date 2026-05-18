@@ -66,5 +66,5 @@ The harsh critic notes an important structural tension in the paper: the error-f
 
 The paper has a clean central idea (error-free DSF via STE) and shows real improvements on multi-digit image sorting, especially with Transformer-based encoders. However, the fragment results flatline without adequate discussion, the loss components are not ablated, and the theoretical motivation rests on a toy analysis not connected to full sorting-network behavior. These issues are addressable but prevent strong acceptance in the current form.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

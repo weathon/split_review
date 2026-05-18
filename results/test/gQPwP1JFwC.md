@@ -79,5 +79,5 @@ The reviewers' critiques collectively highlight a tension that goes beyond what 
 
 **Value to community**: 6/10 — If validated more thoroughly, the average‑gradient approach could be a useful addition to the optimization toolbox, particularly for very deep architectures.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

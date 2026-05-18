@@ -73,5 +73,5 @@ The two reviews are largely consistent in their assessment of the attack contrib
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

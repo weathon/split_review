@@ -72,5 +72,5 @@ The most interesting observation from the review process is the asymmetry in rig
 
 The paper identifies an interesting and underexplored question — whether SAE feature spaces have geometric structure beyond random placement — and presents strong evidence at the brain scale. The galaxy-scale observation is plausible but needs a corrected null. The atomic-scale claim as currently stated is not supported by the presented evidence. The paper would benefit from completing one analysis (atomic scale on SAE features) and fixing one analysis (galaxy scale null). In its present form, the gap between the paper's claims and its evidence is too large for acceptance, but the core ideas are promising.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

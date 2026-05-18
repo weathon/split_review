@@ -69,5 +69,5 @@ None beyond the paper's own contributions. The review surfaces a structural conc
 
 The paper presents a novel combination of existing ideas (action-based contrastive pairs + on-policy DPO sampling + trajectory simulation) and provides clean ablations that decompose the contribution of each component. The core methodological contribution is sound and the results on PACIFIC and AmbigSQL are compelling. However, the evaluation's heavy dependence on an unvalidated simulation pipeline — combined with the inconsistency of results on Abg-CoQA — means the evidence is suggestive but not fully conclusive. The method is a meaningful step forward for sample-efficient dialogue policy learning, and the concerns are addressable. I recommend acceptance contingent on the authors validating the simulation pipeline (or at minimum, presenting a sensitivity analysis in the main text).
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

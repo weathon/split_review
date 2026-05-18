@@ -67,5 +67,5 @@ None beyond the paper's own contributions. The reviewers' insights reinforce the
 
 The paper addresses a genuinely important question—how neural networks learn clean patterns before overfitting label noise—and proposes a clean, intuitive mechanism supported by both theory and experiment. The theoretical framework (Lemma 4.2, Theorems 4.4–4.5) elegantly shows what clean-priority dynamics would look like under gradient opposition. The experiments confirm the predicted qualitative behavior. The main weakness is real: the theoretical contribution is conditional on an assumption that is plausible but not proven, and the paper's framing overstates what is established. The missing experimental verification of the gradient angle during training makes the gap harder to evaluate. However, these problems are addressable in revision and do not invalidate the paper's empirical findings or the conceptual value of the proposed mechanism.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

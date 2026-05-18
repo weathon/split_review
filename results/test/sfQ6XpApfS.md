@@ -96,5 +96,5 @@ None beyond the paper's own contributions. The reviews largely recapitulate conc
 
 The paper proposes a genuinely interesting and well-motivated idea — unsupervised peer-review for LLM evaluation. The experimental results are consistently strong across three datasets and multiple baselines. The ablation study convincingly validates the consistency assumption. However, the paper has a **major reproducibility gap**: the central optimization algorithm and the elimination mechanism are both underspecified to a degree that prevents independent verification and reuse. Given that this is the paper's core claimed contribution, these omissions are serious. The paper can be made acceptable with a revision that specifies the optimization algorithm, clarifies the elimination procedure, and tones down the metrics overclaim. In its current form, the contribution is not fully demonstrated.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

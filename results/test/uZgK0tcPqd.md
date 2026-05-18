@@ -63,5 +63,5 @@ The most interesting signal emerging from the reviews is the internal evidence t
 
 The paper proposes a genuinely novel and interesting direction. The core idea — injecting cognitive signals into reward modeling — is well-motivated, the ablation is impressively broad, and the results are consistent. However, the most serious weakness (the missing control for the capacity confound) prevents the central claim from being fully supported in the current form. This is addressable with additional experiments, and the paper provides partial internal evidence that mitigates the concern (some ET configurations with extra parameters *underperform* the baseline). With the control experiment added and the minor issues cleaned up, this could be a solid contribution.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

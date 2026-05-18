@@ -82,5 +82,5 @@ The most interesting insight emerging from the reviews is that while the attack 
 
 This paper makes a solid contribution on the attack side—TIA and MMA are genuinely novel, well-motivated, and achieve clear SOTA on Kinetics-Sounds. The defense contribution, however, is not adequately validated: it lacks cross-attack evaluation, efficiency comparison, curriculum ablation, and a second dataset. The paper is not fatally flawed (the attacks alone are publishable), but the defense claims need substantial additional evidence.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

@@ -77,5 +77,5 @@ The key insight that emerges from the reviews and the paper itself is that **con
 
 **Score**: 6.0 — A solid, well-executed paper with a simple, practical method, thorough ablations, and clear results. The contribution is real and useful. The weaknesses are matters of presentation scope and depth, not correctness.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

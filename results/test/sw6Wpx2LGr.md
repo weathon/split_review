@@ -86,5 +86,5 @@ The most interesting observation from synthesizing the reviews is that the paper
 
 **Value:** 7/10 — The benchmark, AQG, and DTAR analysis are independently useful contributions even if the method evaluation had issues.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

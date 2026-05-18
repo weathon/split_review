@@ -70,5 +70,5 @@ The reviews surface a core tension that the paper itself does not fully resolve:
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

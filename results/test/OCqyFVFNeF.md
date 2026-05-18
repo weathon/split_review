@@ -78,5 +78,5 @@ The paper addresses a meaningful problem — the instability of interaction-base
 
 **Score: 5.0** (marginally below the accept threshold — the paper makes a genuine contribution but the experimental evaluation is not yet rigorous enough to fully support the claims. A revision addressing the ablation and baseline concerns could make this a strong paper.)
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

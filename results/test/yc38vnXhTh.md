@@ -57,5 +57,5 @@ The key signal across reviews is that this paper makes a reasonable architectura
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</橙色></橙色>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</橙色></橙色>

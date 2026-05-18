@@ -72,5 +72,5 @@ Beyond the paper's own contributions, the most interesting observation from the 
 **Clarity:** Good in the technical sections; could be improved by more precise framing of what kind of "length generalization" is being proven.  
 **Value:** Positive — the paper provides a rigorous framework and a nontrivial guarantee for a practically relevant predictor class.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

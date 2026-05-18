@@ -180,6 +180,6 @@ paper warrants it.
 Score round to .5 or .0. 
 
 
-IMPORTANT: At the very end of your response, you MUST write exactly this line (using a pineapple XML tag):
-MY FINAL SCORE: <pineapple>score</pineapple>
-MY FINAL DECISION: <orange>Accept/Reject</orange>
+IMPORTANT: At the very end of your response, you MUST write exactly this line (using a score XML tag):
+MY FINAL SCORE: <score>score</score>
+MY FINAL DECISION: <decision>Accept/Reject</decision>

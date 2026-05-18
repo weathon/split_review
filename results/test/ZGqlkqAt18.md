@@ -78,5 +78,5 @@ The most significant weakness is the undefined safety evaluation criterion, whic
 
 With the safety threshold clarified and cost metrics reported, the paper would make a solid contribution. In its current form, the evaluation gap is too large to fully assess the results.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

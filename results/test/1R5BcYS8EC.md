@@ -81,5 +81,5 @@ The reviews collectively surface an important tension that the paper itself does
 
 The paper has a genuine technical contribution (text encodings improve surrogate accuracy, enable synonym robustness, and prompt augmentation regularizes small-data training). However, the framing mismatch between the accessibility motivation and the quantitative experiments is significant, and the natural-language component does not outperform simpler key-value templates. The missing baselines weaken the quantitative comparison. These issues are addressable with revisions but are substantial in their current form.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>

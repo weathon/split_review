@@ -79,5 +79,5 @@ The most interesting finding in the paper is the poisoning experiment reversal: 
 
 Overall, the paper makes real contributions — defining and evaluating trNTK, demonstrating consistent rank correlation across diverse settings, and providing practical projection variants with dramatic speedups. The weaknesses are addressable: the sparsity claim should be softened or better quantified, the faithfulness metrics should be reconciled, and the claims should be more carefully scoped. None of these issues invalidate the central contribution.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

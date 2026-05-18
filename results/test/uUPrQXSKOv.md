@@ -74,5 +74,5 @@ The paper tackles an important problem and presents a well-designed method with 
 
 This is a solid paper that makes a clear empirical contribution to federated long-tailed learning.
 
-MY FINAL SCORE: <pineapple>7</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7</score>
+MY FINAL DECISION: <decision>Accept</decision>

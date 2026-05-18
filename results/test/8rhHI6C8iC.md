@@ -85,5 +85,5 @@ The reviews surface a productive tension: the paper's practical contribution (HP
 
 The paper has a genuine practical contribution and strong empirical results for its core claim. However, the evaluation has a significant gap: the central mechanism (plug-in selection) is not quantitatively validated, and a secondary but strong claim (privacy) is unsupported. These are addressable in a revision.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

@@ -62,5 +62,5 @@ The most striking insight from the reviews is the tension between the paper's cl
 
 ## Score and Decision
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

@@ -87,5 +87,5 @@ The reviews reveal an inversion in the paper's evidence: its strongest experimen
 
 The paper has a plausible core idea and several well-executed components, but its central claim is not adequately supported. A major revision focused on controlled comparisons could substantially strengthen it.
 
-MY FINAL SCORE: <pineapple>5.0</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.0</score>
+MY FINAL DECISION: <decision>Reject</decision>

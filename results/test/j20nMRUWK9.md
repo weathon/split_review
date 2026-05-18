@@ -78,5 +78,5 @@ The most interesting observation from the reviewer interactions that goes beyond
 
 The paper makes a clear, well-motivated contribution with strong empirical support. The weaknesses are real but addressable — they concern missing implementation details and a gap in the promised analysis, not flaws in the core methodology or evidence. With the suggested clarifications, the paper would be a solid and reproducible contribution to GCD. The missing details in the current form prevent full assessment and reproduction, warranting conditional acceptance.
 
-MY FINAL SCORE: <pineapple>7.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

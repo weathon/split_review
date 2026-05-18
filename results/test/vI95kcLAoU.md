@@ -76,5 +76,5 @@ The key insight that emerges from reading the reviews against the paper is a ten
 
 The paper makes a solid empirical contribution with a simple, practical method that consistently improves throughput across diverse tasks. The weaknesses are real but addressable: the complexity analysis needs to account for window-attention architectures, the "SOTA" claim should be scoped, and limitations should be acknowledged. None of these undermine the core finding that replacing MSA with a cheap parametric function in middle ViT layers works well.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

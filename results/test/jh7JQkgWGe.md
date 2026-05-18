@@ -78,5 +78,5 @@ The paper makes a genuine theoretical contribution (closed-form SHAP for Fourier
 **Clarity:** Good. The paper is well-structured and the main ideas are clearly communicated.  
 **Value to community:** High. The method offers practical speedups and a new theoretical perspective on SHAP computation.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

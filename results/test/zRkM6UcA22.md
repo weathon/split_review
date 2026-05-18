@@ -67,5 +67,5 @@ The key insight that emerges from the reviews beyond the paper's own contributio
 
 The paper makes a substantial empirical contribution — introducing the problem of tri-plane processing, building a comprehensive benchmark, and achieving results that far surpass prior neural-field methods while nearly matching explicit-representation methods. The weaknesses are genuine but addressable and do not undermine the core empirical findings. The paper is a clear accept.
 
-MY FINAL SCORE: <pineapple>7.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>7.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

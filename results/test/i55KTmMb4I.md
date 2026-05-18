@@ -72,5 +72,5 @@ Beyond the paper's own contributions, the cross-lingual transfer finding is the 
 
 This paper makes a solid contribution — its benchmark's 18-language coverage is a clear step beyond prior work, the fine-grained annotations are novel and useful for diagnostic analysis, and the instruction corpus demonstrates consistent gains. The weaknesses are real but fixable: the retrieval claim is overstated, decontamination could be stronger, and the annotations lack validation. None of these undermine the core contributions (the benchmark scale, the annotation methodology, and the instruction corpus itself). With the suggested revisions, this would be a strong contribution to the community.
 
-MY FINAL SCORE: <pineapple>6.5</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.5</score>
+MY FINAL DECISION: <decision>Accept</decision>

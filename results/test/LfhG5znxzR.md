@@ -75,5 +75,5 @@ Neither reviewer surfaced an insight that goes significantly beyond the paper's 
 
 The paper introduces a clean, well-motivated method for producing sparse and discrete neural representations and provides compelling causal evidence in a controlled setting. The language model experiments are less complete — the interpretability comparison has selection bias, the steering lacks formal controls, and the performance trade-off is larger than the framing suggests — but none of these issues are fatal, and the core idea is sufficiently novel and interesting. With targeted revisions (especially control conditions for steering and more precise framing of claims), the paper would make a solid contribution.
 
-MY FINAL SCORE: <pineapple>6.0</pineapple>
-MY FINAL DECISION: <orange>Accept</orange>
+MY FINAL SCORE: <score>6.0</score>
+MY FINAL DECISION: <decision>Accept</decision>

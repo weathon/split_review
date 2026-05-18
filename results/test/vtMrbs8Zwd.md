@@ -69,5 +69,5 @@ Beyond the paper's own contributions, the reviews surface a tension that the pap
 
 The paper makes genuine contributions—the first linear convergence proof for stochastic SAM and a novel stability analysis yielding explicit bounds on Hessian uniformity—and its empirical study is broad and informative. However, the unresolved gap between the theory (unnormalized SAM) and experiments (normalized SAM) undercuts the paper's coherence as a unified contribution, and the abstract's overstated claim about the consistency of the empirical trend reduces the paper's credibility. These are fixable in revision but are real concerns in the current draft. The paper is a borderline case: the underlying ideas are valuable, but the presentation and framing need repair.
 
-MY FINAL SCORE: <pineapple>5.5</pineapple>
-MY FINAL DECISION: <orange>Reject</orange>
+MY FINAL SCORE: <score>5.5</score>
+MY FINAL DECISION: <decision>Reject</decision>
