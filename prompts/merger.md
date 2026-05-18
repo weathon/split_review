@@ -49,49 +49,13 @@ implementation details, or large artifacts impractical to include in a submissio
 && - Be careful with the Strength Finder: a lot of its claimed strengths can be invalid. 
 && Remove strengths that are generic, strengths about whether the problem is important, strengths that are delusional, superficial, sycophancy, and strengths drawn from pure pseudoscience. Only keep strengths that are concrete, specific to this paper, and grounded in real evidence. try this one later 
 
-- Be careful with the Strength Finder: some its claimed strengths can be generic or nonsense.
+- Be very careful with the Strength Finder: a lot of its claimed strengths can be complete nonsense. Remove strengths that are generic, strengths about whether the problem is important, strengths that are delusional, superficial, sycophancy, and strengths drawn from pure pseudoscience. Only keep strengths that are concrete, specific to this paper, and grounded in real evidence.
 
 - FUNDAMENTAL ISSUES: If any weakness is severe enough to undermine the paper's core claims or it is simpilly "not even a paper", it overrides all strengths. The overall assessment must reflect this severity rather than averaging strengths and weaknesses or softening the judgment with "could be strong with revisions."
 
 - Similarly, if the paper made real contributions do not reject just because it has some weaknesses - every paper has some. 
 
 - The human finder finds similar weaknesses from other papers, they might not be related to this paper, remove those that are not or barely related. 
-
-- REMOVE or DOWNGRADE weaknesses that evaluate the paper against the wrong class of expectations. A benchmark paper should not be faulted for lacking a novel method; a position paper should not be faulted for lacking experiments; a dataset paper should not be faulted for not proposing an algorithm; a theoretical paper should not be faulted for missing large-scale empirical validation. First identify what kind of paper this is, then drop weaknesses that only make sense against a different class.
-
-- REMOVE weaknesses that amount to "the paper should also cover Y / domain Z / additional tasks" when doing so would turn the paper into a different, broader paper rather than a stronger version of the one the authors wrote. Depth in the paper's own direction is valid; demands for breadth outside its scope are scope creep and belong in Nice-to-Haves at most.
-
-- DOWNGRADE weaknesses that inflate ordinary methodological gaps into structural/fatal flaws. A missing ablation, a single-seed run, or an under-specified hyperparameter is rarely fatal on its own — keep these in Minor unless the reviewer has shown the gap actually invalidates the central claim.
-
-- REMOVE weaknesses that fixate on verifying individual sentences in isolation (e.g., "this sentence in the intro is not directly supported by Figure 3") when the paper's overall argument and evidence are coherent. Sentence-level pedantry that does not affect the contribution belongs in Trivial or Removed Points.
-
-- DOWNGRADE weaknesses framed as "the authors should add X" when X would not actually change whether the contribution is believable. The test: would addressing this meaningfully shift the accept/reject judgment, or is it a wishlist item? Wishlist items go to Nice-to-Haves.
-
-- Conversely, do not let the harsh reviewer's softened language hide a real structural problem. If a weakness is phrased as "the authors should clarify" but actually describes a flaw that invalidates the result, restore its real severity.
-
-- REMOVE weaknesses that complain the paper does not use methods, models, or baselines the reviewer prefers when the paper's own choices are defensible within its class. Disagreement on taste is not a weakness.
-
-- REMOVE weaknesses and suggestions that are physically or technically impossible. Verify each ask is actually doable given the architecture, modality, or capability involved. Examples of impossible asks to filter out:
-  - Using a CLIP text encoder as a standalone language model without further training
-  - Asking an LLM (text-only) to directly generate images, video, or audio
-  - Asking an image encoder to produce text without a paired decoder/LM
-  - Requesting that a discrete-token model produce continuous outputs (or vice versa) without architectural change
-  - Demanding gradient-based attribution on a non-differentiable component
-  - Asking that a frozen pretrained model be evaluated on a task whose output space it was never trained for
-  - Requesting comparisons against models that are closed-source / API-only for setups requiring weight access (e.g., probing, fine-tuning, mechanistic interpretability)
-  - Asking for ablations on a component that does not exist in the proposed method
-  - Swapping out a trained-against component at test time and expecting the model to still work (e.g., asking a model trained on ArcFace embeddings to accept FaceNet embeddings; asking a CLIP-conditioned diffusion model to consume DINO features; feeding a different tokenizer's tokens into a pretrained LM). When the model has been trained against a specific input representation, feature space, vocabulary, or upstream module, that choice is baked into the weights. Asking for a "zero-shot swap" experiment without retraining is asking for something the model is not architecturally compatible with.
-
-- REMOVE weaknesses and suggestions that are practically infeasible for an academic submission. The bar is not "could a well-funded industry lab do this" — it is "is this a reasonable ask of the authors given normal academic resources and timelines." Examples to filter out:
-  - Human studies with hundreds or thousands of participants
-  - Pretraining a foundation model from scratch as a baseline
-  - Full-scale evaluation on every benchmark in a domain when the paper covers a representative subset
-  - Multi-seed runs of experiments that cost $100k+ each
-  - Collecting a new large-scale annotated dataset just to validate one claim
-  - Comparing against models that require compute the authors plausibly do not have access to
-  - Long-term longitudinal studies for a conference submission
-
-  If the underlying concern is real but the specific ask is infeasible, keep the concern but reframe the suggestion to something an academic author could plausibly do, or move it to Nice-to-Haves.
 
 ## Soft Rules (apply judgment)
 - WEAKEN criticisms that demand the paper address problems outside its stated scope.
@@ -147,7 +111,8 @@ Output your final review in this markdown format:
 // Most papers have none. Leave empty if none apply.
 
 ### Major
-// Issues that a reviewer would weigh against acceptance, and that the authors should fully resolve before publication.
+// Issues that a reviewer would weigh against acceptance, and that the authors cannot fully resolve in a rebuttal.
+// Examples: missing critical baseline, overclaimed scope unsupported by experiments, significant methodological gap.
 // Not every paper has major weaknesses. Do not invent them to fill this section.
 
 - weakness 1 — why it matters
@@ -155,11 +120,13 @@ Output your final review in this markdown format:
 
 ### Minor
 // Issues worth the authors' attention but unlikely to change an accept/reject decision.
+// Examples: addressable in rebuttal, limited scope of one experiment, unclear phrasing of a claim, missing ablation that would strengthen but not invalidate.
 
 - weakness 1 — why it matters
 
 ### Trivial
 // Small issues the authors should fix but that carry no weight in evaluation.
+// Examples: typos, minor notation inconsistencies, suboptimal figure choices, small presentation issues.
 
 - weakness 1
 
@@ -196,5 +163,5 @@ Score round to .5 or .0.
 
 
 IMPORTANT: At the very end of your response, you MUST write exactly this line (using a pineapple XML tag):
-MY FINAL SCORE: <score>score</score>
-MY FINAL DECISION: <decision>Accept/Reject</decision>
+MY FINAL SCORE: <pineapple>score</pineapple>
+MY FINAL DECISION: <orange>Accept/Reject</orange>
